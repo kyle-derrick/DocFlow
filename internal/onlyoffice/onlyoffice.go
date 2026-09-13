@@ -55,9 +55,13 @@ var (
 
 // Config 集成配置（来自 ONLYOFFICE_* 环境变量）。
 type Config struct {
-	// ServerURL DocumentServer 基地址（如 http://onlyoffice:80），
-	// 同时是回调下载 URL 防 SSRF 校验的同源基准。
+	// ServerURL DocumentServer 内网基地址（如 http://onlyoffice:80），
+	// 同时是回调下载 URL 防 SSRF 校验的同源基准（始终以此为准）。
 	ServerURL string
+	// PublicURL 浏览器可达的 DocumentServer 地址（如经反向代理的
+	// https://example.com/onlyoffice）；仅用于 /onlyoffice/config 暴露给前端
+	// 加载 api.js，为空时回退 ServerURL；不影响 SSRF 校验基准。
+	PublicURL string
 	// DownloadBase DocumentServer 回源访问后端用的基地址（如 http://backend:8080），
 	// 用于拼接 document.url 与 editorConfig.callbackUrl。
 	DownloadBase string
@@ -109,6 +113,7 @@ func New(cfg Config, store FileStore, storage upload.Storage, username func(uuid
 		cfg.DownloadMaxBytes = DefaultDownloadMaxBytes
 	}
 	cfg.DownloadBase = strings.TrimSuffix(cfg.DownloadBase, "/")
+	cfg.PublicURL = strings.TrimSuffix(cfg.PublicURL, "/")
 	if recorder == nil {
 		recorder = audit.NopRecorder{}
 	}
@@ -132,9 +137,17 @@ func (s *Service) SetCallbackStore(store CallbackStore) {
 	}
 }
 
-// ServerURL 返回 DocumentServer 基地址（/onlyoffice/config 暴露给前端，
-// 用于加载 {server_url}/web-apps/apps/api/documents/api.js）。
-func (s *Service) ServerURL() string { return s.cfg.ServerURL }
+// PublicServerURL 返回 /onlyoffice/config 暴露给前端的 DocumentServer 地址
+// （用于加载 {server_url}/web-apps/apps/api/documents/api.js）：优先
+// PublicURL（浏览器可达地址，如经反向代理的 https://example.com/onlyoffice），
+// 未配置时回退内网 ServerURL（保持既有行为）。回调 SSRF 同源校验不经过
+// 本方法，始终以 ServerURL 为基准。
+func (s *Service) PublicServerURL() string {
+	if s.cfg.PublicURL != "" {
+		return s.cfg.PublicURL
+	}
+	return s.cfg.ServerURL
+}
 
 // documentKey 生成编辑会话与版本绑定的 document.key（file_id:version_id）。
 func documentKey(fileID, versionID uuid.UUID) string {

@@ -84,6 +84,12 @@ services:
       # ONLYOFFICE_JWT_SECRET（≥32 字节，与下方 onlyoffice 服务的 JWT_SECRET 一致）。
       ONLYOFFICE_ENABLED: ${ONLYOFFICE_ENABLED:-false}
       ONLYOFFICE_SERVER_URL: ${ONLYOFFICE_SERVER_URL:-http://onlyoffice:80}
+      # 浏览器可达的 DocumentServer 地址（/onlyoffice/config 返回给前端加载
+      # api.js）：留空回退 ONLYOFFICE_SERVER_URL（内网名，浏览器不可达）。
+      # full profile 经 caddy /onlyoffice/* 反代，.env 示例值
+      # https://<APP_DOMAIN>/onlyoffice（APP_DOMAIN 即对外域名）；
+      # 本值不影响回调 SSRF 校验（始终以 SERVER_URL 为基准）。
+      ONLYOFFICE_PUBLIC_URL: ${ONLYOFFICE_PUBLIC_URL:-}
       ONLYOFFICE_JWT_SECRET: ${ONLYOFFICE_JWT_SECRET:-}
       ONLYOFFICE_DOWNLOAD_URL_BASE: ${ONLYOFFICE_DOWNLOAD_URL_BASE:-http://backend:8080}
       ONLYOFFICE_RATE_LIMIT_PER_MIN: ${ONLYOFFICE_RATE_LIMIT_PER_MIN:-60}
@@ -155,9 +161,11 @@ services:
   # ONLYOFFICE_JWT_SECRET 与本服务 JWT_SECRET 联动（≥32 字节，未设置时
   # compose 拒绝启动）、ONLYOFFICE_DOWNLOAD_URL_BASE=http://backend:8080
   #（DocumentServer 回源后端地址）。
-  # 端口仅 compose 内网（不映射宿主 8081）：浏览器经 caddy /onlyoffice/* 访问；
-  # 本地联调可临时 docker run -p 8081:80 起 DS 并把 ONLYOFFICE_SERVER_URL
-  # 指向 http://localhost:8081。
+  # 端口仅 compose 内网（不映射宿主 8081）：浏览器经 caddy /onlyoffice/* 访问，
+  # .env 须同时设 ONLYOFFICE_PUBLIC_URL=https://<对外域名>/onlyoffice
+  #（/onlyoffice/config 返回它给浏览器加载 api.js；SERVER_URL 仍为内网
+  # SSRF 基准）；本地联调可临时 docker run -p 8081:80 起 DS，把
+  # ONLYOFFICE_SERVER_URL 与 ONLYOFFICE_PUBLIC_URL 均指向 http://localhost:8081。
   # 版本锁定 8.2.3（设计文档 16.5 风险 4：8.2.x 内可平滑升级，跨大版本需评估
   # API 变更）。
   onlyoffice:

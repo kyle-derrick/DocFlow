@@ -56,3 +56,63 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  # E2E（Playwright）：依赖 backend/frontend 两个 job 通过后再跑。
+  # PostgreSQL 用 GitHub Actions service container（postgres:16-alpine，
+  # pg_isready 健康检查）；后端由 e2e/setup-backend.mjs 负责 go build + 迁移
+  # + seed 并以 :8080 启动（限流/扫描关闭、COOKIE_SECURE=false），前端由
+  # vite dev server（:5173）提供页面并代理 /api 到 :8080。
+  # 范围说明：仅覆盖核心链路（auth/files/share），DocumentServer 不在 E2E
+  # 范围内（ONLYOFFICE_ENABLED=false，编辑器集成由单测/契约测试覆盖）。
+  e2e:
+    name: E2E (Playwright)
+    runs-on: ubuntu-latest
+    needs: [backend, frontend]
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: docflow
+          POSTGRES_PASSWORD: docflow-e2e
+          POSTGRES_DB: docflow
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U docflow"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --cache ./.npm-cache
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Run E2E
+        env:
+          E2E_DATABASE_URL: postgres://docflow:docflow-e2e@localhost:5432/docflow?sslmode=disable
+          # 种子管理员密码须满足强度（≥12 且含大小写+数字；setup-backend
+          # 以环境变量为准幂等 upsert）。
+          E2E_SEED_PASSWORD: E2eAdminPassw0rd
+        run: npm run e2e

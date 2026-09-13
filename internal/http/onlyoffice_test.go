@@ -153,6 +153,7 @@ func TestOnlyOfficeRoutesDisabledByDefault(t *testing.T) {
 }
 
 // config 探测端点启用态：返回 enabled=true 与 DocumentServer 基地址。
+// 未配置 PublicURL（回退态）：server_url 返回内网 ONLYOFFICE_SERVER_URL。
 func TestOnlyOfficeConfigEnabled(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	const apiSecret = "0123456789abcdef0123456789abcdef"
@@ -179,6 +180,45 @@ func TestOnlyOfficeConfigEnabled(t *testing.T) {
 	}
 	if cfg["enabled"] != true || cfg["server_url"] != "http://onlyoffice:80" {
 		t.Fatalf("config enabled = %v, server_url = %v", cfg["enabled"], cfg["server_url"])
+	}
+}
+
+// config 探测端点 public 优先态：配置 PublicURL 时 server_url 返回浏览器可达
+// 地址而非内网 ONLYOFFICE_SERVER_URL（SSRF 校验基准不受影响——仍以 ServerURL
+// 为准，见 onlyoffice 包 TestURLAllowedOrigins）。
+func TestOnlyOfficeConfigPublicURLPrecedence(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const apiSecret = "0123456789abcdef0123456789abcdef"
+	h := NewHandler(nil, nil, nil, nil, nil, nil, newOOMemStorage(), false, "", 0)
+	svc := onlyoffice.New(onlyoffice.Config{
+		ServerURL: "http://onlyoffice:80",
+		// 末尾斜杠应被归一化去掉。
+		PublicURL: "https://example.com/onlyoffice/",
+		JWTSecret: onlyOfficeTestSecret,
+	}, &ooFileStore{}, newOOMemStorage(), func(uuid.UUID) (string, error) { return "alice", nil }, nil)
+	h.SetOnlyOffice(svc, 1_000_000)
+	router := gin.New()
+	h.Register(router, apiSecret, 120, 10, 60)
+
+	access, err := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"sub": uuid.NewString(), "exp": time.Now().Add(time.Hour).Unix(),
+	}).SignedString([]byte(apiSecret))
+	if err != nil {
+		t.Fatalf("sign access token: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/onlyoffice/config", nil)
+	req.Header.Set("Authorization", "Bearer "+access)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("config public: status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &cfg); err != nil {
+		t.Fatalf("config body: %v", err)
+	}
+	if cfg["enabled"] != true || cfg["server_url"] != "https://example.com/onlyoffice" {
+		t.Fatalf("config public = %v, server_url = %v", cfg["enabled"], cfg["server_url"])
 	}
 }
 

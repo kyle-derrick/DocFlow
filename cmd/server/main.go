@@ -142,6 +142,7 @@ func main() {
 	if cfg.OnlyOfficeEnabled {
 		onlyofficeSvc := onlyoffice.New(onlyoffice.Config{
 			ServerURL:        cfg.OnlyOfficeServerURL,
+			PublicURL:        cfg.OnlyOfficePublicURL,
 			DownloadBase:     cfg.OnlyOfficeDownloadURLBase,
 			JWTSecret:        cfg.OnlyOfficeJWTSecret,
 			TokenTTL:         onlyoffice.DefaultTokenTTL,
@@ -152,7 +153,7 @@ func main() {
 		// 跨重启/多实例去重，失败回滚记录允许 DocumentServer 重试。
 		onlyofficeSvc.SetCallbackStore(onlyoffice.NewGormCallbackStore(db))
 		handler.SetOnlyOffice(onlyofficeSvc, cfg.OnlyOfficeRateLimitPerMinute)
-		log.Printf("onlyoffice integration enabled (server=%s)", cfg.OnlyOfficeServerURL)
+		log.Printf("onlyoffice integration enabled (server=%s public=%s)", cfg.OnlyOfficeServerURL, onlyofficeSvc.PublicServerURL())
 	}
 	// Prometheus 指标：全局 HTTP 中间件在 Register 内挂载；/metrics 端点由
 	// METRICS_ENABLED 控制（默认启用，无认证，生产由 Caddy/网络层限制访问）。

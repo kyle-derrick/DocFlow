@@ -36,6 +36,9 @@
 	# 时静态上游 DNS 解析失败会直接退出，故默认指向本机 discard 端口
 	#（127.0.0.1:9，minimal 下 /onlyoffice/* 返回 502 属预期）；
 	# make up-full 会注入 ONLYOFFICE_UPSTREAM=onlyoffice:80。
+	# 浏览器经本路径加载 api.js：.env 设 ONLYOFFICE_PUBLIC_URL=https://<域名>/onlyoffice
+	#（后端 /onlyoffice/config 将其返回给浏览器；回调 SSRF 校验仍以内网
+	# ONLYOFFICE_SERVER_URL 为基准，与本路径无关）。
 	handle /onlyoffice/* {
 		reverse_proxy {$ONLYOFFICE_UPSTREAM:127.0.0.1:9}
 	}

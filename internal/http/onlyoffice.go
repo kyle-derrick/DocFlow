@@ -18,15 +18,17 @@ import (
 const onlyofficeRateLimitDefault = 60
 
 // onlyofficeConfig GET /api/v1/onlyoffice/config：前端探测集成可用性与
-// DocumentServer 基地址（加载 DocEditor 脚本、决定是否显示「编辑」入口）。
+// DocumentServer 地址（加载 DocEditor 脚本、决定是否显示「编辑」入口）。
 // 该端点恒注册（不随 ONLYOFFICE_ENABLED 开关 404）：禁用时返回
-// {enabled:false, server_url:null}，不暴露内部 URL。
+// {enabled:false, server_url:null}，不暴露内部 URL；启用时 server_url 返回
+// 浏览器可达地址（ONLYOFFICE_PUBLIC_URL 优先，未配置回退 ONLYOFFICE_SERVER_URL
+// ——后者为 docker 内网名时浏览器无法解析加载 api.js，生产应配置 PUBLIC_URL）。
 func (h *Handler) onlyofficeConfig(c *gin.Context) {
 	if h.onlyoffice == nil {
 		c.JSON(http.StatusOK, gin.H{"enabled": false, "server_url": nil})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"enabled": true, "server_url": h.onlyoffice.ServerURL()})
+	c.JSON(http.StatusOK, gin.H{"enabled": true, "server_url": h.onlyoffice.PublicServerURL()})
 }
 
 // SetOnlyOffice 注入 ONLYOFFICE 集成服务；非 nil 时启用路由挂载（幂等）。

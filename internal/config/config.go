@@ -54,9 +54,14 @@ type Config struct {
 	// 未启用时后端不注册 session/download/callback 路由（请求 404），
 	// config 探测端点恒注册并返回 {enabled:false, server_url:null}。
 	OnlyOfficeEnabled bool
-	// OnlyOfficeServerURL 为 DocumentServer 基地址（如 http://onlyoffice:80），
-	// 同时是回调下载 URL 防 SSRF 校验的同源基准；启用时必填。
+	// OnlyOfficeServerURL 为 DocumentServer 内网基地址（如 http://onlyoffice:80），
+	// 同时是回调下载 URL 防 SSRF 校验的同源基准（始终以此为准）；启用时必填。
 	OnlyOfficeServerURL string
+	// OnlyOfficePublicURL 为浏览器可达的 DocumentServer 地址（如
+	// https://example.com/onlyoffice 或本地直连 http://localhost:8081），
+	// 仅用于 /onlyoffice/config 返回给前端加载 api.js；为空时回退
+	// OnlyOfficeServerURL（保持既有行为），不影响 SSRF 校验基准。
+	OnlyOfficePublicURL string
 	// OnlyOfficeJWTSecret 与 DocumentServer 共享的 JWT 签名密钥（HS256），
 	// 启用时必填且 ≥32 字节。
 	OnlyOfficeJWTSecret string
@@ -201,7 +206,7 @@ func Load() (Config, error) {
 	if e != nil {
 		return Config{}, e
 	}
-	c := Config{Port: stringEnv("PORT", "8080"), DatabaseURL: os.Getenv("DATABASE_URL"), JWTSecret: os.Getenv("JWT_SECRET"), AccessTokenTTL: a, RefreshTokenTTL: r, CookieSecure: secure, CookieDomain: os.Getenv("COOKIE_DOMAIN"), StorageRoot: stringEnv("STORAGE_ROOT", "./storage"), MaxFileSize: max, ScanEnabled: scan, UploadSessionTTL: ttl, StorageDriver: stringEnv("STORAGE_DRIVER", "local"), S3Endpoint: os.Getenv("S3_ENDPOINT"), S3Bucket: os.Getenv("S3_BUCKET"), S3Region: stringEnv("S3_REGION", "us-east-1"), S3AccessKey: os.Getenv("S3_ACCESS_KEY"), S3SecretKey: os.Getenv("S3_SECRET_KEY"), S3PathStyle: pathStyle, ClamAVAddr: os.Getenv("CLAMAV_ADDR"), ClamAVTimeout: clamavTimeout, ClamAVRequired: clamavRequired, RateLimitPerMinute: rateLimit, LoginRateLimitPerMinute: loginRateLimit, PublicRateLimitPerMinute: publicRateLimit, MaxVersionsPerFile: maxVersions, JanitorEnabled: janitorEnabled, JanitorInterval: janitorInterval, OnlyOfficeEnabled: ooEnabled, OnlyOfficeServerURL: stringEnv("ONLYOFFICE_SERVER_URL", "http://onlyoffice:80"), OnlyOfficeJWTSecret: os.Getenv("ONLYOFFICE_JWT_SECRET"), OnlyOfficeDownloadURLBase: stringEnv("ONLYOFFICE_DOWNLOAD_URL_BASE", "http://backend:8080"), OnlyOfficeRateLimitPerMinute: ooRateLimit, MetricsEnabled: metricsEnabled, WebpkgEnabled: webpkgEnabled, WebpkgMaxEntries: webpkgMaxEntries, WebpkgMaxFileSize: webpkgMaxFileSize, WebpkgMaxTotalSize: webpkgMaxTotalSize, WebpkgMaxDepth: webpkgMaxDepth, WebpkgRateLimitPerMinute: webpkgRateLimit, QueueDriver: stringEnv("QUEUE_DRIVER", "inprocess"), RedisAddr: stringEnv("REDIS_ADDR", "localhost:6379"), RedisPassword: os.Getenv("REDIS_PASSWORD"), QueueConcurrency: queueConcurrency}
+	c := Config{Port: stringEnv("PORT", "8080"), DatabaseURL: os.Getenv("DATABASE_URL"), JWTSecret: os.Getenv("JWT_SECRET"), AccessTokenTTL: a, RefreshTokenTTL: r, CookieSecure: secure, CookieDomain: os.Getenv("COOKIE_DOMAIN"), StorageRoot: stringEnv("STORAGE_ROOT", "./storage"), MaxFileSize: max, ScanEnabled: scan, UploadSessionTTL: ttl, StorageDriver: stringEnv("STORAGE_DRIVER", "local"), S3Endpoint: os.Getenv("S3_ENDPOINT"), S3Bucket: os.Getenv("S3_BUCKET"), S3Region: stringEnv("S3_REGION", "us-east-1"), S3AccessKey: os.Getenv("S3_ACCESS_KEY"), S3SecretKey: os.Getenv("S3_SECRET_KEY"), S3PathStyle: pathStyle, ClamAVAddr: os.Getenv("CLAMAV_ADDR"), ClamAVTimeout: clamavTimeout, ClamAVRequired: clamavRequired, RateLimitPerMinute: rateLimit, LoginRateLimitPerMinute: loginRateLimit, PublicRateLimitPerMinute: publicRateLimit, MaxVersionsPerFile: maxVersions, JanitorEnabled: janitorEnabled, JanitorInterval: janitorInterval, OnlyOfficeEnabled: ooEnabled, OnlyOfficeServerURL: stringEnv("ONLYOFFICE_SERVER_URL", "http://onlyoffice:80"), OnlyOfficePublicURL: stringEnv("ONLYOFFICE_PUBLIC_URL", ""), OnlyOfficeJWTSecret: os.Getenv("ONLYOFFICE_JWT_SECRET"), OnlyOfficeDownloadURLBase: stringEnv("ONLYOFFICE_DOWNLOAD_URL_BASE", "http://backend:8080"), OnlyOfficeRateLimitPerMinute: ooRateLimit, MetricsEnabled: metricsEnabled, WebpkgEnabled: webpkgEnabled, WebpkgMaxEntries: webpkgMaxEntries, WebpkgMaxFileSize: webpkgMaxFileSize, WebpkgMaxTotalSize: webpkgMaxTotalSize, WebpkgMaxDepth: webpkgMaxDepth, WebpkgRateLimitPerMinute: webpkgRateLimit, QueueDriver: stringEnv("QUEUE_DRIVER", "inprocess"), RedisAddr: stringEnv("REDIS_ADDR", "localhost:6379"), RedisPassword: os.Getenv("REDIS_PASSWORD"), QueueConcurrency: queueConcurrency}
 	if c.DatabaseURL == "" {
 		return Config{}, errors.New("DATABASE_URL is required")
 	}
@@ -260,13 +265,20 @@ func validateWebpkg(c Config) error {
 }
 
 // validateOnlyOffice 校验 ONLYOFFICE 集成配置：启用时 SERVER_URL 须为合法
-// http(s) URL，JWT_SECRET 必填且 ≥32 字节（与主 JWT_SECRET 相互独立）。
+// http(s) URL，JWT_SECRET 必填且 ≥32 字节（与主 JWT_SECRET 相互独立）；
+// PUBLIC_URL 可选（浏览器可达地址，留空回退 SERVER_URL），设置时同样
+// 须为合法 http(s) URL。
 func validateOnlyOffice(c Config) error {
 	if !c.OnlyOfficeEnabled {
 		return nil
 	}
 	if e := checkAbsoluteHTTPURL(c.OnlyOfficeServerURL, "ONLYOFFICE_SERVER_URL"); e != nil {
 		return e
+	}
+	if c.OnlyOfficePublicURL != "" {
+		if e := checkAbsoluteHTTPURL(c.OnlyOfficePublicURL, "ONLYOFFICE_PUBLIC_URL"); e != nil {
+			return e
+		}
 	}
 	if e := checkAbsoluteHTTPURL(c.OnlyOfficeDownloadURLBase, "ONLYOFFICE_DOWNLOAD_URL_BASE"); e != nil {
 		return e
