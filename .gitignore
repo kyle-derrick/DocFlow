@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.npm-cache/
+storage/
+
+# Playwright E2E 产物（frontend）
+frontend/test-results/
+frontend/playwright-report/
+frontend/blob-report/
+
+# 本地环境与 IDE
+.env
+.env.local
+.idea/
+.vscode/
