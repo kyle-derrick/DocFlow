@@ -1,0 +1,4 @@
+# 保持构建上下文最小，并避免本地 node_modules/dist 覆盖 npm ci 产物。
+node_modules
+dist
+.npm-cache

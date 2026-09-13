@@ -1,0 +1,57 @@
+# DocFlow 生产入口（设计文档 §12.2）。caddy 是唯一映射宿主端口（80/443）的
+# 服务；前端静态产物在构建期拷入镜像 /srv/frontend（见 frontend/Dockerfile）。
+#
+# 站点地址取环境变量 APP_DOMAIN：未设置时默认 :80（本地验证，无 TLS）；
+# 设为域名（如 docflow.example.com）时自动申请/续期 HTTPS 证书
+#（ACME HTTP 挑战走 80 端口，已在 docker-compose.yml 映射）。
+{$APP_DOMAIN::80} {
+	encode gzip
+
+	# 安全响应头基线。不下发 CSP：CSP 由应用层提供——/content/* 由后端带
+	# sandbox allow-scripts 的严格 CSP（须允许 sandbox iframe 嵌入，不加
+	# frame-ancestors 限制），其余路径由应用自行控制；Caddy 不重复下发
+	# 以免策略冲突。
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy same-origin
+	}
+
+	# Caddy 自身存活探针（区别于 backend 的 /health）。
+	handle /health {
+		respond 200
+	}
+
+	# REST API → Go 后端（backend 仅 compose 内网，无宿主端口映射）。
+	handle /api/* {
+		reverse_proxy backend:8080
+	}
+
+	# 网页包安全预览内容端点：无认证、按 IP 限流与 CSP/nosniff 均由后端提供。
+	handle /content/* {
+		reverse_proxy backend:8080
+	}
+
+	# ONLYOFFICE Document Server（full profile）。上游经 ONLYOFFICE_UPSTREAM
+	# 注入：minimal 下无 onlyoffice 服务，若此处写死 onlyoffice:80，Caddy 启动
+	# 时静态上游 DNS 解析失败会直接退出，故默认指向本机 discard 端口
+	#（127.0.0.1:9，minimal 下 /onlyoffice/* 返回 502 属预期）；
+	# make up-full 会注入 ONLYOFFICE_UPSTREAM=onlyoffice:80。
+	handle /onlyoffice/* {
+		reverse_proxy {$ONLYOFFICE_UPSTREAM:127.0.0.1:9}
+	}
+
+	# /metrics 与 backend 的 /health、/ready 不写反代规则即不经 Caddy 暴露
+	#（未匹配路径落到下方 SPA，返回 index.html 而非指标）；内网监控在
+	# compose 网络内直连 backend:8080/metrics 抓取，或设 METRICS_ENABLED=false。
+
+	# 前端 SPA 静态产物（构建期拷入 /srv/frontend）。
+	handle {
+		root * /srv/frontend
+		try_files {path} /index.html
+		file_server
+	}
+
+	log {
+		output stdout
+	}
+}

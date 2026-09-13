@@ -1,0 +1,2113 @@
+# DocFlow HTTP API 契约（OpenAPI 3.1）。
+# 本文件以 internal/http 实际实现为准（handler.go / uploads.go / tus.go / shares.go /
+# teams.go / trash.go / preview.go / download.go / ratelimit.go / webpkg.go），由
+# internal/http/openapi_test.go 做双向路由一致性校验，契约与实现不允许漂移。
+# 说明：/health、/ready 为基础设施探针，不属于业务契约；路由参数统一写作 {id} 形式。
+# 网页包内容域端点 GET /content/{pid}/{filepath} 为契约外路由（openapi_test.go
+# isExcludedRoute 豁免）：无认证、面向 sandbox iframe 而非 API 客户端，独立按 IP
+# 轻限流并携带严格 CSP/nosniff，语义见 /files/{id}/preview 的 webpkg 分支。
+openapi: 3.1.0
+info:
+  title: DocFlow API
+  version: 1.0.0
+  description: |
+    DocFlow 文档管理服务 API。
+
+    ## 认证
+    - 业务端点要求 `Authorization: Bearer <access_token>`（HS256 JWT，subject 为用户 UUID）。
+    - 登录/刷新通过 HttpOnly Cookie `refresh_token`（Path=/api/v1/auth/refresh，SameSite=Lax）轮换会话。
+
+    ## 错误与限流
+    - 错误响应统一为 `{error, code?}`；`code` 为机器可读错误码（如 NAME_CONFLICT、QUARANTINED）。
+    - 认证接口按 user_id+IP 每分钟限流；登录按 IP+邮箱前缀哈希更严格限流；
+      公开分享接口按 IP 独立限流；超限返回 429 并带 Retry-After。
+    - 文件元数据响应带 ETag（基于 updated_at）。
+servers:
+  - url: /api/v1
+    description: API 基础路径（契约测试据此归一化路由）
+security:
+  - bearerAuth: []
+tags:
+  - name: Auth
+    description: 登录、刷新与登出
+  - name: Users
+    description: 用户目录查找（邀请场景）
+  - name: Files
+    description: 个人空间文件与目录
+  - name: Trash
+    description: 回收站
+  - name: Uploads
+    description: 自定义分片上传 API
+  - name: tus
+    description: tus 1.0.0 断点续传（creation/expiration 扩展）
+  - name: Shares
+    description: 私有分享（登录用户按显式授权访问）
+  - name: Public Shares
+    description: 公开分享（token 链接，无认证）
+  - name: Teams
+    description: 团队与团队空间
+  - name: Admin
+    description: 管理端（仅 admin 角色）：系统设置与基础统计
+  - name: onlyoffice
+    description: >-
+      ONLYOFFICE Document Server 集成（可用性探测、编辑会话、回源下载与
+      保存回调）；除 config 探测端点恒注册（禁用时 enabled=false 且不暴露
+      server_url）外，其余端点仅在 ONLYOFFICE_ENABLED=true 时注册
+      （禁用时 404）
+
+paths:
+  /auth/login:
+    post:
+      tags: [Auth]
+      operationId: login
+      summary: 邮箱密码登录
+      description: >-
+        校验凭据后签发访问令牌并创建刷新会话；刷新令牌经 HttpOnly Cookie
+        refresh_token 下发。登录按 IP+邮箱前缀哈希独立限流。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string }
+                password: { type: string, format: password }
+      responses:
+        '200':
+          description: 登录成功；Set-Cookie 下发 refresh_token
+          headers:
+            Set-Cookie:
+              description: refresh_token=...; Path=/api/v1/auth/refresh; HttpOnly; SameSite=Lax
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenPair' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401':
+          description: 邮箱或密码错误
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      operationId: refresh
+      summary: 轮换刷新令牌
+      description: >-
+        从 refresh_token Cookie 读取刷新令牌并轮换（rotate）：旧令牌立即失效，
+        新 Cookie 与新访问令牌随响应返回。该端点无独立限流。
+      security: []
+      parameters:
+        - name: refresh_token
+          in: cookie
+          required: true
+          schema: { type: string }
+          description: HttpOnly 刷新令牌 Cookie
+      responses:
+        '200':
+          description: 新访问令牌；Set-Cookie 轮换 refresh_token
+          headers:
+            Set-Cookie:
+              description: 轮换后的 refresh_token Cookie
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenPair' }
+        '401':
+          description: 刷新令牌缺失、无效或已过期
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      operationId: logout
+      summary: 登出
+      description: 撤销 refresh_token Cookie 对应的刷新会话并清除 Cookie；幂等，未携带 Cookie 也返回 204。
+      security: []
+      parameters:
+        - name: refresh_token
+          in: cookie
+          required: false
+          schema: { type: string }
+      responses:
+        '204':
+          description: 已登出（Cookie 被清除）
+
+  /users/lookup:
+    get:
+      tags: [Users]
+      operationId: lookupUsers
+      summary: 用户查找（邀请场景）
+      description: >-
+        按邮箱或用户名精确/前缀匹配查找活跃用户（大小写不敏感前缀），按 username
+        排序，固定最多返回 10 条。权限考虑：任何登录用户均可查询（添加团队成员/
+        邀请场景需要）；为避免用户枚举与隐私泄露，响应只含 id 与 username，
+        绝不返回 email，并受通用认证接口限流约束。q 为空返回 400。
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: { type: string, minLength: 1 }
+          description: 查询串：邮箱（精确或前缀）或用户名（精确或前缀）
+      responses:
+        '200':
+          description: 匹配的用户列表（仅 id 与 username）
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string, format: uuid }
+                    username: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /files:
+    get:
+      tags: [Files]
+      operationId: listFiles
+      summary: 列出目录内容
+      description: 列出当前用户 parent_id 指定目录（缺省为用户根目录，服务端按需创建）的直接子项。
+      parameters:
+        - name: parent_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+          description: 父目录 ID；缺省为用户根目录
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, default: 100, maximum: 100 }
+          description: 返回条数上限（服务端固定上限 100）
+      responses:
+        '200':
+          description: 目录内容
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FileList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /folders:
+    post:
+      tags: [Files]
+      operationId: createFolder
+      summary: 创建目录
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                parent_id:
+                  { type: string, format: uuid, description: 父目录 ID；缺省为用户根目录 }
+      responses:
+        '201':
+          description: 目录已创建
+          headers:
+            ETag: { schema: { type: string }, description: 基于 updated_at 的弱校验值 }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/File' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /files/{id}:
+    get:
+      tags: [Files]
+      operationId: getFile
+      summary: 文件/目录元数据（含当前版本）
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 元数据；文件无当前版本时 current_version 为 null
+          headers:
+            ETag: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FileWithVersion' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    patch:
+      tags: [Files]
+      operationId: renameFile
+      summary: 重命名
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+      responses:
+        '200':
+          description: 重命名后的元数据
+          headers:
+            ETag: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/File' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    delete:
+      tags: [Files]
+      operationId: deleteFile
+      summary: 软删除（移入回收站）
+      description: 删除文件或目录（含子树）进入回收站；根目录不可删除（403）。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: 已移入回收站 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /files/{id}/download:
+    get:
+      tags: [Files]
+      operationId: downloadFile
+      summary: 下载当前版本
+      description: >-
+        对象状态须为 available（否则 403）；成功时递增 download_count；
+        Content-Disposition: attachment（文件名按 RFC 5987 编码）；支持单区间 Range。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: Range
+          in: header
+          required: false
+          schema: { type: string }
+          description: '如 bytes=0-1023 或 bytes=-N（后缀区间）；多区间不支持（416）'
+      responses:
+        '200':
+          description: 全量内容（实际 Content-Type 为对象 MIME 类型）
+          headers:
+            Content-Disposition:
+              description: attachment; filename=...（RFC 5987）
+              schema: { type: string }
+            Accept-Ranges: { schema: { type: string, const: bytes } }
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '206':
+          description: 区间内容
+          headers:
+            Content-Range: { schema: { type: string } }
+            Accept-Ranges: { schema: { type: string, const: bytes } }
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: 对象不可下载（非 available 状态）或无权限
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '416':
+          description: 'Range 无法满足；响应带 Content-Range: bytes */<size>'
+          headers:
+            Content-Range: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /files/{id}/preview:
+    get:
+      tags: [Files]
+      operationId: previewFile
+      summary: 内联预览
+      description: >-
+        MIME 白名单：image/*、application/pdf、application/json、text/plain；
+        image/svg* 一律拒绝（防 XSS）；text/* 强制 charset=utf-8；
+        Content-Disposition: inline 且带 X-Content-Type-Options: nosniff；
+        成功递增 view_count；支持单区间 Range。
+        网页包联动：application/zip（或 .zip 文件名）且 web_packages 存在
+        ready 解包结果时，返回 200 JSON {kind:"webpkg",
+        url:"/content/<public_id>/index.html"}（替代 415），前端以
+        sandbox iframe 加载该 URL。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: Range
+          in: header
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: >-
+            内联内容（常规类型为二进制流）；zip 网页包为 WebpkgPreview JSON
+          headers:
+            Content-Disposition:
+              description: inline; filename=...（RFC 5987）；webpkg JSON 分支无此头
+              schema: { type: string }
+            X-Content-Type-Options: { schema: { type: string, const: nosniff } }
+            Accept-Ranges: { schema: { type: string, const: bytes } }
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+            application/json:
+              schema: { $ref: '#/components/schemas/WebpkgPreview' }
+        '206':
+          description: 区间内容
+          headers:
+            Content-Range: { schema: { type: string } }
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: 对象不可预览（非 available 状态）或无权限
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '415':
+          description: preview not supported（MIME 不在白名单，或 zip 无 ready 网页包）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '416':
+          description: Range 无法满足
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /files/{id}/webpkg/extract:
+    post:
+      tags: [Files]
+      operationId: extractWebpkg
+      summary: 手动解包网页包（幂等重建）
+      description: >-
+        对文件当前版本（zip）执行安全解包；权限同「覆盖为新版本」：
+        个人文件 owner、团队文件 CanWrite（editor 及以上）。重复执行幂等重建
+        （先删旧解包对象再解包，public_id 保持稳定）。安全校验未通过时返回
+        200 且 status=blocked（附原因）；存储级失败返回 500。上传完成时
+        （WEBPKG_ENABLED，默认 true）亦会自动尝试解包，失败置 blocked，
+        不影响文件本身可用性。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 解包结果（status=ready|blocked|failed|extracting）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebpkgPackage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 文件无当前版本
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500':
+          description: 存储级解包失败（status=failed，原因见 200 语义或服务器日志）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /files/{id}/versions:
+    get:
+      tags: [Files]
+      operationId: listFileVersions
+      summary: 版本列表
+      description: >-
+        按版本号倒序列出文件全部版本（含关联对象 blob 的 status/size/sha256/mime）。
+        读权限同文件元数据：个人文件 owner、团队文件任意在册成员。
+        新版本不设独立写入端点，经上传链路（POST /uploads 或 tus 创建）携带 file_id 覆盖产生。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 版本列表（含当前版本）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  versions:
+                    type: array
+                    items: { $ref: '#/components/schemas/FileVersionDetail' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /files/{id}/versions/{versionId}/restore:
+    post:
+      tags: [Files]
+      operationId: restoreFileVersion
+      summary: 回滚当前版本
+      description: >-
+        将 current_version 指向该文件的既有版本（版本内容不可变，仅移动指针）；
+        仅允许指向该文件的版本，否则 409（code: NOT_FILE_VERSION）。
+        权限：个人文件 owner、团队文件 CanWrite（editor 及以上）。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: versionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+          description: 目标版本记录 ID（versions 列表中的 id）
+      responses:
+        '200':
+          description: 回滚后的文件元数据（current_version 已指向目标版本）
+          headers:
+            ETag: { schema: { type: string }, description: 基于 updated_at 的弱校验值 }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FileWithVersion' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 版本不属于该文件；code 为 NOT_FILE_VERSION
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /files/{id}/restore:
+    post:
+      tags: [Trash]
+      operationId: restoreFile
+      summary: 从回收站恢复
+      description: 恢复软删除文件；原父目录已删除或名称冲突时返回 409（带错误码），不静默改名。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 恢复后的元数据
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/File' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 恢复冲突；code 为 PARENT_DELETED / NAME_CONFLICT / NOT_DELETED
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /trash:
+    get:
+      tags: [Trash]
+      operationId: listTrash
+      summary: 回收站列表
+      description: 列出当前用户软删除文件（含子树条目），按 deleted_at 倒序，limit 简单分页。
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, default: 100, maximum: 1000 }
+      responses:
+        '200':
+          description: 回收站内容
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  files:
+                    type: array
+                    items: { $ref: '#/components/schemas/TrashFile' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /trash/{id}:
+    delete:
+      tags: [Trash]
+      operationId: purgeFile
+      summary: 彻底删除（硬删除）
+      description: >-
+        仅软删除文件可彻底删除；级联删除子树记录，物理对象引用计数归零后删除存储对象。
+        根目录不可删除（403）。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: 已彻底删除 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 目标不在回收站；code 为 NOT_DELETED
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /uploads:
+    post:
+      tags: [Uploads]
+      operationId: createUpload
+      summary: 创建上传会话（自定义分片 API）
+      description: >-
+        与 tus 端点并存的自定义 API。注意：此处服务启动失败类错误（如超出大小上限）
+        一律映射 400，而非 tus 端点的 413。
+        携带 file_id 时为「覆盖为新版本」会话：目标须为 type=file 且当前用户有
+        CanWrite 权限（个人 owner / 团队 editor+），name 与 parent_id 被忽略，
+        沿用目标文件现有名称与父目录；Complete 成功后内容成为该文件的新版本，
+        并按 MAX_VERSIONS_PER_FILE（默认 5）裁剪历史版本。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, size]
+              properties:
+                name: { type: string }
+                size: { type: integer, format: int64, minimum: 0 }
+                expected_sha256:
+                  { type: string, description: 期望内容 SHA-256（64 位十六进制，大小写不敏感） }
+                parent_id:
+                  { type: string, format: uuid, description: 目标目录；缺省为用户根目录 }
+                file_id:
+                  { type: string, format: uuid, description: 覆盖目标文件 ID；指定时 name/parent_id 被忽略 }
+      responses:
+        '201':
+          description: 会话已创建
+          headers:
+            Location:
+              description: '/api/v1/uploads/{id}'
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UploadSession' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: 无 CanWrite 权限（团队 viewer/非成员）或版本覆盖能力未启用
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: file_id 目标不存在（或个人文件非 owner，不泄露存在性）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /uploads/{id}:
+    get:
+      tags: [Uploads]
+      operationId: getUpload
+      summary: 查询上传会话
+      description: 轮询上传状态（含后台自动完成后的终态）；响应为 UploadSession 的子集（不含 retry_count）。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 会话状态
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UploadSession' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    patch:
+      tags: [Uploads]
+      operationId: patchUpload
+      summary: 追加上传数据
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: Upload-Offset
+          in: header
+          required: true
+          schema: { type: integer, format: int64, minimum: 0 }
+          description: 必须等于服务端当前 offset，否则 409
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        '200':
+          description: 追加成功；响应头 Upload-Offset 为新偏移
+          headers:
+            Upload-Offset: { schema: { type: integer, format: int64 } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UploadSession' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /uploads/{id}/complete:
+    post:
+      tags: [Uploads]
+      operationId: completeUpload
+      summary: 完成上传
+      description: >-
+        校验哈希 → 病毒扫描（如启用）→ 落库为文件版本。终态幂等：available 重复调用
+        返回 200；quarantined / failed 返回 409（code 分别为 QUARANTINED / FAILED）。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 完成后的会话（status=available）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UploadSession' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: '扫描被隔离 / 校验失败 / 会话不可完成；code: QUARANTINED 或 FAILED'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /tus/files:
+    options:
+      tags: [tus]
+      operationId: tusOptions
+      summary: tus 能力发现
+      description: >-
+        响应头：Tus-Resumable: 1.0.0、Tus-Version: 1.0.0、
+        Tus-Extension: creation,expiration、Tus-Max-Size（配置了上限时返回）。
+        不支持 concatenation / termination / checksum 扩展。
+      security: []
+      responses:
+        '204':
+          description: 能力宣告（无响应体）
+          headers:
+            Tus-Resumable: { schema: { type: string, const: '1.0.0' } }
+            Tus-Version: { schema: { type: string, const: '1.0.0' } }
+            Tus-Extension: { schema: { type: string, const: 'creation,expiration' } }
+            Tus-Max-Size:
+              description: 单次上传长度上限（字节）；未配置上限时不返回该头
+              schema: { type: integer, format: int64 }
+    post:
+      tags: [tus]
+      operationId: tusCreate
+      summary: 创建 tus 上传（creation 扩展）
+      description: >-
+        Upload-Metadata 为逗号分隔的 "key base64value" 对（value 可整体省略）；
+        filename 键必填；parent_id（UUID）与 sha256 可选，其余键原样保存并在 HEAD 回显。
+        未指定 parent_id 时落入用户根目录。
+        携带 file_id（UUID，base64 编码）时为「覆盖为新版本」会话：目标须为
+        type=file 且当前用户有 CanWrite 权限，filename/parent_id 被忽略，
+        沿用目标文件现有名称与父目录；写满自动完成后内容成为新版本并按
+        MAX_VERSIONS_PER_FILE 裁剪历史。
+      parameters:
+        - name: Upload-Length
+          in: header
+          required: true
+          schema: { type: integer, format: int64, minimum: 0 }
+          description: 上传总字节数；超过 Tus-Max-Size 时返回 413
+        - name: Upload-Metadata
+          in: header
+          required: true
+          schema: { type: string }
+          description: >-
+            逗号分隔的 "key base64value" 对；filename 必填（base64 编码），
+            可选 parent_id、sha256（base64 编码的 64 位十六进制）、
+            file_id（base64 编码的 UUID，覆盖为新版本）
+        - name: Tus-Resumable
+          in: header
+          required: false
+          schema: { type: string, const: '1.0.0' }
+          description: 协议版本头；当前实现未强制校验请求头
+      responses:
+        '201':
+          description: 上传已创建
+          headers:
+            Location:
+              description: '/api/v1/tus/files/{id}'
+              schema: { type: string }
+            Upload-Offset: { schema: { type: integer, format: int64, const: 0 } }
+            Upload-Expires:
+              description: 会话过期时间（RFC 7231 日期格式）
+              schema: { type: string }
+            Tus-Resumable: { schema: { type: string, const: '1.0.0' } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: file_id 目标不存在（或个人文件非 owner，不泄露存在性）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /tus/files/{id}:
+    head:
+      tags: [tus]
+      operationId: tusHead
+      summary: 查询上传偏移与元数据
+      description: >-
+        无响应体。响应头：Upload-Offset、Upload-Length、Upload-Metadata（创建时回显原始头）、
+        Cache-Control: no-store、Tus-Resumable。终态会话仍可查询；
+        uploading 且已过期返回 410；不存在或非本人资源一律 404（不泄露存在性）。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 当前偏移与长度（无响应体）
+          headers:
+            Upload-Offset: { schema: { type: integer, format: int64 } }
+            Upload-Length: { schema: { type: integer, format: int64 } }
+            Upload-Metadata:
+              description: 创建时的原始 Upload-Metadata 头（无则不返回）
+              schema: { type: string }
+            Cache-Control: { schema: { type: string, const: no-store } }
+            Tus-Resumable: { schema: { type: string, const: '1.0.0' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '410': { $ref: '#/components/responses/Gone' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    patch:
+      tags: [tus]
+      operationId: tusPatch
+      summary: 追加数据块
+      description: >-
+        Content-Type 必须为 application/offset+octet-stream（否则 415）；
+        Upload-Offset 请求头必须等于服务端当前偏移（否则 409）；
+        请求体字节数不得超过剩余长度（否则 400）。
+        偏移写满后服务端后台自动完成（verify → scan → available），
+        可通过 GET /uploads/{id} 轮询状态；终态会话返回 410。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: Upload-Offset
+          in: header
+          required: true
+          schema: { type: integer, format: int64, minimum: 0 }
+          description: 当前服务端偏移
+      requestBody:
+        required: true
+        content:
+          application/offset+octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        '204':
+          description: 追加成功（无响应体）
+          headers:
+            Upload-Offset: { schema: { type: integer, format: int64 } }
+            Upload-Expires: { schema: { type: string } }
+            Tus-Resumable: { schema: { type: string, const: '1.0.0' } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '410': { $ref: '#/components/responses/Gone' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /shares:
+    post:
+      tags: [Shares]
+      operationId: createShare
+      summary: 创建分享
+      description: >-
+        visibility=public（默认）：生成公开 token，明文 token 与 share_url 仅在本次
+        响应返回一次（库中只存 SHA-256 哈希）；此时 user_ids / team_ids 必须为空。
+        visibility=private：不生成 token，按 user_ids / team_ids 显式授权。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [file_id]
+              properties:
+                file_id: { type: string, format: uuid }
+                permission:
+                  { type: string, enum: [view, download], default: view }
+                visibility:
+                  { type: string, enum: [public, private], default: public }
+                user_ids:
+                  type: array
+                  items: { type: string, format: uuid }
+                  description: 私有分享：显式授权的用户列表
+                team_ids:
+                  type: array
+                  items: { type: string, format: uuid }
+                  description: 私有分享：授权的团队列表（成员可访问）
+                expires_in:
+                  { type: integer, format: int64, description: 有效期（秒）；缺省或 0 表示永久 }
+                max_downloads:
+                  { type: integer, description: 最大下载次数；缺省表示不限 }
+      responses:
+        '201':
+          description: >-
+            分享已创建；公开分享额外返回 token 与 share_url
+            （/api/v1/public/shares/{token}，仅此一次），私有分享不含两者
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CreatedShare' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 文件不可分享（如软删除中）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    get:
+      tags: [Shares]
+      operationId: listShares
+      summary: 我的分享列表
+      description: >-
+        按创建时间倒序列出当前用户创建的分享（公开与私有）；
+        每条附 file_name（文件已删除时为空串）与 visibility（public|private）。
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, default: 100, maximum: 1000 }
+      responses:
+        '200':
+          description: 分享列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ShareList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /shares/shared-with-me:
+    get:
+      tags: [Shares]
+      operationId: listSharedWithMe
+      summary: 与我共享的列表
+      description: >-
+        分享给当前用户的有效私有分享列表（share_users 显式授权，或当前用户属于
+        share_teams 任一授权团队；成员关系实时判定）。公开分享、已撤销、已过期、
+        达下载上限的分享，以及文件已删除/不可用的条目不返回；按 created_at 倒序。
+        owner_username 为分享者用户名（不含 email，避免泄露）。
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, default: 100, maximum: 1000 }
+      responses:
+        '200':
+          description: 与我共享的分享列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SharedWithMeList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /shares/{id}:
+    delete:
+      tags: [Shares]
+      operationId: revokeShare
+      summary: 撤销分享
+      description: 幂等；仅分享创建者可撤销。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: 已撤销 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /shares/{id}/files/{fid}:
+    get:
+      tags: [Shares]
+      operationId: shareFileInfo
+      summary: 私有分享文件元数据（登录用户）
+      description: >-
+        分享 owner 可直接访问；其他登录用户须被显式授权（user_ids）或属于授权团队
+        （team_ids）。仅暴露安全字段，不含 owner、内部 ID 与存储路径。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+          description: 分享 ID
+        - name: fid
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+          description: 被分享的文件 ID
+      responses:
+        '200':
+          description: 文件元数据
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ShareFileMeta' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: 当前用户未被授权访问该私有分享
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '410': { $ref: '#/components/responses/Gone' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /shares/{id}/files/{fid}/download:
+    get:
+      tags: [Shares]
+      operationId: shareFileDownload
+      summary: 私有分享下载（登录用户）
+      description: >-
+        需 download 权限；成功原子递增分享与文件 download_count（受 max_downloads 限制）；
+        支持单区间 Range 与 Content-Disposition: attachment。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: fid
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: Range
+          in: header
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: 全量内容
+          headers:
+            Content-Disposition: { schema: { type: string } }
+            Accept-Ranges: { schema: { type: string, const: bytes } }
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '206':
+          description: 区间内容
+          headers:
+            Content-Range: { schema: { type: string } }
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '410': { $ref: '#/components/responses/Gone' }
+        '416':
+          description: Range 无法满足
+          headers:
+            Content-Range: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /shares/{id}/files/{fid}/preview:
+    get:
+      tags: [Shares]
+      operationId: shareFilePreview
+      summary: 私有分享预览（登录用户）
+      description: view 与 download 权限均可预览；不消耗分享 download_count；MIME 白名单同个人预览。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: fid
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: Range
+          in: header
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: 内联内容
+          headers:
+            Content-Disposition: { schema: { type: string } }
+            X-Content-Type-Options: { schema: { type: string, const: nosniff } }
+            Accept-Ranges: { schema: { type: string, const: bytes } }
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '206':
+          description: 区间内容
+          headers:
+            Content-Range: { schema: { type: string } }
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '410': { $ref: '#/components/responses/Gone' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '416':
+          description: Range 无法满足
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /public/shares/{token}:
+    get:
+      tags: [Public Shares]
+      operationId: publicShareInfo
+      summary: 公开分享元数据（无认证）
+      description: >-
+        按 token 匹配（库中只存哈希）；无认证、不设任何 Cookie，按 IP 独立限流。
+        仅暴露安全字段。未启用则 404；过期/撤销/达下载上限 410。
+      security: []
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { type: string }
+          description: 创建公开分享时返回的一次性明文 token（URL-safe base64）
+      responses:
+        '200':
+          description: 文件元数据
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ShareFileMeta' }
+        '403':
+          description: 文件当前不可用（对象非 available 状态）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '410': { $ref: '#/components/responses/Gone' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /public/shares/{token}/download:
+    get:
+      tags: [Public Shares]
+      operationId: publicShareDownload
+      summary: 公开分享下载（无认证）
+      description: >-
+        校验分享有效性与对象可用性；成功原子递增分享与文件 download_count；
+        支持单区间 Range 与 Content-Disposition: attachment。
+      security: []
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { type: string }
+        - name: Range
+          in: header
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: 全量内容
+          headers:
+            Content-Disposition: { schema: { type: string } }
+            Accept-Ranges: { schema: { type: string, const: bytes } }
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '206':
+          description: 区间内容
+          headers:
+            Content-Range: { schema: { type: string } }
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '403':
+          description: 分享不允许下载或对象不可用
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '410': { $ref: '#/components/responses/Gone' }
+        '416':
+          description: Range 无法满足
+          headers:
+            Content-Range: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /public/shares/{token}/preview:
+    get:
+      tags: [Public Shares]
+      operationId: publicSharePreview
+      summary: 公开分享预览（无认证）
+      description: >-
+        view 与 download 权限均可预览；不消耗分享 download_count；
+        MIME 白名单与安全头同个人预览。网页包联动同个人预览：zip 且存在
+        ready 解包结果时返回 200 JSON（WebpkgPreview）。
+      security: []
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { type: string }
+        - name: Range
+          in: header
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: 内联内容；zip 网页包为 WebpkgPreview JSON
+          headers:
+            Content-Disposition: { schema: { type: string } }
+            X-Content-Type-Options: { schema: { type: string, const: nosniff } }
+            Accept-Ranges: { schema: { type: string, const: bytes } }
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+            application/json:
+              schema: { $ref: '#/components/schemas/WebpkgPreview' }
+        '206':
+          description: 区间内容
+          headers:
+            Content-Range: { schema: { type: string } }
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '403':
+          description: 对象不可用或分享不允许访问
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '410': { $ref: '#/components/responses/Gone' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '416':
+          description: Range 无法满足
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /teams:
+    post:
+      tags: [Teams]
+      operationId: createTeam
+      summary: 创建团队
+      description: 创建者自动成为 owner 成员，并在同一事务内生成团队根目录；团队名全局唯一。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  { type: string, maxLength: 100, description: 非空、无控制字符 }
+                description: { type: string }
+      responses:
+        '201':
+          description: 团队已创建（含 root_folder_id）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CreatedTeam' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409':
+          description: 团队名已存在
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    get:
+      tags: [Teams]
+      operationId: listTeams
+      summary: 我的团队列表
+      description: 当前用户所属（成员或 owner）的团队。
+      responses:
+        '200':
+          description: 团队列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TeamList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /teams/{id}/members:
+    post:
+      tags: [Teams]
+      operationId: addTeamMember
+      summary: 添加成员（仅团队 owner）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_id]
+              properties:
+                user_id: { type: string, format: uuid }
+                role:
+                  { type: string, enum: [owner, editor, viewer], default: viewer }
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '201':
+          description: 成员已添加
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TeamMember' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 用户已是成员
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    get:
+      tags: [Teams]
+      operationId: listTeamMembers
+      summary: 成员列表（须为团队成员）
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 成员列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TeamMemberList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /teams/{id}/members/{uid}:
+    delete:
+      tags: [Teams]
+      operationId: removeTeamMember
+      summary: 移除成员（仅团队 owner）
+      description: owner 对应的成员不可移除（403）。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: uid
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+          description: 被移除成员的用户 ID
+      responses:
+        '204': { description: 成员已移除 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /teams/{id}/files:
+    get:
+      tags: [Teams]
+      operationId: listTeamFiles
+      summary: 团队空间文件列表
+      description: >-
+        列出团队根目录（缺省）或 parent_id 指定团队目录的直接子项；
+        成员可读；非成员 404（不泄露团队存在性）。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: parent_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+          description: 团队目录 ID；缺省为团队根目录
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, default: 100, maximum: 1000 }
+      responses:
+        '200':
+          description: 目录内容（含所属父目录 ID）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TeamFileList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /teams/{id}/folders:
+    post:
+      tags: [Teams]
+      operationId: createTeamFolder
+      summary: 创建团队目录（editor 及以上角色）
+      description: 在团队根目录（缺省）或指定团队目录下创建目录；viewer 返回 403。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                parent_id:
+                  { type: string, format: uuid, description: 团队目录 ID；缺省为团队根目录 }
+      responses:
+        '201':
+          description: 目录已创建
+          headers:
+            ETag: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/File' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /onlyoffice/config:
+    get:
+      tags: [onlyoffice]
+      operationId: getOnlyOfficeConfig
+      summary: 集成可用性探测（前端据此显示「编辑」入口）
+      description: >-
+        返回 ONLYOFFICE 集成状态与 DocumentServer 基地址（前端加载
+        `{server_url}/web-apps/apps/api/documents/api.js`）。该端点恒注册：
+        ONLYOFFICE_ENABLED=false 时返回 `{enabled:false, server_url:null}`
+        （不暴露内部 URL），其余 onlyoffice 端点此时不注册（404）。
+      responses:
+        '200':
+          description: 集成状态
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [enabled, server_url]
+                properties:
+                  enabled: { type: boolean }
+                  server_url:
+                    type: [string, 'null']
+                    description: DocumentServer 基地址；禁用时为 null
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /onlyoffice/session:
+    post:
+      tags: [onlyoffice]
+      operationId: createOnlyOfficeSession
+      summary: 生成编辑器配置（DocsAPI.DocEditor 可直接使用）
+      description: >-
+        校验读权限（authorizeFileAccess 同规则：个人文件 owner、团队文件任意
+        在册成员）且当前版本 blob 为 available。document.key 绑定
+        `file_id:version_id`（编辑会话与版本绑定）；document.url 为 5 分钟有效期
+        的签名下载 URL（ONLYOFFICE_DOWNLOAD_URL_BASE 前缀）；token 为对
+        document+editorConfig 整体签名的 JWT（HS256，ONLYOFFICE_JWT_SECRET，
+        TTL 5 分钟）。集成未启用（ONLYOFFICE_ENABLED=false）时路由不注册（404）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [file_id]
+              properties:
+                file_id: { type: string, format: uuid }
+      responses:
+        '200':
+          description: >-
+            DocsAPI.DocEditor 配置（documentType/document/editorConfig/token；
+            editorConfig 含 user.id/name、lang=zh 与 callbackUrl）
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: 无权限或当前版本不可用（非 available 状态）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 文件无当前版本
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /onlyoffice/download/{fileId}:
+    get:
+      tags: [onlyoffice]
+      operationId: onlyofficeDownload
+      summary: DocumentServer 回源下载（签名 token，无 Bearer）
+      description: >-
+        供 DocumentServer 拉取文档内容（无用户会话）。token 为 HS256 JWT：
+        sub=file_id、v=版本 ID、aud=onlyoffice-download、exp 5 分钟，且须与
+        路径 fileId、查询 v 一致；校验通过后流式返回该版本内容（单区间 Range 与
+        Content-Disposition: attachment 同个人下载，不计入 download_count）。
+        被隔离/不可用 blob 一律拒绝（403）。独立按 IP 轻限流
+        （ONLYOFFICE_RATE_LIMIT_PER_MIN）。
+      security: []
+      parameters:
+        - name: fileId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: token
+          in: query
+          required: true
+          schema: { type: string }
+          description: 签名下载 token（session 接口的 document.url 内嵌）
+        - name: v
+          in: query
+          required: true
+          schema: { type: string, format: uuid }
+          description: 版本记录 ID（与 token 的 v 声明一致）
+        - name: Range
+          in: header
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: 全量内容
+          headers:
+            Content-Disposition: { schema: { type: string } }
+            Accept-Ranges: { schema: { type: string, const: bytes } }
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '206':
+          description: 区间内容
+          headers:
+            Content-Range: { schema: { type: string } }
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401':
+          description: token 缺失、签名不符、过期、用途（aud）不符或参数绑定失败
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: blob 非 available 状态（隔离/不可用）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '416':
+          description: Range 无法满足
+          headers:
+            Content-Range: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /onlyoffice/callback:
+    post:
+      tags: [onlyoffice]
+      operationId: onlyofficeCallback
+      summary: 保存回调（DocumentServer → DocFlow，无 Bearer）
+      description: >-
+        DocumentServer command service 回调。JWT 校验取 body.token 或
+        Authorization: Bearer 头（HS256，ONLYOFFICE_JWT_SECRET；key/status/url
+        以验签后的 claims 为信任源）。status=2/6：仅接受与
+        ONLYOFFICE_SERVER_URL 同源的下载 URL（scheme/host/port 全等，防 SSRF），
+        下载后作为新版本保存（临时 key 转正、SHA-256 校验、复用内容去重）；
+        幂等键 (file_id, document.key, url) 命中的重复回调不重复建版本。
+        status=4 仅清理（写 onlyoffice.cleanup 审计）；其他状态空处理。
+        始终返回 HTTP 200：成功 {"error":0}，失败 {"error":1}（协议约定，
+        非 200 会触发 DocumentServer 重试）。独立按 IP 轻限流。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                key: { type: string, description: document.key（file_id:version_id） }
+                status: { type: integer, description: '1=编辑中 2=保存 3=错误 4=关闭 6=强制保存 7=强制保存错误' }
+                url: { type: string, description: 新版本下载 URL（仅 status=2/6 使用） }
+                users: { type: array, items: { type: string } }
+                token: { type: string, description: 回调体整体签名的 JWT }
+      responses:
+        '200':
+          description: '处理结果（协议体）：成功 error=0，失败 error=1'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: integer, enum: [0, 1] }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /admin/settings:
+    get:
+      tags: [Admin]
+      operationId: listAdminSettings
+      summary: 列出全部系统设置（仅 admin）
+      description: >-
+        返回全部内置键的当前值（未设置时为默认值）、类型、描述与默认值。
+        仅非密钥类运行时配置；密钥类（JWT/S3/SMTP 凭据等）一律走环境变量，
+        不经 system_settings 暴露。
+      responses:
+        '200':
+          description: 设置列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  settings:
+                    type: array
+                    items: { $ref: '#/components/schemas/Setting' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /admin/settings/{key}:
+    put:
+      tags: [Admin]
+      operationId: updateAdminSetting
+      summary: 更新单个系统设置（仅 admin）
+      description: >-
+        按键的类型与范围校验后写入（value_type 为 bool/int/string，int 键有
+        min/max 范围）；未知键 404、类型或范围不符 400。成功写 settings.update
+        审计（含操作者与新值）。
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+            enum:
+              [site.name, upload.max_versions_per_file, upload.max_file_size,
+               share.default_expiry_hours, retention.trash_days]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [value]
+              properties:
+                value:
+                  description: 与键定义类型一致的标量值（bool / int / string）
+                  oneOf:
+                    - type: boolean
+                    - type: integer
+                    - type: string
+      responses:
+        '200':
+          description: 已更新；返回归一化后的值
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  key: { type: string }
+                  value: {}
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /admin/stats:
+    get:
+      tags: [Admin]
+      operationId: adminStats
+      summary: 基础统计（仅 admin）
+      description: 各核心表的行数计数（users / files / upload_sessions / sessions / shares）。
+      responses:
+        '200':
+          description: 统计计数
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminStats' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        Authorization: Bearer <access_token>；HS256 JWT，subject 为用户 UUID，
+        过期时间以服务配置为准。
+
+  responses:
+    BadRequest:
+      description: 请求参数或请求体非法
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unauthorized:
+      description: 缺失或无效的访问令牌
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: 无权限执行该操作（含只读目录、根目录保护、对象不可用等）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: 资源不存在或不属于当前用户（不泄露存在性）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Conflict:
+      description: 状态冲突（名称冲突、偏移不匹配、文件无当前版本等）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Gone:
+      description: 资源已失效（分享过期/撤销/达下载上限、上传会话过期或终态）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    PayloadTooLarge:
+      description: 上传长度超过 Tus-Max-Size 上限
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    UnsupportedMediaType:
+      description: Content-Type 不被接受，或预览 MIME 不在白名单（preview not supported）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    RateLimited:
+      description: 触发限流；响应头 Retry-After 为当前窗口剩余秒数
+      headers:
+        Retry-After:
+          description: 建议等待秒数
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: 人类可读错误信息
+        code:
+          type: string
+          description: >-
+            机器可读错误码；当前实现使用 NAME_CONFLICT / NOT_DELETED / PARENT_DELETED /
+            QUARANTINED / FAILED
+        status:
+          type: string
+          description: 上传相关错误附带的会话状态（仅 uploads complete 端点）
+    Setting:
+      type: object
+      description: 系统设置条目（GET /admin/settings）；value 为按类型解析后的标量
+      properties:
+        key:
+          type: string
+          enum:
+            [site.name, upload.max_versions_per_file, upload.max_file_size,
+             share.default_expiry_hours, retention.trash_days]
+        value: { description: 当前生效值（未设置时为默认值） }
+        type: { type: string, enum: [bool, int, string] }
+        description: { type: string }
+        default: { description: 内置默认值 }
+        updated_at: { type: string, format: date-time }
+        updated_by:
+          type: [string, 'null']
+          format: uuid
+          description: 最近更新者；从未设置过时缺省
+    AdminStats:
+      type: object
+      description: 基础统计（GET /admin/stats），各核心表行数
+      properties:
+        users: { type: integer, format: int64 }
+        files: { type: integer, format: int64 }
+        uploads: { type: integer, format: int64, description: upload_sessions 行数 }
+        sessions: { type: integer, format: int64 }
+        shares: { type: integer, format: int64 }
+    TokenPair:
+      type: object
+      required: [access_token, token_type]
+      properties:
+        access_token: { type: string, description: JWT 访问令牌 }
+        token_type: { type: string, const: Bearer }
+    WebpkgPreview:
+      type: object
+      description: >-
+        网页包预览指引（/files/{id}/preview 与 /public/shares/{token}/preview
+        对 zip+ready 包的 200 JSON 响应）；前端以 sandbox="allow-scripts" 的
+        iframe 加载 url（无 allow-same-origin，内容端点带严格 CSP/nosniff）。
+      required: [kind, url]
+      properties:
+        kind: { type: string, const: webpkg }
+        url:
+          type: string
+          description: '内容入口 /content/<public_id>/index.html（public_id 为 43 字符随机串）'
+    WebpkgPackage:
+      type: object
+      description: >-
+        web_packages 行的对外视图（POST /files/{id}/webpkg/extract 响应）；
+        public_id 仅在 ready 时返回，blocked/failed 附 error 原因。
+      properties:
+        file_id: { type: string, format: uuid }
+        status:
+          type: string
+          enum: [extracting, ready, failed, blocked]
+          description: ready 可预览；blocked 为安全校验未通过；failed 为存储级失败
+        public_id:
+          type: string
+          description: 43 字符 URL-safe 随机串（仅 ready 时返回；幂等重建保持稳定）
+        entry_count: { type: integer, description: 解包文件条目数（目录条目不计） }
+        total_size: { type: integer, format: int64, description: 展开总字节数 }
+        error:
+          type: string
+          description: blocked/failed 时的原因（ready 时缺省）
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    File:
+      type: object
+      description: >-
+        文件/目录元数据；响应不含 owner_id、team_id 等内部字段。
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        parent_id:
+          type: [string, 'null']
+          format: uuid
+          description: 父目录 ID；根目录为 null
+        type: { type: string, enum: [file, folder] }
+        is_root: { type: boolean }
+        description: { type: string }
+        is_public:
+          { type: boolean, description: 是否存在有效公开分享（冗余辅助字段） }
+        view_count: { type: integer, format: int64 }
+        download_count: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    TrashFile:
+      allOf:
+        - $ref: '#/components/schemas/File'
+        - type: object
+          properties:
+            deleted_at:
+              type: [string, 'null']
+              format: date-time
+    FileWithVersion:
+      allOf:
+        - $ref: '#/components/schemas/File'
+        - type: object
+          properties:
+            current_version:
+              oneOf:
+                - $ref: '#/components/schemas/FileVersion'
+                - type: 'null'
+              description: 当前版本摘要；文件无任何版本时为 null
+    FileVersion:
+      type: object
+      description: GET /files/{id} 返回的当前版本视图（对象 blob 摘要）
+      properties:
+        id: { type: string, format: uuid, description: 版本记录 ID }
+        version: { type: integer, description: 版本号（从 1 递增） }
+        size: { type: integer, format: int64, description: 内容字节数 }
+        sha256: { type: string, description: 内容 SHA-256（十六进制小写） }
+        mime_type: { type: string, description: 检测出的 MIME 类型 }
+        status:
+          type: string
+          enum: [created, scanning, available, quarantined, failed, deleting]
+          description: 对象状态；仅 available 可下载
+    FileList:
+      type: object
+      properties:
+        files:
+          type: array
+          items: { $ref: '#/components/schemas/File' }
+    TeamFileList:
+      type: object
+      properties:
+        files:
+          type: array
+          items: { $ref: '#/components/schemas/File' }
+        parent_id:
+          { type: string, format: uuid, description: 当前列出的目录 ID }
+    UploadSession:
+      type: object
+      description: >-
+        上传会话；POST /uploads、PATCH /uploads/{id}、POST /uploads/{id}/complete
+        返回全量字段，GET /uploads/{id} 省略 retry_count。响应不含
+        user_id、expected_sha256、metadata、storage_key（敏感/内部字段）。
+      properties:
+        id: { type: string, format: uuid }
+        parent_id: { type: string, format: uuid }
+        name: { type: string }
+        size: { type: integer, format: int64, description: 声明的总字节数 }
+        offset: { type: integer, format: int64, description: 已接收字节数 }
+        status:
+          type: string
+          enum: [uploading, verifying, scanning, available, quarantined, failed]
+        file_id:
+          type: [string, 'null']
+          format: uuid
+          description: >-
+            覆盖为新版本会话的目标文件 ID（仅 file_id 创建的会话返回，含 Complete
+            完成后的响应）；常规上传会话缺省该字段
+        expires_at: { type: string, format: date-time }
+        retry_count:
+          { type: integer, description: '处理重试次数（GET /uploads/{id} 不返回）' }
+        created_at: { type: string, format: date-time }
+        completed_at:
+          type: [string, 'null']
+          format: date-time
+          description: 完成时间；未完成为 null 或缺省
+    FileVersionDetail:
+      type: object
+      description: GET /files/{id}/versions 的版本条目（版本不可变，status 为关联 blob 实时状态）
+      properties:
+        id: { type: string, format: uuid, description: 版本记录 ID }
+        version: { type: integer, description: 版本号（从 1 递增，列表按其倒序） }
+        size: { type: integer, format: int64, description: 内容字节数 }
+        sha256: { type: string, description: 内容 SHA-256（十六进制小写） }
+        mime_type: { type: string, description: 对象 MIME 类型 }
+        status:
+          type: string
+          enum: [created, scanning, available, quarantined, failed, deleting]
+          description: 关联对象状态；deleting 表示已被版本裁剪解除引用、待后台回收
+        comment:
+          type: [string, 'null']
+          description: 版本备注（预留，当前恒为 null）
+        user_id: { type: string, format: uuid, description: 创建该版本的用户 }
+        created_at: { type: string, format: date-time }
+    Share:
+      type: object
+      description: >-
+        分享记录；列表与私有分享响应不含明文 token（明文仅公开分享创建时返回一次）。
+        列表响应额外附 file_name 与 visibility。
+      properties:
+        id: { type: string, format: uuid }
+        file_id: { type: string, format: uuid }
+        visibility:
+          type: string
+          enum: [public, private]
+          description: 分享可见性；仅 GET /shares 列表响应返回
+        permission: { type: string, enum: [view, download] }
+        expires_at:
+          type: [string, 'null']
+          format: date-time
+          description: 过期时间；null 表示永久
+        max_downloads:
+          type: [integer, 'null']
+          description: 最大下载次数；null 表示不限
+        download_count: { type: integer }
+        revoked_at:
+          type: [string, 'null']
+          format: date-time
+          description: 撤销时间；null 表示未撤销
+        created_at: { type: string, format: date-time }
+        file_name:
+          type: string
+          description: 关联文件名（JOIN files）；仅 GET /shares 列表响应返回，文件已删除时为空串
+    CreatedShare:
+      allOf:
+        - $ref: '#/components/schemas/Share'
+        - type: object
+          properties:
+            token:
+              type: [string, 'null']
+              description: >-
+                公开分享的一次性明文 token（URL-safe base64，仅创建响应返回）；
+                私有分享为 null/缺省
+            share_url:
+              type: [string, 'null']
+              description: '公开分享访问路径 /api/v1/public/shares/{token}；私有分享为 null/缺省'
+    ShareList:
+      type: object
+      properties:
+        shares:
+          type: array
+          items: { $ref: '#/components/schemas/Share' }
+    SharedWithMeItem:
+      type: object
+      description: 「与我共享」条目：有效私有分享 + 文件元数据 + 分享者用户名（不含 email）
+      properties:
+        id: { type: string, format: uuid, description: 分享 ID }
+        file_id: { type: string, format: uuid }
+        name: { type: string, description: 文件名 }
+        size:
+          { type: integer, format: int64, description: 当前版本字节数；版本缺失时为 0 }
+        mime_type: { type: string, description: 当前版本 MIME 类型 }
+        permission: { type: string, enum: [view, download] }
+        owner_username: { type: string, description: 分享者用户名（不泄露 email） }
+        expires_at:
+          type: [string, 'null']
+          format: date-time
+        created_at: { type: string, format: date-time, description: 分享创建时间 }
+    SharedWithMeList:
+      type: object
+      properties:
+        shares:
+          type: array
+          items: { $ref: '#/components/schemas/SharedWithMeItem' }
+    ShareFileMeta:
+      type: object
+      description: 分享访问入口（私有与公开）暴露的安全元数据子集
+      properties:
+        name: { type: string }
+        size: { type: integer, format: int64 }
+        mime_type: { type: string }
+        version: { type: integer }
+        version_status:
+          type: string
+          enum: [created, scanning, available, quarantined, failed, deleting]
+        permission: { type: string, enum: [view, download] }
+        expires_at:
+          type: [string, 'null']
+          format: date-time
+        max_downloads:
+          type: [integer, 'null']
+        download_count: { type: integer }
+    Team:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: string }
+        owner_id: { type: string, format: uuid, description: 团队 owner 用户 ID }
+        created_at: { type: string, format: date-time }
+    CreatedTeam:
+      allOf:
+        - $ref: '#/components/schemas/Team'
+        - type: object
+          properties:
+            root_folder_id:
+              { type: string, format: uuid, description: 事务内创建的团队根目录 ID }
+    TeamList:
+      type: object
+      properties:
+        teams:
+          type: array
+          items: { $ref: '#/components/schemas/Team' }
+    TeamMember:
+      type: object
+      properties:
+        user_id: { type: string, format: uuid }
+        role: { type: string, enum: [owner, editor, viewer] }
+        created_at: { type: string, format: date-time }
+    TeamMemberList:
+      type: object
+      properties:
+        members:
+          type: array
+          items: { $ref: '#/components/schemas/TeamMember' }
