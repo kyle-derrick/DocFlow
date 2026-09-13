@@ -1,0 +1,8 @@
+# backend 构建上下文瘦身（构建在仓库根 context 进行）：
+# 排除本地依赖/产物/密钥，避免进入镜像层与构建上下文传输。
+.git
+.design
+frontend
+storage
+.env
+.env.local

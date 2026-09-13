@@ -1,0 +1,201 @@
+# DocFlow 生产部署编排（设计文档 §12 部署架构）。
+#
+# 端口边界：caddy 是唯一映射宿主端口的服务（80/443）；backend / postgres /
+# redis / onlyoffice / clamav 均仅 compose 内网可达，不做任何宿主映射。
+# 前端不运行 dev server：静态产物在构建期打进 caddy 镜像 /srv/frontend
+#（frontend/Dockerfile 多阶段 node:22-alpine 构建 → caddy:2.8.4-alpine）。
+#
+# Profiles（服务矩阵）：
+#   minimal    caddy + backend + postgres                  —— make up-minimal
+#   full       minimal + redis + onlyoffice                —— make up-full
+#   antivirus  minimal + clamav（可与 full 叠加）          —— docker compose
+#              --profile full --profile antivirus up -d
+# 三个 profile 均含核心三件套（caddy/backend/postgres），可单独或叠加启动。
+#
+# 本地开发不经本文件的 caddy：后端 `make run` 直接监听宿主 :8080，前端
+# `cd frontend && npm run dev`（vite 将 /api 代理到 localhost:8080）。
+# 本机无 postgres 时可临时起一个并挂载迁移目录：
+#   docker run -d --name docflow-pg -p 5432:5432 \
+#     -e POSTGRES_DB=docflow -e POSTGRES_USER=docflow \
+#     -e POSTGRES_PASSWORD=change-me \
+#     -v "$PWD/migrations:/docker-entrypoint-initdb.d:ro" postgres:16-alpine
+services:
+  # 统一入口：TLS 终止 + 前端静态产物 + API/内容/ONLYOFFICE 反代。
+  # 构建上下文为 ./frontend（多阶段构建，产物并入本镜像），配置挂载
+  # deploy/Caddyfile；证书与站点地址见 .env 的 APP_DOMAIN。
+  caddy:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: docflow/caddy:1.0.0
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      # 站点域名（Caddyfile 站点地址 {$APP_DOMAIN}）：未设置时兜底 :80
+      #（本地验证，无 TLS）；生产在 .env 设为对外域名，自动签发 HTTPS。
+      APP_DOMAIN: ${APP_DOMAIN:-:80}
+      # ONLYOFFICE 反代上游：minimal 下无 onlyoffice 服务，写死 onlyoffice:80
+      # 会让 Caddy 启动时 DNS 解析失败退出，故默认 discard 端口
+      #（/onlyoffice/* 502 属预期）；make up-full 注入 onlyoffice:80。
+      ONLYOFFICE_UPSTREAM: ${ONLYOFFICE_UPSTREAM:-127.0.0.1:9}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      backend:
+        condition: service_healthy
+    profiles: ["minimal", "full", "antivirus"]
+
+  # Go API：仅内网暴露 8080（无宿主端口映射，外部一律经 caddy）。
+  backend:
+    build: .
+    image: docflow/backend:1.0.0
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgres://docflow:change-me@postgres:5432/docflow?sslmode=disable}
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      PORT: 8080
+      # 生产经 caddy 提供 HTTPS 时应设 COOKIE_SECURE=true。
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      STORAGE_DRIVER: ${STORAGE_DRIVER:-local}
+      STORAGE_ROOT: /data/storage
+      S3_ENDPOINT: ${S3_ENDPOINT:-}
+      S3_BUCKET: ${S3_BUCKET:-}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-}
+      S3_PATH_STYLE: ${S3_PATH_STYLE:-true}
+      MAX_FILE_SIZE: ${MAX_FILE_SIZE:-1073741824}
+      # 病毒扫描联动 antivirus profile：启用 clamav 后设 .env
+      # SCAN_ENABLED=true、CLAMAV_ADDR=clamav:3310（容器内 localhost 不可达；
+      # CLAMAV_REQUIRED=true 时 clamd 不可达会 fail closed 拒绝上传）。
+      SCAN_ENABLED: ${SCAN_ENABLED:-false}
+      CLAMAV_ADDR: ${CLAMAV_ADDR:-clamav:3310}
+      CLAMAV_TIMEOUT: ${CLAMAV_TIMEOUT:-5m}
+      CLAMAV_REQUIRED: ${CLAMAV_REQUIRED:-true}
+      RATE_LIMIT_PER_MIN: ${RATE_LIMIT_PER_MIN:-120}
+      LOGIN_RATE_LIMIT_PER_MIN: ${LOGIN_RATE_LIMIT_PER_MIN:-10}
+      PUBLIC_RATE_LIMIT_PER_MIN: ${PUBLIC_RATE_LIMIT_PER_MIN:-60}
+      MAX_VERSIONS_PER_FILE: ${MAX_VERSIONS_PER_FILE:-5}
+      # ONLYOFFICE 集成（默认关闭）：启用需在 .env 设置 ONLYOFFICE_ENABLED=true、
+      # ONLYOFFICE_JWT_SECRET（≥32 字节，与下方 onlyoffice 服务的 JWT_SECRET 一致）。
+      ONLYOFFICE_ENABLED: ${ONLYOFFICE_ENABLED:-false}
+      ONLYOFFICE_SERVER_URL: ${ONLYOFFICE_SERVER_URL:-http://onlyoffice:80}
+      ONLYOFFICE_JWT_SECRET: ${ONLYOFFICE_JWT_SECRET:-}
+      ONLYOFFICE_DOWNLOAD_URL_BASE: ${ONLYOFFICE_DOWNLOAD_URL_BASE:-http://backend:8080}
+      ONLYOFFICE_RATE_LIMIT_PER_MIN: ${ONLYOFFICE_RATE_LIMIT_PER_MIN:-60}
+      # Prometheus 指标端点（默认启用，无认证）。/metrics 不经 Caddy 暴露
+      #（Caddyfile 无该反代规则，未匹配路径返回 SPA 首页）；内网监控在
+      # compose 网络内直连 backend:8080/metrics，无内网抓取可设 false 关闭。
+      METRICS_ENABLED: ${METRICS_ENABLED:-true}
+    expose:
+      - "8080"
+    volumes:
+      - backend_storage:/data/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles: ["minimal", "full", "antivirus"]
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-docflow}
+      POSTGRES_USER: ${POSTGRES_USER:-docflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+    # 迁移执行方式（利弊）：migrations 挂到 docker-entrypoint-initdb.d 仅在
+    # 数据卷首次初始化（空卷）时按文件名序执行——开箱即用，但镜像/脚本升级
+    # 新增的迁移不会自动执行，且重复 up 不会重放；生产更稳妥的是显式迁移
+    # 执行（psql / migrate 等对 backend 镜像内 /migrations 跑版本化迁移）。
+    # 本次保留挂载以便全新环境零额外步骤启动。
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+    profiles: ["minimal", "full", "antivirus"]
+
+  # Redis（full profile）：后台任务队列的后端存储——QUEUE_DRIVER=redis 时
+  # backend 经 asynq（hibiken/asynq）把上传补完/网页包解包任务写入 Redis，
+  # 多实例部署下任意实例的 worker 均可消费（无本地状态，横向扩展安全）；
+  # 默认 QUEUE_DRIVER=inprocess 时本服务不被使用。进程内限流仍为内存实现，
+  # 多实例下各实例独立计数。归入 full profile：minimal 栈保持零 Redis 依赖，
+  # backend 亦不声明 depends_on（避免把 redis 拖入 minimal）；未挂宿主端口。
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    profiles: ["full"]
+
+  # 病毒扫描（antivirus profile）：docker compose --profile antivirus up -d
+  # 启用，可与 full 叠加（--profile full --profile antivirus）。
+  # 启用后 .env 联动：SCAN_ENABLED=true、CLAMAV_ADDR=clamav:3310。
+  # 注意：不加 depends_on，保持按需启用；clamd 首次启动需下载病毒库，耗时
+  # 数分钟（CLAMAV_REQUIRED=true 期间上传会 fail closed 拒绝）。
+  clamav:
+    image: clamav/clamav:1.4.1
+    profiles: ["antivirus"]
+    expose:
+      - "3310"
+    volumes:
+      - clamav_data:/var/lib/clamav
+    healthcheck:
+      test: ["CMD", "clamdcheck.sh"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10m
+
+  # ONLYOFFICE Document Server（full profile）：make up-full 或
+  # docker compose --profile full up -d 启用。
+  # 对应 .env：ONLYOFFICE_ENABLED=true、ONLYOFFICE_SERVER_URL=http://onlyoffice:80、
+  # ONLYOFFICE_JWT_SECRET 与本服务 JWT_SECRET 联动（≥32 字节，未设置时
+  # compose 拒绝启动）、ONLYOFFICE_DOWNLOAD_URL_BASE=http://backend:8080
+  #（DocumentServer 回源后端地址）。
+  # 端口仅 compose 内网（不映射宿主 8081）：浏览器经 caddy /onlyoffice/* 访问；
+  # 本地联调可临时 docker run -p 8081:80 起 DS 并把 ONLYOFFICE_SERVER_URL
+  # 指向 http://localhost:8081。
+  # 版本锁定 8.2.3（设计文档 16.5 风险 4：8.2.x 内可平滑升级，跨大版本需评估
+  # API 变更）。
+  onlyoffice:
+    image: onlyoffice/documentserver:8.2.3
+    profiles: ["full"]
+    environment:
+      - JWT_ENABLED=true
+      - JWT_SECRET=${ONLYOFFICE_JWT_SECRET:?set ONLYOFFICE_JWT_SECRET in .env}
+    expose:
+      - "80"
+    volumes:
+      - onlyoffice_data:/var/www/onlyoffice/Data
+      - onlyoffice_logs:/var/log/onlyoffice
+    restart: unless-stopped
+  #
+  # 如需 S3 兼容对象存储（STORAGE_DRIVER=s3），可参考以下示例自行启用
+  #（本仓库默认不启用，仅作说明；MinIO 与 SeaweedFS 二选一即可）：
+  # minio:
+  #   image: minio/minio:RELEASE.2024-09-13T20-26-02Z
+  #   command: server /data --console-address ":9001"
+  #   environment:
+  #     MINIO_ROOT_USER: docflow
+  #     MINIO_ROOT_PASSWORD: change-me
+  #   volumes: [minio_data:/data]
+  #   # 对应 .env：STORAGE_DRIVER=s3、S3_ENDPOINT=http://minio:9000、
+  #   # S3_BUCKET=docflow、S3_ACCESS_KEY/S3_SECRET_KEY 同上、S3_PATH_STYLE=true
+  #
+  # seaweedfs (S3 网关):
+  #   image: chrislusf/seaweedfs:3.80
+  #   command: server -s3 -dir=/data -master.volumeSizeLimitMB=1024
+  #   volumes: [seaweedfs_data:/data]
+  #   # 对应 .env：STORAGE_DRIVER=s3、S3_ENDPOINT=http://seaweedfs:8333、
+  #   # S3_BUCKET=docflow（需提前创建）、S3_PATH_STYLE=true
+volumes:
+  postgres_data:
+  backend_storage:
+  clamav_data:
+  caddy_data:
+  caddy_config:
+  onlyoffice_data:
+  onlyoffice_logs:

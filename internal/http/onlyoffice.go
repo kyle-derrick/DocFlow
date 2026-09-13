@@ -1,0 +1,169 @@
+package http
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+
+	"github.com/docflow/docflow/internal/files"
+	"github.com/docflow/docflow/internal/onlyoffice"
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+)
+
+// onlyofficeRateLimitDefault 为 onlyoffice 公开组（download/callback）独立
+// 按 IP 轻限流的默认值（每分钟次数；SetOnlyOffice 传入非正值时使用）。
+const onlyofficeRateLimitDefault = 60
+
+// onlyofficeConfig GET /api/v1/onlyoffice/config：前端探测集成可用性与
+// DocumentServer 基地址（加载 DocEditor 脚本、决定是否显示「编辑」入口）。
+// 该端点恒注册（不随 ONLYOFFICE_ENABLED 开关 404）：禁用时返回
+// {enabled:false, server_url:null}，不暴露内部 URL。
+func (h *Handler) onlyofficeConfig(c *gin.Context) {
+	if h.onlyoffice == nil {
+		c.JSON(http.StatusOK, gin.H{"enabled": false, "server_url": nil})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"enabled": true, "server_url": h.onlyoffice.ServerURL()})
+}
+
+// SetOnlyOffice 注入 ONLYOFFICE 集成服务；非 nil 时启用路由挂载（幂等）。
+// rateLimitPerMinute 为公开组独立轻限流，<=0 时回退默认 60。
+func (h *Handler) SetOnlyOffice(svc *onlyoffice.Service, rateLimitPerMinute int) {
+	if svc != nil {
+		h.onlyoffice = svc
+		if rateLimitPerMinute > 0 {
+			h.onlyofficeRateLimitPerMin = rateLimitPerMinute
+		}
+	}
+}
+
+// registerOnlyOfficeRoutes 挂载 ONLYOFFICE 路由（仅在集成启用时调用）：
+//   - POST /api/v1/onlyoffice/session 挂认证组（Bearer + 通用限流）；
+//   - GET  /api/v1/onlyoffice/download/:fileId 与 POST /api/v1/onlyoffice/callback
+//     为 DocumentServer 回源链路（无用户会话）：挂公开组绕过 Bearer 与认证接口
+//     限流，自带 JWT 校验与独立按 IP 轻限流。
+func (h *Handler) registerOnlyOfficeRoutes(api *gin.RouterGroup, r *gin.Engine) {
+	api.POST("/onlyoffice/session", h.createOnlyOfficeSession)
+	limit := h.onlyofficeRateLimitPerMin
+	if limit <= 0 {
+		limit = onlyofficeRateLimitDefault
+	}
+	group := r.Group("/api/v1/onlyoffice", publicLimiter(NewRateLimiter(limit)))
+	group.GET("/download/:fileId", h.onlyofficeDownload)
+	group.POST("/callback", h.onlyofficeCallback)
+}
+
+type onlyofficeSessionRequest struct {
+	FileID string `json:"file_id"`
+}
+
+// createOnlyOfficeSession POST /api/v1/onlyoffice/session：校验读权限与当前
+// 版本可用性后，返回可直接传给 DocsAPI.DocEditor 的编辑配置（含 5 分钟有效
+// 的 JWT token 与签名下载 URL）。
+func (h *Handler) createOnlyOfficeSession(c *gin.Context) {
+	var req onlyofficeSessionRequest
+	if c.ShouldBindJSON(&req) != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	id, err := uuid.Parse(strings.TrimSpace(req.FileID))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	config, err := h.onlyoffice.NewEditConfig(userID(c), id)
+	if onlyofficeError(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, config)
+}
+
+// onlyofficeDownload GET /api/v1/onlyoffice/download/:fileId?v=&token=：
+// DocumentServer 回源下载（无 Bearer）。签名校验通过后流式返回该版本内容，
+// Range 与 Content-Disposition: attachment 语义同个人下载（不计数——内部回源）。
+func (h *Handler) onlyofficeDownload(c *gin.Context) {
+	id, ok := parseID(c, c.Param("fileId"))
+	if !ok {
+		return
+	}
+	f, _, blob, err := h.onlyoffice.ResolveDownload(id, c.Query("v"), c.Query("token"))
+	if onlyofficeError(c, err) {
+		return
+	}
+	r, hasRange, err := parseRange(c.GetHeader("Range"), blob.Size)
+	if err != nil {
+		c.Header("Content-Range", fmt.Sprintf("bytes */%d", blob.Size))
+		c.JSON(http.StatusRequestedRangeNotSatisfiable, gin.H{"error": "invalid range"})
+		return
+	}
+	reader, err := h.storage.Read(blob.StorageKey)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to read file"})
+		return
+	}
+	defer reader.Close()
+	seeker, canSeek := reader.(io.Seeker)
+	if hasRange && !canSeek {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to read file"})
+		return
+	}
+	status := http.StatusOK
+	contentLength := blob.Size
+	var body io.Reader = reader
+	if hasRange {
+		status = http.StatusPartialContent
+		contentLength = r.Length()
+		if _, serr := seeker.Seek(r.Start, io.SeekStart); serr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to read file"})
+			return
+		}
+		body = io.LimitReader(reader, r.Length())
+		c.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", r.Start, r.End, blob.Size))
+	}
+	c.Header("Content-Disposition", contentDisposition(f.Name))
+	c.Header("Accept-Ranges", "bytes")
+	c.DataFromReader(status, contentLength, blob.MimeType, body, nil)
+}
+
+// onlyofficeCallback POST /api/v1/onlyoffice/callback：DocumentServer 保存回调
+// （无 Bearer，服务内自校验 JWT）。始终 HTTP 200：成功 {"error":0}，失败 {"error":1}
+// （ONLYOFFICE 协议约定，非 200 会触发 DocumentServer 重试）。
+func (h *Handler) onlyofficeCallback(c *gin.Context) {
+	body, err := io.ReadAll(io.LimitReader(c.Request.Body, 1<<20))
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"error": 1})
+		return
+	}
+	if err := h.onlyoffice.HandleCallback(body, c.GetHeader("Authorization"), c.ClientIP(), c.GetHeader("User-Agent")); err != nil {
+		c.JSON(http.StatusOK, gin.H{"error": 1})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"error": 0})
+}
+
+// onlyofficeError 统一映射集成错误；nil 时不写响应并返回 false。
+func onlyofficeError(c *gin.Context, err error) bool {
+	switch {
+	case err == nil:
+		return false
+	case errors.Is(err, onlyoffice.ErrInvalidToken):
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid onlyoffice token"})
+	case errors.Is(err, onlyoffice.ErrInvalidKey), errors.Is(err, files.ErrInvalidTarget):
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	case errors.Is(err, onlyoffice.ErrURLNotAllowed), errors.Is(err, files.ErrForbidden),
+		errors.Is(err, files.ErrBlobUnavailable):
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+	case errors.Is(err, files.ErrNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
+	case errors.Is(err, files.ErrNoVersion):
+		c.JSON(http.StatusConflict, gin.H{"error": "file has no current version"})
+	case errors.Is(err, onlyoffice.ErrDownloadTooLarge):
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": err.Error()})
+	default:
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "onlyoffice operation failed"})
+	}
+	return true
+}
