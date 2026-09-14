@@ -7,7 +7,9 @@ import (
 
 	"github.com/docflow/docflow/internal/audit"
 	"github.com/docflow/docflow/internal/files"
+	"github.com/docflow/docflow/internal/upload"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 // versionJSON 组装版本条目（含 blob status/size/sha256/mime）。
@@ -31,6 +33,51 @@ func (h *Handler) listFileVersions(c *gin.Context) {
 		out = append(out, versionJSON(v))
 	}
 	c.JSON(http.StatusOK, gin.H{"versions": out})
+}
+
+// versionContentReader 抽象版本内容读取（生产实现 *files.Store.ReadVersion；
+// 接口化便于单测注入内存实现——files.Store 为 gorm 具体类型，见
+// preview_test.go 同一取舍说明）。
+type versionContentReader interface {
+	ReadVersion(user, fileID, versionID uuid.UUID) (files.File, files.FileVersion, files.ObjectBlob, error)
+}
+
+var _ versionContentReader = (*files.Store)(nil)
+
+// fileVersionContent GET /api/v1/files/:id/versions/:versionId/content：
+// 版本原始内容（文本版本对比用）。读权限同版本列表（个人 owner、团队
+// 任意在册成员）；blob 须 available（quarantined 等回 403）。响应为
+// blob.mime + inline disposition + nosniff，不支持 Range（整读）。
+func (h *Handler) fileVersionContent(c *gin.Context) {
+	id, ok := parseID(c, c.Param("id"))
+	if !ok {
+		return
+	}
+	versionID, ok := parseID(c, c.Param("versionId"))
+	if !ok {
+		return
+	}
+	if h.versionReader == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "version content is not available"})
+		return
+	}
+	f, _, blob, err := h.versionReader.ReadVersion(userID(c), id, versionID)
+	if h.fileError(c, err) {
+		return
+	}
+	if blob.Status != files.BlobStatusAvailable {
+		c.JSON(http.StatusForbidden, gin.H{"error": "file is not available", "status": blob.Status})
+		return
+	}
+	reader, err := upload.ReadSection(h.storage, blob.StorageKey, 0, blob.Size)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to read file"})
+		return
+	}
+	defer reader.Close()
+	c.Header("Content-Disposition", inlineDisposition(f.Name))
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.DataFromReader(http.StatusOK, blob.Size, blob.MimeType, reader, nil)
 }
 
 // restoreFileVersion POST /api/v1/files/:id/versions/:versionId/restore

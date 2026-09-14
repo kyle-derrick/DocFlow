@@ -94,3 +94,11 @@ func (g *GormRepo) DeleteOldReadNotifications(now time.Time, retain time.Duratio
 	result := g.db.Exec("DELETE FROM notifications WHERE is_read = true AND COALESCE(read_at, created_at) < ?", cutoff)
 	return result.RowsAffected, result.Error
 }
+
+// DeleteOrphanSearchDocs 删除无对应 files 行的全文索引行（file_search_docs），
+// 返回删除行数。原生 SQL 直查（表在 internal/search 域，此处不引模型，
+// 与 DeleteExpiredSessions 同模式）。
+func (g *GormRepo) DeleteOrphanSearchDocs() (int64, error) {
+	result := g.db.Exec("DELETE FROM file_search_docs WHERE file_id NOT IN (SELECT id FROM files)")
+	return result.RowsAffected, result.Error
+}

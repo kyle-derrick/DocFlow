@@ -35,6 +35,16 @@ const (
 	// 个人访问令牌（PAT）管理：创建与撤销（PAT 认证本身不审计，噪音）。
 	ActionTokenCreate = "token.create"
 	ActionTokenRevoke = "token.revoke"
+	// Webhook 通知渠道管理（v1.1）：注册与删除（启停不审计，噪音）。
+	ActionWebhookCreate = "webhook.create"
+	ActionWebhookDelete = "webhook.delete"
+	// 两步验证（TOTP，v2）：启用（confirm）与禁用；登录第二段沿用
+	// login_success/login_failure，不另设 action。
+	ActionTOTPEnable  = "totp.enable"
+	ActionTOTPDisable = "totp.disable"
+	// OIDC 单点登录（v2）：自动开户（SSO 登录成功/失败沿用
+	// login_success/login_failure，metadata.stage=oidc）。
+	ActionOIDCProvision = "oidc.provision"
 )
 
 // resource_type 常量。
@@ -51,6 +61,8 @@ const (
 	ResourceUser       = "user"
 	// ResourceToken 为个人访问令牌（api_tokens 行）。
 	ResourceToken = "token"
+	// ResourceWebhook 为出站 webhook（webhooks 行）。
+	ResourceWebhook = "webhook"
 )
 
 // status 常量。

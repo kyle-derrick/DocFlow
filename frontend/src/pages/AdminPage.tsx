@@ -39,6 +39,7 @@ const statCards: Array<{ key: keyof AdminStats; label: string }> = [
   { key: 'uploads', label: '上传会话' },
   { key: 'sessions', label: '登录会话' },
   { key: 'shares', label: '分享' },
+  { key: 'tokens', label: 'API 令牌' },
 ]
 
 /** 邀请派生状态的展示徽章 class（复用既有 badge 样式）。 */

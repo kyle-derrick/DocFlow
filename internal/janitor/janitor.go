@@ -61,6 +61,10 @@ type Repo interface {
 	// DeleteOldReadNotifications 删除已读超过保留期（90 天）的通知行
 	//（notifications，原生 SQL，read_at 缺失时回退 created_at），返回删除行数。
 	DeleteOldReadNotifications(now time.Time, retain time.Duration) (int64, error)
+	// DeleteOrphanSearchDocs 删除无对应 files 行的全文索引行
+	//（file_search_docs，原生 SQL），返回删除行数。正常路径由外键
+	// ON DELETE CASCADE 级联承担，此为竞态/迁移遗留的兜底清理。
+	DeleteOrphanSearchDocs() (int64, error)
 }
 
 // Purger 抽象回收站彻底删除能力；生产实现为 *files.Store。
@@ -174,6 +178,23 @@ func (j *Janitor) RunOnce() {
 	j.sweepNotifications()
 	j.sweepDeletingBlobs()
 	j.sweepTrash()
+	j.sweepSearchOrphans()
+}
+
+// sweepSearchOrphans 兜底清理孤儿全文索引行（file_search_docs 无对应
+// files 行）。正常路径：文件硬删除时外键 ON DELETE CASCADE 已级联移除
+// 索引行；此 sweep 覆盖级联删除失败/迁移前遗留等场景。软删文件的索引
+// 保留（恢复后可继续检索），查询侧经 JOIN files ... deleted_at IS NULL
+// 排除（见 internal/search）。纯行删除，暂只记日志。
+func (j *Janitor) sweepSearchOrphans() {
+	n, err := j.repo.DeleteOrphanSearchDocs()
+	if err != nil {
+		j.logf("janitor: delete orphan search docs: %v", err)
+		return
+	}
+	if n > 0 {
+		j.logf("janitor: removed %d orphan search docs", n)
+	}
 }
 
 // sweepNotifications 清理已读超过保留期（90 天）的通知行。

@@ -75,6 +75,20 @@ type APIToken struct {
 	CreatedAt time.Time
 }
 
+// UserTOTP 对应 user_totp 表（migrations/020）。Secret 为 Base32 共享密钥
+// （明文存储：自托管边界内数据库属信任域，见 migration 注释）；Enabled=false
+// 表示 setup 已开始但未 confirm。RecoveryCodes 为 JSON 数组文本，存恢复码
+// 的 SHA-256 hex 哈希；明文仅 ConfirmSetup 响应返回一次。
+type UserTOTP struct {
+	UserID        uuid.UUID `gorm:"type:uuid;primaryKey"`
+	Secret        string    `gorm:"not null"`
+	Enabled       bool      `gorm:"not null;default:false"`
+	RecoveryCodes string    `gorm:"not null;default:'[]'"`
+	ConfirmedAt   *time.Time
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
 // PasswordResetToken 对应 password_reset_tokens 表（migrations/014）。
 // TokenHash 为明文 token 的 SHA-256 hex（64 字符）；明文不落库，仅在
 // 请求重置时经邮件发送一次。used_at 原子条件更新保证一次性语义。

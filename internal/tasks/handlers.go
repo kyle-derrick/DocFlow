@@ -31,6 +31,12 @@ type WebpkgExtractor interface {
 	AutoExtract(fileID uuid.UUID)
 }
 
+// SearchIndexer 抽象全文索引构建能力（*search.Indexer 满足）。Index 幂等
+// （整行覆盖 upsert），文件已硬删时清理索引行后归零返回。
+type SearchIndexer interface {
+	Index(fileID uuid.UUID) error
+}
+
 // CompleteUploadHandler 返回「上传补完」处理函数：调 upload.Service.Complete
 // （verify→scan→落库），成功后记录审计（upload.complete；覆盖为新版本的会话
 // 另记 version.create）——与原 tus PATCH 内联 goroutine 行为一致。
@@ -81,6 +87,19 @@ func ExtractWebpkgHandler(extractor WebpkgExtractor) TaskFunc {
 		}
 		extractor.AutoExtract(fileID)
 		return nil
+	}
+}
+
+// SearchIndexHandler 返回「全文索引构建」处理函数：调 search.Indexer.Index
+// 重建 file_search_docs 行（读当前版本 blob 内容，限 2MB、文本判定在处理侧）。
+// 索引为派生数据：构建失败不影响文件可用性，但允许 redis 驱动重试自愈
+// （瞬时存储/DB 错误返回 error；终态如文件不存在已由 Indexer 内部归零）。
+func SearchIndexHandler(indexer SearchIndexer) TaskFunc {
+	return func(ctx context.Context, fileID uuid.UUID) error {
+		if indexer == nil {
+			return nil
+		}
+		return indexer.Index(fileID)
 	}
 }
 

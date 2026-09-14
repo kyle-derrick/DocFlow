@@ -17,9 +17,12 @@ export const SESSION_EXPIRED_EVENT = 'docflow:session-expired'
 
 export class ApiError extends Error {
   status: number
-  constructor(status: number, message: string) {
+  /** 机器可读错误码（如 TOTP_REQUIRED），服务端未携带时缺省。 */
+  code?: string
+  constructor(status: number, message: string, code?: string) {
     super(message)
     this.status = status
+    this.code = code
     this.name = 'ApiError'
   }
 }
@@ -99,13 +102,13 @@ async function parseBody(res: Response): Promise<unknown> {
   }
 }
 
-/** JSON API 请求：统一把 {error} 转成 ApiError 抛出。 */
+/** JSON API 请求：统一把 {error, code} 转成 ApiError 抛出。 */
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const res = await authFetch(path, init)
   const data = await parseBody(res)
   if (!res.ok) {
-    const obj = data as { error?: string; message?: string } | null
-    throw new ApiError(res.status, obj?.error || obj?.message || `请求失败（${res.status}）`)
+    const obj = data as { error?: string; message?: string; code?: string } | null
+    throw new ApiError(res.status, obj?.error || obj?.message || `请求失败（${res.status}）`, obj?.code)
   }
   return data as T
 }
@@ -324,10 +327,29 @@ export interface CreatedShare extends ShareItem {
 /** admin 角色探测缓存（见 isAdmin）；登录/登出后失效。 */
 let adminProbe: Promise<boolean> | null = null
 
+/** 两步验证登录标记：login 命中 401 TOTP_REQUIRED 时抛出（code 随 ApiError 携带）。 */
+export const TOTP_REQUIRED_CODE = 'TOTP_REQUIRED'
+
+function applyLoginToken(token: string): void {
+  accessToken = token
+  adminProbe = null
+}
+
 export async function login(email: string, password: string): Promise<void> {
   const data = await api<{ access_token: string }>('/api/v1/auth/login', jsonInit('POST', { email, password }))
-  accessToken = data.access_token
-  adminProbe = null
+  applyLoginToken(data.access_token)
+}
+
+/**
+ * 两步验证登录第二段：code 为 6 位 TOTP 码；recoveryCode 为一次性恢复码
+ *（二选一，均为空时服务端 400）。成功后 access_token 入内存（同 login）。
+ */
+export async function loginTotp(email: string, password: string, code: string, recoveryCode = ''): Promise<void> {
+  const data = await api<{ access_token: string }>(
+    '/api/v1/auth/login/totp',
+    jsonInit('POST', { email, password, code, recovery_code: recoveryCode }),
+  )
+  applyLoginToken(data.access_token)
 }
 
 export async function logout(): Promise<void> {
@@ -408,6 +430,70 @@ export async function revokeToken(id: string): Promise<void> {
   await api(`/api/v1/tokens/${id}`, { method: 'DELETE' })
 }
 
+// ---------- 两步验证（TOTP） ----------
+
+/** GET /auth/totp 状态视图。 */
+export interface TotpStatus {
+  enabled: boolean
+  /** 启用确认时间（RFC3339）；未 setup/未确认时为 null。 */
+  confirmed_at: string | null
+}
+
+/** POST /auth/totp/setup 响应：secret 与 otpauth URL（认证器手动添加用）。 */
+export interface TotpSetup {
+  secret: string
+  otpauth_url: string
+}
+
+/** 两步验证状态；未 setup 时 enabled=false。 */
+export async function getTotpStatus(): Promise<TotpStatus> {
+  return api<TotpStatus>('/api/v1/auth/totp')
+}
+
+/**
+ * 开始设置：生成新 secret（作废未完成的旧 setup）。客户端不渲染二维码，
+ * 以文本展示 secret/otpauth URL 供认证器手动录入或导入。
+ */
+export async function beginTotpSetup(): Promise<TotpSetup> {
+  return api<TotpSetup>('/api/v1/auth/totp/setup', jsonInit('POST', {}))
+}
+
+/**
+ * 确认启用：校验 6 位码后启用并生成 10 个恢复码；明文（xxxx-xxxx）仅此
+ * 一次返回（服务端只存哈希），调用方须立即提示用户保存。
+ */
+export async function confirmTotpSetup(code: string): Promise<string[]> {
+  const data = await api<{ recovery_codes: string[] }>('/api/v1/auth/totp/confirm', jsonInit('POST', { code }))
+  return data.recovery_codes ?? []
+}
+
+/** 禁用两步验证：密码或当前有效 6 位码二选一（均错 403；未启用 404）。 */
+export async function disableTotp(password: string, code = ''): Promise<void> {
+  await api('/api/v1/auth/totp', jsonInit('DELETE', { password, code }))
+}
+
+// ---------- OIDC 单点登录（公开端点） ----------
+
+/** GET /auth/oidc/config：SSO 是否启用（登录页按钮门控）。 */
+export interface OIDCStatus {
+  enabled: boolean
+}
+
+/** SSO 可用性探测：无认证请求；失败（含旧后端 404）保守视为未启用。 */
+export async function getOIDCStatus(): Promise<OIDCStatus> {
+  try {
+    const res = await fetch('/api/v1/auth/oidc/config')
+    if (!res.ok) return { enabled: false }
+    const data = (await res.json()) as { enabled?: boolean }
+    return { enabled: data.enabled === true }
+  } catch {
+    return { enabled: false }
+  }
+}
+
+/** SSO 登录入口（302 跳 IdP；回调后落地 /sso#access_token=...）。 */
+export const OIDC_LOGIN_PATH = '/api/v1/auth/oidc/login'
+
 // ---------- 站内通知与通知偏好 ----------
 
 /** 通知事件类型（v1.0 范围）。 */
@@ -483,6 +569,49 @@ export async function updateNotificationPreference(
   )
 }
 
+// ---------- Webhook 通知渠道（v1.1） ----------
+
+/** Webhook 条目（GET /webhooks；secret 仅创建响应返回一次）。 */
+export interface WebhookItem {
+  id: string
+  url: string
+  events: NotificationEventType[]
+  enabled: boolean
+  /** 连续失败计数（成功清零；连续 10 次失败服务端自动停用）。 */
+  failure_count: number
+  /** 最近一次投递 HTTP 状态码；0=传输层失败，null=从未投递。 */
+  last_status: number | null
+  last_delivered_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface CreatedWebhook extends WebhookItem {
+  /** 一次性签名 secret（whsec_ 前缀；仅创建响应返回，用于校验 X-DocFlow-Signature）。 */
+  secret: string
+}
+
+/** 我的 webhook 列表（created_at 倒序，含已停用；不含 secret）。 */
+export async function listWebhooks(): Promise<WebhookItem[]> {
+  const data = await api<{ webhooks: WebhookItem[] }>('/api/v1/webhooks')
+  return data.webhooks ?? []
+}
+
+/** 创建 webhook；返回一次性 secret（接收方以其复算 HMAC 验签）。 */
+export async function createWebhook(url: string, events: NotificationEventType[]): Promise<CreatedWebhook> {
+  return api<CreatedWebhook>('/api/v1/webhooks', jsonInit('POST', { url, events }))
+}
+
+/** 启用/停用自己的 webhook（自动停用后可经此恢复）；返回更新后的条目。 */
+export async function updateWebhook(id: string, enabled: boolean): Promise<WebhookItem> {
+  return api<WebhookItem>(`/api/v1/webhooks/${id}`, jsonInit('PATCH', { enabled }))
+}
+
+/** 删除自己的 webhook（立即停止投递；非属主/不存在 404）。 */
+export async function deleteWebhook(id: string): Promise<void> {
+  await api(`/api/v1/webhooks/${id}`, { method: 'DELETE' })
+}
+
 // ---------- 邀请注册与密码找回（公开端点） ----------
 
 /** 凭一次性邀请 token 注册；成功即登录（响应同 login，access_token 入内存）。 */
@@ -507,6 +636,35 @@ export async function resetPassword(token: string, password: string): Promise<vo
 export async function listFiles(parentId: string | null, opts?: FileQueryOptions): Promise<FileItem[]> {
   const data = await api<{ files: FileItem[] }>(`/api/v1/files${buildFileQuery(parentId, opts)}`)
   return data.files ?? []
+}
+
+// ---------- 全文检索（文件名 + 文本内容） ----------
+
+/** GET /search 结果条目；name/type/parent_id/updated_at 取 files 行实时值。 */
+export interface SearchResultItem {
+  id: string
+  name: string
+  type: 'folder' | 'file'
+  parent_id?: string | null
+  updated_at: string
+  /**
+   * 命中上下文：名称命中时为名称本身；内容命中时为 ts_headline 片段，
+   * 高亮标记 [[..]]（纯文本，前端渲染高亮）。仅名称索引或无片段时缺省。
+   */
+  snippet?: string
+}
+
+/**
+ * 全文检索当前用户可读文件（个人 owner + 团队在册成员；软删排除）。
+ * 名称子串（大小写不敏感，中文友好）或内容词命中（内容索引仅文本类
+ * 且 ≤2MB；二进制仅名称匹配）。索引在上传完成后异步构建，最新内容
+ * 可能有短暂延迟。
+ */
+export async function searchFiles(q: string, limit?: number): Promise<SearchResultItem[]> {
+  const params = new URLSearchParams({ q })
+  if (limit) params.set('limit', String(limit))
+  const data = await api<{ results: SearchResultItem[] }>(`/api/v1/search?${params.toString()}`)
+  return data.results ?? []
 }
 
 export async function createFolder(name: string, parentId: string | null): Promise<FileItem> {
@@ -940,6 +1098,32 @@ export async function restoreVersion(fileId: string, versionId: string): Promise
   return api<FileWithVersion>(`/api/v1/files/${fileId}/versions/${versionId}/restore`, { method: 'POST' })
 }
 
+/**
+ * 认证读取指定版本原始内容为文本（版本对比用）：读权限同版本列表
+ * （个人 owner、团队任意在册成员）；blob 非 available 时 403。
+ */
+export async function fetchVersionText(fileId: string, versionId: string): Promise<string> {
+  const res = await authFetch(`/api/v1/files/${fileId}/versions/${versionId}/content`)
+  if (!res.ok) {
+    const data = (await res.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(res.status, data?.error ?? '版本内容读取失败')
+  }
+  return res.text()
+}
+
+/** 版本对比可用的文本判定：MIME 命中预览白名单（text/json），或常见文本扩展名。 */
+const TEXT_DIFF_EXTS = new Set([
+  'txt', 'md', 'markdown', 'json', 'csv', 'log', 'xml', 'yml', 'yaml', 'ini', 'conf', 'toml', 'env',
+  'sql', 'js', 'jsx', 'ts', 'tsx', 'go', 'py', 'rb', 'java', 'c', 'h', 'cpp', 'hpp', 'cs', 'php',
+  'sh', 'bat', 'ps1', 'css', 'scss', 'html', 'htm', 'svg', 'drawio',
+])
+
+export function isTextLike(name: string, mime: string): boolean {
+  if (previewKind(mime) === 'text') return true
+  const i = name.lastIndexOf('.')
+  return i >= 0 && TEXT_DIFF_EXTS.has(name.slice(i + 1).toLowerCase())
+}
+
 // ---------- ONLYOFFICE 编辑器 ----------
 
 /** GET /onlyoffice/config：集成可用性与 DocumentServer 基地址。 */
@@ -1040,6 +1224,8 @@ export interface AdminStats {
   uploads: number
   sessions: number
   shares: number
+  /** api_tokens 表行数（v1.1 起返回）。 */
+  tokens: number
 }
 
 export async function adminGetSettings(): Promise<SettingItem[]> {
@@ -1058,6 +1244,37 @@ export async function adminPutSetting(key: string, value: SettingValue): Promise
 
 export async function adminGetStats(): Promise<AdminStats> {
   return api<AdminStats>('/api/v1/admin/stats')
+}
+
+// ---------- 仪表盘（v1.1） ----------
+
+/** 仪表盘最近文件条目（个人空间 updated_at 倒序前 5）。 */
+export interface DashboardRecentFile {
+  id: string
+  name: string
+  updated_at: string
+}
+
+/** GET /dashboard 响应：个人统计 + admin 全局统计（仅 admin 角色）。 */
+export interface DashboardData {
+  /** 我的文件数（个人空间未软删文件，不含目录）。 */
+  files: number
+  /** 存储占用（当前版本大小之和，字节）。 */
+  storage_bytes: number
+  /** 我可访问团队空间的文件数。 */
+  team_files: number
+  /** 有效分享数（公开+私有：未撤销未过期）。 */
+  shares: number
+  /** 近 7 天上传会话数。 */
+  uploads_7d: number
+  recent_files: DashboardRecentFile[]
+  /** 全局统计（仅 admin 返回）。 */
+  admin?: AdminStats
+}
+
+/** 个人仪表盘概览统计（admin 附全局统计）。 */
+export async function getDashboard(): Promise<DashboardData> {
+  return api<DashboardData>('/api/v1/dashboard')
 }
 
 // ---------- 邀请管理（仅 admin 角色） ----------

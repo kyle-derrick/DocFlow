@@ -18,6 +18,8 @@ type Mailer interface {
 	SendInvitation(email, link, inviter string) error
 	// SendPasswordReset 发送密码重置邮件（链接默认 30 分钟有效且仅可使用一次）。
 	SendPasswordReset(email, link string) error
+	// SendNotification 发送站内通知事件的邮件副本（纯文本简单格式）。
+	SendNotification(email, title, body string) error
 }
 
 // NoopMailer 不发送任何邮件，仅把链接写入日志（默认邮件通道）。
@@ -33,6 +35,11 @@ func (NoopMailer) SendInvitation(email, link, inviter string) error {
 
 func (NoopMailer) SendPasswordReset(email, link string) error {
 	log.Printf("[mail:noop] password reset for %s: %s", email, link)
+	return nil
+}
+
+func (NoopMailer) SendNotification(email, title, body string) error {
+	log.Printf("[mail:noop] notification for %s: %s", email, title)
 	return nil
 }
 
@@ -59,6 +66,13 @@ func (s *SMTPMailer) SendInvitation(email, link, inviter string) error {
 func (s *SMTPMailer) SendPasswordReset(email, link string) error {
 	body := fmt.Sprintf("您好，\n\n您（或他人）请求重置 DocFlow 账号密码。以下链接 30 分钟内有效且仅可使用一次：\n\n%s\n\n如非本人操作，请忽略本邮件，您的密码不会被更改。", link)
 	return s.send(email, "DocFlow 密码重置", body)
+}
+
+// SendNotification 发送站内通知事件的邮件副本（纯文本简单格式：
+// 标题 + 正文 + 偏好调整指引）。
+func (s *SMTPMailer) SendNotification(email, title, body string) error {
+	text := fmt.Sprintf("您好，\n\n%s\n\n%s\n\n—— DocFlow（可在「设置 → 通知偏好」中调整各类通知开关）", title, body)
+	return s.send(email, "[DocFlow] "+title, text)
 }
 
 // send 组装最简 RFC 5322 报文并经 smtp.SendMail 投递。

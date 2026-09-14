@@ -14,11 +14,25 @@ type Dispatcher interface {
 	NotifyMany(userIDs []uuid.UUID, eventType, title, body string, resourceID uuid.UUID) error
 }
 
+// WebhookEnqueuer 为通知落库后的 webhook 出站回调：查该用户启用了该事件
+// 的 hook 并入队投递任务（由 main 装配，签名与 upload/share 的
+// SetNotifyDispatcher 回调一致）。错误由回调内部处理（记日志）。
+type WebhookEnqueuer func(userID uuid.UUID, eventType, title, body string, resourceID uuid.UUID)
+
+// MailNotifier 为通知落库后的邮件出站回调：按 userID 查邮箱并投递纯文本
+// 副本（由 main 装配）。错误由回调内部处理（记日志）。
+type MailNotifier func(userID uuid.UUID, eventType, title, body string)
+
 // Service 实现 Dispatcher，并暴露通知/偏好的本人维度查询（HTTP 层使用）。
+// 出站渠道（webhook/邮件）经 SetWebhookEnqueuer/SetMailNotifier 注入，
+// 与站内通知共用同一偏好开关（偏好关闭时两者均不触发）。
 type Service struct {
 	store Store
 	prefs PreferenceRepo
 	now   func() time.Time
+	// 出站渠道回调（nil 停用对应渠道）；仅在读路径全部成功后触发。
+	webhookEnqueuer WebhookEnqueuer
+	mailNotifier    MailNotifier
 }
 
 var _ Dispatcher = (*Service)(nil)
@@ -34,6 +48,12 @@ func (s *Service) SetClock(fn func() time.Time) {
 	}
 }
 
+// SetWebhookEnqueuer 注入 webhook 投递入队回调（幂等；nil 停用渠道）。
+func (s *Service) SetWebhookEnqueuer(fn WebhookEnqueuer) { s.webhookEnqueuer = fn }
+
+// SetMailNotifier 注入邮件通知回调（幂等；nil 停用渠道）。
+func (s *Service) SetMailNotifier(fn MailNotifier) { s.mailNotifier = fn }
+
 // enabled 判定偏好：读取失败按默认开关处理（保守不丢通知）。
 func (s *Service) enabled(user uuid.UUID, eventType string) bool {
 	p, found, err := s.prefs.Get(user, eventType)
@@ -43,7 +63,9 @@ func (s *Service) enabled(user uuid.UUID, eventType string) bool {
 	return p.Enabled
 }
 
-// Notify 分发单条通知：偏好 disabled 时静默跳过（返回 nil，非错误）。
+// Notify 分发单条通知：偏好 disabled 时静默跳过（返回 nil，非错误，
+// 邮件与 webhook 出站渠道一并短路）；落库成功后触发两个出站渠道回调
+// （回调内部处理自身错误，不影响本结果）。
 func (s *Service) Notify(userID uuid.UUID, eventType, title, body string, resourceID uuid.UUID) error {
 	if !s.enabled(userID, eventType) {
 		return nil
@@ -53,7 +75,16 @@ func (s *Service) Notify(userID uuid.UUID, eventType, title, body string, resour
 		id := resourceID
 		n.ResourceID = &id
 	}
-	return s.store.Create(n)
+	if err := s.store.Create(n); err != nil {
+		return err
+	}
+	if s.mailNotifier != nil {
+		s.mailNotifier(userID, eventType, title, body)
+	}
+	if s.webhookEnqueuer != nil {
+		s.webhookEnqueuer(userID, eventType, title, body, resourceID)
+	}
+	return nil
 }
 
 // NotifyMany 批量分发：逐个检查偏好（各自短路），userIDs 去重；

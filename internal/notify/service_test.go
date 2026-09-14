@@ -66,6 +66,64 @@ func TestNotifyPreferenceShortCircuit(t *testing.T) {
 	}
 }
 
+// 出站渠道（webhook/邮件）与站内通知共用同一偏好开关：偏好关闭时
+// 两者一并短路；开启时均在落库成功后触发且参数一致。
+func TestOutboundChannelsSharePreference(t *testing.T) {
+	svc, store, prefs := newTestService()
+	user := uuid.New()
+
+	var mails, hooks int
+	var hookEvent, hookTitle, mailTitle string
+	var hookResource uuid.UUID
+	svc.SetMailNotifier(func(uid uuid.UUID, eventType, title, body string) {
+		mails++
+		mailTitle = title
+	})
+	svc.SetWebhookEnqueuer(func(uid uuid.UUID, eventType, title, body string, resourceID uuid.UUID) {
+		hooks++
+		hookEvent, hookTitle = eventType, title
+		hookResource = resourceID
+	})
+
+	// 偏好关闭：站内不落库，邮件与 webhook 均不触发。
+	if err := prefs.Set(user, EventUploadCompleted, false, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Notify(user, EventUploadCompleted, "上传完成：a.txt", "body", uuid.New()); err != nil {
+		t.Fatalf("disabled preference must short-circuit silently, got %v", err)
+	}
+	if items, _ := store.List(user, false, 10, ""); len(items) != 0 {
+		t.Fatalf("items = %d, want 0", len(items))
+	}
+	if mails != 0 || hooks != 0 {
+		t.Fatalf("disabled preference must skip both channels: mails=%d hooks=%d", mails, hooks)
+	}
+
+	// 偏好开启（重新启用）：站内落库 + 两个渠道均触发，参数一致。
+	resource := uuid.New()
+	if err := prefs.Set(user, EventUploadCompleted, true, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Notify(user, EventUploadCompleted, "上传完成：a.txt", "body", resource); err != nil {
+		t.Fatal(err)
+	}
+	if items, _ := store.List(user, false, 10, ""); len(items) != 1 {
+		t.Fatalf("items = %d, want 1", len(items))
+	}
+	if mails != 1 || hooks != 1 {
+		t.Fatalf("enabled preference must trigger both channels: mails=%d hooks=%d", mails, hooks)
+	}
+	if mailTitle != "上传完成：a.txt" || hookEvent != EventUploadCompleted || hookTitle != "上传完成：a.txt" || hookResource != resource {
+		t.Fatalf("channel args mismatch: mailTitle=%q hookEvent=%q hookResource=%s", mailTitle, hookEvent, hookResource)
+	}
+
+	// 未注入渠道（nil）：仅站内落库，无 panic（防御默认态）。
+	svc2, _, _ := newTestService()
+	if err := svc2.Notify(user, EventShareAccessed, "t", "b", uuid.Nil); err != nil {
+		t.Fatalf("no channels injected: %v", err)
+	}
+}
+
 // NotifyMany：逐个偏好短路（disabled 用户跳过、其余落库）、去重、过滤零值 ID。
 func TestNotifyManyPerUserPreferenceAndDedupe(t *testing.T) {
 	svc, store, prefs := newTestService()

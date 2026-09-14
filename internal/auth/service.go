@@ -120,11 +120,13 @@ type Service struct {
 	accessTokenTTL  time.Duration
 	refreshTokenTTL time.Duration
 	now             func() time.Time
-	// creds/resets/tokens 为可选依赖（Set* 注入）：改密、密码重置与 PAT
-	// 链路使用，未注入时对应方法返回 ErrNotConfigured（会话/令牌签发不受影响）。
+	// creds/resets/tokens/totp 为可选依赖（Set* 注入）：改密、密码重置、PAT
+	// 与两步验证链路使用，未注入时对应方法返回 ErrNotConfigured/ErrTOTPNotConfigured
+	//（会话/令牌签发不受影响）。
 	creds  Credentials
 	resets PasswordResetStore
 	tokens TokenStore
+	totp   TOTPStore
 }
 
 func NewService(store SessionStore, jwtSecret string, accessTokenTTL, refreshTokenTTL time.Duration) *Service {

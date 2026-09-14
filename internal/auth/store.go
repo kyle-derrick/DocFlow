@@ -304,6 +304,14 @@ func (s *UserStore) Lookup(q string, limit int) ([]User, error) {
 	return out, err
 }
 
+// UsernameExists 判断用户名是否已被占用（任意状态的用户均占用唯一约束）；
+// 供 OIDC 自动开户的用户名去重使用。
+func (s *UserStore) UsernameExists(username string) (bool, error) {
+	var count int64
+	err := s.db.Model(&User{}).Where("username = ?", username).Count(&count).Error
+	return count > 0, err
+}
+
 // Status 返回用户状态（active/disabled/locked）；用户不存在返回 ErrUserNotFound。
 // 供 refresh 轮换成功后复查账号是否仍 active（禁用账号立即失效会话）。
 func (s *UserStore) Status(id uuid.UUID) (string, error) {

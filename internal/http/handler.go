@@ -15,12 +15,14 @@ import (
 	"github.com/docflow/docflow/internal/mail"
 	"github.com/docflow/docflow/internal/metrics"
 	"github.com/docflow/docflow/internal/notify"
+	"github.com/docflow/docflow/internal/oidc"
 	"github.com/docflow/docflow/internal/onlyoffice"
 	"github.com/docflow/docflow/internal/share"
 	"github.com/docflow/docflow/internal/tagging"
 	"github.com/docflow/docflow/internal/tasks"
 	"github.com/docflow/docflow/internal/team"
 	"github.com/docflow/docflow/internal/upload"
+	"github.com/docflow/docflow/internal/webhook"
 	"github.com/docflow/docflow/internal/webpkg"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -75,6 +77,9 @@ type Handler struct {
 	settings settingsService
 	stats    statsSource
 	roles    auth.RoleLookup
+	// dashboard 为个人仪表盘聚合源（SetDashboardSource 注入）；nil 时
+	// GET /api/v1/dashboard 返回 500（生产恒注入）。
+	dashboard dashboardSource
 	// invites 为邀请制注册服务、mailer 为邮件通道（邀请/重置链接），
 	// publicBaseURL 用于拼接邮件里的绝对链接；SetInvites 注入，未注入时
 	// 邀请与注册/重置端点返回 503。
@@ -107,15 +112,28 @@ type Handler struct {
 	// tags 为标签服务（SetTagging 注入）：标签 CRUD 与文件打/去标签；
 	// 未注入时 tags 端点返回 503（生产恒注入，契约测试注入内存实现）。
 	tags *tagging.Service
+	// search 为全文检索服务（SetSearch 注入）：GET /api/v1/search 的
+	// 名称 + 内容检索；未注入时该端点返回 503（生产恒注入）。
+	search searchService
 	// notifications 为站内通知服务（SetNotifications 注入）：通知列表/已读
 	// 与通知偏好；未注入时通知端点返回 503（生产恒注入）。
 	notifications *notify.Service
+	// webhooks 为 Webhook 通知渠道服务（SetWebhooks 注入）：注册/列举/
+	// 启停/删除（本人维度）；未注入时 webhook 端点返回 503（生产恒注入）。
+	webhooks *webhook.Service
 	// idem 为批量端点的幂等响应缓存（进程内，TTL 60s；见 batch.go）。
 	idem *idemCache
+	// oidc 为 OIDC 单点登录服务；非 nil（SetOIDC 注入）时 Register 挂载
+	// /api/v1/auth/oidc/login 与 callback 路由（公开组），否则不注册
+	//（默认 404）；config 探测端点恒注册（禁用时 enabled=false）。
+	oidc *oidc.Service
+	// versionReader 为版本内容读取源（NewHandler 以 *files.Store 装配，
+	// 接口化便于单测注入内存实现）：GET /files/:id/versions/:versionId/content。
+	versionReader versionContentReader
 }
 
 func NewHandler(authService *auth.Service, users *auth.UserStore, fileStore *files.Store, shares *share.Service, teams *team.Service, uploads *upload.Service, storage upload.Storage, cookieSecure bool, cookieDomain string, refreshTokenTTL time.Duration) *Handler {
-	return &Handler{auth: authService, users: users, files: fileStore, shares: shares, teams: teams, uploads: uploads, storage: storage, cookieSecure: cookieSecure, cookieDomain: cookieDomain, refreshTokenTTL: refreshTokenTTL, audit: audit.NopRecorder{}, mailer: mail.NewNoopMailer(), idem: newIdemCache(idempotencyTTL)}
+	return &Handler{auth: authService, users: users, files: fileStore, shares: shares, teams: teams, uploads: uploads, storage: storage, cookieSecure: cookieSecure, cookieDomain: cookieDomain, refreshTokenTTL: refreshTokenTTL, audit: audit.NopRecorder{}, mailer: mail.NewNoopMailer(), idem: newIdemCache(idempotencyTTL), versionReader: fileStore}
 }
 
 // SetAuditRecorder 注入审计写入器；nil 时保持 Nop。
@@ -151,6 +169,15 @@ func (h *Handler) SetTaskEnqueuer(enqueuer tasks.Enqueuer) {
 func (h *Handler) SetTagging(svc *tagging.Service) {
 	if svc != nil {
 		h.tags = svc
+	}
+}
+
+// SetSearch 注入全文检索服务（幂等）；svc 通常为 search.NewStore(
+// search.NewGormRepo(db))。未注入时 GET /api/v1/search 返回 503
+// （生产恒注入，契约测试注入内存实现）。
+func (h *Handler) SetSearch(svc searchService) {
+	if svc != nil {
+		h.search = svc
 	}
 }
 
@@ -199,12 +226,23 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	authSensitiveLimiterMW := publicLimiter(NewRateLimiter(authSensitiveRateLimitPerMin))
 	authGroup := r.Group("/api/v1/auth")
 	authGroup.POST("/login", loginLimiterMW, h.login)
+	// 两步验证登录第二段（公开）：与 /login 共享同一限流器实例与限流键
+	//（IP+邮箱前缀哈希，重放同样的密码+邮箱消耗同一桶）。
+	authGroup.POST("/login/totp", loginLimiterMW, h.loginTOTP)
 	authGroup.POST("/refresh", authOpsLimiterMW, h.refresh)
 	authGroup.POST("/logout", authOpsLimiterMW, h.logout)
 	// 邀请制注册（凭一次性邀请 token）与密码找回/重置：公开端点。
 	authGroup.POST("/register", authSensitiveLimiterMW, h.register)
 	authGroup.POST("/forgot-password", authSensitiveLimiterMW, h.forgotPassword)
 	authGroup.POST("/reset-password", authSensitiveLimiterMW, h.resetPassword)
+	// OIDC 单点登录（v2）：config 探测端点恒注册（禁用时 enabled=false），
+	// login/callback 仅启用（SetOIDC 注入）时注册；均为公开 GET，复用
+	// refresh/logout 的按 IP 轻限流实例。
+	authGroup.GET("/oidc/config", h.oidcConfig)
+	if h.oidc != nil {
+		authGroup.GET("/oidc/login", authOpsLimiterMW, h.oidcLogin)
+		authGroup.GET("/oidc/callback", authOpsLimiterMW, h.oidcCallback)
+	}
 	// PAT 认证路径挂在中间件上（dfpat_ 前缀走 Service.VerifyPersonalAccessToken）；
 	// h.auth 未注入（契约测试）时显式传 nil，中间件对该前缀一律 401。
 	var patVerifier auth.AccessTokenVerifier
@@ -214,6 +252,12 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	api := r.Group("/api/v1", auth.RequireAccessToken(jwtSecret, patVerifier), apiLimiter(NewRateLimiter(rateLimit)))
 	// 修改密码（认证）：成功撤销其他会话并轮换当前会话。
 	api.POST("/auth/change-password", h.changePassword)
+	// 两步验证（TOTP，v2）：状态、开始设置、确认启用（返回一次性恢复码）
+	// 与禁用（密码或 TOTP 码二选一验证）；登录第二段为公开端点 /auth/login/totp。
+	api.GET("/auth/totp", h.totpStatus)
+	api.POST("/auth/totp/setup", h.totpSetup)
+	api.POST("/auth/totp/confirm", h.totpConfirm)
+	api.DELETE("/auth/totp", h.totpDisable)
 	// 会话管理（多端登录）：活跃会话列表、撤销单个、撤销全部（含当前）。
 	api.GET("/auth/sessions", h.listSessions)
 	api.DELETE("/auth/sessions/:id", h.revokeSession)
@@ -229,7 +273,18 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	api.POST("/notifications/read-all", h.markAllNotificationsRead)
 	api.GET("/notification-preferences", h.listNotificationPreferences)
 	api.PUT("/notification-preferences/:type", h.updateNotificationPreference)
+	// Webhook 通知渠道（v1.1，本人维度）：注册（一次性 secret 仅本次返回）、
+	// 列表（含投递状态）、启停与删除。
+	api.POST("/webhooks", h.createWebhook)
+	api.GET("/webhooks", h.listWebhooks)
+	api.PATCH("/webhooks/:id", h.updateWebhook)
+	api.DELETE("/webhooks/:id", h.deleteWebhook)
 	api.GET("/files", h.listFiles)
+	// 全文检索（文件名 + 文本内容）：高频读端点，不记录审计；
+	// 访问判定与 /files 检索模式一致（个人 owner + 团队在册成员）。
+	api.GET("/search", h.searchFiles)
+	// 个人仪表盘概览统计（admin 附加全局统计，见 dashboard.go）。
+	api.GET("/dashboard", h.dashboardStats)
 	api.POST("/folders", h.createFolder)
 	api.GET("/files/:id", h.getFile)
 	api.PATCH("/files/:id", h.renameFile)
@@ -238,6 +293,7 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	api.GET("/files/:id/preview", h.previewFile)
 	// 文件版本管理：版本列表与 current_version 回滚（新版本经上传链路 file_id 写入）。
 	api.GET("/files/:id/versions", h.listFileVersions)
+	api.GET("/files/:id/versions/:versionId/content", h.fileVersionContent)
 	api.POST("/files/:id/versions/:versionId/restore", h.restoreFileVersion)
 	api.GET("/trash", h.listTrash)
 	api.POST("/files/:id/restore", h.restoreFile)
@@ -335,12 +391,24 @@ func (h *Handler) login(c *gin.Context) {
 	if err != nil {
 		// 用户不存在（或非 active）：对包级 dummy 哈希执行等耗 bcrypt 比较，
 		// 消除与「密码错误」分支的时序差异，防止邮箱枚举。
-		_ = bcrypt.CompareHashAndPassword([]byte(dummyPasswordHash), []byte(request.Password))
+		_ = compareDummyPassword(request.Password)
 		reject()
 		return
 	}
 	if h.auth.VerifyPassword(user.PasswordHash, request.Password) != nil {
 		reject()
+		return
+	}
+	// 两步验证：enabled 用户在 /login 不发放任何 token（防绕过），前端凭
+	// 401 code=TOTP_REQUIRED 转 POST /auth/login/totp 二段提交（密码 + 码，
+	// 限流键与 /login 一致）。查询失败 fail closed（500，不发 token）。
+	totpEnabled, err := h.auth.TOTPEnabled(user.ID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to verify second factor"})
+		return
+	}
+	if totpEnabled {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "totp_required", "code": "TOTP_REQUIRED"})
 		return
 	}
 	access, err := h.auth.AccessToken(user.ID)
@@ -356,6 +424,12 @@ func (h *Handler) login(c *gin.Context) {
 	h.setRefreshCookie(c, refresh)
 	h.recordAudit(c, audit.Entry{UserID: &user.ID, Action: audit.ActionLoginSuccess, ResourceType: audit.ResourceSession, ResourceID: user.ID.String(), Status: audit.StatusSuccess})
 	c.JSON(http.StatusOK, gin.H{"access_token": access, "token_type": "Bearer"})
+}
+
+// compareDummyPassword 对包级 dummy 哈希执行等耗 bcrypt 比较（用户不存在/
+// 非 active 分支），消除与「密码错误」分支的时序差异，防止邮箱枚举。
+func compareDummyPassword(password string) error {
+	return bcrypt.CompareHashAndPassword([]byte(dummyPasswordHash), []byte(password))
 }
 
 // sessionInfoFromRequest 采集会话创建时的请求环境（ip/user_agent，审计用途）。

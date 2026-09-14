@@ -8,7 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/docflow/docflow/internal/oidc"
 	"github.com/docflow/docflow/internal/onlyoffice"
+	"github.com/docflow/docflow/internal/search"
 	"github.com/docflow/docflow/internal/tagging"
 	"github.com/docflow/docflow/internal/webpkg"
 	"github.com/gin-gonic/gin"
@@ -69,18 +71,27 @@ func loadContractSpec(t *testing.T) (base string, spec contractSpec) {
 // onlyoffice 端点参与双向校验；生产未启用时不注册该组路由（404）。
 // 网页包手动解包端点（POST /files/{id}/webpkg/extract）同理恒启用；
 // 内容端点 /content/:pid/*filepath 为契约外内容域路由（isExcludedRoute 豁免）。
-// 标签服务同理恒注入（内存实现），保证 tags/starred/batch 端点参与校验。
+// 标签服务同理恒注入（内存实现），保证 tags/starred/batch 端点参与校验；
+// 全文检索服务同样恒注入（内存实现，GET /search 参与双向校验）。
+// OIDC 单点登录同理恒注入（静态 Provider，不触网），保证 /auth/oidc/*
+// 端点参与双向校验；生产未启用时 login/callback 不注册（404）。
 func contractRouter(t *testing.T) *gin.Engine {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	h := NewHandler(nil, nil, nil, nil, nil, nil, nil, false, "", 0)
 	h.SetTagging(tagging.NewService(tagging.NewMemoryRepo(), nil))
+	h.SetSearch(search.NewStore(search.NewMemoryRepo()))
 	h.SetOnlyOffice(onlyoffice.New(onlyoffice.Config{
 		ServerURL:    "http://onlyoffice:80",
 		DownloadBase: "http://backend:8080",
 		JWTSecret:    "openapi-contract-onlyoffice-secret-0123456789",
 	}, nil, nil, nil, nil), 60)
 	h.SetWebpkg(webpkg.NewService(webpkg.NewMemoryRepo(), nil, nil, webpkg.DefaultLimits()), 60)
+	h.SetOIDC(oidc.NewService(oidc.New(oidc.Provider{
+		Issuer:                "http://idp.example.com",
+		AuthorizationEndpoint: "http://idp.example.com/authorize",
+		TokenEndpoint:         "http://idp.example.com/token",
+	}, "contract-client", "contract-secret", "http://backend:8080/api/v1/auth/oidc/callback"), nil, nil, true))
 	r := gin.New()
 	h.Register(r, "openapi-contract-test-secret", 1_000_000, 1_000_000, 1_000_000)
 	return r

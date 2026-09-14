@@ -14,6 +14,7 @@ import {
 } from '../api'
 import FileBrowser, { Modal, formatTime } from '../components/FileBrowser'
 import VersionHistoryModal from '../components/VersionHistoryModal'
+import { useHotkeys } from '../useHotkeys'
 
 /** 个人空间：文件浏览复用 FileBrowser，本页仅保留重命名 / 删除 / 分享 / 版本历史对话框。 */
 export default function FilesPage() {
@@ -147,6 +148,22 @@ export default function FilesPage() {
   const privateGrantCount = shareUsers.length + shareTeams.length
   const submitDisabled =
     shareBusy || (shareVisibility === 'private' && privateGrantCount === 0)
+
+  // Escape 依次关本页对话框（版本历史→重命名→分享）；FileBrowser 的选择与
+  // 内置弹窗由其自身 Escape 处理（见 FileBrowser）。
+  useHotkeys({
+    Escape: () => {
+      if (historyTarget) {
+        setHistoryTarget(null)
+        return
+      }
+      if (renameTarget) {
+        setRenameTarget(null)
+        return
+      }
+      if (shareTarget) setShareTarget(null)
+    },
+  })
 
   return (
     <div className="page">

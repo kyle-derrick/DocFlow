@@ -33,6 +33,7 @@ import {
   setFileStarred,
   summarizeBatchResults,
 } from '../api'
+import { useHotkeys } from '../useHotkeys'
 
 export function formatTime(iso: string): string {
   return new Date(iso).toLocaleString('zh-CN', { hour12: false })
@@ -581,6 +582,43 @@ export default function FileBrowser({
     }
   }
 
+  // 页面快捷键（v1.1）：n 新建文件夹 / u 上传 / Delete 删除选中 /
+  // Escape 依次关弹窗（预览→标签→移动→新建文件夹），无弹窗时清空选择。
+  useHotkeys({
+    n: () => {
+      if (createFolderFn && !searchMode) {
+        setFolderOpen(true)
+        setFolderName('')
+        setFolderError('')
+      }
+    },
+    u: () => {
+      if (uploadFn && !searchMode) fileInputRef.current?.click()
+    },
+    Delete: () => {
+      if (selected.size > 0 && !batchBusy) void handleBatchTrash()
+    },
+    Escape: () => {
+      if (previewTarget) {
+        closePreview()
+        return
+      }
+      if (tagModalTarget) {
+        setTagModalTarget(null)
+        return
+      }
+      if (moveOpen) {
+        setMoveOpen(false)
+        return
+      }
+      if (folderOpen) {
+        setFolderOpen(false)
+        return
+      }
+      if (selected.size > 0) setSelected(new Set())
+    },
+  })
+
   return (
     <div className="file-browser">
       <div className="page-head">
@@ -615,7 +653,7 @@ export default function FileBrowser({
       <div className="filter-bar">
         <label className="filter-item">
           <span>标签</span>
-          <select value={tagFilter} onChange={(e) => setTagFilter(e.target.value)}>
+          <select data-hotkey="filter" value={tagFilter} onChange={(e) => setTagFilter(e.target.value)}>
             <option value="">全部</option>
             {tags.map((t) => (
               <option key={t.id} value={t.id}>#{t.name}</option>

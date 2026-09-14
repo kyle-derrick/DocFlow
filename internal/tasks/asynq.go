@@ -53,6 +53,26 @@ func (r *RedisAsynq) EnqueueExtractWebpkg(fileID uuid.UUID) error {
 	return nil
 }
 
+func (r *RedisAsynq) EnqueueWebhookDelivery(payload []byte) error {
+	if _, err := r.client.Enqueue(asynq.NewTask(TaskTypeWebhookDelivery, payload)); err != nil {
+		return err
+	}
+	metrics.IncQueueEnqueued(TaskTypeWebhookDelivery, metrics.QueueDriverRedis)
+	return nil
+}
+
+func (r *RedisAsynq) EnqueueSearchIndex(fileID uuid.UUID) error {
+	payload, err := marshalSearchIndexPayload(fileID)
+	if err != nil {
+		return err
+	}
+	if _, err := r.client.Enqueue(asynq.NewTask(TaskTypeSearchIndex, payload)); err != nil {
+		return err
+	}
+	metrics.IncQueueEnqueued(TaskTypeSearchIndex, metrics.QueueDriverRedis)
+	return nil
+}
+
 func (r *RedisAsynq) Driver() string { return metrics.QueueDriverRedis }
 
 // Close 释放入队客户端连接（进程退出时由 main 调用）。
@@ -67,13 +87,15 @@ func NewAsynqServer(redisAddr, redisPassword string, concurrency int) *asynq.Ser
 	return asynq.NewServer(asynq.RedisClientOpt{Addr: redisAddr, Password: redisPassword}, asynq.Config{Concurrency: concurrency})
 }
 
-// NewMux 注册两类任务的 asynq 处理器：与 InProcess 驱动共用同一 TaskFunc
-// 实现，行为一致；处理结果计入 docflow_queue_processed_total{type,status}，
+// NewMux 注册四类任务的 asynq 处理器：与 InProcess 驱动共用同一组处理
+// 函数实现，行为一致；处理结果计入 docflow_queue_processed_total{type,status}，
 // 瞬时错误原样返回交由 asynq 重试。
-func NewMux(completeUpload, extractWebpkg TaskFunc) *asynq.ServeMux {
+func NewMux(completeUpload, extractWebpkg, searchIndex TaskFunc, webhookDelivery WebhookDeliveryFunc) *asynq.ServeMux {
 	mux := asynq.NewServeMux()
 	mux.HandleFunc(TaskTypeCompleteUpload, wrapTaskFunc(TaskTypeCompleteUpload, completeUpload))
 	mux.HandleFunc(TaskTypeExtractWebpkg, wrapTaskFunc(TaskTypeExtractWebpkg, extractWebpkg))
+	mux.HandleFunc(TaskTypeWebhookDelivery, wrapWebhookDeliveryFunc(webhookDelivery))
+	mux.HandleFunc(TaskTypeSearchIndex, wrapTaskFunc(TaskTypeSearchIndex, searchIndex))
 	return mux
 }
 
@@ -95,6 +117,22 @@ func wrapTaskFunc(taskType string, fn TaskFunc) func(context.Context, *asynq.Tas
 			return err
 		}
 		metrics.IncQueueProcessed(taskType, metrics.QueueStatusSuccess)
+		return nil
+	}
+}
+
+// wrapWebhookDeliveryFunc 适配 WebhookDeliveryFunc 为 asynq 处理器（载荷
+// 原始 JSON 直接透传，解析在处理函数内）。
+func wrapWebhookDeliveryFunc(fn WebhookDeliveryFunc) func(context.Context, *asynq.Task) error {
+	return func(ctx context.Context, t *asynq.Task) error {
+		if fn == nil {
+			return fmt.Errorf("no handler registered for %s: %w", TaskTypeWebhookDelivery, asynq.SkipRetry)
+		}
+		if err := fn(ctx, t.Payload()); err != nil {
+			metrics.IncQueueProcessed(TaskTypeWebhookDelivery, metrics.QueueStatusFailed)
+			return err
+		}
+		metrics.IncQueueProcessed(TaskTypeWebhookDelivery, metrics.QueueStatusSuccess)
 		return nil
 	}
 }

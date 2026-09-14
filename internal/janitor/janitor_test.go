@@ -27,7 +27,9 @@ type memRepo struct {
 	authSessions  map[uuid.UUID]fakeAuthSession
 	apiTokens     map[uuid.UUID]fakeAPIToken
 	notifications map[uuid.UUID]fakeNotification
-	failErr       error
+	// searchDocs 模拟 file_search_docs 行（file_id -> 名称占位）。
+	searchDocs map[uuid.UUID]string
+	failErr    error
 	// recheckHook 在 DeleteBlobRechecked 复核前调用，模拟「先复活后清理」竞速。
 	recheckHook func(id uuid.UUID)
 }
@@ -53,7 +55,7 @@ type fakeNotification struct {
 }
 
 func newMemRepo() *memRepo {
-	return &memRepo{sessions: make(map[uuid.UUID]upload.UploadSession), blobs: make(map[uuid.UUID]files.ObjectBlob), files: make(map[uuid.UUID]files.File), authSessions: make(map[uuid.UUID]fakeAuthSession), apiTokens: make(map[uuid.UUID]fakeAPIToken), notifications: make(map[uuid.UUID]fakeNotification)}
+	return &memRepo{sessions: make(map[uuid.UUID]upload.UploadSession), blobs: make(map[uuid.UUID]files.ObjectBlob), files: make(map[uuid.UUID]files.File), authSessions: make(map[uuid.UUID]fakeAuthSession), apiTokens: make(map[uuid.UUID]fakeAPIToken), notifications: make(map[uuid.UUID]fakeNotification), searchDocs: make(map[uuid.UUID]string)}
 }
 
 func (m *memRepo) ExpiredActiveSessions(now time.Time, limit int) ([]upload.UploadSession, error) {
@@ -220,6 +222,23 @@ func (m *memRepo) DeleteOldReadNotifications(now time.Time, retain time.Duration
 		}
 		if read.Before(cutoff) {
 			delete(m.notifications, id)
+			n++
+		}
+	}
+	return n, nil
+}
+
+// searchDocs 模拟 file_search_docs（file_id -> 名称）；files map 即 files 行，
+// 两者差集即孤儿索引。
+var _ = struct{}{}
+
+func (m *memRepo) DeleteOrphanSearchDocs() (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var n int64
+	for fileID := range m.searchDocs {
+		if _, ok := m.files[fileID]; !ok {
+			delete(m.searchDocs, fileID)
 			n++
 		}
 	}
@@ -669,6 +688,44 @@ func TestSweepNotifications(t *testing.T) {
 		if _, ok := repo.notifications[id]; !ok {
 			t.Fatalf("%s must be kept", desc)
 		}
+	}
+	if keys := storage.deletedKeys(); len(keys) != 0 {
+		t.Fatalf("physical deletes = %v, want none", keys)
+	}
+}
+
+// ---- 孤儿全文索引清理 ----
+
+// file_search_docs 中无对应 files 行的孤儿索引被删除；软删文件（deleted_at
+// 非空但行仍在）的索引保留（软删排除由查询侧 JOIN 承担）；无孤儿时幂等零删除。
+func TestSweepSearchOrphans(t *testing.T) {
+	repo := newMemRepo()
+	storage := &fakeStorage{}
+	owner := uuid.New()
+	orphan := uuid.New()
+	alive := uuid.New()
+	softDeleted := uuid.New()
+	deletedAt := testNow.Add(-time.Hour)
+	repo.files[alive] = files.File{ID: alive, OwnerID: owner, Name: "alive.md", Type: "file"}
+	repo.files[softDeleted] = files.File{ID: softDeleted, OwnerID: owner, Name: "gone.md", Type: "file", DeletedAt: &deletedAt}
+	repo.searchDocs[orphan] = "orphan"
+	repo.searchDocs[alive] = "alive"
+	repo.searchDocs[softDeleted] = "soft-deleted"
+
+	j := newTestJanitor(repo, &fakePurger{}, storage, nil, audit.NopRecorder{})
+	j.RunOnce()
+
+	if _, ok := repo.searchDocs[orphan]; ok {
+		t.Fatal("orphan search doc must be removed")
+	}
+	for id, desc := range map[uuid.UUID]string{alive: "alive file index", softDeleted: "soft-deleted file index (kept for restore)"} {
+		if _, ok := repo.searchDocs[id]; !ok {
+			t.Fatalf("%s must be kept", desc)
+		}
+	}
+	// 幂等：再次执行无新增删除（经直接调用复核返回值）。
+	if n, err := repo.DeleteOrphanSearchDocs(); err != nil || n != 0 {
+		t.Fatalf("second sweep = (%d, %v), want (0, nil)", n, err)
 	}
 	if keys := storage.deletedKeys(); len(keys) != 0 {
 		t.Fatalf("physical deletes = %v, want none", keys)

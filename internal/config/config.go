@@ -136,6 +136,24 @@ type Config struct {
 	// https://docflow.example.com）：拼接邀请注册与密码重置邮件里的链接；
 	// 为空时邮件/日志输出相对路径 /register/<token>、/reset/<token>。
 	PublicBaseURL string
+	// OIDCEnabled 控制 OIDC 单点登录（OIDC_ENABLED，默认 false）：false 时
+	// 后端不注册 /api/v1/auth/oidc/login 与 callback 路由（404），config
+	// 探测端点恒注册并返回 {enabled:false}。
+	OIDCEnabled bool
+	// OIDCIssuer 为 IdP 签发方基地址（如 https://accounts.google.com），
+	// 启动时拉取 {issuer}/.well-known/openid-configuration 发现文档
+	//（失败即 fatal）；启用时必填且须为绝对 http(s) URL。
+	OIDCIssuer string
+	// OIDCClientID / OIDCClientSecret 为 IdP 侧注册的应用凭据，启用时必填。
+	OIDCClientID     string
+	OIDCClientSecret string
+	// OIDCRedirectURL 为授权码回调地址，缺省取 {PUBLIC_BASE_URL}/api/v1/auth/oidc/callback；
+	// PUBLIC_BASE_URL 与本值均未设置（且已启用）时校验失败。
+	OIDCRedirectURL string
+	// OIDCAutoProvision 控制自动开户（OIDC_AUTO_PROVISION，默认 true）：
+	// IdP 身份未关联既有用户且邮箱无匹配时自动创建 role=user 的随机密码
+	// 账号；false 时无匹配一律 403（引导联系管理员）。
+	OIDCAutoProvision bool
 }
 
 func Load() (Config, error) {
@@ -259,7 +277,20 @@ func Load() (Config, error) {
 	if e != nil {
 		return Config{}, e
 	}
-	c := Config{Port: stringEnv("PORT", "8080"), DatabaseURL: os.Getenv("DATABASE_URL"), JWTSecret: os.Getenv("JWT_SECRET"), AccessTokenTTL: a, RefreshTokenTTL: r, CookieSecure: secure, CookieDomain: os.Getenv("COOKIE_DOMAIN"), StorageRoot: stringEnv("STORAGE_ROOT", "./storage"), MaxFileSize: max, ScanEnabled: scan, UploadSessionTTL: ttl, TrustedProxies: listEnv("TRUSTED_PROXIES"), StorageDriver: stringEnv("STORAGE_DRIVER", "local"), S3Endpoint: os.Getenv("S3_ENDPOINT"), S3Bucket: os.Getenv("S3_BUCKET"), S3Region: stringEnv("S3_REGION", "us-east-1"), S3AccessKey: os.Getenv("S3_ACCESS_KEY"), S3SecretKey: os.Getenv("S3_SECRET_KEY"), S3PathStyle: pathStyle, ClamAVAddr: os.Getenv("CLAMAV_ADDR"), ClamAVTimeout: clamavTimeout, ClamAVRequired: clamavRequired, RateLimitPerMinute: rateLimit, LoginRateLimitPerMinute: loginRateLimit, PublicRateLimitPerMinute: publicRateLimit, MaxVersionsPerFile: maxVersions, JanitorEnabled: janitorEnabled, JanitorInterval: janitorInterval, OnlyOfficeEnabled: ooEnabled, OnlyOfficeServerURL: stringEnv("ONLYOFFICE_SERVER_URL", "http://onlyoffice:80"), OnlyOfficePublicURL: stringEnv("ONLYOFFICE_PUBLIC_URL", ""), OnlyOfficeJWTSecret: os.Getenv("ONLYOFFICE_JWT_SECRET"), OnlyOfficeDownloadURLBase: stringEnv("ONLYOFFICE_DOWNLOAD_URL_BASE", "http://backend:8080"), OnlyOfficeRateLimitPerMinute: ooRateLimit, MetricsEnabled: metricsEnabled, DrawioEnabled: drawioEnabled, DrawioServerURL: stringEnv("DRAWIO_SERVER_URL", "http://drawio:8080"), DrawioPublicURL: stringEnv("DRAWIO_PUBLIC_URL", ""), WebpkgEnabled: webpkgEnabled, WebpkgMaxEntries: webpkgMaxEntries, WebpkgMaxFileSize: webpkgMaxFileSize, WebpkgMaxTotalSize: webpkgMaxTotalSize, WebpkgMaxDepth: webpkgMaxDepth, WebpkgRateLimitPerMinute: webpkgRateLimit, QueueDriver: stringEnv("QUEUE_DRIVER", "inprocess"), RedisAddr: stringEnv("REDIS_ADDR", "localhost:6379"), RedisPassword: os.Getenv("REDIS_PASSWORD"), QueueConcurrency: queueConcurrency, PatchMaxBytes: patchMax, SMTPEnabled: smtpEnabled, SMTPHost: os.Getenv("SMTP_HOST"), SMTPPort: smtpPort, SMTPUser: os.Getenv("SMTP_USER"), SMTPPass: os.Getenv("SMTP_PASS"), SMTPFrom: os.Getenv("SMTP_FROM"), PublicBaseURL: stringEnv("PUBLIC_BASE_URL", "")}
+	oidcEnabled, e := boolEnv("OIDC_ENABLED", false)
+	if e != nil {
+		return Config{}, e
+	}
+	oidcAutoProvision, e := boolEnv("OIDC_AUTO_PROVISION", true)
+	if e != nil {
+		return Config{}, e
+	}
+	c := Config{Port: stringEnv("PORT", "8080"), DatabaseURL: os.Getenv("DATABASE_URL"), JWTSecret: os.Getenv("JWT_SECRET"), AccessTokenTTL: a, RefreshTokenTTL: r, CookieSecure: secure, CookieDomain: os.Getenv("COOKIE_DOMAIN"), StorageRoot: stringEnv("STORAGE_ROOT", "./storage"), MaxFileSize: max, ScanEnabled: scan, UploadSessionTTL: ttl, TrustedProxies: listEnv("TRUSTED_PROXIES"), StorageDriver: stringEnv("STORAGE_DRIVER", "local"), S3Endpoint: os.Getenv("S3_ENDPOINT"), S3Bucket: os.Getenv("S3_BUCKET"), S3Region: stringEnv("S3_REGION", "us-east-1"), S3AccessKey: os.Getenv("S3_ACCESS_KEY"), S3SecretKey: os.Getenv("S3_SECRET_KEY"), S3PathStyle: pathStyle, ClamAVAddr: os.Getenv("CLAMAV_ADDR"), ClamAVTimeout: clamavTimeout, ClamAVRequired: clamavRequired, RateLimitPerMinute: rateLimit, LoginRateLimitPerMinute: loginRateLimit, PublicRateLimitPerMinute: publicRateLimit, MaxVersionsPerFile: maxVersions, JanitorEnabled: janitorEnabled, JanitorInterval: janitorInterval, OnlyOfficeEnabled: ooEnabled, OnlyOfficeServerURL: stringEnv("ONLYOFFICE_SERVER_URL", "http://onlyoffice:80"), OnlyOfficePublicURL: stringEnv("ONLYOFFICE_PUBLIC_URL", ""), OnlyOfficeJWTSecret: os.Getenv("ONLYOFFICE_JWT_SECRET"), OnlyOfficeDownloadURLBase: stringEnv("ONLYOFFICE_DOWNLOAD_URL_BASE", "http://backend:8080"), OnlyOfficeRateLimitPerMinute: ooRateLimit, MetricsEnabled: metricsEnabled, DrawioEnabled: drawioEnabled, DrawioServerURL: stringEnv("DRAWIO_SERVER_URL", "http://drawio:8080"), DrawioPublicURL: stringEnv("DRAWIO_PUBLIC_URL", ""), WebpkgEnabled: webpkgEnabled, WebpkgMaxEntries: webpkgMaxEntries, WebpkgMaxFileSize: webpkgMaxFileSize, WebpkgMaxTotalSize: webpkgMaxTotalSize, WebpkgMaxDepth: webpkgMaxDepth, WebpkgRateLimitPerMinute: webpkgRateLimit, QueueDriver: stringEnv("QUEUE_DRIVER", "inprocess"), RedisAddr: stringEnv("REDIS_ADDR", "localhost:6379"), RedisPassword: os.Getenv("REDIS_PASSWORD"), QueueConcurrency: queueConcurrency, PatchMaxBytes: patchMax, SMTPEnabled: smtpEnabled, SMTPHost: os.Getenv("SMTP_HOST"), SMTPPort: smtpPort, SMTPUser: os.Getenv("SMTP_USER"), SMTPPass: os.Getenv("SMTP_PASS"), SMTPFrom: os.Getenv("SMTP_FROM"), PublicBaseURL: stringEnv("PUBLIC_BASE_URL", ""), OIDCEnabled: oidcEnabled, OIDCIssuer: strings.TrimSuffix(stringEnv("OIDC_ISSUER", ""), "/"), OIDCClientID: os.Getenv("OIDC_CLIENT_ID"), OIDCClientSecret: os.Getenv("OIDC_CLIENT_SECRET"), OIDCRedirectURL: stringEnv("OIDC_REDIRECT_URL", ""), OIDCAutoProvision: oidcAutoProvision}
+	// OIDC 回调地址默认值：{PUBLIC_BASE_URL}/api/v1/auth/oidc/callback
+	//（两者均未设置时由 validateOIDC 报错——IdP 侧必须注册确切回调地址）。
+	if c.OIDCEnabled && c.OIDCRedirectURL == "" && c.PublicBaseURL != "" {
+		c.OIDCRedirectURL = strings.TrimSuffix(c.PublicBaseURL, "/") + "/api/v1/auth/oidc/callback"
+	}
 	if c.DatabaseURL == "" {
 		return Config{}, errors.New("DATABASE_URL is required")
 	}
@@ -293,7 +324,35 @@ func Load() (Config, error) {
 	if e := validateSMTP(c); e != nil {
 		return Config{}, e
 	}
+	if e := validateOIDC(c); e != nil {
+		return Config{}, e
+	}
 	return c, nil
+}
+
+// validateOIDC 校验 OIDC 单点登录配置：启用时 ISSUER 须为绝对 http(s) URL、
+// CLIENT_ID/CLIENT_SECRET 必填；REDIRECT_URL 未显式设置且 PUBLIC_BASE_URL
+// 为空时报错（默认值推导见 Load——IdP 侧必须注册确切回调地址）。
+func validateOIDC(c Config) error {
+	if !c.OIDCEnabled {
+		return nil
+	}
+	if c.OIDCIssuer == "" {
+		return errors.New("OIDC_ISSUER is required when OIDC_ENABLED")
+	}
+	if e := checkAbsoluteHTTPURL(c.OIDCIssuer, "OIDC_ISSUER"); e != nil {
+		return e
+	}
+	if c.OIDCClientID == "" {
+		return errors.New("OIDC_CLIENT_ID is required when OIDC_ENABLED")
+	}
+	if c.OIDCClientSecret == "" {
+		return errors.New("OIDC_CLIENT_SECRET is required when OIDC_ENABLED")
+	}
+	if c.OIDCRedirectURL == "" {
+		return errors.New("OIDC_REDIRECT_URL is required when OIDC_ENABLED and PUBLIC_BASE_URL is empty")
+	}
+	return checkAbsoluteHTTPURL(c.OIDCRedirectURL, "OIDC_REDIRECT_URL")
 }
 
 // validateSMTP 校验邮件通道配置：启用 SMTP 时 HOST 与 FROM 必填，

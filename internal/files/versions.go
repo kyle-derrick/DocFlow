@@ -376,6 +376,25 @@ func (s *Store) GetVersionBlob(fileID, versionID uuid.UUID) (FileVersion, Object
 	return version, blob, nil
 }
 
+// ReadVersion 读授权返回指定版本及其关联 blob：读权限与 ListVersions 一致
+// （个人文件 owner、团队文件任意在册成员，经 Get 判定）；版本须属于该文件，
+// 且文件须为 type=file 未删除。blob 状态由调用方复核（available 方可输出）。
+// 供 GET /api/v1/files/:id/versions/:versionId/content（版本对比）使用。
+func (s *Store) ReadVersion(user, fileID, versionID uuid.UUID) (File, FileVersion, ObjectBlob, error) {
+	f, err := s.Get(user, fileID)
+	if err != nil {
+		return File{}, FileVersion{}, ObjectBlob{}, err
+	}
+	if f.Type != "file" {
+		return File{}, FileVersion{}, ObjectBlob{}, ErrInvalidTarget
+	}
+	version, blob, err := s.GetVersionBlob(fileID, versionID)
+	if err != nil {
+		return File{}, FileVersion{}, ObjectBlob{}, err
+	}
+	return f, version, blob, nil
+}
+
 // ListVersions 返回 user 可读文件的版本列表（含 blob status/size/sha256/mime，按版本号倒序）。
 // 读权限与 Get/下载/预览一致：个人文件 owner、团队文件任意在册成员。
 func (s *Store) ListVersions(user, fileID uuid.UUID) ([]VersionDetail, error) {

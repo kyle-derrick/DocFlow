@@ -118,6 +118,8 @@ func TestInProcessDispatchesHandlers(t *testing.T) {
 	p := NewInProcess(
 		CompleteUploadHandler(completions, nil),
 		ExtractWebpkgHandler(extractor),
+		nil,
+		nil,
 	)
 	if p.Driver() != "inprocess" {
 		t.Fatalf("Driver() = %q, want inprocess", p.Driver())
@@ -167,7 +169,7 @@ func waitMetric(t *testing.T, name string, labels map[string]string, before, wan
 func TestInProcessRecoversPanic(t *testing.T) {
 	boom := func(context.Context, uuid.UUID) error { panic("boom") }
 	failedBefore := counterValue(t, "docflow_queue_processed_total", map[string]string{"type": TaskTypeCompleteUpload, "status": "failed"})
-	p := NewInProcess(boom, boom)
+	p := NewInProcess(boom, boom, nil, nil)
 	if err := p.EnqueueCompleteUpload(uuid.New()); err != nil {
 		t.Fatalf("enqueue panicking task: %v", err)
 	}
@@ -187,7 +189,7 @@ func TestInProcessRecoversPanic(t *testing.T) {
 // 处理函数返回错误：InProcess 不炸进程，计入 processed{status=failed}。
 func TestInProcessHandlerErrorCountedFailed(t *testing.T) {
 	cause := errors.New("transient")
-	p := NewInProcess(func(context.Context, uuid.UUID) error { return cause }, nil)
+	p := NewInProcess(func(context.Context, uuid.UUID) error { return cause }, nil, nil, nil)
 	failedBefore := counterValue(t, "docflow_queue_processed_total", map[string]string{"type": TaskTypeCompleteUpload, "status": "failed"})
 	if err := p.EnqueueCompleteUpload(uuid.New()); err != nil {
 		t.Fatalf("enqueue: %v", err)
@@ -204,7 +206,7 @@ func TestInProcessCloseWaitsForInFlightTasks(t *testing.T) {
 		ctxSeen <- ctx
 		<-release
 		return nil
-	}, nil)
+	}, nil, nil, nil)
 	if err := p.EnqueueCompleteUpload(uuid.New()); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
@@ -252,7 +254,7 @@ func TestInProcessCloseTimesOut(t *testing.T) {
 	p := NewInProcess(func(context.Context, uuid.UUID) error {
 		<-block
 		return nil
-	}, nil)
+	}, nil, nil, nil)
 	defer close(block)
 	if err := p.EnqueueCompleteUpload(uuid.New()); err != nil {
 		t.Fatalf("enqueue: %v", err)
@@ -329,6 +331,8 @@ func TestMuxDispatchesTasksLocally(t *testing.T) {
 	mux := NewMux(
 		CompleteUploadHandler(completions, nil),
 		ExtractWebpkgHandler(extractor),
+		nil,
+		nil,
 	)
 	payload, _ := marshalCompleteUploadPayload(sessionID)
 	if err := mux.ProcessTask(context.Background(), asynq.NewTask(TaskTypeCompleteUpload, payload)); err != nil {
@@ -352,7 +356,7 @@ func TestMuxDispatchesTasksLocally(t *testing.T) {
 
 // 载荷非法：mux 包装返回错误（含 SkipRetry 语义），计入 processed{failed}。
 func TestMuxInvalidPayloadFails(t *testing.T) {
-	mux := NewMux(func(context.Context, uuid.UUID) error { return nil }, nil)
+	mux := NewMux(func(context.Context, uuid.UUID) error { return nil }, nil, nil, nil)
 	failedBefore := counterValue(t, "docflow_queue_processed_total", map[string]string{"type": TaskTypeCompleteUpload, "status": "failed"})
 	err := mux.ProcessTask(context.Background(), asynq.NewTask(TaskTypeCompleteUpload, []byte("not-json")))
 	if err == nil {
@@ -363,6 +367,74 @@ func TestMuxInvalidPayloadFails(t *testing.T) {
 	}
 	if d := counterValue(t, "docflow_queue_processed_total", map[string]string{"type": TaskTypeCompleteUpload, "status": "failed"}) - failedBefore; d != 1 {
 		t.Fatalf("processed{failed} 差值 = %v, want 1", d)
+	}
+}
+
+// --- webhook 投递任务（载荷为原始 JSON 字节） ---
+
+// InProcess EnqueueWebhookDelivery 在 goroutine 中把原始载荷透传给
+// WebhookDeliveryFunc，计入 enqueued 与 processed{success}；处理函数返回
+// 错误时计入 processed{failed} 且不 panic。
+func TestInProcessWebhookDelivery(t *testing.T) {
+	payload := []byte(`{"hook_id":"00000000-0000-0000-0000-000000000001"}`)
+	got := make(chan []byte, 4)
+	p := NewInProcess(nil, nil, nil, func(ctx context.Context, raw []byte) error {
+		got <- raw
+		return nil
+	})
+	enqueuedBefore := counterValue(t, "docflow_queue_enqueued_total", map[string]string{"type": TaskTypeWebhookDelivery, "driver": "inprocess"})
+	okBefore := counterValue(t, "docflow_queue_processed_total", map[string]string{"type": TaskTypeWebhookDelivery, "status": "success"})
+	if err := p.EnqueueWebhookDelivery(payload); err != nil {
+		t.Fatalf("EnqueueWebhookDelivery: %v", err)
+	}
+	select {
+	case raw := <-got:
+		if string(raw) != string(payload) {
+			t.Fatalf("payload = %s, want %s", raw, payload)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("webhook delivery handler was not invoked within timeout")
+	}
+	if d := counterValue(t, "docflow_queue_enqueued_total", map[string]string{"type": TaskTypeWebhookDelivery, "driver": "inprocess"}) - enqueuedBefore; d != 1 {
+		t.Fatalf("enqueued 差值 = %v, want 1", d)
+	}
+	waitMetric(t, "docflow_queue_processed_total", map[string]string{"type": TaskTypeWebhookDelivery, "status": "success"}, okBefore, 1)
+
+	// 处理函数返回错误：计入 failed，进程不崩。
+	cause := errors.New("endpoint down")
+	p2 := NewInProcess(nil, nil, nil, func(context.Context, []byte) error { return cause })
+	failedBefore := counterValue(t, "docflow_queue_processed_total", map[string]string{"type": TaskTypeWebhookDelivery, "status": "failed"})
+	if err := p2.EnqueueWebhookDelivery([]byte("{}")); err != nil {
+		t.Fatalf("enqueue failing delivery: %v", err)
+	}
+	waitMetric(t, "docflow_queue_processed_total", map[string]string{"type": TaskTypeWebhookDelivery, "status": "failed"}, failedBefore, 1)
+}
+
+// asynq mux：webhook-delivery 载荷原样透传（不经 decodePayload），
+// 未注册处理函数时返回 SkipRetry。
+func TestMuxWebhookDeliveryLocal(t *testing.T) {
+	payload := []byte(`{"event":"upload.completed"}`)
+	got := make(chan []byte, 4)
+	mux := NewMux(nil, nil, nil, func(ctx context.Context, raw []byte) error {
+		got <- raw
+		return nil
+	})
+	if err := mux.ProcessTask(context.Background(), asynq.NewTask(TaskTypeWebhookDelivery, payload)); err != nil {
+		t.Fatalf("ProcessTask webhook-delivery: %v", err)
+	}
+	select {
+	case raw := <-got:
+		if string(raw) != string(payload) {
+			t.Fatalf("payload = %s, want %s", raw, payload)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("webhook delivery handler was not invoked within timeout")
+	}
+	// 未注册（nil）：SkipRetry 语义错误。
+	nilMux := NewMux(nil, nil, nil, nil)
+	err := nilMux.ProcessTask(context.Background(), asynq.NewTask(TaskTypeWebhookDelivery, []byte("{}")))
+	if err == nil || !errors.Is(err, asynq.SkipRetry) {
+		t.Fatalf("nil handler err = %v, want SkipRetry wrapped", err)
 	}
 }
 
@@ -428,5 +500,76 @@ func TestExtractWebpkgHandler(t *testing.T) {
 	}
 	if err := ExtractWebpkgHandler(nil)(context.Background(), fileID); err != nil {
 		t.Fatalf("nil extractor: %v", err)
+	}
+}
+
+// --- search-index 任务 ---
+
+// fakeIndexer 记录 Index 调用（channel 通知），可注入返回值。
+type fakeIndexer struct {
+	called chan uuid.UUID
+	err    error
+}
+
+func (f *fakeIndexer) Index(fileID uuid.UUID) error {
+	f.called <- fileID
+	return f.err
+}
+
+// InProcess：EnqueueSearchIndex 在 goroutine 中触发处理函数并传入 fileID，
+// 计入 enqueued 与 processed{success}；处理错误计入 processed{failed}。
+func TestInProcessSearchIndex(t *testing.T) {
+	fileID := uuid.New()
+	indexer := &fakeIndexer{called: make(chan uuid.UUID, 4)}
+	p := NewInProcess(nil, nil, SearchIndexHandler(indexer), nil)
+	enqueuedBefore := counterValue(t, "docflow_queue_enqueued_total", map[string]string{"type": TaskTypeSearchIndex, "driver": "inprocess"})
+	okBefore := counterValue(t, "docflow_queue_processed_total", map[string]string{"type": TaskTypeSearchIndex, "status": "success"})
+	if err := p.EnqueueSearchIndex(fileID); err != nil {
+		t.Fatalf("EnqueueSearchIndex: %v", err)
+	}
+	if got := waitCalled(t, indexer.called); got != fileID {
+		t.Fatalf("Index id = %s, want %s", got, fileID)
+	}
+	if d := counterValue(t, "docflow_queue_enqueued_total", map[string]string{"type": TaskTypeSearchIndex, "driver": "inprocess"}) - enqueuedBefore; d != 1 {
+		t.Fatalf("enqueued 差值 = %v, want 1", d)
+	}
+	waitMetric(t, "docflow_queue_processed_total", map[string]string{"type": TaskTypeSearchIndex, "status": "success"}, okBefore, 1)
+
+	// 处理错误：计入 failed，进程不崩。
+	cause := errors.New("db down")
+	p2 := NewInProcess(nil, nil, SearchIndexHandler(&fakeIndexer{called: make(chan uuid.UUID, 4), err: cause}), nil)
+	failedBefore := counterValue(t, "docflow_queue_processed_total", map[string]string{"type": TaskTypeSearchIndex, "status": "failed"})
+	if err := p2.EnqueueSearchIndex(uuid.New()); err != nil {
+		t.Fatalf("enqueue failing index: %v", err)
+	}
+	waitMetric(t, "docflow_queue_processed_total", map[string]string{"type": TaskTypeSearchIndex, "status": "failed"}, failedBefore, 1)
+}
+
+// search-index 载荷与 mux 派发：载荷 {file_id} 往返一致；asynq mux 本地
+// 分发到达共用 TaskFunc；SearchIndexHandler(nil) 安全返回。
+func TestSearchIndexPayloadAndMux(t *testing.T) {
+	fileID := uuid.New()
+	raw, err := marshalSearchIndexPayload(fileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprintf(`{"file_id":%q}`, fileID); string(raw) != want {
+		t.Fatalf("search-index payload = %s, want %s", raw, want)
+	}
+	got, err := decodePayload(TaskTypeSearchIndex, raw)
+	if err != nil || got != fileID {
+		t.Fatalf("decode = (%s, %v), want (%s, nil)", got, err, fileID)
+	}
+
+	indexer := &fakeIndexer{called: make(chan uuid.UUID, 4)}
+	mux := NewMux(nil, nil, SearchIndexHandler(indexer), nil)
+	if err := mux.ProcessTask(context.Background(), asynq.NewTask(TaskTypeSearchIndex, raw)); err != nil {
+		t.Fatalf("ProcessTask search-index: %v", err)
+	}
+	if got := waitCalled(t, indexer.called); got != fileID {
+		t.Fatalf("Index id = %s, want %s", got, fileID)
+	}
+	if err := SearchIndexHandler(nil)(context.Background(), fileID); err != nil {
+		t.Fatalf("nil indexer: %v", err)
 	}
 }

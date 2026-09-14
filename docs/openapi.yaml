@@ -1,7 +1,7 @@
 # DocFlow HTTP API 契约（OpenAPI 3.1）。
 # 本文件以 internal/http 实际实现为准（handler.go / uploads.go / tus.go / shares.go /
 # teams.go / trash.go / preview.go / download.go / ratelimit.go / webpkg.go / tags.go /
-# batch.go），由
+# batch.go / dashboard.go / webhooks.go），由
 # internal/http/openapi_test.go 做双向路由一致性校验，契约与实现不允许漂移。
 # 说明：/health、/ready 为基础设施探针，不属于业务契约；路由参数统一写作 {id} 形式。
 # 网页包内容域端点 GET /content/{pid}/{filepath} 为契约外路由（openapi_test.go
@@ -30,13 +30,22 @@ security:
   - bearerAuth: []
 tags:
   - name: Auth
-    description: 登录、刷新、登出、会话管理、邀请注册与密码管理（忘记/重置/修改）
+    description: >-
+      登录、刷新、登出、会话管理、两步验证（TOTP）、OIDC 单点登录
+      （/auth/oidc/*，启用时可用）、邀请注册与密码管理（忘记/重置/修改）
   - name: Tokens
     description: 个人访问令牌（PAT，dfpat_ 前缀 Bearer 凭证）：创建（明文仅返回一次）、列表与撤销
   - name: Notifications
     description: 站内通知与通知偏好（本人维度）：列表/未读数/已读、各事件类型开关
+  - name: Webhooks
+    description: >-
+      Webhook 通知渠道（本人维度）：注册出站回调 URL（一次性签名 secret 仅
+      创建时返回）、列表（含投递状态）、启停与删除；事件触发时 POST 签名
+      JSON 载荷（经队列异步投递）
   - name: Users
     description: 用户目录查找（邀请场景）
+  - name: Dashboard
+    description: 个人仪表盘概览统计（admin 附加全局统计）
   - name: Files
     description: 个人空间文件与目录
   - name: Tags
@@ -78,7 +87,9 @@ paths:
       summary: 邮箱密码登录
       description: >-
         校验凭据后签发访问令牌并创建刷新会话；刷新令牌经 HttpOnly Cookie
-        refresh_token 下发。登录按 IP+邮箱前缀哈希独立限流。
+        refresh_token 下发。登录按 IP+邮箱前缀哈希独立限流。已启用两步验证
+        （TOTP）的账号密码正确时仍 401 TOTP_REQUIRED（不发放任何令牌），
+        须凭同一凭据转 POST /auth/login/totp 提交第二因子。
       security: []
       requestBody:
         required: true
@@ -102,7 +113,152 @@ paths:
               schema: { $ref: '#/components/schemas/TokenPair' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401':
-          description: 邮箱或密码错误
+          description: >-
+            邮箱或密码错误；或账号已启用两步验证——此时 body 为
+            {error: totp_required, code: TOTP_REQUIRED}，不发放任何令牌
+            （防绕过：启用 TOTP 的账号在 /login 永远拿不到 token）。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/login/totp:
+    post:
+      tags: [Auth]
+      operationId: loginTotp
+      summary: 两步验证登录（第二段）
+      description: >-
+        重新验证邮箱+密码后校验第二因子：code 为认证器当前 6 位 TOTP 码
+        （±30s 窗口），或 recovery_code 为一次性恢复码（命中即消耗，不可
+        重用）。通过后签发访问令牌并创建刷新会话（响应同 login）。限流与
+        /login 共享同一实例与限流键（IP+邮箱前缀哈希）。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TOTPLoginRequest' }
+      responses:
+        '200':
+          description: 登录成功；Set-Cookie 下发 refresh_token
+          headers:
+            Set-Cookie:
+              description: refresh_token=...; Path=/api/v1/auth/refresh; HttpOnly; SameSite=Lax
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenPair' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401':
+          description: >-
+            邮箱或密码错误（invalid credentials，与 login 同响应防枚举），
+            或 code/recovery_code 校验失败（invalid totp code）。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/oidc/config:
+    get:
+      tags: [Auth]
+      operationId: oidcConfig
+      summary: OIDC 单点登录可用性探测
+      description: >-
+        恒注册的公开探测端点：{enabled}。enabled=false 表示后端未启用
+        OIDC（OIDC_ENABLED=false），此时 /auth/oidc/login 与 /auth/oidc/callback
+        不注册（404），登录页不展示「使用 SSO 登录」按钮。
+      security: []
+      responses:
+        '200':
+          description: '{enabled: 是否启用 SSO}'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [enabled]
+                properties:
+                  enabled: { type: boolean }
+
+  /auth/oidc/login:
+    get:
+      tags: [Auth]
+      operationId: oidcLogin
+      summary: 发起 OIDC 单点登录（302 跳 IdP）
+      description: >-
+        仅 OIDC_ENABLED=true 时注册。签发一次性 state（内存登记 PKCE
+        verifier，TTL 10 分钟，用后即焚）并 302 跳转 IdP 授权端点
+        （response_type=code + PKCE S256，scope=openid email profile）；
+        state 同时写入 HttpOnly cookie oidc_state（Path=/api/v1/auth/oidc/callback），
+        callback 侧与 URL 参数双验证（防 CSRF/重放）。按 IP 独立轻限流。
+      security: []
+      responses:
+        '302':
+          description: >-
+            Location 为 IdP 授权地址；Set-Cookie 下发 oidc_state
+            （HttpOnly，10 分钟）。
+          headers:
+            Location:
+              description: IdP authorization_endpoint（含 state 与 code_challenge）
+              schema: { type: string, format: uri }
+            Set-Cookie:
+              description: oidc_state=...; Path=/api/v1/auth/oidc/callback; HttpOnly; SameSite=Lax
+              schema: { type: string }
+        '500':
+          description: 服务端状态签发失败（极少见）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/oidc/callback:
+    get:
+      tags: [Auth]
+      operationId: oidcCallback
+      summary: OIDC 授权码回调（302 前端落地页）
+      description: >-
+        仅 OIDC_ENABLED=true 时注册。state 双验证（cookie == 参数）并经
+        服务端内存消费（一次性）后，以授权码 + PKCE verifier 换取令牌，
+        解析 sub/email（userinfo 优先，回退 ID token claims；email 小写
+        归一）。用户映射：oidc_links 的 sub 关联 → email 匹配 active 用户
+        → 自动开户（OIDC_AUTO_PROVISION，默认 true；role=user、随机不可
+        登录密码、审计 oidc.provision，根目录延迟创建）。关闭自动开户且
+        无匹配时 403（SSO_NOT_PROVISIONED，引导联系管理员）。安全取舍：
+        SSO 信任 IdP 认证强度，跳过本地 TOTP 二验（密码登录的 TOTP 拦截
+        不变）。成功后签发 DocFlow 会话：refresh_token 经 HttpOnly Cookie，
+        access_token 经 URL fragment 跳转前端落地页——fragment 不随请求
+        发送、不进日志与 Referer。按 IP 独立轻限流。
+      security: []
+      parameters:
+        - name: state
+          in: query
+          required: true
+          schema: { type: string }
+        - name: code
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        '302':
+          description: >-
+            登录成功。Location 为 {PUBLIC_BASE_URL}/sso#access_token=<jwt>
+            （前端落地页读取 fragment 存内存并清除）；Set-Cookie 下发
+            refresh_token。
+          headers:
+            Location:
+              description: 前端 SSO 落地页（access_token 在 URL fragment 中）
+              schema: { type: string, format: uri }
+            Set-Cookie:
+              description: refresh_token=...; Path=/api/v1/auth/refresh; HttpOnly; SameSite=Lax
+              schema: { type: string }
+        '401':
+          description: state 缺失/不匹配/已消费，或授权码换取失败
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: >-
+            账号被禁用，或无匹配账号且自动开户关闭（后者 code 为
+            SSO_NOT_PROVISIONED，引导联系管理员）。
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -331,6 +487,92 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '429': { $ref: '#/components/responses/RateLimited' }
 
+  /auth/totp:
+    get:
+      tags: [Auth]
+      operationId: totpStatus
+      summary: 两步验证状态
+      description: 当前用户两步验证（TOTP）状态；未 setup 时 enabled=false、confirmed_at=null。
+      responses:
+        '200':
+          description: 状态视图
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TOTPStatus' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    delete:
+      tags: [Auth]
+      operationId: totpDisable
+      summary: 禁用两步验证
+      description: >-
+        密码或当前有效 6 位 TOTP 码二选一验证（均错 403；恢复码不可用于
+        禁用）后删除 user_totp 行。写 totp.disable 审计；重新启用走全新
+        setup。未启用时 404。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TOTPDisableRequest' }
+      responses:
+        '204': { description: 已禁用 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/totp/setup:
+    post:
+      tags: [Auth]
+      operationId: totpSetup
+      summary: 开始两步验证设置
+      description: >-
+        生成新 secret（作废未完成的旧 setup）并落库 enabled=false，返回
+        Base32 secret 与 otpauth URL。客户端不渲染二维码：以文本展示供
+        认证器手动录入/导入（设计限制）。已启用时 409（须先禁用）。
+      responses:
+        '200':
+          description: secret 与 otpauth URL（待 confirm）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TOTPSetup' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/totp/confirm:
+    post:
+      tags: [Auth]
+      operationId: totpConfirm
+      summary: 确认启用两步验证
+      description: >-
+        校验认证器 6 位码（±30s 窗口）后启用（enabled=true + confirmed_at）
+        并生成 10 个恢复码（xxxx-xxxx）。明文仅本响应返回一次，服务端只存
+        SHA-256 哈希。写 totp.enable 审计。码错误 400；未 setup 400；已启用 409。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TOTPConfirmRequest' }
+      responses:
+        '200':
+          description: 已启用；恢复码明文仅此一次返回
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [recovery_codes]
+                properties:
+                  recovery_codes:
+                    type: array
+                    items: { type: string }
+                    description: 10 个恢复码（xxxx-xxxx），一次性明文
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
   /tokens:
     post:
       tags: [Tokens]
@@ -510,6 +752,114 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '429': { $ref: '#/components/responses/RateLimited' }
 
+  /webhooks:
+    post:
+      tags: [Webhooks]
+      operationId: createWebhook
+      summary: 注册 Webhook
+      description: >-
+        注册出站回调 URL：事件发生时（与站内通知同一偏好开关，偏好关闭则
+        不投递）POST {event,timestamp,data} JSON 并附 X-DocFlow-Signature:
+        sha256=<hex(HMAC-SHA256(secret, body))> 签名头（接收方用下发的
+        secret 验签）。URL 须为 http(s) 且无 userinfo（localhost/内网允许，
+        自托管场景；SSRF 经签名 secret、有限重试与自动禁用缓解）；events
+        为白名单事件类型的非空子集（重复去重）。一次性签名 secret
+        （whsec_ + 43 字符 URL-safe base64）仅在本 201 响应返回一次，服务端
+        存明文（HMAC 出站签名需明文密钥，与入站认证的 PAT 哈希不同）。
+        投递超时 10s、内部重试 3 次（1s/5s/25s 退避），经后台队列异步执行。
+        同一用户重复注册同一 URL 返回 409。写 webhook.create 审计。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url, events]
+              properties:
+                url: { type: string, maxLength: 2048, description: 回调 URL（http/https，无 userinfo） }
+                events:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: string
+                    enum: [upload.completed, upload.quarantined, share.accessed, file.updated]
+      responses:
+        '201':
+          description: 已创建；secret 明文仅此一次返回
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CreatedWebhook' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { description: 同一用户已注册该 URL }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    get:
+      tags: [Webhooks]
+      operationId: listWebhooks
+      summary: 我的 Webhook 列表
+      description: >-
+        当前用户的全部 webhook（created_at 倒序，含已禁用）；附投递状态
+        （last_status 为最近一次投递 HTTP 状态码，0=传输层失败，null=从未
+        投递；failure_count 为连续失败计数，成功清零，连续 10 次失败自动
+        禁用）。不含 secret。
+      responses:
+        '200':
+          description: webhook 列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /webhooks/{id}:
+    patch:
+      tags: [Webhooks]
+      operationId: updateWebhook
+      summary: 启用/停用 Webhook
+      description: >-
+        更新自己的 webhook 启停（自动禁用后可经此重新启用）；不存在或不属于
+        当前用户一律 404（不泄露存在性）。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled]
+              properties:
+                enabled: { type: boolean }
+      responses:
+        '200':
+          description: 已更新；返回最新条目
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Webhook' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    delete:
+      tags: [Webhooks]
+      operationId: deleteWebhook
+      summary: 删除 Webhook
+      description: 删除自己的 webhook（立即停止投递）；不存在或非属主一律 404。写 webhook.delete 审计。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: 已删除 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
   /users/lookup:
     get:
       tags: [Users]
@@ -539,6 +889,75 @@ paths:
                     id: { type: string, format: uuid }
                     username: { type: string }
         '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /search:
+    get:
+      tags: [Files]
+      operationId: searchFiles
+      summary: 文件全文检索（名称 + 文本内容）
+      description: >-
+        跨目录检索当前用户可读的文件（个人 owner + 团队在册成员，实时判定；
+        软删文件排除；访问判定与 GET /files 的检索模式一致）。匹配规则：
+        名称 ILIKE %q%（大小写不敏感子串，中文友好）OR 内容 tsvector @@
+        plainto_tsquery('simple', q)（内容索引仅覆盖文本类文件且 ≤2MB，
+        二进制——图片/pdf/office——仅名称匹配；'simple' 分词对中文内容
+        基本无效，中文以名称子串为主）。索引在上传完成（新建/覆盖版本）
+        后异步构建，检索到最新上传内容可能有短暂延迟。结果名称命中优先，
+        其次 updated_at 倒序。高频读端点：不记录审计，限流沿用认证接口组。
+        tag_id/starred 过滤可选（语义同 /files 检索模式）。
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: { type: string, minLength: 1 }
+          description: 检索词（名称子串或内容词；%/_/\ 按字面匹配）
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, default: 20, maximum: 100 }
+          description: 返回条数上限（服务端固定上限 100）
+        - name: tag_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+          description: 限定带该标签的结果（须属于当前用户，否则 404）
+        - name: starred
+          in: query
+          required: false
+          schema: { type: string, enum: ["true", "false"] }
+          description: 限定收藏状态
+      responses:
+        '200':
+          description: 检索结果（名称命中附 snippet=名称；内容命中附 ts_headline 片段）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SearchResultList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /dashboard:
+    get:
+      tags: [Dashboard]
+      operationId: getDashboard
+      summary: 个人仪表盘统计（登录用户）
+      description: >-
+        个人空间（owner 维度）概览统计：我的文件数、存储占用（当前版本
+        file_versions.size 之和，软删与历史版本不计入）、有效分享数（公开 +
+        私有：未撤销且未过期）、近 7 天上传会话数，以及最近更新的 5 个文件
+        （id/name/updated_at）。团队文件不计入个人口径，另以 team_files
+        单列（当前用户可访问团队空间的文件数，在册成员实时判定）。
+        请求者为 admin 角色时附加全局统计 admin（复用 GET /admin/stats，
+        角色查询失败时静默降级为个人视图）。
+      responses:
+        '200':
+          description: 个人统计（admin 附全局统计）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DashboardResponse' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '429': { $ref: '#/components/responses/RateLimited' }
 
@@ -1115,6 +1534,48 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /files/{id}/versions/{versionId}/content:
+    get:
+      tags: [Files]
+      operationId: getFileVersionContent
+      summary: 版本原始内容（文本版本对比）
+      description: >-
+        返回指定历史版本的原始内容（v2：前端版本对比）。读权限同版本列表
+        （个人文件 owner、团队文件任意在册成员）；版本须属于该文件且关联
+        blob 为 available（quarantined 等回 403）。响应 Content-Type 为
+        blob MIME、Content-Disposition: inline、X-Content-Type-Options:
+        nosniff；不支持 Range（整读，对比场景按版本完整取回）。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: versionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+          description: 版本记录 ID（versions 列表中的 id）
+      responses:
+        '200':
+          description: 版本原始内容（inline，Content-Type 为 blob MIME）
+          headers:
+            Content-Disposition:
+              description: inline; filename="<文件名>"（RFC 5987）
+              schema: { type: string }
+            X-Content-Type-Options: { schema: { type: string, const: nosniff } }
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: 无读权限（团队非成员），或 blob 非 available（quarantined 等，附 status）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404': { $ref: '#/components/responses/NotFound' }
         '429': { $ref: '#/components/responses/RateLimited' }
 
   /files/{id}/tags:
@@ -2674,7 +3135,8 @@ components:
           type: string
           description: >-
             机器可读错误码；当前实现使用 NAME_CONFLICT / NOT_DELETED / PARENT_DELETED /
-            QUARANTINED / FAILED
+            QUARANTINED / FAILED / TOTP_REQUIRED（POST /auth/login 对已启用两步
+            验证账号的 401，error=totp_required）
         status:
           type: string
           description: 上传相关错误附带的会话状态（仅 uploads complete 端点）
@@ -2773,6 +3235,50 @@ components:
           type: string
           format: password
           description: 至少 12 字符，须含大写、小写与数字
+    TOTPLoginRequest:
+      type: object
+      required: [email, password]
+      description: 两步验证登录第二段：email+password 复核后校验 code 或 recovery_code（二选一，都传时按 TOTP 码优先）
+      properties:
+        email: { type: string }
+        password: { type: string, format: password }
+        code:
+          type: string
+          description: 认证器当前 6 位 TOTP 码（±30s 窗口）
+        recovery_code:
+          type: string
+          description: 一次性恢复码（xxxx-xxxx；命中即消耗）
+    TOTPSetup:
+      type: object
+      required: [secret, otpauth_url]
+      description: >-
+        POST /auth/totp/setup 响应；客户端不渲染二维码，以文本展示 secret
+        （认证器手动录入/导入）。secret 服务端明文存储（自托管边界，见
+        migration 020 注释），仅 setup/confirm 阶段经认证响应下发。
+      properties:
+        secret: { type: string, description: Base32 共享密钥（SHA1/6 位/30 秒） }
+        otpauth_url: { type: string, description: otpauth://totp/... 认证器导入 URL }
+    TOTPConfirmRequest:
+      type: object
+      required: [code]
+      properties:
+        code: { type: string, description: 认证器当前 6 位码（±30s 窗口） }
+    TOTPDisableRequest:
+      type: object
+      description: 密码或 TOTP 码二选一（均须非空才进入校验；恢复码不可用于禁用）
+      properties:
+        password: { type: string, format: password }
+        code: { type: string, description: 当前有效 6 位 TOTP 码 }
+    TOTPStatus:
+      type: object
+      required: [enabled]
+      description: GET /auth/totp 状态视图
+      properties:
+        enabled: { type: boolean }
+        confirmed_at:
+          type: [string, 'null']
+          format: date-time
+          description: 启用确认时间；未 setup/未确认时为 null
     TokenPair:
       type: object
       required: [access_token, token_type]
@@ -2871,6 +3377,29 @@ components:
         files:
           type: array
           items: { $ref: '#/components/schemas/File' }
+    SearchResult:
+      type: object
+      description: >-
+        全文检索单条结果；name/type/parent_id/updated_at 取 files 行实时值。
+        snippet：名称命中时为名称本身；内容命中时为 ts_headline('simple', ...)
+        片段，高亮标记为 [[..]]（纯文本，前端渲染高亮）；仅名称索引或无命中
+        片段时缺省。
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        type: { type: string, enum: [file, folder] }
+        parent_id:
+          type: [string, 'null']
+          format: uuid
+          description: 所在目录 ID（前端跳转预览用；不提供完整面包屑链）
+        updated_at: { type: string, format: date-time }
+        snippet: { type: string, description: "命中上下文（[[..]] 高亮标记）" }
+    SearchResultList:
+      type: object
+      properties:
+        results:
+          type: array
+          items: { $ref: '#/components/schemas/SearchResult' }
     Tag:
       type: object
       description: 用户维度标签（tags 表）；(user_id, name) 唯一

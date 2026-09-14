@@ -1,8 +1,29 @@
 import { ReactElement, useEffect, useRef, useState } from 'react'
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
-import { hasAccessToken, isAdmin, listNotifications, logout, markAllNotificationsRead, markNotificationRead, NotificationItem, refreshSession, SESSION_EXPIRED_EVENT } from './api'
-import { formatTime } from './components/FileBrowser'
+import {
+  FileItem,
+  PreviewContent,
+  PreviewKind,
+  SearchResultItem,
+  downloadFile,
+  fetchPreview,
+  hasAccessToken,
+  isAdmin,
+  listNotifications,
+  logout,
+  markAllNotificationsRead,
+  markNotificationRead,
+  NotificationItem,
+  refreshSession,
+  searchFiles,
+  SESSION_EXPIRED_EVENT,
+} from './api'
+import { Modal, formatTime } from './components/FileBrowser'
+import HotkeysHelp from './components/HotkeysHelp'
+import { OfflineBadge, UpdateToast } from './components/PwaStatus'
+import { useHotkeys } from './useHotkeys'
 import LoginPage from './pages/LoginPage'
+import SsoPage from './pages/SsoPage'
 import RegisterPage from './pages/RegisterPage'
 import ForgotPage from './pages/ForgotPage'
 import ResetPage from './pages/ResetPage'
@@ -16,6 +37,7 @@ import AdminPage from './pages/AdminPage'
 import EditorPage from './pages/EditorPage'
 import DrawioPage from './pages/DrawioPage'
 import SettingsPage from './pages/SettingsPage'
+import DashboardPage from './pages/DashboardPage'
 
 /** 铃铛未读数轮询间隔（毫秒）。 */
 const NOTIFICATION_POLL_INTERVAL = 15_000
@@ -152,6 +174,278 @@ function NotificationBell() {
   )
 }
 
+/** 检索输入防抖（毫秒）。 */
+const SEARCH_DEBOUNCE_MS = 400
+
+/** 检索下拉面板的条数上限。 */
+const SEARCH_PANEL_LIMIT = 20
+
+/** 高亮分段：text 中大小写不敏感包含 q 的子串标记 hit。 */
+function highlightParts(text: string, q: string): Array<{ text: string; hit: boolean }> {
+  if (!q) return [{ text, hit: false }]
+  const lower = text.toLowerCase()
+  const needle = q.toLowerCase()
+  const parts: Array<{ text: string; hit: boolean }> = []
+  let i = 0
+  for (;;) {
+    const idx = lower.indexOf(needle, i)
+    if (idx < 0) break
+    if (idx > i) parts.push({ text: text.slice(i, idx), hit: false })
+    parts.push({ text: text.slice(idx, idx + needle.length), hit: true })
+    i = idx + needle.length
+  }
+  if (i < text.length) parts.push({ text: text.slice(i), hit: false })
+  return parts
+}
+
+/** snippet（ts_headline）的 [[..]] 标记转高亮分段。 */
+function snippetParts(snippet: string): Array<{ text: string; hit: boolean }> {
+  const parts: Array<{ text: string; hit: boolean }> = []
+  let rest = snippet
+  for (;;) {
+    const start = rest.indexOf('[[')
+    if (start < 0) break
+    const end = rest.indexOf(']]', start + 2)
+    if (end < 0) break
+    if (start > 0) parts.push({ text: rest.slice(0, start), hit: false })
+    parts.push({ text: rest.slice(start + 2, end), hit: true })
+    rest = rest.slice(end + 2)
+  }
+  if (rest) parts.push({ text: rest, hit: false })
+  return parts
+}
+
+function Highlight({ parts }: { parts: Array<{ text: string; hit: boolean }> }) {
+  return (
+    <>
+      {parts.map((p, i) =>
+        p.hit ? (
+          <mark key={i} className="search-hit">{p.text}</mark>
+        ) : (
+          <span key={i}>{p.text}</span>
+        ),
+      )}
+    </>
+  )
+}
+
+/**
+ * 顶栏全文搜索：输入防抖 400ms（回车立即）调 /search，下拉面板展示
+ * 名称高亮/类型图标/内容片段；点击结果打开预览对话框（跳转限制：
+ * 结果仅含 parent_id 无完整面包屑链，不定位到所在目录；文件夹结果
+ * 引导前往文件页）。快捷键 '/' 聚焦本输入框（见 GlobalHotkeys）。
+ */
+function TopBarSearch() {
+  const [q, setQ] = useState('')
+  const [open, setOpen] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [results, setResults] = useState<SearchResultItem[]>([])
+  const [error, setError] = useState('')
+  const wrapRef = useRef<HTMLDivElement | null>(null)
+
+  // 预览对话框状态（与 FileBrowser 的预览渲染保持一致）。
+  const [previewTarget, setPreviewTarget] = useState<SearchResultItem | null>(null)
+  const [previewLoading, setPreviewLoading] = useState(false)
+  const [previewKind, setPreviewKind] = useState<PreviewKind | null>(null)
+  const [previewUrl, setPreviewUrl] = useState('')
+  const [previewText, setPreviewText] = useState('')
+  const [previewError, setPreviewError] = useState('')
+
+  const doSearch = async (query: string) => {
+    setLoading(true)
+    setError('')
+    try {
+      setResults(await searchFiles(query, SEARCH_PANEL_LIMIT))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '搜索失败')
+      setResults([])
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // 防抖 400ms：清空输入即收起面板；回车时下方 onKeyDown 直接触发。
+  useEffect(() => {
+    const trimmed = q.trim()
+    if (!trimmed) {
+      setResults([])
+      setError('')
+      setOpen(false)
+      return
+    }
+    setOpen(true)
+    const timer = setTimeout(() => void doSearch(trimmed), SEARCH_DEBOUNCE_MS)
+    return () => clearTimeout(timer)
+  }, [q])
+
+  // 点击面板外关闭。
+  useEffect(() => {
+    if (!open) return
+    const onDocClick = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDocClick)
+    return () => document.removeEventListener('mousedown', onDocClick)
+  }, [open])
+
+  const closePreview = () => {
+    if (previewUrl) URL.revokeObjectURL(previewUrl)
+    setPreviewUrl('')
+    setPreviewText('')
+    setPreviewKind(null)
+    setPreviewError('')
+    setPreviewLoading(false)
+    setPreviewTarget(null)
+  }
+
+  const openPreview = async (item: SearchResultItem) => {
+    setOpen(false)
+    if (item.type !== 'file') return
+    if (previewUrl) URL.revokeObjectURL(previewUrl)
+    setPreviewTarget(item)
+    setPreviewLoading(true)
+    setPreviewKind(null)
+    setPreviewUrl('')
+    setPreviewText('')
+    setPreviewError('')
+    try {
+      const content: PreviewContent = await fetchPreview(item.id)
+      setPreviewKind(content.kind)
+      setPreviewUrl(content.url ?? '')
+      setPreviewText(content.text ?? '')
+    } catch (err) {
+      setPreviewError(err instanceof Error ? err.message : '预览加载失败')
+    } finally {
+      setPreviewLoading(false)
+    }
+  }
+
+  const onInputKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      const trimmed = q.trim()
+      if (trimmed) void doSearch(trimmed)
+    } else if (e.key === 'Escape') {
+      setQ('')
+      setOpen(false)
+      ;(e.target as HTMLInputElement).blur()
+    }
+  }
+
+  return (
+    <div className="topbar-search" ref={wrapRef}>
+      <input
+        data-hotkey="search"
+        type="search"
+        value={q}
+        placeholder="搜索文件…（按 / 聚焦）"
+        aria-label="全文搜索"
+        onChange={(e) => setQ(e.target.value)}
+        onKeyDown={onInputKey}
+        onFocus={() => {
+          if (q.trim()) setOpen(true)
+        }}
+      />
+      {open && (
+        <div className="search-panel">
+          {loading && <div className="search-empty">搜索中…</div>}
+          {!loading && error && <div className="search-empty">{error}</div>}
+          {!loading && !error && results.length === 0 && <div className="search-empty">没有匹配的文件</div>}
+          {!loading && !error && results.length > 0 && (
+            <div className="search-list">
+              {results.map((r) => (
+                <button key={r.id} className="search-item" onClick={() => void openPreview(r)}>
+                  <span className="search-item-name">
+                    <span className="icon">{r.type === 'folder' ? '📁' : '📄'}</span>
+                    <Highlight parts={highlightParts(r.name, q.trim())} />
+                  </span>
+                  {r.snippet && r.snippet !== r.name && (
+                    <span className="search-snippet">
+                      <Highlight parts={snippetParts(r.snippet)} />
+                    </span>
+                  )}
+                  <span className="search-time muted">{formatTime(r.updated_at)}</span>
+                </button>
+              ))}
+            </div>
+          )}
+          <div className="search-foot">
+            名称与内容匹配；二进制文件仅名称。回车立即搜索。
+          </div>
+        </div>
+      )}
+
+      {previewTarget && (
+        <Modal wide title={`预览「${previewTarget.name}」`} onClose={closePreview}>
+          {previewLoading ? (
+            <p className="hint">加载预览…</p>
+          ) : previewError ? (
+            <div>
+              <div className="error-text">{previewError}</div>
+              <div className="preview-foot">
+                <button className="btn primary" onClick={() => void downloadFile({ id: previewTarget.id, name: previewTarget.name } as FileItem)}>
+                  下载
+                </button>
+              </div>
+            </div>
+          ) : previewKind === 'unsupported' ? (
+            <div>
+              <div className="empty">该文件类型暂不支持在线预览，请下载后查看</div>
+              <div className="preview-foot">
+                <button className="btn primary" onClick={() => void downloadFile({ id: previewTarget.id, name: previewTarget.name } as FileItem)}>
+                  下载
+                </button>
+              </div>
+            </div>
+          ) : previewKind === 'image' ? (
+            <div className="preview-box">
+              <img className="preview-image" src={previewUrl} alt={previewTarget.name} />
+            </div>
+          ) : previewKind === 'pdf' ? (
+            <div className="preview-box">
+              <iframe className="preview-frame" src={previewUrl} title={previewTarget.name} />
+            </div>
+          ) : previewKind === 'webpkg' ? (
+            <div className="preview-box">
+              <iframe className="preview-frame" sandbox="allow-scripts" src={previewUrl} title={previewTarget.name} />
+            </div>
+          ) : previewKind === 'text' ? (
+            <div className="preview-box">
+              <pre className="preview-text">{previewText}</pre>
+            </div>
+          ) : null}
+        </Modal>
+      )}
+    </div>
+  )
+}
+
+/**
+ * 全局快捷键（v1.1）：'/' 聚焦顶栏全文搜索框、g f/t/s/h 导航、'?' 帮助。
+ * 编辑器页（/edit、/drawio，iframe 捕获键盘）禁用；弹窗打开时由 useHotkeys
+ * 统一跳过（Escape 由 HotkeysHelp 自行处理关闭）。
+ */
+function GlobalHotkeys() {
+  const navigate = useNavigate()
+  const location = useLocation()
+  const [helpOpen, setHelpOpen] = useState(false)
+  const editorPage = location.pathname.startsWith('/edit/') || location.pathname.startsWith('/drawio/')
+  useHotkeys(
+    {
+      '/': () => {
+        document.querySelector<HTMLElement>('[data-hotkey="search"]')?.focus()
+      },
+      'g f': () => navigate('/'),
+      'g t': () => navigate('/teams'),
+      'g s': () => navigate('/shared'),
+      'g h': () => navigate('/trash'),
+      '?': () => setHelpOpen(true),
+    },
+    !editorPage,
+  )
+  return helpOpen ? <HotkeysHelp onClose={() => setHelpOpen(false)} /> : null
+}
+
 function TopBar() {
   const navigate = useNavigate()
   const location = useLocation()
@@ -175,11 +469,16 @@ function TopBar() {
     <header className="topbar">
       <span className="brand">DocFlow</span>
       <nav className="nav">
+        <Link to="/dashboard" className={location.pathname === '/dashboard' ? 'active' : ''}>概览</Link>
         <Link to="/" className={location.pathname === '/' ? 'active' : ''}>文件</Link>
+        <Link to="/teams" className={location.pathname.startsWith('/teams') ? 'active' : ''}>团队</Link>
+        <Link to="/shared" className={location.pathname === '/shared' ? 'active' : ''}>分享</Link>
         <Link to="/trash" className={location.pathname === '/trash' ? 'active' : ''}>回收站</Link>
         {admin && <Link to="/admin" className={location.pathname === '/admin' ? 'active' : ''}>管理</Link>}
         <Link to="/settings" className={location.pathname === '/settings' ? 'active' : ''}>设置</Link>
       </nav>
+      <TopBarSearch />
+      <OfflineBadge />
       <NotificationBell />
       <button className="btn ghost" onClick={handleLogout}>退出登录</button>
     </header>
@@ -212,6 +511,7 @@ function RequireAuth({ children }: { children: ReactElement }) {
   return (
     <div className="app-shell">
       <TopBar />
+      <GlobalHotkeys />
       <main className="content">{children}</main>
     </div>
   )
@@ -220,8 +520,12 @@ function RequireAuth({ children }: { children: ReactElement }) {
 export default function App() {
   return (
     <BrowserRouter>
+      {/* SW 新版本提示：全局（含公开页），与登录态无关。 */}
+      <UpdateToast />
       <Routes>
         <Route path="/login" element={<LoginPage />} />
+        {/* SSO 落地页：后端 OIDC 回调 302 到 /sso#access_token=...，读取后转首页。 */}
+        <Route path="/sso" element={<SsoPage />} />
         {/* 邀请注册 / 忘记密码 / 密码重置：公开页面，无需登录，不包 RequireAuth。 */}
         <Route path="/register/:token" element={<RegisterPage />} />
         <Route path="/forgot" element={<ForgotPage />} />
@@ -229,6 +533,8 @@ export default function App() {
         {/* 公开分享页：无需登录，不包 RequireAuth。 */}
         <Route path="/s/:token" element={<SharePage />} />
         <Route path="/" element={<RequireAuth><FilesPage /></RequireAuth>} />
+        {/* 个人仪表盘概览（v1.1）。 */}
+        <Route path="/dashboard" element={<RequireAuth><DashboardPage /></RequireAuth>} />
         <Route path="/teams" element={<RequireAuth><TeamsPage /></RequireAuth>} />
         <Route path="/teams/:id" element={<RequireAuth><TeamSpacePage /></RequireAuth>} />
         <Route path="/shared" element={<RequireAuth><SharedPage /></RequireAuth>} />

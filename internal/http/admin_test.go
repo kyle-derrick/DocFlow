@@ -112,14 +112,14 @@ func TestUpdateAdminSetting(t *testing.T) {
 
 func TestAdminStats(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	h := &Handler{stats: &fakeStatsSource{stats: AdminStats{Users: 3, Files: 42, Uploads: 7, Sessions: 11, Shares: 5}}}
+	h := &Handler{stats: &fakeStatsSource{stats: AdminStats{Users: 3, Files: 42, Uploads: 7, Sessions: 11, Shares: 5, Tokens: 2}}}
 	c, w := adminContext(http.MethodGet, "/api/v1/admin/stats", "")
 	h.adminStats(c)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
 	body := w.Body.String()
-	for _, want := range []string{`"users":3`, `"files":42`, `"uploads":7`, `"sessions":11`, `"shares":5`} {
+	for _, want := range []string{`"users":3`, `"files":42`, `"uploads":7`, `"sessions":11`, `"shares":5`, `"tokens":2`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("body %s must contain %s", body, want)
 		}

@@ -29,6 +29,7 @@ type AdminStats struct {
 	Uploads  int64 `json:"uploads"`
 	Sessions int64 `json:"sessions"`
 	Shares   int64 `json:"shares"`
+	Tokens   int64 `json:"tokens"`
 }
 
 // gormStats 用 COUNT 查询汇总基础统计。
@@ -48,6 +49,7 @@ func (g *gormStats) Stats() (AdminStats, error) {
 		{"upload_sessions", &s.Uploads},
 		{"sessions", &s.Sessions},
 		{"shares", &s.Shares},
+		{"api_tokens", &s.Tokens},
 	}
 	for _, c := range counts {
 		if err := g.db.Table(c.table).Count(c.dst).Error; err != nil {

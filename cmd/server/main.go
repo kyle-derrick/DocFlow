@@ -25,13 +25,16 @@ import (
 	"github.com/docflow/docflow/internal/janitor"
 	"github.com/docflow/docflow/internal/mail"
 	"github.com/docflow/docflow/internal/notify"
+	"github.com/docflow/docflow/internal/oidc"
 	"github.com/docflow/docflow/internal/onlyoffice"
+	"github.com/docflow/docflow/internal/search"
 	"github.com/docflow/docflow/internal/settings"
 	"github.com/docflow/docflow/internal/share"
 	"github.com/docflow/docflow/internal/tagging"
 	"github.com/docflow/docflow/internal/tasks"
 	"github.com/docflow/docflow/internal/team"
 	"github.com/docflow/docflow/internal/upload"
+	"github.com/docflow/docflow/internal/webhook"
 	"github.com/docflow/docflow/internal/webpkg"
 )
 
@@ -155,12 +158,23 @@ func main() {
 		webpkg.Remove(storage, prefix)
 		return nil
 	})
+	// Webhook 通知渠道（v1.1）：用户自助注册回调 URL，站内通知事件转发
+	//（HMAC 签名投递经 task:webhook-delivery 队列异步执行，见下方接线）。
+	webhookStore := webhook.NewGormStore(db)
+	webhookService := webhook.NewService(webhookStore)
+	webhookDispatcher := webhook.NewDispatcher(webhookStore)
 	// 后台任务队列（多实例横向扩展：无本地状态、任意实例可处理）：
 	// 默认 inprocess（进程内 goroutine，零依赖，行为与原内联实现一致）；
 	// QUEUE_DRIVER=redis 时经 asynq 入队（启动 ping 校验失败即 fatal），
 	// 由任意实例的 worker 消费。两种驱动共用同一组处理函数。
+	// 全文检索（v2 规划 Meilisearch，本批次 PostgreSQL 原生）：索引构建
+	// 经 task:search-index 队列异步执行（见下方 fileComplete 钩子接线）。
+	searchStore := search.NewStore(search.NewGormRepo(db))
+	searchIndexer := search.NewIndexer(searchStore, db, storage)
 	completeUpload := tasks.CompleteUploadHandler(uploadService, auditStore)
 	extractWebpkg := tasks.ExtractWebpkgHandler(webpkgService)
+	searchIndex := tasks.SearchIndexHandler(searchIndexer)
+	webhookDelivery := webhookDispatcher.DeliverTask
 	var enqueuer tasks.Enqueuer
 	var inProcess *tasks.InProcess
 	var shutdownQueue func()
@@ -175,7 +189,7 @@ func main() {
 		enqueuer = tasks.NewRedisAsynq(cfg.RedisAddr, cfg.RedisPassword)
 		// 本实例同时作为 worker 消费任务（任意实例入队的任务均可处理）。
 		server := tasks.NewAsynqServer(cfg.RedisAddr, cfg.RedisPassword, cfg.QueueConcurrency)
-		if err := server.Start(tasks.NewMux(completeUpload, extractWebpkg)); err != nil {
+		if err := server.Start(tasks.NewMux(completeUpload, extractWebpkg, searchIndex, webhookDelivery)); err != nil {
 			log.Fatalf("asynq worker: %v", err)
 		}
 		// Shutdown 等待在处理任务结束；包一层超时防止个别任务卡死拖住退出。
@@ -193,15 +207,19 @@ func main() {
 		}
 		log.Printf("queue driver: redis (addr=%s concurrency=%d)", cfg.RedisAddr, cfg.QueueConcurrency)
 	default:
-		inProcess = tasks.NewInProcess(completeUpload, extractWebpkg)
+		inProcess = tasks.NewInProcess(completeUpload, extractWebpkg, searchIndex, webhookDelivery)
 		enqueuer = inProcess
 		log.Print("queue driver: inprocess")
 	}
-	// 上传完成钩子：网页包自动解包统一经队列派发（inprocess 时即原
-	//「goroutine 内 AutoExtract」行为；zip 候选判定在处理侧）。
+	// 上传完成钩子（新建与覆盖版本两条成功路径均触发，见 upload.Complete）：
+	// 网页包自动解包与全文索引构建统一经队列派发（inprocess 时即原
+	//「goroutine 内联执行」行为；候选判定在处理侧）。
 	uploadService.SetFileCompleteHook(func(fileID uuid.UUID) {
 		if err := enqueuer.EnqueueExtractWebpkg(fileID); err != nil {
 			log.Printf("[tasks] enqueue extract-webpkg %s: %v", fileID, err)
+		}
+		if err := enqueuer.EnqueueSearchIndex(fileID); err != nil {
+			log.Printf("[tasks] enqueue search-index %s: %v", fileID, err)
 		}
 	})
 	shareService := share.NewService(share.NewGormStore(db), fileStore)
@@ -227,6 +245,9 @@ func main() {
 	// 个人访问令牌（PAT）：api_tokens（migration 016），Bearer dfpat_ 前缀
 	// 凭证经 RequireAccessToken 双路径校验（见 internal/auth）。
 	service.SetTokenStore(auth.NewGormAPITokenStore(db))
+	// 两步验证（TOTP，v2 设计）：user_totp（migration 020）；enabled 用户
+	// /login 一律 401 TOTP_REQUIRED，经 /auth/login/totp 二段提交。
+	service.SetTOTPStore(auth.NewGormTOTPStore(db))
 	// 邀请制注册：邀请生命周期管理 + 邮件通道（邀请/重置链接）。
 	// SMTP_ENABLED=true 时经 net/smtp 投递；默认 Noop 仅日志输出链接，
 	// 不建立任何网络连接。PUBLIC_BASE_URL 用于拼接邮件中的绝对链接。
@@ -238,6 +259,44 @@ func main() {
 	} else {
 		log.Print("mail transport: noop (invitation/reset links are logged only)")
 	}
+	// 邮件通知渠道（v1.1）：通知落库后按用户邮箱发送纯文本副本（Noop 时
+	// 仅日志）；与站内通知共用同一偏好开关（偏好关闭时两者一并短路）。
+	notifyService.SetMailNotifier(func(uid uuid.UUID, eventType, title, body string) {
+		user, err := userStore.GetByID(uid)
+		if err != nil {
+			log.Printf("[notify] mail: lookup user %s: %v", uid, err)
+			return
+		}
+		if err := mailer.SendNotification(user.Email, title, body); err != nil {
+			log.Printf("[notify] mail: send to %s: %v", user.Email, err)
+		}
+	})
+	// Webhook 通知渠道接线：通知落库后查该用户启用了该事件的 hook，
+	// 逐个组装投递载荷入队 task:webhook-delivery（inprocess/redis 均可消费；
+	// 投递由 webhook.Dispatcher 执行：签名 + 超时 10s + 3 次退避重试 +
+	// 连续失败自动禁用）。
+	notifyService.SetWebhookEnqueuer(func(uid uuid.UUID, eventType, title, body string, resourceID uuid.UUID) {
+		hooks, err := webhookService.HooksForEvent(uid, eventType)
+		if err != nil {
+			log.Printf("[notify] webhook: list hooks for user %s: %v", uid, err)
+			return
+		}
+		for _, hook := range hooks {
+			var resource *uuid.UUID
+			if resourceID != uuid.Nil {
+				id := resourceID
+				resource = &id
+			}
+			payload, err := webhook.MarshalDelivery(hook.ID, uid, eventType, title, body, resource)
+			if err != nil {
+				log.Printf("[notify] webhook: marshal delivery for hook %s: %v", hook.ID, err)
+				continue
+			}
+			if err := enqueuer.EnqueueWebhookDelivery(payload); err != nil {
+				log.Printf("[tasks] enqueue webhook-delivery for hook %s: %v", hook.ID, err)
+			}
+		}
+	})
 	router := gin.Default()
 	// 可信代理（TRUSTED_PROXIES，逗号分隔 CIDR/IP）：控制 gin ClientIP 是否
 	// 采信 X-Forwarded-For。默认空 = 不信任任何代理（ClientIP 取 RemoteAddr），
@@ -250,17 +309,39 @@ func main() {
 	// 标签与收藏：Tag CRUD / 文件打去标签 / is_starred / 列表过滤
 	//（文件读授权复用 fileStore.Get 的 authorizeFileAccess 语义）。
 	handler.SetTagging(tagging.NewService(tagging.NewGormRepo(db), fileStore))
+	// 全文检索：GET /api/v1/search（文件名 + 文本内容；索引构建经队列）。
+	handler.SetSearch(searchStore)
 	// 站内通知：列表/已读/未读数与通知偏好端点（本人维度）。
 	handler.SetNotifications(notifyService)
+	// Webhook 通知渠道端点（本人维度）：注册/列举/启停/删除。
+	handler.SetWebhooks(webhookService)
 	// 后台补完任务经队列派发（tus PATCH 写满后入队；inprocess 行为不变）。
 	handler.SetTaskEnqueuer(enqueuer)
 	// 管理端：系统设置（system_settings）、基础统计与 admin 角色查询。
 	handler.SetSettingsService(settingsStore)
 	handler.SetStatsSource(httpapi.NewAdminStats(db))
 	handler.SetRoleLookup(userStore)
+	// 个人仪表盘概览统计（v1.1）：文件聚合复用 fileStore，分享/上传计数直查 DB。
+	handler.SetDashboardSource(httpapi.NewDashboardSource(fileStore, db))
 	// 邀请制注册与邮件通道（POST /api/v1/admin/invitations、/api/v1/auth/register、
 	// /forgot-password、/reset-password）。
 	handler.SetInvites(inviteService, mailer, cfg.PublicBaseURL)
+	// OIDC 单点登录（v2）：启用时启动即拉取发现文档（失败 fatal——IdP
+	// 不可达则 SSO 形同虚设，宁可拒启）；login/callback 路由随之注册，
+	// config 探测端点恒注册（禁用时 enabled=false）。用户映射：sub 关联
+	//（oidc_links，migration 021）→ email 匹配 → 自动开户
+	//（OIDC_AUTO_PROVISION，默认 true）。SSO 信任 IdP 认证强度，跳过
+	// 本地 TOTP 二验（密码登录的 TOTP 拦截不变）。
+	if cfg.OIDCEnabled {
+		provider, err := oidc.Discover(ctx, cfg.OIDCIssuer)
+		if err != nil {
+			log.Fatalf("oidc discovery: %v", err)
+		}
+		oidcSvc := oidc.NewService(oidc.New(provider, cfg.OIDCClientID, cfg.OIDCClientSecret, cfg.OIDCRedirectURL), oidc.NewGormLinkStore(db), userStore, cfg.OIDCAutoProvision)
+		oidcSvc.SetAuditRecorder(auditStore)
+		handler.SetOIDC(oidcSvc)
+		log.Printf("oidc sso enabled (issuer=%s redirect=%s auto_provision=%t)", cfg.OIDCIssuer, cfg.OIDCRedirectURL, cfg.OIDCAutoProvision)
+	}
 	// ONLYOFFICE 集成：启用时注入服务（挂载 /api/v1/onlyoffice 路由；
 	// 编辑配置/下载 token 用 ONLYOFFICE_JWT_SECRET 签名，回调保存复用
 	// AddVersion+Prune 的版本链路，下载大小上限沿用 MAX_FILE_SIZE）。
