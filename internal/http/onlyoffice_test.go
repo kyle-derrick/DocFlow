@@ -270,6 +270,14 @@ func TestOnlyOfficeSessionAndCallbackEndpoints(t *testing.T) {
 	if !strings.HasPrefix(docURL, "http://backend:8080/api/v1/onlyoffice/download/") {
 		t.Fatalf("document.url = %q", docURL)
 	}
+	// 未接线写授权器（SetWriteAuthorizer）：session 保守降级只读会话。
+	editorConfig := config["editorConfig"].(map[string]any)
+	if editorConfig["mode"] != "view" {
+		t.Fatalf("mode without write authorizer = %v, want view (fail closed)", editorConfig["mode"])
+	}
+	if perms := document["permissions"].(map[string]any); perms["edit"] != false {
+		t.Fatalf("permissions.edit without write authorizer = %v, want false", perms["edit"])
+	}
 
 	// 无 Bearer 访问 session → 401。
 	req = httptest.NewRequest(http.MethodPost, "/api/v1/onlyoffice/session", strings.NewReader(`{"file_id":"`+store.file.ID.String()+`"}`))

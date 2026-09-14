@@ -3,13 +3,13 @@ package http
 import (
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/docflow/docflow/internal/audit"
 	"github.com/docflow/docflow/internal/share"
+	"github.com/docflow/docflow/internal/upload"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
@@ -266,6 +266,7 @@ func (h *Handler) publicShareInfo(c *gin.Context) {
 
 // publicShareDownload GET /api/v1/public/shares/:token/download 公开流式下载。
 // 校验权限与 ObjectBlob 可用性，成功时已原子递增分享与文件下载计数，并写入审计。
+// 存储读取失败（500）时经 DecrementDownload 补偿回退已消耗的分享/文件计数。
 // 同样支持 Range 与 Content-Disposition。
 func (h *Handler) publicShareDownload(c *gin.Context) {
 	r, err := h.shares.ResolveForDownload(c.Param("token"))
@@ -278,34 +279,30 @@ func (h *Handler) publicShareDownload(c *gin.Context) {
 		c.JSON(http.StatusRequestedRangeNotSatisfiable, gin.H{"error": "invalid range"})
 		return
 	}
-	reader, err := h.storage.Read(r.Blob.StorageKey)
+	// 区间读取统一走 upload.ReadSection（S3 原生 Range / LocalStorage Seek；
+	// 无 Range 时整读 [0, size)），不再依赖 io.Seeker 断言。
+	start, length := int64(0), r.Blob.Size
+	if hasRange {
+		start, length = fileRange.Start, fileRange.Length()
+	}
+	reader, err := upload.ReadSection(h.storage, r.Blob.StorageKey, start, length)
 	if err != nil {
+		_ = h.shares.DecrementDownload(r)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to read file"})
 		return
 	}
 	defer reader.Close()
-	seeker, ok := reader.(io.Seeker)
-	if hasRange && !ok {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to read file"})
-		return
-	}
 	h.recordAudit(c, audit.Entry{UserID: nil, Action: audit.ActionPublicDownload, ResourceType: audit.ResourceShare, ResourceID: r.Share.ID.String(), Metadata: `{"file_id":"` + r.File.ID.String() + `","size":` + strconv.FormatInt(r.Blob.Size, 10) + `}`})
 	status := http.StatusOK
 	contentLength := r.Blob.Size
-	var body io.Reader = reader
 	if hasRange {
 		status = http.StatusPartialContent
 		contentLength = fileRange.Length()
-		if _, serr := seeker.Seek(fileRange.Start, io.SeekStart); serr != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to read file"})
-			return
-		}
-		body = io.LimitReader(reader, fileRange.Length())
 		c.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", fileRange.Start, fileRange.End, r.Blob.Size))
 	}
 	c.Header("Content-Disposition", contentDisposition(r.File.Name))
 	c.Header("Accept-Ranges", "bytes")
-	c.DataFromReader(status, contentLength, r.Blob.MimeType, body, nil)
+	c.DataFromReader(status, contentLength, r.Blob.MimeType, reader, nil)
 }
 
 // parseShareFileParams 解析 /api/v1/shares/:id/files/:fid 路径参数。
@@ -364,6 +361,7 @@ func (h *Handler) shareFileInfo(c *gin.Context) {
 
 // shareFileDownload GET /api/v1/shares/:id/files/:fid/download：私有分享流式下载（登录用户）。
 // 校验授权与下载权限，成功时原子递增分享与文件下载计数，支持 Range。
+// 存储读取失败（500）时经 DecrementDownload 补偿回退已消耗的分享/文件计数。
 func (h *Handler) shareFileDownload(c *gin.Context) {
 	shareID, fileID, ok := h.parseShareFileParams(c)
 	if !ok {
@@ -380,34 +378,29 @@ func (h *Handler) shareFileDownload(c *gin.Context) {
 		c.JSON(http.StatusRequestedRangeNotSatisfiable, gin.H{"error": "invalid range"})
 		return
 	}
-	reader, err := h.storage.Read(r.Blob.StorageKey)
+	// 同公开下载：区间读取统一走 upload.ReadSection。
+	start, length := int64(0), r.Blob.Size
+	if hasRange {
+		start, length = fileRange.Start, fileRange.Length()
+	}
+	reader, err := upload.ReadSection(h.storage, r.Blob.StorageKey, start, length)
 	if err != nil {
+		_ = h.shares.DecrementDownload(r)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to read file"})
 		return
 	}
 	defer reader.Close()
-	seeker, isSeeker := reader.(io.Seeker)
-	if hasRange && !isSeeker {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to read file"})
-		return
-	}
 	h.recordAudit(c, audit.Entry{UserID: &user, Action: audit.ActionPublicDownload, ResourceType: audit.ResourceShare, ResourceID: r.Share.ID.String(), Metadata: `{"file_id":"` + r.File.ID.String() + `","size":` + strconv.FormatInt(r.Blob.Size, 10) + `,"access":"private"}`})
 	status := http.StatusOK
 	contentLength := r.Blob.Size
-	var body io.Reader = reader
 	if hasRange {
 		status = http.StatusPartialContent
 		contentLength = fileRange.Length()
-		if _, serr := seeker.Seek(fileRange.Start, io.SeekStart); serr != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to read file"})
-			return
-		}
-		body = io.LimitReader(reader, fileRange.Length())
 		c.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", fileRange.Start, fileRange.End, r.Blob.Size))
 	}
 	c.Header("Content-Disposition", contentDisposition(r.File.Name))
 	c.Header("Accept-Ranges", "bytes")
-	c.DataFromReader(status, contentLength, r.Blob.MimeType, body, nil)
+	c.DataFromReader(status, contentLength, r.Blob.MimeType, reader, nil)
 }
 
 // shareFilePreview GET /api/v1/shares/:id/files/:fid/preview：私有分享内联预览（登录用户）。

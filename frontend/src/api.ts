@@ -187,6 +187,10 @@ export interface ShareItem {
   download_count: number
   revoked_at: string | null
   created_at: string
+  /** 可见性（列表响应返回：public|private；旧后端/创建响应可能缺省）。 */
+  visibility?: 'public' | 'private'
+  /** 关联文件名（列表响应返回；文件已删除或旧后端时为空/缺省）。 */
+  file_name?: string | null
 }
 
 export interface CreatedShare extends ShareItem {
@@ -411,12 +415,13 @@ export interface CreateShareOptions {
 }
 
 /**
- * 分享可见性/token 的前端内存态：契约约定列表与私有分享响应不回传 token 与
- * visibility（明文 token 仅公开分享创建时返回一次），故创建时暂存于内存 Map，
- * 供「我的分享」页展示链接与可见性；刷新页面后丢失（等价于“创建时已展示”）。
+ * 分享明文 token 的前端内存态：契约约定列表与私有分享响应不回传明文
+ * token（仅公开分享创建时返回一次），故创建时暂存于内存 Map，供「我的
+ * 分享」页展示复制链接；刷新页面后丢失（等价于“创建时已展示”）。
+ * 可见性/文件名已由列表响应后端字段提供（ShareItem.visibility/file_name），
+ * 不再依赖内存态。
  */
 export interface ShareMeta {
-  visibility: 'public' | 'private'
   token?: string
 }
 
@@ -439,7 +444,7 @@ export async function createShare(opts: CreateShareOptions): Promise<CreatedShar
     if (opts.teamIds?.length) body.team_ids = opts.teamIds
   }
   const created = await api<CreatedShare>('/api/v1/shares', jsonInit('POST', body))
-  rememberShareMeta(created.id, { visibility: opts.visibility, token: created.token ?? undefined })
+  rememberShareMeta(created.id, { token: created.token ?? undefined })
   return created
 }
 
@@ -571,7 +576,17 @@ async function runUploadSession(
   }
 
   onProgress('completing')
-  let done = await api<UploadSession>(`/api/v1/uploads/${session.id}/complete`, { method: 'POST' })
+  // /complete 对隔离终态直接回 409 {"error":"scan rejected"}（不进入轮询），
+  // 映射为与轮询路径一致的中文隔离文案；其余错误原样抛出。
+  let done: UploadSession
+  try {
+    done = await api<UploadSession>(`/api/v1/uploads/${session.id}/complete`, { method: 'POST' })
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 409 && err.message.includes('scan rejected')) {
+      throw new ApiError(409, '文件未通过安全扫描，已被隔离')
+    }
+    throw err
+  }
   while (done.status === 'uploading' || done.status === 'verifying' || done.status === 'scanning') {
     onProgress(done.status)
     await sleep(800)

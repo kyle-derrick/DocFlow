@@ -40,6 +40,11 @@ func (s *Service) SetEnabled(v bool) { s.enabled = v }
 
 // AutoExtract 上传完成钩子的自动入口：仅对 zip 候选文件尝试解包，
 // 失败置 blocked/failed 不影响文件本身可用性；任何错误仅记日志。
+// 版本失效处理：已是 zip 包但新版本不再是 zip 候选时，将行置 blocked
+// （error='superseded by non-archive version'），防止旧版本解包内容继续
+// 对外提供（Resolve 的 source_blob_sha256 校验另行兜底）。
+// 注意：WEBPKG_ENABLED=false 时本函数直接返回，不执行 superseded 标记——
+// 旧包内容仍由 Resolve 的版本一致性校验拦截。
 func (s *Service) AutoExtract(fileID uuid.UUID) {
 	if s == nil || !s.enabled || s.repo == nil || s.files == nil || s.storage == nil {
 		return
@@ -49,7 +54,14 @@ func (s *Service) AutoExtract(fileID uuid.UUID) {
 		return // 文件不存在/已删除：无需解包
 	}
 	_, blob, err := s.files.CurrentVersion(f.OwnerID, fileID)
-	if err != nil || !ZipCandidate(blob.MimeType, f.Name) {
+	if err != nil {
+		return
+	}
+	if !ZipCandidate(blob.MimeType, f.Name) {
+		// 新版本非 zip 候选：既有包行置 blocked（无行则无事可做）。
+		if pkg, gerr := s.repo.GetByFileID(fileID); gerr == nil {
+			_ = s.repo.SetResult(pkg.ID, StatusBlocked, "superseded by non-archive version", 0, 0, "")
+		}
 		return
 	}
 	if _, err := s.ExtractForFile(fileID); err != nil {
@@ -59,8 +71,9 @@ func (s *Service) AutoExtract(fileID uuid.UUID) {
 
 // ExtractForFile 对文件当前版本执行解包（手动端点与自动钩子共用）。
 // 幂等重建：web_packages 行与 public_id 首次创建后保持稳定，重跑先按
-// 内部清单删除旧 key 再解包。返回最终状态的行；解包失败时也返回行
-// （status=blocked/failed，附原因），便于调用方展示。
+// 内部清单删除旧 key 再解包。并发互斥：既有行经 TryMarkExtracting 条件
+// 更新抢占（他人解包进行中时直接返回当前行，不重复解包）。返回最终状态
+// 的行；解包失败时也返回行（status=blocked/failed，附原因），便于调用方展示。
 func (s *Service) ExtractForFile(fileID uuid.UUID) (Package, error) {
 	f, err := s.files.GetFileByID(fileID)
 	if err != nil {
@@ -88,8 +101,15 @@ func (s *Service) ExtractForFile(fileID uuid.UUID) (Package, error) {
 	case err != nil:
 		return Package{}, err
 	default:
-		_ = s.repo.SetResult(pkg.ID, StatusExtracting, "", 0, 0)
-		pkg.Status, pkg.Error, pkg.EntryCount, pkg.TotalSize = StatusExtracting, "", 0, 0
+		// 并发互斥：条件更新抢占 extracting；0 行受影响 = 他人解包进行中，直接返回。
+		marked, merr := s.repo.TryMarkExtracting(fileID)
+		if merr != nil {
+			return Package{}, merr
+		}
+		if !marked {
+			return pkg, nil
+		}
+		pkg.Status, pkg.Error, pkg.EntryCount, pkg.TotalSize = StatusExtracting, nil, 0, 0
 	}
 
 	prefix := "webpkg/" + pkg.PublicID
@@ -98,8 +118,9 @@ func (s *Service) ExtractForFile(fileID uuid.UUID) (Package, error) {
 
 	r, rerr := s.storage.Read(blob.StorageKey)
 	if rerr != nil {
-		_ = s.repo.SetResult(pkg.ID, StatusFailed, rerr.Error(), 0, 0)
-		pkg.Status, pkg.Error = StatusFailed, rerr.Error()
+		_ = s.repo.SetResult(pkg.ID, StatusFailed, rerr.Error(), 0, 0, blob.SHA256)
+		pkg.Status = StatusFailed
+		pkg.Error = nullableStr(rerr.Error())
 		return pkg, rerr
 	}
 	stats, xerr := Extract(s.storage, r, prefix, s.limits)
@@ -109,14 +130,16 @@ func (s *Service) ExtractForFile(fileID uuid.UUID) (Package, error) {
 		if errors.Is(xerr, ErrWebpkgInvalid) {
 			status = StatusBlocked
 		}
-		_ = s.repo.SetResult(pkg.ID, status, xerr.Error(), 0, 0)
-		pkg.Status, pkg.Error = status, xerr.Error()
+		_ = s.repo.SetResult(pkg.ID, status, xerr.Error(), 0, 0, blob.SHA256)
+		pkg.Status = status
+		pkg.Error = nullableStr(xerr.Error())
 		return pkg, xerr
 	}
-	if serr := s.repo.SetResult(pkg.ID, StatusReady, "", stats.EntryCount, stats.TotalSize); serr != nil {
+	if serr := s.repo.SetResult(pkg.ID, StatusReady, "", stats.EntryCount, stats.TotalSize, blob.SHA256); serr != nil {
 		return pkg, serr
 	}
-	pkg.Status, pkg.Error, pkg.EntryCount, pkg.TotalSize = StatusReady, "", stats.EntryCount, stats.TotalSize
+	pkg.Status, pkg.Error, pkg.EntryCount, pkg.TotalSize = StatusReady, nil, stats.EntryCount, stats.TotalSize
+	pkg.SourceBlobSHA256 = nullableStr(blob.SHA256)
 	return pkg, nil
 }
 
@@ -135,7 +158,9 @@ func (s *Service) ReadyPackage(fileID uuid.UUID) (string, bool) {
 // Resolve 按 publicId + 相对路径取内容 reader 与推断的 Content-Type。
 // 校验（任一失败返回 ok=false，HTTP 侧统一 404 不泄露细节）：
 // public_id 形如 43 字符 URL-safe 串、包 ready、文件未删除、当前版本
-// blob available、相对路径通过清理与扩展名白名单、内容键存在。
+// blob available、包记录的 source_blob_sha256 与当前版本一致（版本更替后
+// 旧包失效，需重新解包；migration 013 前的旧行无记录同样拒绝）、相对路径
+// 通过清理与扩展名白名单、内容键存在。
 // svg 返回 image/svg+xml，由 HTTP 层以最严格 CSP（sandbox）提供。
 func (s *Service) Resolve(publicID, relPath string) (io.ReadCloser, string, bool) {
 	if s == nil || s.repo == nil || s.files == nil || s.storage == nil {
@@ -154,6 +179,11 @@ func (s *Service) Resolve(publicID, relPath string) (io.ReadCloser, string, bool
 	}
 	_, blob, err := s.files.CurrentVersion(f.OwnerID, pkg.FileID)
 	if err != nil || blob.Status != files.BlobStatusAvailable {
+		return nil, "", false
+	}
+	// 版本失效校验：包解包自的 blob 与当前版本不一致（版本已更替/旧行无记录）
+	// 时视为不存在，防止继续提供旧版本内容。
+	if pkg.SourceBlobSHA256 == nil || *pkg.SourceBlobSHA256 != blob.SHA256 {
 		return nil, "", false
 	}
 	clean, contentType, ok := ResolvePath(relPath, s.limits.MaxDepth)

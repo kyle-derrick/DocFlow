@@ -78,8 +78,8 @@ func webpkgJSON(p webpkg.Package) gin.H {
 	if p.Status == webpkg.StatusReady {
 		out["public_id"] = p.PublicID
 	}
-	if p.Error != "" {
-		out["error"] = p.Error
+	if p.Error != nil {
+		out["error"] = *p.Error
 	}
 	return out
 }

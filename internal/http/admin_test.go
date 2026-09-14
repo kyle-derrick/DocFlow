@@ -48,7 +48,7 @@ func adminContext(method, target, body string) (*gin.Context, *httptest.Response
 func TestListAdminSettings(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	h := &Handler{settings: &fakeSettingsService{views: []settings.SettingView{
-		{Key: settings.KeySiteName, Value: "DocFlow", Type: settings.TypeString, Description: "站点名称", Default: "DocFlow"},
+		{Key: settings.KeyUploadMaxFileSize, Value: int64(1 << 30), Type: settings.TypeInt, Description: "单文件上传大小上限（字节）", Default: int64(1 << 30)},
 	}}}
 	c, w := adminContext(http.MethodGet, "/api/v1/admin/settings", "")
 	h.listAdminSettings(c)
@@ -56,7 +56,7 @@ func TestListAdminSettings(t *testing.T) {
 		t.Fatalf("status = %d, want 200 (body: %s)", w.Code, w.Body.String())
 	}
 	body := w.Body.String()
-	for _, want := range []string{`"key":"site.name"`, `"value":"DocFlow"`, `"type":"string"`, `"description"`} {
+	for _, want := range []string{`"key":"upload.max_file_size"`, `"value":1073741824`, `"type":"int"`, `"description"`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("body %s must contain %s", body, want)
 		}

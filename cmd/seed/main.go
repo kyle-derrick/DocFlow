@@ -1,8 +1,9 @@
 // Command seed 创建开发/运维用的管理员账号。
 // 邮箱与密码必须通过环境变量提供，不允许硬编码默认密码。
+// 邮箱统一小写归一后写入与匹配（重跑幂等）。
 //
-//	SEED_ADMIN_EMAIL     管理员邮箱（必填）
-//	SEED_ADMIN_PASSWORD  管理员密码（必填，至少 12 字符，须含大小写字母和数字）
+//	SEED_ADMIN_EMAIL     管理员邮箱（必填，写入前统一转小写）
+//	SEED_ADMIN_PASSWORD  管理员密码（必填，至少 12 个字符，须含大小写字母和数字）
 //	SEED_ADMIN_USERNAME  管理员用户名（默认取邮箱 @ 前部分，3-32 字符）
 //	SEED_ADMIN_ROLE      账号角色：user | admin（默认 admin）
 //	DATABASE_URL         PostgreSQL 连接串（必填，复用服务端配置）
@@ -65,19 +66,26 @@ func main() {
 	fmt.Printf("admin user %s (%s, role=%s) is ready\n", username, email, role)
 }
 
+// seedAdmin upsert 管理员账号：
+//   - 冲突更新带 WHERE users.status='active'：disabled/locked 账号不被重跑
+//     seed 复活、也不改写其密码/角色/用户名（取舍：需运维显式重新启用账号
+//     后再次 seed 才会更新；active 账号的 username/password/role 仍按最新
+//     环境变量更新，保持重跑即改密的运维习惯）。
 func seedAdmin(db *gorm.DB, username, email, passwordHash, role string) error {
 	result := db.Exec(`
 INSERT INTO users (username, email, password_hash, status, role)
 VALUES (?, ?, ?, 'active', ?)
 ON CONFLICT (email) DO UPDATE
-SET username = EXCLUDED.username, password_hash = EXCLUDED.password_hash, status = 'active', role = EXCLUDED.role, updated_at = now()`,
+SET username = EXCLUDED.username, password_hash = EXCLUDED.password_hash, role = EXCLUDED.role, updated_at = now()
+WHERE users.status = 'active'`,
 		username, email, passwordHash, role)
 	return result.Error
 }
 
-// validatePassword 校验密码强度：至少 12 字节，且同时包含大写、小写和数字。
+// validatePassword 校验密码强度：至少 12 个字符（按 Unicode 字符计数，
+// 避免多字节字符被字节计数误判），且同时包含大写、小写和数字。
 func validatePassword(password string) error {
-	if len(password) < 12 {
+	if len([]rune(password)) < 12 {
 		return fmt.Errorf("password must be at least 12 characters")
 	}
 	var hasUpper, hasLower, hasDigit bool

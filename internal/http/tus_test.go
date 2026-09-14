@@ -169,6 +169,73 @@ func waitUploadStatus(t *testing.T, store *upload.MemoryStore, id uuid.UUID, wan
 
 // --- metadata 解析（纯函数） ---
 
+// TestTusCreateMetadataTooLong Upload-Metadata 超过 2048 字节（会话 metadata
+// 列上限）直接 400，不落库。
+func TestTusCreateMetadataTooLong(t *testing.T) {
+	env := newTusTestEnv(t)
+	long := "filename " + b64("a.txt") + ",note " + b64(strings.Repeat("x", 3000))
+	if w := tusCreate(env.router, "3", long); w.Code != http.StatusBadRequest {
+		t.Fatalf("oversized metadata: status = %d, want 400", w.Code)
+	}
+	if w := tusCreate(env.router, "3", env.tusMeta("filename "+b64("a.txt"))); w.Code != http.StatusCreated {
+		t.Fatalf("normal metadata still accepted: status = %d", w.Code)
+	}
+}
+
+// TestUploadsEndpointsOwnerIsolation /api/v1/uploads/:id 三端点（PATCH/
+// complete/GET）归属校验：非属主一律 404，不泄露存在性（与 tus 同语义）。
+func TestUploadsEndpointsOwnerIsolation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store := upload.NewMemoryStore()
+	svc := upload.NewService(store, newMemStorage(), time.Hour, tusTestMaxSize, false, nil, nil)
+	owner := uuid.New()
+	build := func(user uuid.UUID) *gin.Engine {
+		h := NewHandler(nil, nil, nil, nil, nil, svc, newMemStorage(), false, "", 0)
+		router := gin.New()
+		api := router.Group("/api/v1")
+		api.Use(func(c *gin.Context) {
+			c.Set(auth.UserIDContextKey, user)
+			c.Next()
+		})
+		api.GET("/uploads/:id", h.getUpload)
+		api.PATCH("/uploads/:id", h.patchUpload)
+		api.POST("/uploads/:id/complete", h.completeUpload)
+		return router
+	}
+	sess, err := svc.Start(owner, uuid.New(), "a.txt", 3, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := sess.ID.String()
+	other := build(uuid.New())
+	do := func(r *gin.Engine, method, path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader("abc"))
+		if method == http.MethodPatch {
+			req.Header.Set("Upload-Offset", "0")
+		}
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		return w
+	}
+	if w := do(other, http.MethodGet, "/api/v1/uploads/"+id); w.Code != http.StatusNotFound {
+		t.Fatalf("other owner GET: %d, want 404", w.Code)
+	}
+	if w := do(other, http.MethodPatch, "/api/v1/uploads/"+id); w.Code != http.StatusNotFound {
+		t.Fatalf("other owner PATCH: %d, want 404", w.Code)
+	}
+	if w := do(other, http.MethodPost, "/api/v1/uploads/"+id+"/complete"); w.Code != http.StatusNotFound {
+		t.Fatalf("other owner complete: %d, want 404", w.Code)
+	}
+	// 属主路径不受影响（写满后手动 complete 可用）。
+	mine := build(owner)
+	if w := do(mine, http.MethodPatch, "/api/v1/uploads/"+id); w.Code != http.StatusOK {
+		t.Fatalf("owner PATCH: %d body=%s", w.Code, w.Body.String())
+	}
+	if w := do(mine, http.MethodPost, "/api/v1/uploads/"+id+"/complete"); w.Code != http.StatusOK {
+		t.Fatalf("owner complete: %d body=%s", w.Code, w.Body.String())
+	}
+}
+
 func TestParseTusMetadata(t *testing.T) {
 	meta, err := parseTusMetadata("filename " + b64("hello world.txt") + ",filetype " + b64("text/plain") + ",is_confirmed")
 	if err != nil {

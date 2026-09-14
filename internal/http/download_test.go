@@ -26,7 +26,7 @@ func TestParseRange(t *testing.T) {
 		{header: "bytes=", size: 100, err: true},
 		{header: "bytes=5", size: 100, err: true},
 		{header: "bytes=a-b", size: 100, err: true},
-		{header: "bytes=0-4,10-14", size: 100, err: true},
+		{header: "bytes=0-4,10-14", size: 100, want: byteRange{}, ok: false, err: false},
 		{header: "chars=0-4", size: 100, err: true},
 		{header: "bytes=--5", size: 100, err: true},
 		{header: "bytes=-0", size: 100, err: true},

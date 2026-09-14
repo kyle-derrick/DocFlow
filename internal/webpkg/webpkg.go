@@ -91,9 +91,14 @@ type Package struct {
 	EntryCount int       `gorm:"not null;default:0"`
 	TotalSize  int64     `gorm:"not null;default:0"`
 	Status     string    `gorm:"size:16;not null"`
-	Error      string    `gorm:"type:text"`
-	CreatedAt  time.Time `gorm:"not null"`
-	UpdatedAt  time.Time `gorm:"not null"`
+	// Error 为失败/拦截原因（可空指针，空值落 NULL，修复旧模型 string 空串歧义）。
+	Error *string `gorm:"type:text"`
+	// SourceBlobSHA256 记录解包时源文件当前版本的 blob sha256（可空，migration 013；
+	// 旧数据不回填）。Resolve 比对其与文件当前版本是否一致，版本更替后旧包
+	// 内容不再对外提供。
+	SourceBlobSHA256 *string   `gorm:"type:char(64)"`
+	CreatedAt        time.Time `gorm:"not null"`
+	UpdatedAt        time.Time `gorm:"not null"`
 }
 
 // TableName 显式映射到 web_packages。

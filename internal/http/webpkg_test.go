@@ -56,6 +56,10 @@ func (f *webpkgFakeSource) IncrementViewCount(owner, id uuid.UUID) error {
 	return nil
 }
 
+// webpkgSourceSHA 为内容/预览链路 fake blob 的固定 sha256
+// （Resolve 校验包 source_blob_sha256 与当前版本一致，空串会被拒绝）。
+const webpkgSourceSHA = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
 // buildWebpkgZip 构造含 index.html 与 svg 资源的合法网页包。
 func buildWebpkgZip(t *testing.T) []byte {
 	t.Helper()
@@ -99,7 +103,7 @@ func newWebpkgContentRouter(t *testing.T, rateLimit int) (*gin.Engine, string) {
 		owner:   owner,
 		file:    files.File{ID: uuid.New(), Name: "site.zip", OwnerID: owner, Type: "file"},
 		version: files.FileVersion{Version: 1},
-		blob:    files.ObjectBlob{StorageKey: "objects/pkg", Size: int64(len(zipBytes)), MimeType: "application/zip", Status: files.BlobStatusAvailable},
+		blob:    files.ObjectBlob{StorageKey: "objects/pkg", Size: int64(len(zipBytes)), MimeType: "application/zip", Status: files.BlobStatusAvailable, SHA256: webpkgSourceSHA},
 	}
 	svc := webpkg.NewService(webpkg.NewMemoryRepo(), source, storage, webpkg.DefaultLimits())
 	if _, err := svc.ExtractForFile(source.file.ID); err != nil {
@@ -213,7 +217,7 @@ func newWebpkgShareRouter(t *testing.T, extract bool) (*gin.Engine, *webpkgFakeS
 		owner:   owner,
 		file:    files.File{ID: uuid.New(), Name: "site.zip", OwnerID: owner, Type: "file"},
 		version: files.FileVersion{Version: 1},
-		blob:    files.ObjectBlob{StorageKey: "objects/pkg", Size: int64(len(zipBytes)), MimeType: "application/zip", Status: files.BlobStatusAvailable},
+		blob:    files.ObjectBlob{StorageKey: "objects/pkg", Size: int64(len(zipBytes)), MimeType: "application/zip", Status: files.BlobStatusAvailable, SHA256: webpkgSourceSHA},
 	}
 	svc := webpkg.NewService(webpkg.NewMemoryRepo(), source, storage, webpkg.DefaultLimits())
 	if extract {

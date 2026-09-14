@@ -33,6 +33,7 @@ func hasControlCharacter(s string) bool {
 // 拒绝（返回 ErrWebpkgInvalid 包装的原因）：
 //   - 空路径、控制字符、反斜杠（跨平台分隔符混淆）；
 //   - 绝对路径（前导 '/'）与盘符（"C:..."）；
+//   - 段内含 ':'（NTFS 备用数据流等分隔符风险，非首位段同样拒绝）；
 //   - 空路径段（"a//b"）、"." 与 ".." 段（Zip Slip）；
 //   - Windows 保留设备名段、以点/空格结尾的段；
 //   - 目录深度超过 maxDepth。
@@ -74,6 +75,8 @@ func SanitizePath(name string, maxDepth int) (path string, isDir bool, err error
 			return invalid("empty path segment in %q", name)
 		case seg == "." || seg == "..":
 			return invalid("traversal segment in %q", name)
+		case strings.ContainsRune(seg, ':'):
+			return invalid("colon in path segment %q", seg)
 		}
 		base := strings.ToUpper(strings.SplitN(seg, ".", 2)[0])
 		if reservedNames[base] {

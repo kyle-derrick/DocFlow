@@ -228,7 +228,8 @@ func TestResolveForUserLifecycle(t *testing.T) {
 
 func TestPublicShareNotAccessibleByUserEntry(t *testing.T) {
 	svc, _, _, _, _, owner, fileID, _ := newPrivateTestEnv(t)
-	// 公开分享：token 解析不变；按用户入口（CanAccess）非 owner 一律拒绝。
+	// 公开分享：token 解析不变；按用户入口（CanAccess）非 owner 一律拒绝，
+	// 且对外呈现「不存在」（ErrNotFound→404，不泄露分享存在性）。
 	sh, token, err := svc.Create(owner, fileID, PermissionView, 0, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -243,8 +244,16 @@ func TestPublicShareNotAccessibleByUserEntry(t *testing.T) {
 	if !svc.CanAccess(sh, owner) {
 		t.Fatal("owner must always access own share")
 	}
-	if _, err := svc.ResolveForUser(sh.ID, fileID, other); !errors.Is(err, ErrForbidden) {
-		t.Fatalf("public share by user entry: err = %v, want ErrForbidden", err)
+	if _, err := svc.ResolveForUser(sh.ID, fileID, other); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("public share by user entry: err = %v, want ErrNotFound", err)
+	}
+	// 私有分享未授权仍是 403 语义（ErrForbidden）。
+	private, err := svc.CreatePrivate(owner, fileID, PermissionView, 0, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ResolveForUser(private.ID, fileID, other); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("private share by unauthorized user: err = %v, want ErrForbidden", err)
 	}
 	if _, err := svc.Resolve(token); err != nil {
 		t.Fatalf("public token resolution must stay unchanged: %v", err)

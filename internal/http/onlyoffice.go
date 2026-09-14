@@ -9,6 +9,7 @@ import (
 
 	"github.com/docflow/docflow/internal/files"
 	"github.com/docflow/docflow/internal/onlyoffice"
+	"github.com/docflow/docflow/internal/upload"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
@@ -101,33 +102,28 @@ func (h *Handler) onlyofficeDownload(c *gin.Context) {
 		c.JSON(http.StatusRequestedRangeNotSatisfiable, gin.H{"error": "invalid range"})
 		return
 	}
-	reader, err := h.storage.Read(blob.StorageKey)
+	// 区间读取统一走 upload.ReadSection（S3 原生 Range / LocalStorage Seek；
+	// 无 Range 时整读 [0, size)），不再依赖 io.Seeker 断言。
+	start, length := int64(0), blob.Size
+	if hasRange {
+		start, length = r.Start, r.Length()
+	}
+	reader, err := upload.ReadSection(h.storage, blob.StorageKey, start, length)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to read file"})
 		return
 	}
 	defer reader.Close()
-	seeker, canSeek := reader.(io.Seeker)
-	if hasRange && !canSeek {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to read file"})
-		return
-	}
 	status := http.StatusOK
 	contentLength := blob.Size
-	var body io.Reader = reader
 	if hasRange {
 		status = http.StatusPartialContent
 		contentLength = r.Length()
-		if _, serr := seeker.Seek(r.Start, io.SeekStart); serr != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to read file"})
-			return
-		}
-		body = io.LimitReader(reader, r.Length())
 		c.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", r.Start, r.End, blob.Size))
 	}
 	c.Header("Content-Disposition", contentDisposition(f.Name))
 	c.Header("Accept-Ranges", "bytes")
-	c.DataFromReader(status, contentLength, blob.MimeType, body, nil)
+	c.DataFromReader(status, contentLength, blob.MimeType, reader, nil)
 }
 
 // onlyofficeCallback POST /api/v1/onlyoffice/callback：DocumentServer 保存回调

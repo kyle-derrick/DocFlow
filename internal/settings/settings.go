@@ -35,8 +35,8 @@ var (
 )
 
 // 内置键（唯一可设置的键集合；新增键须在此登记定义）。
+// site.name 已移除：无任何消费方（前端标题等为静态配置），保留即死设置。
 const (
-	KeySiteName                 = "site.name"
 	KeyUploadMaxVersionsPerFile = "upload.max_versions_per_file"
 	KeyUploadMaxFileSize        = "upload.max_file_size"
 	KeyShareDefaultExpiryHours  = "share.default_expiry_hours"
@@ -59,7 +59,6 @@ func intPtr(v int64) *int64 { return &v }
 // Definitions 是全部内置键定义；键顺序即 GetAll 输出顺序。
 // int 类型键的默认值统一存 int64（与 normalizeValue 归一化结果一致）。
 var Definitions = []Definition{
-	{Key: KeySiteName, Type: TypeString, Default: "DocFlow", Description: "站点名称（页面标题等展示用途）"},
 	{Key: KeyUploadMaxVersionsPerFile, Type: TypeInt, Default: int64(5), Min: intPtr(1), Max: intPtr(1000), Description: "每文件保留的版本数上限（覆盖上传后按版本号裁剪历史版本）"},
 	{Key: KeyUploadMaxFileSize, Type: TypeInt, Default: int64(1 << 30), Min: intPtr(1), Max: intPtr(1 << 40), Description: "单文件上传大小上限（字节）"},
 	{Key: KeyShareDefaultExpiryHours, Type: TypeInt, Default: int64(168), Min: intPtr(1), Max: intPtr(8760), Description: "公开分享默认有效期（小时）"},

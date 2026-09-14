@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/docflow/docflow/internal/auth"
 	"github.com/gin-gonic/gin"
@@ -20,6 +21,9 @@ type fakeUserDirectory struct {
 	results     []auth.User
 	lookupErr   error
 	names       map[uuid.UUID]string
+	// status 为 Status 查询的返回值（默认返回 not found 错误）。
+	status    string
+	statusErr error
 }
 
 func (f *fakeUserDirectory) FindActiveByEmail(string) (auth.User, error) {
@@ -36,6 +40,76 @@ func (f *fakeUserDirectory) Username(id uuid.UUID) (string, error) {
 		return n, nil
 	}
 	return "", errors.New("user not found")
+}
+
+func (f *fakeUserDirectory) Status(uuid.UUID) (string, error) {
+	if f.statusErr != nil {
+		return "", f.statusErr
+	}
+	if f.status != "" {
+		return f.status, nil
+	}
+	return "", errors.New("user not found")
+}
+
+// fakeSessionStore 是 auth.SessionStore 的内存实现（含旧 hash 重放检测，
+// 语义与 internal/auth 的 GormSessionStore/fakeStore 一致），供 refresh
+// 处理器测试断言撤销行为。
+type fakeSessionStore struct {
+	sessions map[string]auth.Session
+}
+
+func newFakeSessionStore() *fakeSessionStore {
+	return &fakeSessionStore{sessions: make(map[string]auth.Session)}
+}
+
+func (f *fakeSessionStore) Create(session auth.Session) error {
+	f.sessions[session.RefreshTokenHash] = session
+	return nil
+}
+
+func (f *fakeSessionStore) writeBack(session auth.Session) {
+	for hash, existing := range f.sessions {
+		if existing.ID == session.ID {
+			f.sessions[hash] = session
+		}
+	}
+	f.sessions[session.RefreshTokenHash] = session
+}
+
+func (f *fakeSessionStore) Rotate(oldHash, newHash string, now, expiresAt time.Time) (auth.Session, error) {
+	session, ok := f.sessions[oldHash]
+	if !ok || session.RevokedAt != nil || !session.ExpiresAt.After(now) {
+		return auth.Session{}, auth.ErrInvalidRefreshToken
+	}
+	if session.RefreshTokenHash != oldHash {
+		session.RevokedAt = &now
+		f.writeBack(session)
+		return auth.Session{}, auth.ErrInvalidRefreshToken
+	}
+	session.RefreshTokenHash, session.LastActiveAt, session.ExpiresAt = newHash, now, expiresAt
+	f.writeBack(session)
+	return session, nil
+}
+
+func (f *fakeSessionStore) Revoke(hash string, now time.Time) error {
+	session, ok := f.sessions[hash]
+	if !ok || session.RevokedAt != nil {
+		return auth.ErrInvalidRefreshToken
+	}
+	session.RevokedAt = &now
+	f.writeBack(session)
+	return nil
+}
+
+// revokedSession 返回任意已被撤销的 session（用于断言撤销确实发生）。
+func (f *fakeSessionStore) revokedSession() (auth.Session, bool) {
+	for _, session := range f.sessions {
+		if session.RevokedAt != nil {
+			return session, true
+		}
+	}
+	return auth.Session{}, false
 }
 
 func lookupContext(query string) (*gin.Context, *httptest.ResponseRecorder) {
@@ -103,5 +177,149 @@ func TestLookupUsersEmptyAndError(t *testing.T) {
 	h.lookupUsers(c)
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("error status = %d, want 500", w.Code)
+	}
+}
+
+// q 含 @（邮箱查询）时原样透传给目录层（精确匹配策略在 store 层实现），
+// HTTP 层不做任何预分支，避免泄漏匹配语义差异。
+func TestLookupUsersEmailQueryPassedThrough(t *testing.T) {
+	alice := auth.User{ID: uuid.New(), Username: "alice", Email: "alice@example.com"}
+	fake := &fakeUserDirectory{results: []auth.User{alice}}
+	h := &Handler{users: fake}
+	c, w := lookupContext("alice@example.com")
+	h.lookupUsers(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", w.Code, w.Body.String())
+	}
+	if fake.lookupQ != "alice@example.com" {
+		t.Fatalf("lookup q = %q, want unchanged email query", fake.lookupQ)
+	}
+}
+
+// 用户不存在（或非 active）：走 dummy bcrypt 等耗比较路径，仍统一返回 401。
+func TestLoginUnknownUserReturnsUniform401(t *testing.T) {
+	h := NewHandler(nil, nil, nil, nil, nil, nil, nil, false, "", time.Hour)
+	h.users = &fakeUserDirectory{} // FindActiveByEmail 恒返回错误
+	router := gin.New()
+	router.POST("/api/v1/auth/login", h.login)
+	body := `{"email":"nobody@example.com","password":"Whatever12345"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "invalid credentials") {
+		t.Fatalf("body = %s, want invalid credentials", w.Body.String())
+	}
+}
+
+func refreshTestHandler(t *testing.T, users userDirectory) (*Handler, *fakeSessionStore, string) {
+	t.Helper()
+	store := newFakeSessionStore()
+	service := auth.NewService(store, "http-refresh-test-secret-0123456789ab", time.Minute, time.Hour)
+	token, err := service.NewSession(uuid.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := NewHandler(service, nil, nil, nil, nil, nil, nil, false, "", time.Hour)
+	h.users = users
+	return h, store, token
+}
+
+func postRefresh(h *Handler, token string) *httptest.ResponseRecorder {
+	router := gin.New()
+	router.POST("/api/v1/auth/refresh", h.refresh)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/refresh", nil)
+	req.AddCookie(&http.Cookie{Name: "refresh_token", Value: token})
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	return w
+}
+
+// active 用户 refresh 成功：返回 access_token 并轮换 refresh cookie。
+func TestRefreshActiveUserSucceeds(t *testing.T) {
+	h, _, token := refreshTestHandler(t, &fakeUserDirectory{status: auth.StatusActive})
+	w := postRefresh(h, token)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "access_token") {
+		t.Fatalf("body = %s, want access_token", w.Body.String())
+	}
+	var rotated bool
+	for _, cookie := range w.Result().Cookies() {
+		if cookie.Name == "refresh_token" {
+			rotated = true
+		}
+	}
+	if !rotated {
+		t.Fatal("response must set rotated refresh_token cookie")
+	}
+}
+
+// 非 active（disabled/locked）或状态查询失败：401 且撤销刚轮换出的 session。
+func TestRefreshNonActiveUserSessionRevoked(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		users *fakeUserDirectory
+	}{
+		{name: "disabled", users: &fakeUserDirectory{status: auth.StatusDisabled}},
+		{name: "locked", users: &fakeUserDirectory{status: auth.StatusLocked}},
+		{name: "lookup-error", users: &fakeUserDirectory{statusErr: errors.New("db down")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, store, token := refreshTestHandler(t, tc.users)
+			w := postRefresh(h, token)
+			if w.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401", w.Code)
+			}
+			session, ok := store.revokedSession()
+			if !ok {
+				t.Fatal("session must be revoked when user is not active")
+			}
+			if session.RevokedAt == nil {
+				t.Fatal("revoked_at must be set")
+			}
+		})
+	}
+}
+
+// refresh/logout 共享独立按 IP 轻限流（60/min）：超出后 429（带 Retry-After）。
+func TestRefreshLogoutRateLimitedPerIP(t *testing.T) {
+	h := NewHandler(nil, nil, nil, nil, nil, nil, nil, false, "", 0)
+	router := gin.New()
+	h.Register(router, "rate-limit-test-secret-0123456789abcdef", 1_000_000, 1_000_000, 1_000_000)
+	post := func(path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		req.RemoteAddr = "203.0.113.9:1111"
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		return w
+	}
+	for i := 0; i < authOpsRateLimitPerMin; i++ {
+		if w := post("/api/v1/auth/refresh"); w.Code != http.StatusUnauthorized {
+			t.Fatalf("request %d: code = %d, want 401 (no cookie)", i+1, w.Code)
+		}
+	}
+	w := post("/api/v1/auth/refresh")
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("request %d: code = %d, want 429", authOpsRateLimitPerMin+1, w.Code)
+	}
+	if w.Header().Get("Retry-After") == "" {
+		t.Fatal("429 must include Retry-After")
+	}
+	// logout 与 refresh 共用同一限流实例（同 IP 计数合并）。
+	if w := post("/api/v1/auth/logout"); w.Code != http.StatusTooManyRequests {
+		t.Fatalf("logout after exhausted bucket: code = %d, want 429", w.Code)
+	}
+	// 其他 IP 不受影响。
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
+	req.RemoteAddr = "203.0.113.10:1111"
+	w2 := httptest.NewRecorder()
+	router.ServeHTTP(w2, req)
+	if w2.Code != http.StatusNoContent {
+		t.Fatalf("different IP logout: code = %d, want 204", w2.Code)
 	}
 }

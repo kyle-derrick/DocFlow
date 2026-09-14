@@ -185,8 +185,8 @@ func TestListMembersRequiresMembership(t *testing.T) {
 	if len(members) != 2 {
 		t.Fatalf("members = %d, want 2 (owner + viewer)", len(members))
 	}
-	if _, err := svc.ListMembers(outsider, tm.ID); !errors.Is(err, ErrForbidden) {
-		t.Fatalf("outsider list members: err = %v, want ErrForbidden", err)
+	if _, err := svc.ListMembers(outsider, tm.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("outsider list members: err = %v, want ErrNotFound", err)
 	}
 	if _, err := svc.ListMembers(owner, uuid.New()); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing team: err = %v, want ErrNotFound", err)

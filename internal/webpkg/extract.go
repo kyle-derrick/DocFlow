@@ -57,6 +57,9 @@ func Extract(storage Storage, r io.Reader, destPrefix string, limits Limits) (St
 		rel := strings.TrimPrefix(e.clean, strip)
 		key := destPrefix + "/" + rel
 		if err := copyEntry(storage, e.fh, key, limits, &total); err != nil {
+			// 失败条目可能已部分写入（storage.Put 中途出错）：先删当前 key，
+			// 再清理此前已完整写出的 key。
+			_ = storage.Delete(key)
 			cleanupKeys(storage, destPrefix, written)
 			return Stats{}, err
 		}

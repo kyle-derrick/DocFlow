@@ -24,6 +24,21 @@ func (f *fakeS3API) GetObject(_ context.Context, key string) (io.ReadCloser, err
 	return io.NopCloser(bytes.NewReader(data)), nil
 }
 
+func (f *fakeS3API) GetObjectRange(_ context.Context, key string, start, length int64) (io.ReadCloser, error) {
+	data, ok := f.objects[key]
+	if !ok {
+		return nil, errS3NoObject
+	}
+	if start > int64(len(data)) {
+		start = int64(len(data))
+	}
+	end := start + length
+	if end > int64(len(data)) || end < start {
+		end = int64(len(data))
+	}
+	return io.NopCloser(bytes.NewReader(data[start:end])), nil
+}
+
 func (f *fakeS3API) PutObject(_ context.Context, key string, r io.Reader) error {
 	data, err := io.ReadAll(r)
 	if err != nil {
@@ -235,5 +250,104 @@ func TestS3InvalidKeys(t *testing.T) {
 func TestS3NewS3StorageRequiresBucket(t *testing.T) {
 	if _, err := NewS3Storage("", "", "", "", "", true); err == nil {
 		t.Fatal("expected error for empty bucket")
+	}
+}
+
+// TestS3AppendAtPartIndexFromOffset AppendAt 的分片号由 offset 直接推导：
+// 不同 offset 落不同分片对象，数值序拼接保持字节序（变长 PATCH 下
+// offset/N 整除映射会碰撞，offset 一一映射单射）。
+func TestS3AppendAtPartIndexFromOffset(t *testing.T) {
+	s, api := newTestS3Storage()
+	key := "tmp/sess"
+	if n, err := s.AppendAt(key, 0, strings.NewReader("abc")); err != nil || n != 3 {
+		t.Fatalf("append@0: n=%d err=%v", n, err)
+	}
+	// offset=2（与 offset=0 的区间重叠）：分片号不同，不覆盖 part-00000000。
+	if n, err := s.AppendAt(key, 3, strings.NewReader("def")); err != nil || n != 3 {
+		t.Fatalf("append@3: n=%d err=%v", n, err)
+	}
+	for _, k := range []string{key + "/part-00000000", key + "/part-00000003"} {
+		if _, ok := api.objects[k]; !ok {
+			t.Fatalf("missing %s; objects=%v", k, api.objects)
+		}
+	}
+	r, err := s.Read(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	data, _ := io.ReadAll(r)
+	if string(data) != "abcdef" {
+		t.Fatalf("concatenated = %q, want %q", data, "abcdef")
+	}
+	// 同 offset 重试覆盖同一分片（自愈）。
+	if _, err := s.AppendAt(key, 3, strings.NewReader("DEF")); err != nil {
+		t.Fatal(err)
+	}
+	r2, _ := s.Read(key)
+	data2, _ := io.ReadAll(r2)
+	r2.Close()
+	if string(data2) != "abcDEF" {
+		t.Fatalf("after retry = %q, want %q", data2, "abcDEF")
+	}
+}
+
+// TestS3AppendAtomicCounterNoListAfterInit 兼容 Append：计数器初始化仅
+// List 一次，此后分片号原子递增（删除中间分片不影响后续编号，不再复用）。
+func TestS3AppendAtomicCounterNoListAfterInit(t *testing.T) {
+	s, api := newTestS3Storage()
+	key := "tmp/sess"
+	for i := 0; i < 3; i++ {
+		if _, err := s.Append(key, strings.NewReader("x")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	delete(api.objects, key+"/part-00000001")
+	if _, err := s.Append(key, strings.NewReader("y")); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := api.objects[key+"/part-00000003"]; !ok {
+		t.Fatalf("expected part-00000003 via counter, objects=%v", api.objects)
+	}
+}
+
+// TestS3ReadRangeSingleObject 单对象 ReadRange：走 GetObject Range 原生分支。
+func TestS3ReadRangeSingleObject(t *testing.T) {
+	s, _ := newTestS3Storage()
+	if err := s.Put("objects/u/1", strings.NewReader("hello world")); err != nil {
+		t.Fatal(err)
+	}
+	r, err := s.ReadRange("objects/u/1", 6, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	data, _ := io.ReadAll(r)
+	if string(data) != "world" {
+		t.Fatalf("range read = %q, want %q", data, "world")
+	}
+}
+
+// TestS3ReadRangePartsFallback 分片对象（无 key 本体）的 ReadRange：
+// 流式拼接 + 跳过 start 后截取 length。
+func TestS3ReadRangePartsFallback(t *testing.T) {
+	s, _ := newTestS3Storage()
+	key := "tmp/sess"
+	var offset int64
+	for _, part := range []string{"aaaa", "bbbb", "cccc"} {
+		if _, err := s.AppendAt(key, offset, strings.NewReader(part)); err != nil {
+			t.Fatal(err)
+		}
+		offset += int64(len(part))
+	}
+	// 拼接结果 "aaaabbbbcccc"：[5, 11) = "bbbccc"。
+	r, err := s.ReadRange(key, 5, 6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	data, _ := io.ReadAll(r)
+	if string(data) != "bbbccc" {
+		t.Fatalf("range read = %q, want %q", data, "bbbccc")
 	}
 }

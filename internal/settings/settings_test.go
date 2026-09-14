@@ -118,11 +118,13 @@ func TestStoreSetTypeValidation(t *testing.T) {
 	if _, err := s.Set(KeyUploadMaxVersionsPerFile, 1001, actor); !errors.Is(err, ErrInvalidValue) {
 		t.Fatalf("above max err = %v, want ErrInvalidValue", err)
 	}
-	// string 键：接受字符串、拒绝数字。
-	if _, err := s.Set(KeySiteName, "DocFlow 站点", actor); err != nil {
+	// string 键校验（site.name 已移除，string 归一化经 normalizeValue 直测）：
+	// 接受字符串、拒绝数字。
+	strDef := Definition{Key: "test.string", Type: TypeString}
+	if _, err := normalizeValue(strDef, "DocFlow 站点"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Set(KeySiteName, 42, actor); !errors.Is(err, ErrInvalidType) {
+	if _, err := normalizeValue(strDef, 42); !errors.Is(err, ErrInvalidType) {
 		t.Fatalf("string key with int err = %v, want ErrInvalidType", err)
 	}
 }
@@ -153,7 +155,7 @@ func TestStoreGetAllMergesDefaults(t *testing.T) {
 	repo := newMemRepo()
 	s := newTestStore(repo, audit.NopRecorder{})
 	actor := uuid.New()
-	if _, err := s.Set(KeySiteName, "Acme", actor); err != nil {
+	if _, err := s.Set(KeyShareDefaultExpiryHours, 48, actor); err != nil {
 		t.Fatal(err)
 	}
 	views, err := s.GetAll()
@@ -167,8 +169,8 @@ func TestStoreGetAllMergesDefaults(t *testing.T) {
 	for _, v := range views {
 		byKey[v.Key] = v
 	}
-	if v := byKey[KeySiteName]; v.Value != "Acme" || v.UpdatedBy == nil || *v.UpdatedBy != actor {
-		t.Fatalf("site.name view = %+v", v)
+	if v := byKey[KeyShareDefaultExpiryHours]; v.Value.(int64) != 48 || v.UpdatedBy == nil || *v.UpdatedBy != actor {
+		t.Fatalf("share.default_expiry_hours view = %+v", v)
 	}
 	if v := byKey[KeyRetentionTrashDays]; v.Value.(int64) != 30 {
 		t.Fatalf("retention default view = %+v", v)

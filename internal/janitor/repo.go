@@ -1,14 +1,12 @@
 package janitor
 
 import (
-	"errors"
 	"time"
 
 	"github.com/docflow/docflow/internal/files"
 	"github.com/docflow/docflow/internal/upload"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 // activeStatuses / terminalStatuses 与 upload_sessions.status CHECK 约束一致。
@@ -55,30 +53,10 @@ func (g *GormRepo) DeletingBlobs(limit int) ([]files.ObjectBlob, error) {
 	return out, err
 }
 
-// DeleteBlobRechecked 单事务内「SELECT FOR UPDATE 锁行 → 复核 status='deleting'
-// 且 ref_count=0 → 删存储对象 → 删行」，失败回滚可安全重试。
-// 复核不通过（行已复活为 available/仍被引用/已删除）直接跳过，不触碰物理对象。
+// DeleteBlobRechecked 复用 files 包的共享实现（单事务「行锁→复核→删对象→删行」），
+// 与 files.PurgeBlobs、AddVersion 复活路径保持同一套串行化语义。
 func (g *GormRepo) DeleteBlobRechecked(id uuid.UUID, deleteObject func(string) error) (bool, error) {
-	var deleted bool
-	err := g.db.Transaction(func(tx *gorm.DB) error {
-		var blob files.ObjectBlob
-		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("id = ? AND status = ? AND ref_count = 0", id, files.BlobStatusDeleting).
-			First(&blob).Error
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if err := deleteObject(blob.StorageKey); err != nil {
-			return err
-		}
-		result := tx.Where("id = ?", blob.ID).Delete(&files.ObjectBlob{})
-		deleted = result.RowsAffected > 0
-		return result.Error
-	})
-	return deleted, err
+	return files.DeleteBlobRechecked(g.db, id, deleteObject)
 }
 
 func (g *GormRepo) ExpiredTrashTopLevel(now time.Time, retain time.Duration, limit int) ([]files.File, error) {
@@ -88,4 +66,13 @@ func (g *GormRepo) ExpiredTrashTopLevel(now time.Time, retain time.Duration, lim
 		now.Add(-retain),
 	).Order("deleted_at").Limit(limit).Find(&out).Error
 	return out, err
+}
+
+// DeleteExpiredSessions 删除 expires_at 或 revoked_at 早于阈值（now-7d）的
+// 认证会话行，返回删除行数。原生 SQL 直查 sessions 表（模型在 auth 包，
+// 此处不引模型，避免 janitor → auth 依赖）。
+func (g *GormRepo) DeleteExpiredSessions(now time.Time) (int64, error) {
+	cutoff := now.Add(-sessionRetention)
+	result := g.db.Exec("DELETE FROM sessions WHERE expires_at < ? OR revoked_at < ?", cutoff, cutoff)
+	return result.RowsAffected, result.Error
 }

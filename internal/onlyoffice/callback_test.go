@@ -270,21 +270,26 @@ func TestCallbackBlobUnavailableRejectsSave(t *testing.T) {
 	}
 }
 
-// 非法 document.key（解析不出 file_id）与不存在的文件拒绝保存。
+// 非法 document.key（解析不出 file_id）与不存在的文件拒绝保存；
+// 空 key 在 claims 必填校验即拒绝（ErrInvalidToken）。
 func TestCallbackInvalidKeyAndMissingFile(t *testing.T) {
 	store := newFakeFileStore()
 	owner := uuid.New()
 	_, version := store.seedFile(owner, "a.docx", "v1")
 	s := newTestService(store, newMemStorage(), &fakeFetch{}, &fakeRecorder{}, nil)
 
-	for _, key := range []string{"", "not-a-uuid:xy"} {
-		body := callbackBody(t, testJWTSecret, map[string]any{"key": key, "status": 2, "url": sameOriginURL}, true)
-		if err := s.HandleCallback(body, "", "", ""); !errors.Is(err, ErrInvalidKey) {
-			t.Fatalf("key %q: err = %v, want ErrInvalidKey", key, err)
-		}
+	// key 声明缺失（空串）：claims 必填校验拒绝。
+	body := callbackBody(t, testJWTSecret, map[string]any{"key": "", "status": 2, "url": sameOriginURL}, true)
+	if err := s.HandleCallback(body, "", "", ""); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("empty key: err = %v, want ErrInvalidToken", err)
+	}
+	// key 非法（解析不出 file_id）。
+	body = callbackBody(t, testJWTSecret, map[string]any{"key": "not-a-uuid:xy", "status": 2, "url": sameOriginURL}, true)
+	if err := s.HandleCallback(body, "", "", ""); !errors.Is(err, ErrInvalidKey) {
+		t.Fatalf("invalid key: err = %v, want ErrInvalidKey", err)
 	}
 	missing := uuid.New()
-	body := callbackBody(t, testJWTSecret, map[string]any{
+	body = callbackBody(t, testJWTSecret, map[string]any{
 		"key": documentKey(missing, version.ID), "status": 2, "url": sameOriginURL,
 	}, true)
 	if err := s.HandleCallback(body, "", "", ""); !errors.Is(err, files.ErrNotFound) {
@@ -332,5 +337,190 @@ func TestCallbackClaimsAreTrustSource(t *testing.T) {
 	}
 	if got := store.addVersionCount(); got != 0 {
 		t.Fatalf("AddVersion calls = %d, want 0", got)
+	}
+}
+
+// 回调 token 用途隔离：编辑配置 token（aud=onlyoffice-config）与下载 token
+// （aud=onlyoffice-download）打回调一律拒绝；无 aud + 完整 claims 的 DS token
+// 通过并正常保存。
+func TestCallbackTokenAudienceIsolation(t *testing.T) {
+	store := newFakeFileStore()
+	owner := uuid.New()
+	file, version := store.seedFile(owner, "a.docx", "v1")
+	fetcher := &fakeFetch{content: []byte("ok")}
+	recorder := &fakeRecorder{}
+	s := newTestService(store, newMemStorage(), fetcher, recorder, nil)
+	key := documentKey(file.ID, version.ID)
+	saveBody := func(token string) []byte {
+		return []byte(`{"key":"` + key + `","status":2,"url":"` + sameOriginURL + `","token":"` + token + `"}`)
+	}
+
+	// 编辑配置 token 打回调：拒绝（{"error":1}）。
+	config, err := s.NewEditConfig(owner, file.ID)
+	if err != nil {
+		t.Fatalf("NewEditConfig: %v", err)
+	}
+	if err := s.HandleCallback(saveBody(config["token"].(string)), "", "10.0.0.9", "ds"); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("config token as callback: err = %v, want ErrInvalidToken", err)
+	}
+
+	// 下载 token 打回调：拒绝。
+	downloadToken, err := s.signDownloadToken(file.ID, version.ID)
+	if err != nil {
+		t.Fatalf("signDownloadToken: %v", err)
+	}
+	if err := s.HandleCallback(saveBody(downloadToken), "", "10.0.0.9", "ds"); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("download token as callback: err = %v, want ErrInvalidToken", err)
+	}
+	if got := store.addVersionCount(); got != 0 {
+		t.Fatalf("AddVersion calls after rejected tokens = %d, want 0", got)
+	}
+	if len(fetcher.urls) != 0 {
+		t.Fatalf("fetch must not be called, got %v", fetcher.urls)
+	}
+
+	// 无 aud + 完整 claims（DS 实际形态，users[0] 有写权限）：通过并保存。
+	dsToken := signCallbackToken(t, testJWTSecret, map[string]any{
+		"key": key, "status": 2, "url": sameOriginURL, "users": []string{owner.String()},
+	})
+	if err := s.HandleCallback(saveBody(dsToken), "", "10.0.0.9", "ds"); err != nil {
+		t.Fatalf("ds token without aud: %v", err)
+	}
+	if got := store.addVersionCount(); got != 1 {
+		t.Fatalf("AddVersion calls = %d, want 1", got)
+	}
+}
+
+// 安全字段缺 claims 拒绝：status/key 缺失、保存类状态（2/6）缺 url 一律
+// error:1，即使 body 携带同名字段也不回退；status=4 等非保存状态无需 url。
+func TestCallbackRequiredClaims(t *testing.T) {
+	store := newFakeFileStore()
+	owner := uuid.New()
+	file, version := store.seedFile(owner, "a.docx", "v1")
+	fetcher := &fakeFetch{content: []byte("evil")}
+	s := newTestService(store, newMemStorage(), fetcher, &fakeRecorder{}, nil)
+	key := documentKey(file.ID, version.ID)
+
+	cases := []struct {
+		name   string
+		claims map[string]any
+		body   string
+	}{
+		{
+			name:   "missing status claim",
+			claims: map[string]any{"key": key, "url": sameOriginURL},
+			body:   `{"key":"` + key + `","status":2,"url":"` + sameOriginURL + `"}`,
+		},
+		{
+			name:   "missing key claim",
+			claims: map[string]any{"status": 2, "url": sameOriginURL},
+			body:   `{"key":"` + key + `","status":2,"url":"` + sameOriginURL + `"}`,
+		},
+		{
+			name:   "save without url claim",
+			claims: map[string]any{"key": key, "status": 2},
+			body:   `{"key":"` + key + `","status":2,"url":"` + sameOriginURL + `"}`,
+		},
+		{
+			name:   "forcesave without url claim",
+			claims: map[string]any{"key": key, "status": 6},
+			body:   `{"key":"` + key + `","status":6,"url":"` + sameOriginURL + `"}`,
+		},
+	}
+	for _, tc := range cases {
+		token := signCallbackToken(t, testJWTSecret, tc.claims)
+		body := []byte(tc.body + `,"token":"` + token + `"}`)
+		if err := s.HandleCallback(body, "", "", ""); !errors.Is(err, ErrInvalidToken) {
+			t.Fatalf("%s: err = %v, want ErrInvalidToken", tc.name, err)
+		}
+	}
+	if got := store.addVersionCount(); got != 0 {
+		t.Fatalf("AddVersion calls = %d, want 0", got)
+	}
+	if len(fetcher.urls) != 0 {
+		t.Fatalf("fetch must not be called, got %v", fetcher.urls)
+	}
+
+	// status=4（清理）协议上不携带 url：key+status claims 即可通过。
+	token := signCallbackToken(t, testJWTSecret, map[string]any{"key": key, "status": 4})
+	body := []byte(`{"key":"` + key + `","status":4,"token":"` + token + `"}`)
+	if err := s.HandleCallback(body, "", "", ""); err != nil {
+		t.Fatalf("cleanup without url claim: %v", err)
+	}
+}
+
+// 保存写鉴权：actor 取验签 claims 的 users[0]（body users 不可伪造授权）；
+// 无写权限、未接线授权器均 fail closed 拒绝且不发起下载。
+func TestCallbackSaveWriteAuthorization(t *testing.T) {
+	store := newFakeFileStore()
+	owner := uuid.New()
+	file, version := store.seedFile(owner, "a.docx", "v1")
+	editor, viewer := uuid.New(), uuid.New()
+	fetcher := &fakeFetch{content: []byte("v2")}
+	recorder := &fakeRecorder{}
+	s := newTestService(store, newMemStorage(), fetcher, recorder, nil)
+	s.SetWriteAuthorizer(func(user, fileID uuid.UUID) error {
+		if user != owner && user != editor {
+			return files.ErrForbidden
+		}
+		return nil
+	})
+	key := documentKey(file.ID, version.ID)
+
+	// claims users[0]=viewer（无写权限）：拒绝；body 伪造 owner 无效。
+	token := signCallbackToken(t, testJWTSecret, map[string]any{
+		"key": key, "status": 2, "url": sameOriginURL, "users": []string{viewer.String()},
+	})
+	body := []byte(`{"key":"` + key + `","status":2,"url":"` + sameOriginURL + `","users":["` + owner.String() + `"],"token":"` + token + `"}`)
+	if err := s.HandleCallback(body, "", "10.0.0.9", "ds"); !errors.Is(err, ErrSaveForbidden) {
+		t.Fatalf("viewer save: err = %v, want ErrSaveForbidden", err)
+	}
+	if got := store.addVersionCount(); got != 0 {
+		t.Fatalf("AddVersion calls after denied save = %d, want 0", got)
+	}
+	if len(fetcher.urls) != 0 {
+		t.Fatalf("fetch must not be called on denied save, got %v", fetcher.urls)
+	}
+	denied := false
+	for _, e := range recorder.entries {
+		if e.Action == audit.ActionOnlyOfficeSave && e.Status == audit.StatusFailure {
+			denied = true
+		}
+	}
+	if !denied {
+		t.Fatalf("audit actions = %v, want onlyoffice.save failure", recorder.actions())
+	}
+
+	// claims users[0]=editor（有写权限）：保存成功且版本归属 editor。
+	token = signCallbackToken(t, testJWTSecret, map[string]any{
+		"key": key, "status": 2, "url": sameOriginURL, "users": []string{editor.String()},
+	})
+	body = []byte(`{"key":"` + key + `","status":2,"url":"` + sameOriginURL + `","token":"` + token + `"}`)
+	if err := s.HandleCallback(body, "", "10.0.0.9", "ds"); err != nil {
+		t.Fatalf("editor save: %v", err)
+	}
+	if got := store.addVersionCount(); got != 1 {
+		t.Fatalf("AddVersion calls = %d, want 1", got)
+	}
+	current, _, err := store.CurrentVersion(owner, file.ID)
+	if err != nil {
+		t.Fatalf("CurrentVersion: %v", err)
+	}
+	if current.UserID != editor {
+		t.Fatalf("new version user = %v, want editor %v", current.UserID, editor)
+	}
+
+	// 未接线授权器（fail closed）：即使 owner 也拒绝。
+	bare := newTestService(store, newMemStorage(), fetcher, &fakeRecorder{}, nil)
+	bare.authorizeWrite = nil
+	token = signCallbackToken(t, testJWTSecret, map[string]any{
+		"key": key, "status": 2, "url": sameOriginURL + "?t=2", "users": []string{owner.String()},
+	})
+	body = []byte(`{"key":"` + key + `","status":2,"url":"` + sameOriginURL + `?t=2","token":"` + token + `"}`)
+	if err := bare.HandleCallback(body, "", "", ""); !errors.Is(err, ErrSaveForbidden) {
+		t.Fatalf("save without authorizer: err = %v, want ErrSaveForbidden", err)
+	}
+	if got := store.addVersionCount(); got != 1 {
+		t.Fatalf("AddVersion calls after fail-closed = %d, want 1", got)
 	}
 }

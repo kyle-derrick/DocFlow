@@ -33,6 +33,8 @@ type fakeFileStore struct {
 	blobs    map[uuid.UUID]files.ObjectBlob  // blobID → blob
 	addCalls int
 	addErr   error
+	// readers 额外读授权（模拟团队文件「任意在册成员可读」；owner 始终可读）。
+	readers map[uuid.UUID]bool
 }
 
 func newFakeFileStore() *fakeFileStore {
@@ -68,11 +70,21 @@ func (f *fakeFileStore) Get(user, id uuid.UUID) (files.File, error) {
 	if !ok || file.DeletedAt != nil {
 		return files.File{}, files.ErrNotFound
 	}
-	if file.OwnerID != user {
-		// 与 authorizeFileAccess 同规则：非 owner 的个人文件统一 404。
+	if file.OwnerID != user && !f.readers[user] {
+		// 与 authorizeFileAccess 同规则：无读授权的访问统一 404。
 		return files.File{}, files.ErrNotFound
 	}
 	return file, nil
+}
+
+// allowReader 授予 user 读权限（模拟团队成员；测试辅助）。
+func (f *fakeFileStore) allowReader(user uuid.UUID) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.readers == nil {
+		f.readers = make(map[uuid.UUID]bool)
+	}
+	f.readers[user] = true
 }
 
 func (f *fakeFileStore) CurrentVersion(owner, fileID uuid.UUID) (files.FileVersion, files.ObjectBlob, error) {
@@ -274,6 +286,8 @@ func sumHex(content string) string {
 }
 
 // newTestService 构造带内存依赖的服务；now 为 nil 时用真实时钟。
+// 默认注入「全放行」写授权器（模拟 main 生产接线）；需要验证 fail closed
+// 或拒绝路径的测试可将 s.authorizeWrite 置 nil 或 SetWriteAuthorizer 覆盖。
 func newTestService(store FileStore, st upload.Storage, fetcher *fakeFetch, recorder *fakeRecorder, now func() time.Time) *Service {
 	s := New(Config{
 		ServerURL:        testServerURL,
@@ -282,6 +296,7 @@ func newTestService(store FileStore, st upload.Storage, fetcher *fakeFetch, reco
 		TokenTTL:         5 * time.Minute,
 		DownloadMaxBytes: 1 << 20,
 	}, store, st, func(uuid.UUID) (string, error) { return "alice", nil }, recorder)
+	s.SetWriteAuthorizer(func(uuid.UUID, uuid.UUID) error { return nil })
 	if fetcher != nil {
 		s.fetch = fetcher.fetch
 	}
@@ -369,6 +384,70 @@ func TestEditConfigPermissionAndBlobUnavailable(t *testing.T) {
 	if _, err := s.NewEditConfig(owner, file.ID); !errors.Is(err, files.ErrBlobUnavailable) {
 		t.Fatalf("quarantined blob: err = %v, want files.ErrBlobUnavailable", err)
 	}
+}
+
+// 编辑配置按写权限降级：可写 mode=edit/permissions.edit=true；
+// 只读（授权器拒绝）与未接线授权器（fail closed）均 mode=view/edit=false；
+// 编辑配置 token 携带 aud=onlyoffice-config（用途隔离）。
+func TestEditConfigWritePermissionDowngrade(t *testing.T) {
+	store := newFakeFileStore()
+	owner := uuid.New()
+	viewer := uuid.New()
+	file, _ := store.seedFile(owner, "a.docx", "x")
+	s := newTestService(store, newMemStorage(), nil, &fakeRecorder{}, nil)
+	s.SetWriteAuthorizer(func(user, fileID uuid.UUID) error {
+		if user != owner {
+			return files.ErrForbidden
+		}
+		return nil
+	})
+
+	assertMode := func(cfg map[string]any, wantMode string, wantEdit bool) {
+		t.Helper()
+		editor := cfg["editorConfig"].(map[string]any)
+		if editor["mode"] != wantMode {
+			t.Fatalf("mode = %v, want %v", editor["mode"], wantMode)
+		}
+		perms := cfg["document"].(map[string]any)["permissions"].(map[string]any)
+		if perms["edit"] != wantEdit {
+			t.Fatalf("permissions.edit = %v, want %v", perms["edit"], wantEdit)
+		}
+	}
+
+	// viewer（有读权限、无写权限）→ 只读会话。
+	store.allowReader(viewer)
+	cfg, err := s.NewEditConfig(viewer, file.ID)
+	if err != nil {
+		t.Fatalf("viewer config: %v", err)
+	}
+	assertMode(cfg, "view", false)
+
+	// owner 可写 → edit。
+	cfg, err = s.NewEditConfig(owner, file.ID)
+	if err != nil {
+		t.Fatalf("owner config: %v", err)
+	}
+	assertMode(cfg, "edit", true)
+	// 编辑配置 token 声明 aud=onlyoffice-config。
+	claims := jwt.MapClaims{}
+	parsed, err := jwt.ParseWithClaims(cfg["token"].(string), claims, func(*jwt.Token) (any, error) {
+		return []byte(testJWTSecret), nil
+	})
+	if err != nil || !parsed.Valid {
+		t.Fatalf("config token invalid: %v", err)
+	}
+	if got := claimString(claims["aud"]); got != configAudience {
+		t.Fatalf("config token aud = %q, want %q", got, configAudience)
+	}
+
+	// 未接线授权器 → 保守 view（fail closed）。
+	bare := newTestService(store, newMemStorage(), nil, &fakeRecorder{}, nil)
+	bare.authorizeWrite = nil
+	cfg, err = bare.NewEditConfig(owner, file.ID)
+	if err != nil {
+		t.Fatalf("bare config: %v", err)
+	}
+	assertMode(cfg, "view", false)
 }
 
 // ---- 签名下载校验矩阵 ----

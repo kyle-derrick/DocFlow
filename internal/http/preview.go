@@ -2,12 +2,12 @@ package http
 
 import (
 	"fmt"
-	"io"
 	"mime"
 	"net/http"
 	"strings"
 
 	"github.com/docflow/docflow/internal/files"
+	"github.com/docflow/docflow/internal/upload"
 	"github.com/gin-gonic/gin"
 )
 
@@ -71,17 +71,19 @@ func (h *Handler) servePreviewBlob(c *gin.Context, name string, blob files.Objec
 		c.JSON(http.StatusRequestedRangeNotSatisfiable, gin.H{"error": "invalid range"})
 		return
 	}
-	file, err := h.storage.Read(blob.StorageKey)
+	// 区间读取统一走 upload.ReadSection：S3 原生 GetObject Range（不依赖
+	// io.Seeker 断言），LocalStorage Open+Seek；无 Range/多区间（忽略）时
+	// 整读 [0, size)。
+	start, length := int64(0), blob.Size
+	if hasRange {
+		start, length = fileRange.Start, fileRange.Length()
+	}
+	body, err := upload.ReadSection(h.storage, blob.StorageKey, start, length)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to read file"})
 		return
 	}
-	defer file.Close()
-	seeker, isSeeker := file.(io.Seeker)
-	if hasRange && !isSeeker {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to read file"})
-		return
-	}
+	defer body.Close()
 	if incrementView != nil {
 		if err := incrementView(); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to record preview"})
@@ -90,15 +92,9 @@ func (h *Handler) servePreviewBlob(c *gin.Context, name string, blob files.Objec
 	}
 	status := http.StatusOK
 	contentLength := blob.Size
-	var body io.Reader = file
 	if hasRange {
 		status = http.StatusPartialContent
 		contentLength = fileRange.Length()
-		if _, serr := seeker.Seek(fileRange.Start, io.SeekStart); serr != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to read file"})
-			return
-		}
-		body = io.LimitReader(file, fileRange.Length())
 		c.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", fileRange.Start, fileRange.End, blob.Size))
 	}
 	c.Header("Content-Disposition", inlineDisposition(name))

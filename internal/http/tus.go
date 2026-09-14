@@ -23,6 +23,9 @@ const (
 	tusExtension      = "creation,expiration"
 	tusBasePath       = "/api/v1/tus/files/"
 	tusPatchMediaType = "application/offset+octet-stream"
+	// tusMaxMetadataBytes 为 Upload-Metadata 头的长度上限（与会话
+	// metadata 列 size:2048 对齐），超长直接 400，避免落库截断失败。
+	tusMaxMetadataBytes = 2048
 )
 
 // registerTUSRoutes 在认证路由组下挂载 tus 端点；所有响应统一带 Tus-Resumable: 1.0.0。
@@ -94,6 +97,10 @@ func (h *Handler) tusCreate(c *gin.Context) {
 		return
 	}
 	rawMeta := c.GetHeader("Upload-Metadata")
+	if len(rawMeta) > tusMaxMetadataBytes {
+		tusError(c, http.StatusBadRequest, "Upload-Metadata exceeds 2048 bytes")
+		return
+	}
 	meta, err := parseTusMetadata(rawMeta)
 	if err != nil {
 		tusError(c, http.StatusBadRequest, "invalid Upload-Metadata")
@@ -202,6 +209,11 @@ func (h *Handler) tusPatch(c *gin.Context) {
 		tusError(c, http.StatusUnsupportedMediaType, "Content-Type must be application/offset+octet-stream")
 		return
 	}
+	// 单 PATCH 上限：声明超限直接 413，不进入流式复制。
+	if max := h.uploads.PatchMaxBytes(); max > 0 && c.Request.ContentLength > max {
+		tusError(c, http.StatusRequestEntityTooLarge, "request body exceeds per-request upload limit")
+		return
+	}
 	v, ok := h.tusSession(c)
 	if !ok {
 		tusError(c, http.StatusNotFound, "upload not found")
@@ -221,13 +233,15 @@ func (h *Handler) tusPatch(c *gin.Context) {
 		tusError(c, http.StatusConflict, "Upload-Offset does not match current offset")
 		return
 	}
-	v, err = h.uploads.Append(v.ID, offset, c.Request.Body)
+	v, err = h.uploads.AppendWithLength(v.ID, offset, c.Request.ContentLength, c.Request.Body)
 	if err != nil {
 		switch {
 		case errors.Is(err, upload.ErrExpired):
 			tusError(c, http.StatusGone, "upload session expired")
 		case errors.Is(err, upload.ErrOffset):
 			tusError(c, http.StatusConflict, err.Error())
+		case errors.Is(err, upload.ErrPatchTooLarge):
+			tusError(c, http.StatusRequestEntityTooLarge, err.Error())
 		case errors.Is(err, upload.ErrSize):
 			tusError(c, http.StatusBadRequest, "request body exceeds remaining upload length")
 		default:

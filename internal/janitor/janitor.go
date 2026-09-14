@@ -1,13 +1,15 @@
 // Package janitor 提供后台定期清理：
 //   - 过期且非终态的上传会话置 failed 并删除临时存储对象（tmp/*，幂等）；
 //     终态会话超过保留期后删除行；
+//   - 过期/已撤销超过 7 天的认证会话行（原生 SQL 删 sessions，不引 auth 模型）；
 //   - status='deleting' 且 ref_count=0 的 object_blobs 行（SELECT FOR UPDATE
 //     行锁复核后）物理删除存储对象与行，与 AddVersion 的复活路径互斥；
 //   - 回收站软删除超过 retention.trash_days 的文件复用 files.Store.Purge
-//     彻底删除。
+//     彻底删除（含关联网页包对象的回调清理）。
 //
-// 每类清理写审计（janitor.upload / janitor.blob / janitor.trash，metadata 含数量）；
-// 单项错误只记录日志不中断循环。clock 与 interval 可注入以便测试。
+// 每类清理写审计（janitor.upload / janitor.blob / janitor.trash，metadata 含数量；
+// sessions 清理暂仅记日志）；单项错误只记录日志不中断循环。
+// clock 与 interval 可注入以便测试。
 package janitor
 
 import (
@@ -42,11 +44,15 @@ type Repo interface {
 	// DeleteBlobRechecked 行锁复核后删 blob：SELECT FOR UPDATE 锁行并复核
 	// status='deleting' 且 ref_count=0，复核通过后在锁内删除物理对象并删行，
 	// 返回是否删除（行已复活/被引用/不存在时 false，不执行物理删除）。
-	// 与 AddVersion 复活路径（ResurrectBlob 的行更新取行锁）串行化。
+	// 与 AddVersion 复活路径（ResurrectBlob 的行更新取行锁）串行化；
+	// 生产实现复用 files 包的共享实现。
 	DeleteBlobRechecked(id uuid.UUID, deleteObject func(string) error) (bool, error)
 	// ExpiredTrashTopLevel 返回软删除超过 retain 的顶层回收站项
 	//（父目录未同时处于软删除，避免与父目录重复处理），跨全部用户。
 	ExpiredTrashTopLevel(now time.Time, retain time.Duration, limit int) ([]files.File, error)
+	// DeleteExpiredSessions 删除 expires_at 或 revoked_at 早于阈值（7 天）的
+	// 认证会话行（原生 SQL，不依赖 auth 包模型），返回删除行数。
+	DeleteExpiredSessions(now time.Time) (int64, error)
 }
 
 // Purger 抽象回收站彻底删除能力；生产实现为 *files.Store。
@@ -72,6 +78,10 @@ const (
 	DefaultTrashDays = 30
 	// DefaultTerminalSessionRetention 终态上传会话的行保留期。
 	DefaultTerminalSessionRetention = 24 * time.Hour
+	// sessionRetention 认证会话行的清理阈值：expires_at/revoked_at 早于
+	// now-7d 的行删除（DELETE FROM sessions WHERE expires_at < now()-interval '7 days'
+	// OR revoked_at < now()-interval '7 days' 的参数化等价形式）。
+	sessionRetention = 7 * 24 * time.Hour
 	// defaultBatchLimit 单轮每类清理的批量上限，防止长事务。
 	defaultBatchLimit = 500
 )
@@ -145,8 +155,23 @@ func (j *Janitor) RunForever(ctx context.Context) {
 func (j *Janitor) RunOnce() {
 	j.runs.Add(1)
 	j.sweepUploadSessions()
+	j.sweepSessions()
 	j.sweepDeletingBlobs()
 	j.sweepTrash()
+}
+
+// sweepSessions 清理过期/已撤销超过保留期（7 天）的认证会话行。
+// 纯行删除（无关联物理对象）；internal/audit 本批次不可改（无 janitor.session
+// 动作常量），暂只记日志，后续批次可补审计动作。
+func (j *Janitor) sweepSessions() {
+	n, err := j.repo.DeleteExpiredSessions(j.clock())
+	if err != nil {
+		j.logf("janitor: delete expired sessions: %v", err)
+		return
+	}
+	if n > 0 {
+		j.logf("janitor: removed %d expired sessions", n)
+	}
 }
 
 // trashDays 热读取 retention.trash_days；读取失败回退默认值。

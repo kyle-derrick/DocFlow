@@ -71,6 +71,10 @@ type Repo interface {
 	// ConsumeDownload 在分享仍有效（未撤销、未过期、未达下载上限）时原子递增 download_count，
 	// 返回是否成功；失败时由调用方重新读取以区分原因。
 	ConsumeDownload(id uuid.UUID, now time.Time) (bool, error)
+	// DecrementDownload 补偿回退一次已消耗的下载计数（内容读取失败时调用）：
+	// shares.download_count 与关联 files.download_count 同步 -1，条件
+	// download_count > 0 保证不为负；分享不存在或计数为 0 时静默成功。
+	DecrementDownload(id uuid.UUID) error
 	// CountActiveByFile 统计文件的有效「公开」分享数（is_public 辅助字段只反映公开分享）。
 	CountActiveByFile(fileID uuid.UUID, now time.Time) (int64, error)
 	// SetFilePublic 维护 files.is_public 冗余辅助字段。
@@ -114,11 +118,35 @@ type Service struct {
 	files      FileSource
 	membership TeamMembership
 	directory  UserDirectory
-	now        func() time.Time
+	// defaultExpiryHours 为「创建请求未指定有效期」时的默认时长（小时）
+	// 热读取（system_settings 的 share.default_expiry_hours，main 注入）；
+	// nil 或返回非正值时回退既有行为（不设默认，即永久）。
+	defaultExpiryHours func() int
+	now                func() time.Time
 }
 
 func NewService(repo Repo, source FileSource) *Service {
 	return &Service{repo: repo, files: source, now: time.Now}
+}
+
+// SetDefaultExpiryProvider 注入默认有效期（小时）热读取：Create/CreatePrivate
+// 收到 expiresIn==0（缺省或显式 0）时采用该默认；返回 0（未设置/读失败）
+// 维持既有「永久」语义。幂等（nil 不覆盖）。
+func (s *Service) SetDefaultExpiryProvider(fn func() int) {
+	if fn != nil {
+		s.defaultExpiryHours = fn
+	}
+}
+
+// defaultExpiry 返回默认有效期时长；无 provider 或非正值时为 0（永久）。
+func (s *Service) defaultExpiry() time.Duration {
+	if s.defaultExpiryHours == nil {
+		return 0
+	}
+	if n := s.defaultExpiryHours(); n > 0 {
+		return time.Duration(n) * time.Hour
+	}
+	return 0
 }
 
 // SetTeamMembership 注入团队成员关系判定器；未注入时 share_teams 授权不可达（安全默认拒绝）。
@@ -152,6 +180,11 @@ func (s *Service) Create(owner, fileID uuid.UUID, permission string, expiresIn t
 	}
 	if expiresIn < 0 {
 		return Share{}, "", ErrInvalidExpiry
+	}
+	// 未指定有效期（0）时采用热读取默认（share.default_expiry_hours），
+	// 未注入/读失败回退 0（永久）。
+	if expiresIn == 0 {
+		expiresIn = s.defaultExpiry()
 	}
 	if maxDownloads != nil && *maxDownloads < 0 {
 		return Share{}, "", ErrInvalidMaxDownloads
@@ -197,6 +230,10 @@ func (s *Service) CreatePrivate(owner, fileID uuid.UUID, permission string, expi
 	}
 	if expiresIn < 0 {
 		return Share{}, ErrInvalidExpiry
+	}
+	// 同 Create：未指定有效期（0）时采用热读取默认，回退 0（永久）。
+	if expiresIn == 0 {
+		expiresIn = s.defaultExpiry()
 	}
 	if maxDownloads != nil && *maxDownloads < 0 {
 		return Share{}, ErrInvalidMaxDownloads
@@ -284,7 +321,9 @@ func (s *Service) CanAccess(sh Share, user uuid.UUID) bool {
 
 // ResolveForUser 私有分享访问入口（登录用户）：按分享 ID + 文件 ID 解析，
 // 先做授权判定（owner 或 CanAccess），再校验分享有效性与文件可用性。
-// 分享不存在、文件不匹配或文件已删除统一返回 ErrNotFound/ErrGone，避免泄露。
+// 分享不存在、文件不匹配、文件已删除统一返回 ErrNotFound/ErrGone，避免泄露；
+// 公开分享不走用户入口（按 token 解析）：非 owner 访问一律 ErrNotFound
+// （对外呈现「不存在」，不泄露分享可枚举性，HTTP 层映射 404 而非 403）。
 func (s *Service) ResolveForUser(shareID, fileID, user uuid.UUID) (Resolved, error) {
 	sh, err := s.repo.Get(shareID)
 	if err != nil {
@@ -294,6 +333,9 @@ func (s *Service) ResolveForUser(shareID, fileID, user uuid.UUID) (Resolved, err
 		return Resolved{}, ErrNotFound
 	}
 	if !s.CanAccess(sh, user) {
+		if sh.Visibility != VisibilityPrivate {
+			return Resolved{}, ErrNotFound
+		}
 		return Resolved{}, ErrForbidden
 	}
 	if !shareActive(sh, s.now()) {
@@ -353,6 +395,14 @@ func (s *Service) ResolveForUserForDownload(shareID, fileID, user uuid.UUID) (Re
 		return Resolved{}, err
 	}
 	return r, nil
+}
+
+// DecrementDownload 补偿回退一次已消耗的下载计数：ResolveForDownload /
+// ResolveForUserForDownload 已原子递增计数、但调用方读取存储内容失败
+// （未能向用户交付文件）时调用；shares.download_count 与 files.download_count
+// 同步 -1（下限 0）。补偿失败由调用方忽略——计数偏保守多记一次，不影响安全性。
+func (s *Service) DecrementDownload(r Resolved) error {
+	return s.repo.DecrementDownload(r.Share.ID)
 }
 
 // Revoke 撤销 owner 名下的分享（幂等）；文件再无其他有效分享时清除 files.is_public。

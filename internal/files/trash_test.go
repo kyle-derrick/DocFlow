@@ -13,10 +13,14 @@ type memTrashRepo struct {
 	files    map[uuid.UUID]File
 	versions map[uuid.UUID]FileVersion // key: version id
 	blobs    map[uuid.UUID]ObjectBlob
+	// webpkgs 模拟 web_packages 行（file_id → public_id）。
+	webpkgs map[uuid.UUID]string
+	// calls 记录写操作调用顺序，供断言 FK 删除顺序（Clear→DeleteVersions→DeleteFiles）。
+	calls []string
 }
 
 func newMemTrashRepo() *memTrashRepo {
-	return &memTrashRepo{files: make(map[uuid.UUID]File), versions: make(map[uuid.UUID]FileVersion), blobs: make(map[uuid.UUID]ObjectBlob)}
+	return &memTrashRepo{files: make(map[uuid.UUID]File), versions: make(map[uuid.UUID]FileVersion), blobs: make(map[uuid.UUID]ObjectBlob), webpkgs: make(map[uuid.UUID]string)}
 }
 
 func (m *memTrashRepo) GetAny(owner, id uuid.UUID) (File, error) {
@@ -121,7 +125,22 @@ func (m *memTrashRepo) BlobRefsForFiles(fileIDs []uuid.UUID) ([]BlobRef, error) 
 	return out, nil
 }
 
+func (m *memTrashRepo) WebpkgPublicIDs(fileIDs []uuid.UUID) ([]string, error) {
+	want := make(map[uuid.UUID]bool, len(fileIDs))
+	for _, id := range fileIDs {
+		want[id] = true
+	}
+	var out []string
+	for fid, pid := range m.webpkgs {
+		if want[fid] {
+			out = append(out, pid)
+		}
+	}
+	return out, nil
+}
+
 func (m *memTrashRepo) DeleteVersions(fileIDs []uuid.UUID) error {
+	m.calls = append(m.calls, "delete_versions")
 	for id, v := range m.versions {
 		for _, fid := range fileIDs {
 			if v.FileID == fid {
@@ -133,6 +152,7 @@ func (m *memTrashRepo) DeleteVersions(fileIDs []uuid.UUID) error {
 }
 
 func (m *memTrashRepo) ClearCurrentVersions(fileIDs []uuid.UUID) error {
+	m.calls = append(m.calls, "clear_current_versions")
 	for _, fid := range fileIDs {
 		if f, ok := m.files[fid]; ok {
 			f.CurrentVersionID = nil
@@ -143,6 +163,7 @@ func (m *memTrashRepo) ClearCurrentVersions(fileIDs []uuid.UUID) error {
 }
 
 func (m *memTrashRepo) DeleteFiles(ids []uuid.UUID) error {
+	m.calls = append(m.calls, "delete_files")
 	for _, id := range ids {
 		delete(m.files, id)
 	}
@@ -191,10 +212,15 @@ func (m *memTrashRepo) ZeroBlobAndMarkDeleting(id uuid.UUID) error {
 	return nil
 }
 
-func (m *memTrashRepo) DeleteBlobRowIfUnreferenced(id uuid.UUID) (bool, error) {
+// DeleteBlobRechecked 行锁复核的内存等价物：按当前（而非快照）状态复核
+// status='deleting' 且 ref_count=0，通过后删物理对象并删行。
+func (m *memTrashRepo) DeleteBlobRechecked(id uuid.UUID, deleteObject func(string) error) (bool, error) {
 	b, ok := m.blobs[id]
-	if !ok || b.RefCount != 0 || b.Status != BlobStatusDeleting {
+	if !ok || b.Status != BlobStatusDeleting || b.RefCount != 0 {
 		return false, nil
+	}
+	if err := deleteObject(b.StorageKey); err != nil {
+		return false, err
 	}
 	delete(m.blobs, id)
 	return true, nil
@@ -298,12 +324,12 @@ func TestPurgeRejectsActiveAndRoot(t *testing.T) {
 	repo := newMemTrashRepo()
 	owner := uuid.New()
 	active := repo.addFile(owner, nil, "active", "file", false, nil)
-	if _, _, err := purgeLogic(repo, owner, active.ID); err != ErrNotDeleted {
+	if _, _, _, err := purgeLogic(repo, owner, active.ID); err != ErrNotDeleted {
 		t.Fatalf("purge active file: expected ErrNotDeleted, got %v", err)
 	}
 	now := time.Now()
 	root := repo.addFile(owner, nil, "root", "folder", true, &now)
-	if _, _, err := purgeLogic(repo, owner, root.ID); err != ErrRoot {
+	if _, _, _, err := purgeLogic(repo, owner, root.ID); err != ErrRoot {
 		t.Fatalf("purge root: expected ErrRoot, got %v", err)
 	}
 }
@@ -322,7 +348,7 @@ func TestPurgeSharedBlobOnlyDecrementsRefCount(t *testing.T) {
 	repo.addVersion(f1.ID, blob.ID, true)
 	repo.addVersion(f2.ID, blob.ID, true)
 
-	purged, deleting, err := purgeLogic(repo, owner, f1.ID)
+	purged, deleting, _, err := purgeLogic(repo, owner, f1.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -356,7 +382,7 @@ func TestPurgeLastReferenceMarksBlobDeleting(t *testing.T) {
 	f := repo.addFile(owner, ptrID(root.ID), "only.txt", "file", false, &now)
 	repo.addVersion(f.ID, blob.ID, true)
 
-	purged, deleting, err := purgeLogic(repo, owner, f.ID)
+	purged, deleting, _, err := purgeLogic(repo, owner, f.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -387,7 +413,7 @@ func TestPurgeMultipleVersionsSameBlobZeroesRefCount(t *testing.T) {
 	repo.addVersion(f.ID, blob.ID, true)
 	repo.addVersion(f.ID, blob.ID, false)
 
-	purged, deleting, err := purgeLogic(repo, owner, f.ID)
+	purged, deleting, _, err := purgeLogic(repo, owner, f.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -413,7 +439,7 @@ func TestPurgeRemovesAllDescendants(t *testing.T) {
 	repo.blobs[blob.ID] = blob
 	repo.addVersion(file.ID, blob.ID, true)
 
-	purged, deleting, err := purgeLogic(repo, owner, dir.ID)
+	purged, deleting, _, err := purgeLogic(repo, owner, dir.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -458,5 +484,89 @@ func TestPurgeBlobsDeletesOnlyUnreferenced(t *testing.T) {
 	}
 	if _, err := repo.GetBlob(available.ID); err != nil {
 		t.Fatal("available blob row must survive")
+	}
+}
+
+// TestPurgeFKOrder：current_version_id 外键必须先于 file_versions 清除
+// （顺序错误时 PostgreSQL 拒绝删除版本行）。
+func TestPurgeFKOrder(t *testing.T) {
+	repo := newMemTrashRepo()
+	owner := uuid.New()
+	root := repo.addFile(owner, nil, "root", "folder", true, nil)
+	now := time.Now()
+	blob := ObjectBlob{ID: uuid.New(), SHA256: "o", StorageKey: "objects/order", RefCount: 1, Status: BlobStatusAvailable}
+	repo.blobs[blob.ID] = blob
+	f := repo.addFile(owner, ptrID(root.ID), "ordered.txt", "file", false, &now)
+	repo.addVersion(f.ID, blob.ID, true)
+
+	if _, _, _, err := purgeLogic(repo, owner, f.ID); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"clear_current_versions", "delete_versions", "delete_files"}
+	if len(repo.calls) != len(want) {
+		t.Fatalf("calls = %v, want %v", repo.calls, want)
+	}
+	for i, c := range want {
+		if repo.calls[i] != c {
+			t.Fatalf("call order = %v, want %v (clear current_version_id before deleting versions)", repo.calls, want)
+		}
+	}
+}
+
+// TestPurgeBlobsRecheckSkipsResurrected：快照为 deleting/ref=0，复核前行已被
+// AddVersion 复活（available/ref=1）→ 不删物理对象、保留行、不报错。
+func TestPurgeBlobsRecheckSkipsResurrected(t *testing.T) {
+	repo := newMemTrashRepo()
+	snapshot := ObjectBlob{ID: uuid.New(), SHA256: "r", StorageKey: "objects/raced", RefCount: 0, Status: BlobStatusDeleting}
+	repo.blobs[snapshot.ID] = snapshot
+	// 复核前竞速：行已复活为 available/ref=1。
+	repo.blobs[snapshot.ID] = ObjectBlob{ID: snapshot.ID, SHA256: "r", StorageKey: "objects/raced", RefCount: 1, Status: BlobStatusAvailable}
+
+	var deletedKeys []string
+	if err := purgeBlobsLogic(repo, []ObjectBlob{snapshot}, func(key string) error {
+		deletedKeys = append(deletedKeys, key)
+		return nil
+	}); err != nil {
+		t.Fatalf("resurrected blob must be skipped without error: %v", err)
+	}
+	if len(deletedKeys) != 0 {
+		t.Fatalf("physical deletes = %v, want none (blob resurrected between snapshot and recheck)", deletedKeys)
+	}
+	got, err := repo.GetBlob(snapshot.ID)
+	if err != nil || got.Status != BlobStatusAvailable || got.RefCount != 1 {
+		t.Fatalf("blob = %+v, %v; want resurrected row preserved", got, err)
+	}
+}
+
+// TestPurgeReturnsWebpkgPrefixes：purge 返回被删文件关联网页包的对象前缀，
+// 供事务提交后经 SetWebpkgCleaner 清理（未挂包的文件无前缀）。
+func TestPurgeReturnsWebpkgPrefixes(t *testing.T) {
+	repo := newMemTrashRepo()
+	owner := uuid.New()
+	root := repo.addFile(owner, nil, "root", "folder", true, nil)
+	now := time.Now()
+	blob := ObjectBlob{ID: uuid.New(), SHA256: "w", StorageKey: "objects/webpkg", RefCount: 1, Status: BlobStatusAvailable}
+	repo.blobs[blob.ID] = blob
+
+	plain := repo.addFile(owner, ptrID(root.ID), "plain.txt", "file", false, &now)
+	packaged := repo.addFile(owner, ptrID(root.ID), "site.zip", "file", false, &now)
+	repo.addVersion(plain.ID, blob.ID, true)
+	repo.addVersion(packaged.ID, blob.ID, true)
+	repo.webpkgs[packaged.ID] = "pub123"
+
+	_, _, prefixes, err := purgeLogic(repo, owner, packaged.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prefixes) != 1 || prefixes[0] != "webpkg/pub123" {
+		t.Fatalf("webpkg prefixes = %v, want [webpkg/pub123]", prefixes)
+	}
+
+	_, _, prefixes, err = purgeLogic(repo, owner, plain.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prefixes) != 0 {
+		t.Fatalf("webpkg prefixes = %v, want none for plain file", prefixes)
 	}
 }

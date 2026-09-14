@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -20,6 +21,10 @@ type Config struct {
 	MaxFileSize      int64
 	ScanEnabled      bool
 	UploadSessionTTL time.Duration
+	// TrustedProxies 为可信代理 CIDR/IP 列表（TRUSTED_PROXIES，逗号分隔）；
+	// 默认空 = 不信任任何代理（ClientIP 取 RemoteAddr，忽略 X-Forwarded-For），
+	// 防止客户端伪造 XFF 绕过按 IP 限流；条目合法性由 gin SetTrustedProxies 校验。
+	TrustedProxies []string
 	// StorageDriver 选择存储驱动：local（默认）| s3。
 	StorageDriver string
 	// S3 兼容对象存储配置（SeaweedFS/MinIO/AWS），STORAGE_DRIVER=s3 时生效。
@@ -99,6 +104,10 @@ type Config struct {
 	// QueueConcurrency 为 redis 驱动下每实例并行处理任务数
 	//（QUEUE_CONCURRENCY，默认 5）。
 	QueueConcurrency int
+	// PatchMaxBytes 单次上传 PATCH 请求体上限（PATCH_MAX_BYTES，默认
+	// 64MiB，与 upload.DefaultPatchMaxBytes 一致）；接线 upload.Service.
+	// SetPatchMaxBytes，约束单请求的存储写入量与连接占用时长。
+	PatchMaxBytes int64
 }
 
 func Load() (Config, error) {
@@ -206,7 +215,11 @@ func Load() (Config, error) {
 	if e != nil {
 		return Config{}, e
 	}
-	c := Config{Port: stringEnv("PORT", "8080"), DatabaseURL: os.Getenv("DATABASE_URL"), JWTSecret: os.Getenv("JWT_SECRET"), AccessTokenTTL: a, RefreshTokenTTL: r, CookieSecure: secure, CookieDomain: os.Getenv("COOKIE_DOMAIN"), StorageRoot: stringEnv("STORAGE_ROOT", "./storage"), MaxFileSize: max, ScanEnabled: scan, UploadSessionTTL: ttl, StorageDriver: stringEnv("STORAGE_DRIVER", "local"), S3Endpoint: os.Getenv("S3_ENDPOINT"), S3Bucket: os.Getenv("S3_BUCKET"), S3Region: stringEnv("S3_REGION", "us-east-1"), S3AccessKey: os.Getenv("S3_ACCESS_KEY"), S3SecretKey: os.Getenv("S3_SECRET_KEY"), S3PathStyle: pathStyle, ClamAVAddr: os.Getenv("CLAMAV_ADDR"), ClamAVTimeout: clamavTimeout, ClamAVRequired: clamavRequired, RateLimitPerMinute: rateLimit, LoginRateLimitPerMinute: loginRateLimit, PublicRateLimitPerMinute: publicRateLimit, MaxVersionsPerFile: maxVersions, JanitorEnabled: janitorEnabled, JanitorInterval: janitorInterval, OnlyOfficeEnabled: ooEnabled, OnlyOfficeServerURL: stringEnv("ONLYOFFICE_SERVER_URL", "http://onlyoffice:80"), OnlyOfficePublicURL: stringEnv("ONLYOFFICE_PUBLIC_URL", ""), OnlyOfficeJWTSecret: os.Getenv("ONLYOFFICE_JWT_SECRET"), OnlyOfficeDownloadURLBase: stringEnv("ONLYOFFICE_DOWNLOAD_URL_BASE", "http://backend:8080"), OnlyOfficeRateLimitPerMinute: ooRateLimit, MetricsEnabled: metricsEnabled, WebpkgEnabled: webpkgEnabled, WebpkgMaxEntries: webpkgMaxEntries, WebpkgMaxFileSize: webpkgMaxFileSize, WebpkgMaxTotalSize: webpkgMaxTotalSize, WebpkgMaxDepth: webpkgMaxDepth, WebpkgRateLimitPerMinute: webpkgRateLimit, QueueDriver: stringEnv("QUEUE_DRIVER", "inprocess"), RedisAddr: stringEnv("REDIS_ADDR", "localhost:6379"), RedisPassword: os.Getenv("REDIS_PASSWORD"), QueueConcurrency: queueConcurrency}
+	patchMax, e := int64Env("PATCH_MAX_BYTES", 64<<20)
+	if e != nil {
+		return Config{}, e
+	}
+	c := Config{Port: stringEnv("PORT", "8080"), DatabaseURL: os.Getenv("DATABASE_URL"), JWTSecret: os.Getenv("JWT_SECRET"), AccessTokenTTL: a, RefreshTokenTTL: r, CookieSecure: secure, CookieDomain: os.Getenv("COOKIE_DOMAIN"), StorageRoot: stringEnv("STORAGE_ROOT", "./storage"), MaxFileSize: max, ScanEnabled: scan, UploadSessionTTL: ttl, TrustedProxies: listEnv("TRUSTED_PROXIES"), StorageDriver: stringEnv("STORAGE_DRIVER", "local"), S3Endpoint: os.Getenv("S3_ENDPOINT"), S3Bucket: os.Getenv("S3_BUCKET"), S3Region: stringEnv("S3_REGION", "us-east-1"), S3AccessKey: os.Getenv("S3_ACCESS_KEY"), S3SecretKey: os.Getenv("S3_SECRET_KEY"), S3PathStyle: pathStyle, ClamAVAddr: os.Getenv("CLAMAV_ADDR"), ClamAVTimeout: clamavTimeout, ClamAVRequired: clamavRequired, RateLimitPerMinute: rateLimit, LoginRateLimitPerMinute: loginRateLimit, PublicRateLimitPerMinute: publicRateLimit, MaxVersionsPerFile: maxVersions, JanitorEnabled: janitorEnabled, JanitorInterval: janitorInterval, OnlyOfficeEnabled: ooEnabled, OnlyOfficeServerURL: stringEnv("ONLYOFFICE_SERVER_URL", "http://onlyoffice:80"), OnlyOfficePublicURL: stringEnv("ONLYOFFICE_PUBLIC_URL", ""), OnlyOfficeJWTSecret: os.Getenv("ONLYOFFICE_JWT_SECRET"), OnlyOfficeDownloadURLBase: stringEnv("ONLYOFFICE_DOWNLOAD_URL_BASE", "http://backend:8080"), OnlyOfficeRateLimitPerMinute: ooRateLimit, MetricsEnabled: metricsEnabled, WebpkgEnabled: webpkgEnabled, WebpkgMaxEntries: webpkgMaxEntries, WebpkgMaxFileSize: webpkgMaxFileSize, WebpkgMaxTotalSize: webpkgMaxTotalSize, WebpkgMaxDepth: webpkgMaxDepth, WebpkgRateLimitPerMinute: webpkgRateLimit, QueueDriver: stringEnv("QUEUE_DRIVER", "inprocess"), RedisAddr: stringEnv("REDIS_ADDR", "localhost:6379"), RedisPassword: os.Getenv("REDIS_PASSWORD"), QueueConcurrency: queueConcurrency, PatchMaxBytes: patchMax}
 	if c.DatabaseURL == "" {
 		return Config{}, errors.New("DATABASE_URL is required")
 	}
@@ -218,6 +231,9 @@ func Load() (Config, error) {
 	}
 	if c.StorageDriver != "local" && c.StorageDriver != "s3" {
 		return Config{}, errors.New("STORAGE_DRIVER must be local or s3")
+	}
+	if c.PatchMaxBytes < 1 {
+		return Config{}, errors.New("PATCH_MAX_BYTES must be >= 1")
 	}
 	if c.StorageDriver == "s3" && c.S3Bucket == "" {
 		return Config{}, errors.New("S3_BUCKET is required when STORAGE_DRIVER=s3")
@@ -302,6 +318,23 @@ func stringEnv(k, f string) string {
 		return v
 	}
 	return f
+}
+
+// listEnv 读取逗号分隔的列表环境变量（TRUSTED_PROXIES 等）：
+// 去除条目首尾空白并跳过空条目；未设置或全空返回 nil。
+func listEnv(k string) []string {
+	value := strings.TrimSpace(os.Getenv(k))
+	if value == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if item := strings.TrimSpace(part); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 // firstEnv 依次读取多个环境变量名，返回首个已设置（非空）的值；

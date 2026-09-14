@@ -23,6 +23,7 @@ type uploadRequest struct {
 }
 
 // uploadStartError 统一映射会话创建错误（自定义 API 与 tus 共用语义）。
+// default 分支固定 500 + 固定文案（不回显内部错误细节，防信息泄露）。
 func uploadStartError(c *gin.Context, err error, tus bool) {
 	badRequest := func(message string) {
 		if tus {
@@ -30,6 +31,13 @@ func uploadStartError(c *gin.Context, err error, tus bool) {
 			return
 		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": message})
+	}
+	serverError := func() {
+		if tus {
+			tusError(c, http.StatusInternalServerError, "unable to create upload")
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to create upload"})
 	}
 	switch {
 	case errors.Is(err, files.ErrForbidden), errors.Is(err, upload.ErrTargetUnavailable):
@@ -47,6 +55,8 @@ func uploadStartError(c *gin.Context, err error, tus bool) {
 		}
 	case errors.Is(err, files.ErrInvalidTarget):
 		badRequest(err.Error())
+	case errors.Is(err, upload.ErrHash), errors.Is(err, files.ErrInvalidName):
+		badRequest(err.Error())
 	case errors.Is(err, upload.ErrSize):
 		if tus {
 			tusError(c, http.StatusRequestEntityTooLarge, err.Error())
@@ -54,8 +64,19 @@ func uploadStartError(c *gin.Context, err error, tus bool) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		}
 	default:
-		badRequest(err.Error())
+		serverError()
 	}
+}
+
+// uploadSession 加载 :id 会话并校验归属（IDOR 修复）：解析失败、不存在或
+// 非本人资源一律 404（与 tusSession 同语义，不泄露存在性），响应已写出。
+func (h *Handler) uploadSession(c *gin.Context, id uuid.UUID) (upload.UploadSession, bool) {
+	v, err := h.uploads.Get(id)
+	if err != nil || v.UserID != userID(c) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "upload not found"})
+		return upload.UploadSession{}, false
+	}
+	return v, true
 }
 
 func (h *Handler) createUpload(c *gin.Context) {
@@ -81,7 +102,7 @@ func (h *Handler) createUpload(c *gin.Context) {
 		if req.ParentID == "" {
 			root, err := h.files.EnsureRoot(userID(c))
 			if err != nil {
-				c.JSON(500, gin.H{"error": "unable to ensure root folder"})
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to ensure root folder"})
 				return
 			}
 			parent = root.ID
@@ -95,7 +116,7 @@ func (h *Handler) createUpload(c *gin.Context) {
 		var err error
 		v, err = h.uploads.Start(userID(c), parent, req.Name, req.Size, req.ExpectedSHA256)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			uploadStartError(c, err, false)
 			return
 		}
 	}
@@ -107,31 +128,39 @@ func (h *Handler) patchUpload(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if _, ok := h.uploadSession(c, id); !ok {
+		return
+	}
 	offset, err := strconv.ParseInt(c.GetHeader("Upload-Offset"), 10, 64)
 	if err != nil {
 		c.JSON(400, gin.H{"error": "invalid offset"})
 		return
 	}
-	v, err := h.uploads.Append(id, offset, c.Request.Body)
-	if errors.Is(err, upload.ErrOffset) || errors.Is(err, upload.ErrSize) {
+	// 单 PATCH 上限：声明超限直接 413，不进入流式复制。
+	if max := h.uploads.PatchMaxBytes(); max > 0 && c.Request.ContentLength > max {
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "request body exceeds per-request upload limit"})
+		return
+	}
+	v, err := h.uploads.AppendWithLength(id, offset, c.Request.ContentLength, c.Request.Body)
+	switch {
+	case errors.Is(err, upload.ErrPatchTooLarge):
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": err.Error()})
+	case errors.Is(err, upload.ErrOffset), errors.Is(err, upload.ErrSize):
 		c.JSON(409, gin.H{"error": err.Error()})
-		return
-	}
-	if err != nil {
+	case err != nil:
 		c.JSON(500, gin.H{"error": "upload failed"})
-		return
+	default:
+		c.Header("Upload-Offset", strconv.FormatInt(v.Offset, 10))
+		c.JSON(http.StatusOK, v)
 	}
-	c.Header("Upload-Offset", strconv.FormatInt(v.Offset, 10))
-	c.JSON(http.StatusOK, v)
 }
 func (h *Handler) completeUpload(c *gin.Context) {
 	id, ok := parseID(c, c.Param("id"))
 	if !ok {
 		return
 	}
-	current, err := h.uploads.Get(id)
-	if err != nil {
-		c.JSON(404, gin.H{"error": "upload not found"})
+	current, ok := h.uploadSession(c, id)
+	if !ok {
 		return
 	}
 	// 终态幂等：重复调用 complete 直接返回当前状态，不重新处理，也不掩盖错误。
@@ -164,9 +193,8 @@ func (h *Handler) getUpload(c *gin.Context) {
 	if !ok {
 		return
 	}
-	v, err := h.uploads.Get(id)
-	if err != nil {
-		c.JSON(404, gin.H{"error": "upload not found"})
+	v, ok := h.uploadSession(c, id)
+	if !ok {
 		return
 	}
 	out := gin.H{"id": v.ID, "parent_id": v.ParentID, "name": v.Name, "size": v.Size, "offset": v.Offset, "status": v.Status, "expires_at": v.ExpiresAt, "created_at": v.CreatedAt, "completed_at": v.CompletedAt}

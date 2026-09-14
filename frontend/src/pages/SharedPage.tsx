@@ -4,8 +4,9 @@ import { formatTime } from '../components/FileBrowser'
 
 /**
  * 我的分享：按 created_at 倒序列出我创建的分享（公开与私有）。
- * 契约不回传 visibility / 明文 token：可见性与链接取创建时暂存的前端内存态
- * （getShareMeta），未知时可见性显示「—」、公开链接提示「创建时已展示」。
+ * 可见性与文件名优先使用列表响应的后端字段（visibility/file_name）；
+ * 明文 token 契约上仅公开分享创建时返回一次，取创建时暂存的前端内存态
+ * （getShareMeta），刷新后不可再取（提示「创建时已展示」）。
  */
 export default function SharedPage() {
   const [shares, setShares] = useState<ShareItem[]>([])
@@ -22,11 +23,13 @@ export default function SharedPage() {
     try {
       const list = await listShares()
       setShares(list)
-      // 并发把 file_id 解析为文件名（仅本人 owner 的文件可取到，失败回退短 ID）。
-      const results = await Promise.allSettled(list.map((s) => getFileMeta(s.file_id)))
+      // 文件名优先用后端 file_name 字段；缺失（旧后端）时才并发把 file_id
+      // 解析为文件名（仅本人 owner 的文件可取到，失败回退短 ID）。
       const map: Record<string, string> = {}
+      const missing = list.filter((s) => !s.file_name)
+      const results = await Promise.allSettled(missing.map((s) => getFileMeta(s.file_id)))
       results.forEach((r, i) => {
-        if (r.status === 'fulfilled') map[list[i].file_id] = r.value.name
+        if (r.status === 'fulfilled') map[missing[i].file_id] = r.value.name
       })
       setNames(map)
     } catch (err) {
@@ -92,19 +95,19 @@ export default function SharedPage() {
           </thead>
           <tbody>
             {shares.map((s) => {
-              const meta = getShareMeta(s.id)
-              const publicToken = meta?.visibility === 'public' ? meta.token : undefined
+              const publicToken = getShareMeta(s.id)?.token
+              const visibility = s.visibility
               const revoked = s.revoked_at !== null
               const expired = s.expires_at !== null && new Date(s.expires_at).getTime() <= Date.now()
               const invalid = revoked || expired
               return (
                 <tr key={s.id} className={invalid ? 'row-muted' : ''}>
-                  <td title={s.file_id}>{names[s.file_id] ?? `${s.file_id.slice(0, 8)}…`}</td>
+                  <td title={s.file_id}>{s.file_name ?? names[s.file_id] ?? `${s.file_id.slice(0, 8)}…`}</td>
                   <td>{s.permission === 'download' ? '可下载' : '仅查看'}</td>
                   <td>
-                    {meta?.visibility === 'public' ? (
+                    {visibility === 'public' ? (
                       <span className="badge">公开</span>
-                    ) : meta?.visibility === 'private' ? (
+                    ) : visibility === 'private' ? (
                       <span className="badge private">私有</span>
                     ) : (
                       <span className="muted">—</span>
@@ -119,9 +122,9 @@ export default function SharedPage() {
                       >
                         {copiedId === s.id ? '已复制 ✓' : '复制链接'}
                       </button>
-                    ) : meta?.visibility === 'public' ? (
+                    ) : visibility === 'public' ? (
                       <span className="muted">链接创建时已展示</span>
-                    ) : meta?.visibility === 'private' ? (
+                    ) : visibility === 'private' ? (
                       <span className="muted">授权用户/团队访问</span>
                     ) : (
                       <span className="muted">—</span>

@@ -167,6 +167,64 @@ func TestCreateStoresOnlyHashAndSetsPublicFlag(t *testing.T) {
 	}
 }
 
+// 默认有效期热读取：Create/CreatePrivate 收到 expiresIn==0 时采用注入的
+// 默认小时数；未注入或返回非正值（0，模拟读失败回退）时维持「永久」。
+// 显式指定有效期不受默认值影响。
+func TestCreateUsesDefaultExpiryProvider(t *testing.T) {
+	svc, _, ff, owner, fileID, _ := newTestService()
+
+	// 未注入：永久（既有行为）。
+	sh, _, err := svc.Create(owner, fileID, PermissionView, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sh.ExpiresAt != nil {
+		t.Fatalf("no provider: expires_at = %v, want nil (永久)", sh.ExpiresAt)
+	}
+
+	hours := 48
+	svc.SetDefaultExpiryProvider(func() int { return hours })
+
+	// expiresIn==0：采用默认 48h。
+	sh, _, err = svc.Create(owner, fileID, PermissionView, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sh.ExpiresAt == nil || !sh.ExpiresAt.Equal(sh.CreatedAt.Add(48*time.Hour)) {
+		t.Fatalf("default expiry: expires_at = %v, want created_at + 48h", sh.ExpiresAt)
+	}
+
+	// 显式有效期优先于默认值。
+	sh, _, err = svc.Create(owner, fileID, PermissionView, 2*time.Hour, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sh.ExpiresAt == nil || !sh.ExpiresAt.Equal(sh.CreatedAt.Add(2*time.Hour)) {
+		t.Fatalf("explicit expiry: expires_at = %v, want created_at + 2h", sh.ExpiresAt)
+	}
+
+	// provider 返回 0（读失败回退）：永久。
+	hours = 0
+	sh, _, err = svc.Create(owner, fileID, PermissionView, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sh.ExpiresAt != nil {
+		t.Fatalf("provider zero: expires_at = %v, want nil (永久)", sh.ExpiresAt)
+	}
+
+	// 私有分享同语义。
+	hours = 24
+	svc.SetDefaultExpiryProvider(func() int { return hours })
+	priv, err := svc.CreatePrivate(owner, ff.addFile(owner, "p.txt", "file", files.BlobStatusAvailable), PermissionView, 0, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if priv.ExpiresAt == nil || !priv.ExpiresAt.Equal(priv.CreatedAt.Add(24*time.Hour)) {
+		t.Fatalf("private default expiry: expires_at = %v, want created_at + 24h", priv.ExpiresAt)
+	}
+}
+
 func TestCreateValidations(t *testing.T) {
 	svc, _, ff, owner, fileID, now := newTestService()
 	folderID := ff.addFile(owner, "docs", "folder", files.BlobStatusAvailable)
@@ -330,6 +388,48 @@ func TestResolveForDownloadPermissionAndCounts(t *testing.T) {
 	}
 	if _, err := svc.ResolveForDownload(unavailable); !errors.Is(err, ErrFileNotAvailable) {
 		t.Fatalf("unavailable blob download: err = %v, want ErrFileNotAvailable", err)
+	}
+}
+
+// 下载计数补偿：ResolveForDownload 已消耗计数但内容读取失败时，
+// DecrementDownload 回退分享 download_count（下限 0，不越减）。
+func TestDecrementDownloadCompensation(t *testing.T) {
+	svc, repo, ff, owner, fileID, _ := newTestService()
+	_, token, err := svc.Create(owner, fileID, PermissionDownload, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := svc.ResolveForDownload(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := shareByHash(t, repo, HashToken(token)).DownloadCount; got != 1 {
+		t.Fatalf("share download_count after consume = %d, want 1", got)
+	}
+	// 模拟存储读取失败后的补偿。
+	if err := svc.DecrementDownload(r); err != nil {
+		t.Fatalf("DecrementDownload: %v", err)
+	}
+	if got := shareByHash(t, repo, HashToken(token)).DownloadCount; got != 0 {
+		t.Fatalf("share download_count after compensation = %d, want 0", got)
+	}
+	// 下限 0：对计数为 0 的分享再次补偿不产生负数。
+	if err := svc.DecrementDownload(r); err != nil {
+		t.Fatalf("DecrementDownload at zero: %v", err)
+	}
+	if got := shareByHash(t, repo, HashToken(token)).DownloadCount; got != 0 {
+		t.Fatalf("share download_count after double compensation = %d, want 0", got)
+	}
+	// 不存在的分享静默成功。
+	if err := svc.DecrementDownload(Resolved{Share: Share{ID: uuid.New()}}); err != nil {
+		t.Fatalf("DecrementDownload missing share: %v", err)
+	}
+	// 补偿后分享仍可正常下载（计数窗口未被破坏）。
+	if _, err := svc.ResolveForDownload(token); err != nil {
+		t.Fatalf("download after compensation: %v", err)
+	}
+	if ff.downloads[fileID] != 2 {
+		t.Fatalf("files.download_count = %d, want 2", ff.downloads[fileID])
 	}
 }
 

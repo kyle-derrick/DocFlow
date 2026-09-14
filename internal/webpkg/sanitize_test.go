@@ -130,6 +130,7 @@ func TestResolvePathRejected(t *testing.T) {
 		".webpkg-manifest",            // 内部清单不可提供
 		"a/b/c/d/e/f/g/h/i/j/k/x.txt", // 深度超限
 		"bad\x00name.html",            // 控制字符
+		"a/b:c.txt",                   // 段内冒号
 	}
 	for _, rel := range rejected {
 		if _, _, ok := ResolvePath(rel, 10); ok {

@@ -12,6 +12,13 @@ const (
 	RoleAdmin = "admin"
 )
 
+// 用户状态，与 users.status CHECK 约束一致。
+const (
+	StatusActive   = "active"
+	StatusDisabled = "disabled"
+	StatusLocked   = "locked"
+)
+
 type User struct {
 	ID           uuid.UUID `gorm:"type:uuid;primaryKey"`
 	Username     string    `gorm:"uniqueIndex;not null"`

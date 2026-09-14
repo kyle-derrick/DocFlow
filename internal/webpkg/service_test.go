@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -36,6 +38,12 @@ func (f *fakeSource) CurrentVersion(owner, fileID uuid.UUID) (files.FileVersion,
 	return f.version, f.blob, nil
 }
 
+// testSHA / altSHA 为 64 字符十六进制哨兵，模拟版本更替前后的 blob sha。
+const (
+	testSHA = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	altSHA  = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+)
+
 type env struct {
 	svc    *Service
 	source *fakeSource
@@ -57,7 +65,7 @@ func newEnv(t *testing.T, zipBytes []byte, mime, name string) *env {
 		owner:   owner,
 		file:    files.File{ID: uuid.New(), Name: name, OwnerID: owner, Type: "file"},
 		version: files.FileVersion{Version: 1},
-		blob:    files.ObjectBlob{StorageKey: "objects/site", Size: int64(len(zipBytes)), MimeType: mime, Status: files.BlobStatusAvailable},
+		blob:    files.ObjectBlob{StorageKey: "objects/site", Size: int64(len(zipBytes)), MimeType: mime, Status: files.BlobStatusAvailable, SHA256: testSHA},
 	}
 	repo := NewMemoryRepo()
 	svc := NewService(repo, source, storage, DefaultLimits())
@@ -112,7 +120,7 @@ func TestExtractForFileBlockedKeepsRow(t *testing.T) {
 	if !errors.Is(err, ErrWebpkgInvalid) {
 		t.Fatalf("err = %v, want ErrWebpkgInvalid", err)
 	}
-	if pkg.Status != StatusBlocked || pkg.Error == "" {
+	if pkg.Status != StatusBlocked || pkg.Error == nil || *pkg.Error == "" {
 		t.Fatalf("pkg = %+v, want blocked with reason", pkg)
 	}
 	if _, ok := e.svc.ReadyPackage(e.source.file.ID); ok {
@@ -200,7 +208,7 @@ func TestResolveGuards(t *testing.T) {
 	}
 	e.source.blob.Status = files.BlobStatusAvailable
 	// 非 ready 状态不可解析。
-	_ = e.repo.SetResult(pkg.ID, StatusFailed, "boom", 0, 0)
+	_ = e.repo.SetResult(pkg.ID, StatusFailed, "boom", 0, 0, "")
 	if _, _, ok := e.svc.Resolve(pid, "index.html"); ok {
 		t.Error("failed package unexpectedly resolvable")
 	}
@@ -245,4 +253,146 @@ func TestAutoExtractGating(t *testing.T) {
 	// 文件不存在：静默。
 	e5 := newEnv(t, validZip(t), "application/zip", "site.zip")
 	e5.svc.AutoExtract(uuid.New())
+}
+
+// ---- 并发互斥（TryMarkExtracting） ----
+
+// 并发 TryMarkExtracting：恰好一个调用方生效（条件更新语义）。
+func TestTryMarkExtractingSingleWinner(t *testing.T) {
+	e := newEnv(t, validZip(t), "application/zip", "site.zip")
+	if _, err := e.svc.ExtractForFile(e.source.file.ID); err != nil {
+		t.Fatal(err)
+	}
+	var wins atomic.Int32
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if ok, err := e.repo.TryMarkExtracting(e.source.file.ID); err == nil && ok {
+				wins.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	if wins.Load() != 1 {
+		t.Fatalf("winners = %d, want exactly 1", wins.Load())
+	}
+}
+
+// 他人解包进行中（status=extracting）：ExtractForFile 直接返回当前行，
+// 不重复解包（源对象不可读也不触发 failed 落库）。
+func TestExtractForFileSkipsWhenExtracting(t *testing.T) {
+	e := newEnv(t, validZip(t), "application/zip", "site.zip")
+	pkg, err := e.svc.ExtractForFile(e.source.file.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 模拟他人进行中：置 extracting 并移除源对象，若仍尝试解包必失败。
+	if err := e.repo.SetResult(pkg.ID, StatusExtracting, "", 0, 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.store.Delete("objects/site"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := e.svc.ExtractForFile(e.source.file.ID)
+	if err != nil {
+		t.Fatalf("concurrent extract must return without error, got %v", err)
+	}
+	if got.Status != StatusExtracting {
+		t.Fatalf("status = %q, want extracting (untouched)", got.Status)
+	}
+	row, rerr := e.repo.GetByFileID(e.source.file.ID)
+	if rerr != nil || row.Status != StatusExtracting || row.Error != nil {
+		t.Fatalf("row = %+v, %v; want extracting without failure recorded", row, rerr)
+	}
+}
+
+// ---- 版本失效（source_blob_sha256） ----
+
+// 版本更替后（当前版本 blob sha 变化）：ready 包不再可解析，直至重新解包。
+func TestResolveRejectsStaleVersion(t *testing.T) {
+	e := newEnv(t, validZip(t), "application/zip", "site.zip")
+	pkg, err := e.svc.ExtractForFile(e.source.file.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rc, _, ok := e.svc.Resolve(pkg.PublicID, "index.html"); !ok {
+		t.Fatal("fresh package must resolve")
+	} else {
+		rc.Close()
+	}
+	// 新版本：blob sha 变化（内容与 sha 同步替换）。
+	if err := e.store.Put("objects/site", bytes.NewReader(validZip(t))); err != nil {
+		t.Fatal(err)
+	}
+	e.source.blob.SHA256 = altSHA
+	if _, _, ok := e.svc.Resolve(pkg.PublicID, "index.html"); ok {
+		t.Fatal("stale package unexpectedly resolvable after version bump")
+	}
+	// 重新解包后恢复（记录新的源 sha）。
+	if _, err := e.svc.ExtractForFile(e.source.file.ID); err != nil {
+		t.Fatal(err)
+	}
+	if rc, _, ok := e.svc.Resolve(pkg.PublicID, "index.html"); !ok {
+		t.Fatal("re-extracted package must resolve again")
+	} else {
+		rc.Close()
+	}
+	row, _ := e.repo.GetByFileID(e.source.file.ID)
+	if row.SourceBlobSHA256 == nil || *row.SourceBlobSHA256 != altSHA {
+		t.Fatalf("source sha = %v, want %s", row.SourceBlobSHA256, altSHA)
+	}
+}
+
+// migration 013 前的旧行（无 source_blob_sha256 记录）：Resolve 一律拒绝，
+// 直至重新解包补记。
+func TestResolveRejectsLegacyRowWithoutSourceSHA(t *testing.T) {
+	e := newEnv(t, validZip(t), "application/zip", "site.zip")
+	pkg, err := e.svc.ExtractForFile(e.source.file.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, _ := e.repo.GetByFileID(e.source.file.ID)
+	row.SourceBlobSHA256 = nil // 模拟旧行 NULL
+	e.repo.mu.Lock()
+	e.repo.items[row.ID] = row
+	e.repo.mu.Unlock()
+	if _, _, ok := e.svc.Resolve(pkg.PublicID, "index.html"); ok {
+		t.Fatal("legacy row without source sha unexpectedly resolvable")
+	}
+}
+
+// AutoExtract superseded：已是 zip 包但新版本非 zip 候选 → 行置 blocked
+// （error=superseded by non-archive version），Resolve 不再提供。
+func TestAutoExtractSupersededByNonArchive(t *testing.T) {
+	e := newEnv(t, validZip(t), "application/zip", "site.zip")
+	pkg, err := e.svc.ExtractForFile(e.source.file.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 新版本：改名为 png 且 mime 随之变化（非 zip 候选），blob sha 同步变化。
+	e.source.file.Name = "banner.png"
+	e.source.blob.MimeType = "image/png"
+	e.source.blob.SHA256 = altSHA
+	e.svc.AutoExtract(e.source.file.ID)
+	row, rerr := e.repo.GetByFileID(e.source.file.ID)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if row.Status != StatusBlocked || row.Error == nil || *row.Error != "superseded by non-archive version" {
+		t.Fatalf("row = %+v, want blocked superseded by non-archive version", row)
+	}
+	if _, ok := e.svc.ReadyPackage(e.source.file.ID); ok {
+		t.Fatal("superseded package must not be ready")
+	}
+	if _, _, ok := e.svc.Resolve(pkg.PublicID, "index.html"); ok {
+		t.Fatal("superseded package unexpectedly resolvable")
+	}
+	// 无既有包行的非候选文件：不创建行。
+	e2 := newEnv(t, validZip(t), "application/octet-stream", "photo.png")
+	e2.svc.AutoExtract(e2.source.file.ID)
+	if _, err := e2.repo.GetByFileID(e2.source.file.ID); err == nil {
+		t.Fatal("non-candidate file must not get a web package row")
+	}
 }

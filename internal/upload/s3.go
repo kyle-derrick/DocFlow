@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -19,16 +21,24 @@ import (
 // S3Storage 基于 S3 兼容对象存储（AWS S3 / MinIO / SeaweedFS）实现 Storage。
 //
 // Append 语义：S3 对象不可追加写，采用「分片对象」策略——key 作为前缀，
-// 每次 Append 写入一个 `<key>/part-NNNNNNNN` 对象（8 位零填充保证字典序）；
-// Read 先尝试读取 key 本体（Put 的产物），不存在时按分片序号顺序流式拼接；
-// Delete 同时删除 key 本体与全部分片。
+// 每次 Append 写入一个 `<key>/part-NNNNNNNN` 对象（8 位零填充；Read 侧按
+// 数值序拼接，超出 8 位仍正确）；Read 先尝试读取 key 本体（Put 的产物），
+// 不存在时按分片序号顺序流式拼接；Delete 同时删除 key 本体与全部分片。
+//
+// 生产路径：upload.Service 检测 S3Storage 实现 OffsetAppender 后走 AppendAt
+// （分片号由 offset 直接推导），Append 仅作为兼容回退保留（进程内原子计数器）。
 type S3Storage struct {
 	api s3ObjectAPI
+	// nextPart 每 key 的下一分片号计数器（兼容 Append 路径专用；AppendAt
+	// 由 offset 直接推导分片号，不经过计数器）。
+	nextPart sync.Map // key → *atomic.Int64
 }
 
 // s3ObjectAPI 是 S3Storage 依赖的最小对象操作集合，便于脱离网络测试。
 type s3ObjectAPI interface {
 	GetObject(ctx context.Context, key string) (io.ReadCloser, error)
+	// GetObjectRange 读取 [start, start+length) 区间（GetObject Range）。
+	GetObjectRange(ctx context.Context, key string, start, length int64) (io.ReadCloser, error)
 	PutObject(ctx context.Context, key string, r io.Reader) error
 	DeleteObject(ctx context.Context, key string) error
 	// ListObjects 返回以 prefix 开头的全部对象 key（跨页聚合，去重排序由调用方处理）。
@@ -117,30 +127,72 @@ func (s *S3Storage) Put(key string, r io.Reader) error {
 	return s.api.PutObject(context.Background(), key, r)
 }
 
-// Append 写入下一个分片对象；分片序号由当前已有分片决定（最大序号 + 1）。
+// Append 写入下一个分片对象（兼容回退路径）：分片号由进程内原子计数器
+// （sync.Map）分配——计数器缺失时一次性 ListObjects 初始化（现存最大序号+1），
+// 之后不再依赖 List，消除「List-then-put」在列表可见性延迟下复用已占序号的
+// 竞态；PutObject 失败时归还序号供重试复用。
+// 局限：计数器为进程内状态，多实例部署下各实例独立初始化（以 List 结果为
+// 基线仍可能重叠）；生产上传路径走 AppendAt（分片号=offset，无跨实例状态）。
 func (s *S3Storage) Append(key string, r io.Reader) (int64, error) {
 	if err := s3ValidateKey(key); err != nil {
 		return 0, err
 	}
 	ctx := context.Background()
-	names, err := s.api.ListObjects(ctx, key+"/")
-	if err != nil {
-		return 0, err
-	}
-	parts := s3SortedPartKeys(key, names)
-	next := 0
-	if len(parts) > 0 {
-		last := parts[len(parts)-1]
-		if n, perr := strconv.Atoi(last[len(key)+len(s3PartSep):]); perr == nil {
-			next = n + 1
-		}
-	}
+	idx, release := s.claimPartIndex(ctx, key)
 	cr := &countingReader{r: r}
-	if err := s.api.PutObject(ctx, s3PartKey(key, next), cr); err != nil {
+	if err := s.api.PutObject(ctx, s3PartKey(key, int(idx)), cr); err != nil {
+		release()
 		return cr.n, err
 	}
 	return cr.n, nil
 }
+
+// claimPartIndex 认领下一个分片号并返回归还函数（写失败时回退计数器）。
+func (s *S3Storage) claimPartIndex(ctx context.Context, key string) (int64, func()) {
+	if v, ok := s.nextPart.Load(key); ok {
+		counter := v.(*atomic.Int64)
+		idx := counter.Add(1) - 1
+		return idx, func() { counter.Add(-1) }
+	}
+	next := int64(0)
+	if names, err := s.api.ListObjects(ctx, key+"/"); err == nil {
+		if parts := s3SortedPartKeys(key, names); len(parts) > 0 {
+			if n, perr := strconv.Atoi(parts[len(parts)-1][len(key)+len(s3PartSep):]); perr == nil {
+				next = int64(n) + 1
+			}
+		}
+	}
+	fresh := new(atomic.Int64)
+	fresh.Store(next + 1)
+	if actual, loaded := s.nextPart.LoadOrStore(key, fresh); loaded {
+		counter := actual.(*atomic.Int64)
+		idx := counter.Add(1) - 1
+		return idx, func() { counter.Add(-1) }
+	}
+	return next, func() { fresh.Add(-1) }
+}
+
+// AppendAt 在绝对 offset 处写入分片（OffsetAppender，生产上传路径）：
+// 分片号 = offset（即 offset/chunkSize 在 chunkSize=1 下的整除映射——
+// PATCH 长度任意可变时，offset/N 整除映射会让两次不同 offset 落到同一分片
+// 造成覆写损坏，按字节 offset 一一映射则必然单射）。读取侧 s3SortedPartKeys
+// 按数值序拼接，分片号递增即字节序；同一 offset 重试覆盖同一分片，失败残留
+// 天然自愈。
+func (s *S3Storage) AppendAt(key string, offset int64, r io.Reader) (int64, error) {
+	if err := s3ValidateKey(key); err != nil {
+		return 0, err
+	}
+	if offset < 0 || offset > int64(maxInt) {
+		return 0, ErrInvalidKey
+	}
+	cr := &countingReader{r: r}
+	if err := s.api.PutObject(context.Background(), s3PartKey(key, int(offset)), cr); err != nil {
+		return cr.n, err
+	}
+	return cr.n, nil
+}
+
+const maxInt = int64(^uint(0) >> 1)
 
 func (s *S3Storage) Read(key string) (io.ReadCloser, error) {
 	if err := s3ValidateKey(key); err != nil {
@@ -164,6 +216,39 @@ func (s *S3Storage) Read(key string) (io.ReadCloser, error) {
 		return nil, fmt.Errorf("%w: %s", errS3NoObject, key)
 	}
 	return &s3PartReader{api: s.api, keys: parts}, nil
+}
+
+// ReadRange 读取 [start, start+length) 区间（RangeReader）：单对象直接用
+// GetObject Range（不缓冲、不依赖 Seeker）；对象不存在时回退到分片拼接流，
+// 跳过 start 字节后截取 length（分片仅存在于 tmp/ 上传中对象，下载路径的
+// objects/* 终态对象恒走原生 Range 分支）。
+func (s *S3Storage) ReadRange(key string, start, length int64) (io.ReadCloser, error) {
+	if err := s3ValidateKey(key); err != nil {
+		return nil, err
+	}
+	if start < 0 || length < 0 {
+		return nil, ErrInvalidKey
+	}
+	if length == 0 {
+		return io.NopCloser(strings.NewReader("")), nil
+	}
+	ctx := context.Background()
+	r, err := s.api.GetObjectRange(ctx, key, start, length)
+	if err == nil {
+		return r, nil
+	}
+	if !errors.Is(err, errS3NoObject) {
+		return nil, err
+	}
+	full, err := s.Read(key)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := io.CopyN(io.Discard, full, start); err != nil {
+		full.Close()
+		return nil, err
+	}
+	return &sectionReadCloser{r: io.LimitReader(full, length), c: full}, nil
 }
 
 func (s *S3Storage) Delete(key string) error {
@@ -251,6 +336,20 @@ type awsS3 struct {
 
 func (a *awsS3) GetObject(ctx context.Context, key string) (io.ReadCloser, error) {
 	out, err := a.client.GetObject(ctx, &s3.GetObjectInput{Bucket: &a.bucket, Key: &key})
+	if err != nil {
+		var noKey *s3types.NoSuchKey
+		if errors.As(err, &noKey) {
+			return nil, errS3NoObject
+		}
+		return nil, err
+	}
+	return out.Body, nil
+}
+
+func (a *awsS3) GetObjectRange(ctx context.Context, key string, start, length int64) (io.ReadCloser, error) {
+	// Range: bytes=start-(start+length-1)，含端点（RFC 7233）。
+	rng := fmt.Sprintf("bytes=%d-%d", start, start+length-1)
+	out, err := a.client.GetObject(ctx, &s3.GetObjectInput{Bucket: &a.bucket, Key: &key, Range: &rng})
 	if err != nil {
 		var noKey *s3types.NoSuchKey
 		if errors.As(err, &noKey) {

@@ -20,17 +20,35 @@ import (
 	"github.com/docflow/docflow/internal/webpkg"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // userDirectory 抽象用户目录查询（生产实现为 *auth.UserStore），
-// login 走 FindActiveByEmail，用户查找/邀请走 Lookup，分享者名走 Username。
+// login 走 FindActiveByEmail，用户查找/邀请走 Lookup，分享者名走 Username，
+// refresh 轮换成功后经 Status 复查账号是否仍为 active。
 type userDirectory interface {
 	FindActiveByEmail(email string) (auth.User, error)
 	Lookup(q string, limit int) ([]auth.User, error)
 	Username(id uuid.UUID) (string, error)
+	Status(id uuid.UUID) (string, error)
 }
 
 var _ userDirectory = (*auth.UserStore)(nil)
+
+// dummyPasswordHash 为包初始化时一次性生成的 bcrypt 哈希（与 HashPassword
+// 同 cost）。用户不存在/非 active 分支对它执行同样的 CompareHashAndPassword，
+// 使响应耗时与「用户存在但密码错误」路径一致，防止通过时间差枚举邮箱。
+var dummyPasswordHash = func() string {
+	hash, err := bcrypt.GenerateFromPassword([]byte("docflow-dummy-password-timing-align"), bcrypt.DefaultCost+2)
+	if err != nil {
+		panic("auth: generate dummy password hash: " + err.Error())
+	}
+	return string(hash)
+}()
+
+// authOpsRateLimitPerMin 为 refresh/logout 端点的独立按 IP 轻限流
+// （每分钟次数；防无认证刷轮换/登出，复用 publicLimiter 模式的独立实例）。
+const authOpsRateLimitPerMin = 60
 
 type Handler struct {
 	auth            *auth.Service
@@ -112,10 +130,13 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 		r.GET("/metrics", gin.WrapH(metrics.Handler()))
 	}
 	loginLimiterMW := loginLimiter(NewRateLimiter(loginRateLimit))
+	// refresh/logout：无认证的会话操作端点，独立实例按 IP 轻限流
+	//（与 login 限流互不挤占；publicLimiter 模式复用）。
+	authOpsLimiterMW := publicLimiter(NewRateLimiter(authOpsRateLimitPerMin))
 	authGroup := r.Group("/api/v1/auth")
 	authGroup.POST("/login", loginLimiterMW, h.login)
-	authGroup.POST("/refresh", h.refresh)
-	authGroup.POST("/logout", h.logout)
+	authGroup.POST("/refresh", authOpsLimiterMW, h.refresh)
+	authGroup.POST("/logout", authOpsLimiterMW, h.logout)
 	api := r.Group("/api/v1", auth.RequireAccessToken(jwtSecret), apiLimiter(NewRateLimiter(rateLimit)))
 	api.GET("/files", h.listFiles)
 	api.POST("/folders", h.createFolder)
@@ -192,10 +213,21 @@ func (h *Handler) login(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
 	}
-	user, err := h.users.FindActiveByEmail(request.Email)
-	if err != nil || h.auth.VerifyPassword(user.PasswordHash, request.Password) != nil {
+	// 统一的失败应答与审计：两个分支均返回相同 401，耗时也须对齐。
+	reject := func() {
 		h.recordAudit(c, audit.Entry{UserID: nil, Action: audit.ActionLoginFailure, ResourceType: audit.ResourceSession, Status: audit.StatusFailure, Metadata: `{"email":"` + sanitizeAuditToken(request.Email) + `"}`})
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
+	}
+	user, err := h.users.FindActiveByEmail(request.Email)
+	if err != nil {
+		// 用户不存在（或非 active）：对包级 dummy 哈希执行等耗 bcrypt 比较，
+		// 消除与「密码错误」分支的时序差异，防止邮箱枚举。
+		_ = bcrypt.CompareHashAndPassword([]byte(dummyPasswordHash), []byte(request.Password))
+		reject()
+		return
+	}
+	if h.auth.VerifyPassword(user.PasswordHash, request.Password) != nil {
+		reject()
 		return
 	}
 	access, err := h.auth.AccessToken(user.ID)
@@ -250,6 +282,13 @@ func (h *Handler) refresh(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid refresh token"})
 		return
 	}
+	// 轮换成功后复查用户状态：账号被禁用/锁定/删除（或状态查询失败）时
+	// 立即撤销刚轮换出的新 refresh token（整个 session 失效）并 401。
+	if status, err := h.users.Status(session.UserID); err != nil || status != auth.StatusActive {
+		_ = h.auth.RevokeRefreshToken(replacement)
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid refresh token"})
+		return
+	}
 	access, err := h.auth.AccessToken(session.UserID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "token generation failed"})
@@ -272,7 +311,8 @@ func (h *Handler) setRefreshCookie(c *gin.Context, token string) {
 
 func userID(c *gin.Context) uuid.UUID { return c.MustGet(auth.UserIDContextKey).(uuid.UUID) }
 
-// lookupUsers GET /api/v1/users/lookup?q=：按邮箱或用户名精确/前缀匹配查找用户。
+// lookupUsers GET /api/v1/users/lookup?q=：按邮箱整串精确或用户名前缀匹配查找用户
+// （q 含 @ 时仅邮箱精确匹配；匹配策略见 auth.UserStore.Lookup）。
 // 权限考虑：任何登录用户均可查询（添加团队成员/邀请场景需要）；
 // 为避免用户枚举与隐私泄露，响应只含 id 与 username，绝不返回 email，
 // 且固定 LIMIT 10，并受通用认证接口限流约束。q 为空返回 400。

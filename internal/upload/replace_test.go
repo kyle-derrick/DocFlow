@@ -142,9 +142,9 @@ func newReplaceService(t *testing.T, store *fakeVersionStore) (*Service, *Memory
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc := NewService(memStore, storage, time.Hour, 1<<20, false, nil, func(uuid.UUID, uuid.UUID, string, string, int64, string, string) (uuid.UUID, error) {
+	svc := NewService(memStore, storage, time.Hour, 1<<20, false, nil, func(uuid.UUID, uuid.UUID, string, string, int64, string, string) (uuid.UUID, bool, error) {
 		store.createCalls++
-		return uuid.New(), nil
+		return uuid.New(), true, nil
 	})
 	svc.SetVersionTarget(store.validate, store.replace)
 	return svc, memStore, storage

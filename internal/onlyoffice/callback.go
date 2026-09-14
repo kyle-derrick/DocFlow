@@ -28,9 +28,13 @@ type callbackRequest struct {
 
 // HandleCallback 处理 DocumentServer 保存回调（无 Bearer，JWT 自校验）：
 //   - JWT 取 body.token 或 Authorization: Bearer 头，HS256 同密钥校验；
-//   - status=2/6：验签通过后先经 CallbackStore.TryRecord 抢占幂等键
-//     (file_id, document.key, url)（数据库持久化）；冲突（已处理）直接成功，
-//     首次抢占后仅接受与 ONLYOFFICE_SERVER_URL 同源的 url（防 SSRF），
+//     aud 为 onlyoffice-config/onlyoffice-download 的 token 拒绝（用途隔离）；
+//   - status/key/url 以验签 claims 为唯一信任源，缺失必需声明（保存类状态
+//     含 url）即拒绝，不回退未签名 body；
+//   - status=2/6：写鉴权（claims users[0] 为 actor，SetWriteAuthorizer 注入
+//     的授权器判定；未接线 fail closed）通过后先经 CallbackStore.TryRecord
+//     抢占幂等键 (file_id, document.key, url)（数据库持久化）；冲突（已处理）
+//     直接成功，首次抢占后仅接受与 ONLYOFFICE_SERVER_URL 同源的 url（防 SSRF），
 //     下载落为新版本（SHA-256 校验），失败回滚幂等记录允许 DS 重试；
 //   - status=4：仅清理（写 onlyoffice.cleanup 审计）；
 //   - 其他状态：空处理。
@@ -64,29 +68,38 @@ func (s *Service) processCallback(body []byte, authorization, ip, userAgent stri
 	if err != nil {
 		return int64(req.Status), err
 	}
-	// 以 claims 为信任源，claims 缺失的字段回退 body（仅 users 影响审计归属）。
-	status := int64(req.Status)
-	if v, ok := claimNumber(claims["status"]); ok {
-		status = v
+	// 安全字段（status/key/url）以签名的 claims 为唯一信任源：缺失必需声明
+	// 即拒绝（{"error":1}），禁止回退未签名 body。url 仅保存类状态（2/6）
+	// 必需——DS 对 status=4 等状态的回调体不携带 url。
+	status, ok := claimNumber(claims["status"])
+	if !ok {
+		return int64(req.Status), ErrInvalidToken
 	}
 	key := claimString(claims["key"])
 	if key == "" {
-		key = req.Key
+		return status, ErrInvalidToken
 	}
 	url := claimString(claims["url"])
-	if url == "" {
-		url = req.URL
+	if url == "" && (status == 2 || status == 6) {
+		return status, ErrInvalidToken
 	}
-	users := req.Users
+	// users：claims 存在时为信任源（写鉴权 actor 与版本归属）；claims 缺失时
+	// body users 仅用于审计归属展示，不作为授权依据。
+	var claimsUsers []string
 	if raw, ok := claims["users"].([]any); ok {
-		users = make([]string, 0, len(raw))
+		claimsUsers = make([]string, 0, len(raw))
 		for _, item := range raw {
-			users = append(users, claimString(item))
+			claimsUsers = append(claimsUsers, claimString(item))
 		}
 	}
+	users := req.Users
+	if claimsUsers != nil {
+		users = claimsUsers
+	}
+	actor := callbackUser(claimsUsers, uuid.Nil)
 	switch status {
 	case 2, 6:
-		return status, s.saveVersion(status, key, url, users, ip, userAgent)
+		return status, s.saveVersion(status, actor, key, url, users, ip, userAgent)
 	case 4:
 		fileID, _ := fileIDFromKey(key)
 		s.recordAudit(audit.ActionOnlyOfficeCleanup, fileID, callbackUser(users, uuid.Nil),
@@ -120,16 +133,20 @@ func CallbackResultLabel(err error) string {
 	return metrics.CallbackResultOK
 }
 
-// saveVersion 处理 status=2/6：验签通过后、处理前先以幂等键
+// saveVersion 处理 status=2/6：验签与写鉴权通过后、处理前先以幂等键
 // (file_id, document.key, url) TryRecord 抢占（CallbackStore 持久化）：
 //   - inserted=false：同 key 重复回调，视为已处理直接成功（{"error":0}，
 //     指标照常计数），不重复建版本；
 //   - inserted=true：执行保存（校验文件可用性与 URL 同源、下载落版本、记
 //     onlyoffice.save 审计）；任何失败回滚幂等记录（Release）以允许
 //     DocumentServer 重试，并返回非 nil（回复 error:1）。
-func (s *Service) saveVersion(status int64, key, url string, users []string, ip, userAgent string) error {
+func (s *Service) saveVersion(status int64, actor uuid.UUID, key, url string, users []string, ip, userAgent string) error {
 	fileID, err := fileIDFromKey(key)
 	if err != nil {
+		return err
+	}
+	// 写鉴权先于幂等抢占：拒绝的回调不消耗幂等键（重试同样被拒）。
+	if err := s.authorizeSave(actor, fileID, status, key, ip, userAgent); err != nil {
 		return err
 	}
 	inserted, err := s.callbacks.TryRecord(fileID, key, url, strconv.FormatInt(status, 10), metrics.CallbackResultOK)
@@ -147,6 +164,24 @@ func (s *Service) saveVersion(status int64, key, url string, users []string, ip,
 			log.Printf("[onlyoffice] release callback idempotency record failed (file=%s key=%s): %v", fileID, key, relErr)
 		}
 		return err
+	}
+	return nil
+}
+
+// authorizeSave 保存前写鉴权（fail closed）：actor 取验签 claims 的 users[0]
+// （无合法值时 uuid.Nil），经注入的写授权器（SetWriteAuthorizer，
+// ValidateReplaceTarget 语义）判定；未接线授权器或判定失败一律拒绝并记
+// onlyoffice.save 失败审计，不落任何版本。
+func (s *Service) authorizeSave(actor, fileID uuid.UUID, status int64, key, ip, userAgent string) error {
+	if s.authorizeWrite == nil {
+		s.recordAudit(audit.ActionOnlyOfficeSave, fileID, actor, audit.StatusFailure,
+			callbackMetadata(key, status, map[string]any{"reason": "write authorizer not configured"}), ip, userAgent)
+		return ErrSaveForbidden
+	}
+	if err := s.authorizeWrite(actor, fileID); err != nil {
+		s.recordAudit(audit.ActionOnlyOfficeSave, fileID, actor, audit.StatusFailure,
+			callbackMetadata(key, status, map[string]any{"reason": "write denied"}), ip, userAgent)
+		return ErrSaveForbidden
 	}
 	return nil
 }

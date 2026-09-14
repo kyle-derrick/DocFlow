@@ -1,7 +1,6 @@
 package upload
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -27,13 +26,39 @@ var (
 	ErrFailed   = errors.New("upload session failed")
 	// ErrTargetUnavailable 版本覆盖能力未注入（服务未接线 files.Store 钩子）。
 	ErrTargetUnavailable = errors.New("version target is not available")
+	// ErrPatchTooLarge 单次 PATCH 请求体超过 per-request 上限
+	//（SetPatchMaxBytes，默认 DefaultPatchMaxBytes=64MiB）。
+	ErrPatchTooLarge = errors.New("request body exceeds per-request upload limit")
+	// ErrInProgress 会话正在被另一方补完（CAS 状态迁移竞争失败且对方仍在
+	// verifying/scanning 阶段）；调用方可稍后重试或轮询终态。
+	ErrInProgress = errors.New("upload completion already in progress")
 )
 
+// DefaultPatchMaxBytes 单次 PATCH 请求体的默认上限（64MiB）：
+// 流式复制不再整读缓冲，该上限约束单请求的存储写入量与连接占用时长。
+const DefaultPatchMaxBytes int64 = 64 << 20
+
+// sessionStore 为会话持久层的最小接口；并发正确性依赖以下可选能力，
+// 由 MemoryStore / GormStore 实现（服务侧类型断言检测）：
 type sessionStore interface {
 	Save(UploadSession) error
 	Get(uuid.UUID) (UploadSession, error)
 	Update(UploadSession) error
 }
+
+// offsetCaser 为 sessionStore 的可选能力：offset 的条件更新（Append CAS）。
+type offsetCaser interface {
+	AdvanceOffset(id uuid.UUID, from, delta int64, now time.Time) error
+}
+
+// stateMarker 为 sessionStore 的可选能力：状态迁移的条件更新（Complete CAS）。
+type stateMarker interface {
+	MarkVerifying(id uuid.UUID, size int64) (bool, error)
+	MarkScanning(id uuid.UUID) (bool, error)
+	// MarkAvailable 同时落库终态 storage_key（tmp → objects/* 的迁移结果）。
+	MarkAvailable(id uuid.UUID, storageKey string, completedAt time.Time) (bool, error)
+}
+
 type MemoryStore struct {
 	mu    sync.RWMutex
 	items map[uuid.UUID]UploadSession
@@ -65,6 +90,68 @@ func (s *MemoryStore) Update(v UploadSession) error {
 	return nil
 }
 
+func (s *MemoryStore) AdvanceOffset(id uuid.UUID, from, delta int64, _ time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, ok := s.items[id]
+	if !ok {
+		return ErrNotFound
+	}
+	if v.Status != StatusUploading || v.Offset != from {
+		return ErrOffset
+	}
+	v.Offset += delta
+	s.items[id] = v
+	return nil
+}
+
+func (s *MemoryStore) MarkVerifying(id uuid.UUID, size int64) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, ok := s.items[id]
+	if !ok {
+		return false, ErrNotFound
+	}
+	if v.Status != StatusUploading || v.Offset != size {
+		return false, nil
+	}
+	v.Status = StatusVerifying
+	s.items[id] = v
+	return true, nil
+}
+
+func (s *MemoryStore) MarkScanning(id uuid.UUID) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, ok := s.items[id]
+	if !ok {
+		return false, ErrNotFound
+	}
+	if v.Status != StatusVerifying {
+		return false, nil
+	}
+	v.Status = StatusScanning
+	s.items[id] = v
+	return true, nil
+}
+
+func (s *MemoryStore) MarkAvailable(id uuid.UUID, storageKey string, completedAt time.Time) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, ok := s.items[id]
+	if !ok {
+		return false, ErrNotFound
+	}
+	if v.Status != StatusScanning {
+		return false, nil
+	}
+	v.Status = StatusAvailable
+	v.StorageKey = storageKey
+	v.CompletedAt = &completedAt
+	s.items[id] = v
+	return true, nil
+}
+
 type Service struct {
 	store          sessionStore
 	storage        Storage
@@ -72,8 +159,9 @@ type Service struct {
 	maxSize        int64
 	scanner        Scanner
 	validateParent func(uuid.UUID, uuid.UUID) error
-	// createFile 落库上传完成的新文件，返回新建文件 ID（供完成钩子等使用）。
-	createFile func(uuid.UUID, uuid.UUID, string, string, int64, string, string) (uuid.UUID, error)
+	// createFile 落库上传完成的新文件，返回新建文件 ID 与是否新建了 blob
+	//（false 表示同 sha256 内容去重复用既有 blob，新物理对象冗余应删除）。
+	createFile func(uuid.UUID, uuid.UUID, string, string, int64, string, string) (uuid.UUID, bool, error)
 	// fileComplete 在文件落库成功（新文件或覆盖新版本）后同步回调一次，
 	// 供网页包自动解包等后置处理注入；回调不改变会话终态（错误由注入方自负）。
 	fileComplete func(uuid.UUID)
@@ -83,19 +171,78 @@ type Service struct {
 	// replaceFile 在 Complete 成功时向目标文件追加新版本（AddVersion+Prune），
 	// 返回是否新建了 blob（false 表示命中去重复用，新物理对象冗余应删除）。
 	replaceFile func(uuid.UUID, uuid.UUID, string, string, int64, string) (bool, error)
+	// patchMax 单次 PATCH 请求体上限（0 = 不限）。
+	patchMax int64
+	// maxSizeProvider 单文件大小上限热读取（system_settings 的
+	// upload.max_file_size，main 注入）；nil 或返回非正值时回退 maxSize。
+	maxSizeProvider func() int64
+	// sessionLocksMu 保护 sessionLocks；per-session 互斥在进程内串行化
+	// 同一会话的 Append/Complete（双保险之一，跨进程由 store 侧 CAS 兜底）。
+	sessionLocksMu sync.Mutex
+	sessionLocks   map[uuid.UUID]*sync.Mutex
 }
 
-func NewService(store sessionStore, storage Storage, ttl time.Duration, maxSize int64, scanEnabled bool, validateParent func(uuid.UUID, uuid.UUID) error, createFile func(uuid.UUID, uuid.UUID, string, string, int64, string, string) (uuid.UUID, error)) *Service {
+func NewService(store sessionStore, storage Storage, ttl time.Duration, maxSize int64, scanEnabled bool, validateParent func(uuid.UUID, uuid.UUID) error, createFile func(uuid.UUID, uuid.UUID, string, string, int64, string, string) (uuid.UUID, bool, error)) *Service {
 	var scanner Scanner = AllowScanner{}
 	if scanEnabled {
 		scanner = RejectScanner{}
 	}
-	return &Service{store: store, storage: storage, ttl: ttl, maxSize: maxSize, scanner: scanner, validateParent: validateParent, createFile: createFile}
+	return &Service{store: store, storage: storage, ttl: ttl, maxSize: maxSize, scanner: scanner, validateParent: validateParent, createFile: createFile, patchMax: DefaultPatchMaxBytes, sessionLocks: make(map[uuid.UUID]*sync.Mutex)}
 }
 func (s *Service) SetScanner(scanner Scanner) {
 	if scanner != nil {
 		s.scanner = scanner
 	}
+}
+
+// SetPatchMaxBytes 设置单次 PATCH 请求体上限（须 > 0 才生效；默认
+// DefaultPatchMaxBytes=64MiB，对应部署环境变量 PATCH_MAX_BYTES 的接线点）。
+func (s *Service) SetPatchMaxBytes(n int64) {
+	if n > 0 {
+		s.patchMax = n
+	}
+}
+
+// PatchMaxBytes 返回单次 PATCH 请求体上限（0 = 不限）；HTTP 层据此对
+// 超限的 Content-Length 直接回 413。
+func (s *Service) PatchMaxBytes() int64 { return s.patchMax }
+
+// SetMaxSizeProvider 注入单文件大小上限的热读取（每次建会话时调用；
+// 供 system_settings 的 upload.max_file_size 运行时覆盖 MAX_FILE_SIZE）。
+// 返回非正值（读失败/非法值时由注入方自行回退）保持构造值。
+func (s *Service) SetMaxSizeProvider(fn func() int64) {
+	if fn != nil {
+		s.maxSizeProvider = fn
+	}
+}
+
+// effectiveMaxSize 返回当前生效的单文件大小上限：provider 热读取优先，
+// 未注入或返回非正值时回退构造值（MAX_FILE_SIZE）。
+func (s *Service) effectiveMaxSize() int64 {
+	if s.maxSizeProvider != nil {
+		if n := s.maxSizeProvider(); n > 0 {
+			return n
+		}
+	}
+	return s.maxSize
+}
+
+// lockSession 按 sessionID 加锁并返回解锁函数：进程内串行化同一会话的
+// Append/Complete，防止并发 PATCH 交错写入。多实例（redis 队列/水平扩展）
+// 部署下进程间无互斥，由 store 侧 CAS（AdvanceOffset / MarkVerifying）
+// 兜底：竞争失败方回退预占或按重读到的状态返回幂等/冲突语义。
+// 锁表条目随会话生命周期常驻（janitor 清理终态会话后为少量死条目，
+// 单条仅一个互斥量指针，量级与会话数一致，可接受）。
+func (s *Service) lockSession(id uuid.UUID) func() {
+	s.sessionLocksMu.Lock()
+	mu, ok := s.sessionLocks[id]
+	if !ok {
+		mu = &sync.Mutex{}
+		s.sessionLocks[id] = mu
+	}
+	s.sessionLocksMu.Unlock()
+	mu.Lock()
+	return mu.Unlock
 }
 
 // SetFileCompleteHook 注入「文件落库完成」回调（新文件与覆盖新版本均触发，
@@ -115,8 +262,10 @@ func (s *Service) SetVersionTarget(validate func(uuid.UUID, uuid.UUID) (files.Fi
 	}
 }
 
-// MaxSize 返回配置的单文件大小上限（tus Tus-Max-Size 响应头数据源）。
-func (s *Service) MaxSize() int64 { return s.maxSize }
+// MaxSize 返回单文件大小上限（tus Tus-Max-Size 响应头数据源）：
+// 经 SetMaxSizeProvider 注入时为热读取值（与 Start 校验保持一致），
+// 读失败回退构造值。
+func (s *Service) MaxSize() int64 { return s.effectiveMaxSize() }
 
 // SetMetadata 持久化 tus 原始 Upload-Metadata 头，供 HEAD 请求回显。
 func (s *Service) SetMetadata(id uuid.UUID, metadata string) error {
@@ -176,7 +325,7 @@ func (s *Service) createSession(user, parent uuid.UUID, name string, size int64,
 			}
 		}
 	}
-	if size < 0 || size > s.maxSize {
+	if size < 0 || size > s.effectiveMaxSize() {
 		return UploadSession{}, ErrSize
 	}
 	expected = strings.TrimSpace(expected)
@@ -192,7 +341,31 @@ func (s *Service) createSession(user, parent uuid.UUID, name string, size int64,
 	return v, e
 }
 
+// Append 追加一段上传内容（请求体大小未知，按 remaining/patchMax 上限
+// 流式截断，超出报 ErrSize/ErrPatchTooLarge）。
 func (s *Service) Append(id uuid.UUID, offset int64, r io.Reader) (UploadSession, error) {
+	return s.append(id, offset, -1, r)
+}
+
+// AppendWithLength 同 Append；declaredLength 为请求声明的 Content-Length
+// （<0 表示未知/分块传输），用于在写入前直接拒绝超限请求体。
+func (s *Service) AppendWithLength(id uuid.UUID, offset, declaredLength int64, r io.Reader) (UploadSession, error) {
+	return s.append(id, offset, declaredLength, r)
+}
+
+// append 流式追加：不再 io.ReadAll 整体缓冲，countingReader 边读边写存储。
+// 并发防护双保险：
+//  1. 进程内 per-session 互斥串行化同会话的 Append/Complete；
+//  2. store 侧 CAS（AdvanceOffset）——存储写入前预占 offset+n（n 为本次
+//     可能写入的最大字节数），写入失败或超限时回退 offset-n。跨进程并发
+//     （多实例部署）下预占失败即 ErrOffset，防止两个实例同时写同一 offset。
+//
+// 取舍：LocalStorage 无法回滚已落盘字节——本实现按「绝对 offset 覆写」
+// （OffsetAppender.AppendAt）使失败/超限残留被同 offset 重试覆盖，无需
+// truncate；放弃上传的 tmp/* 残留由 janitor 清理。
+func (s *Service) append(id uuid.UUID, offset, declared int64, r io.Reader) (UploadSession, error) {
+	unlock := s.lockSession(id)
+	defer unlock()
 	v, e := s.store.Get(id)
 	if e != nil {
 		return v, e
@@ -204,22 +377,71 @@ func (s *Service) Append(id uuid.UUID, offset int64, r io.Reader) (UploadSession
 		return v, ErrOffset
 	}
 	remaining := v.Size - v.Offset
-	body, e := io.ReadAll(io.LimitReader(r, remaining+1))
-	if e != nil {
-		return v, e
-	}
-	if int64(len(body)) > remaining {
+	if declared > remaining {
 		return v, ErrSize
 	}
-	n, e := s.storage.Append(v.StorageKey, bytes.NewReader(body))
+	if s.patchMax > 0 && declared > s.patchMax {
+		return v, ErrPatchTooLarge
+	}
+	// 本次写入上限：会话剩余容量与单请求上限取小；声明长度已知且更小时取声明值。
+	limit := remaining
+	if s.patchMax > 0 && s.patchMax < limit {
+		limit = s.patchMax
+	}
+	if declared >= 0 && declared < limit {
+		limit = declared
+	}
+	caser, hasCaser := s.store.(offsetCaser)
+	reserved := int64(0)
+	if hasCaser {
+		if e := caser.AdvanceOffset(id, offset, limit, time.Now()); e != nil {
+			// offset/状态已被并发改写（跨进程 Append/Complete/janitor）。
+			return v, ErrOffset
+		}
+		reserved = limit
+	}
+	// 流式复制：hard cap = limit，countingReader 记录实际字节数。
+	cr := &countingReader{r: r}
+	bounded := io.LimitReader(cr, limit)
+	var n int64
+	if oa, ok := s.storage.(OffsetAppender); ok {
+		n, e = oa.AppendAt(v.StorageKey, offset, bounded)
+	} else {
+		n, e = s.storage.Append(v.StorageKey, bounded)
+	}
+	// 溢出检测：写满上限后源仍有剩余字节 → 本次 PATCH 超出容量/单请求上限。
+	if e == nil && n == limit {
+		if extra, _ := cr.Read(make([]byte, 1)); extra > 0 {
+			e = ErrSize
+			if s.patchMax > 0 && declared < 0 && limit == s.patchMax && remaining > limit {
+				e = ErrPatchTooLarge
+			}
+		}
+	}
 	if e != nil {
+		// 回退 CAS 预占（offset 复原）；已写存储字节不回滚——同 offset 重试
+		// 覆写（AppendAt），放弃上传由 janitor 清理 tmp/*。
+		if hasCaser && reserved > 0 {
+			_ = caser.AdvanceOffset(id, offset+reserved, -reserved, time.Now())
+		}
 		return v, e
 	}
-	v.Offset += n
-	e = s.store.Update(v)
-	return v, e
+	v.Offset = offset + n
+	if hasCaser {
+		if n != reserved {
+			// 实际写入与预占不符（客户端提前断流等）：把 offset 收敛到实际值。
+			if e := caser.AdvanceOffset(id, offset+reserved, n-reserved, time.Now()); e != nil {
+				return v, e
+			}
+		}
+	} else if e := s.store.Update(v); e != nil {
+		return v, e
+	}
+	return v, nil
 }
 func (s *Service) Complete(id uuid.UUID) (UploadSession, error) {
+	unlock := s.lockSession(id)
+	defer unlock()
 	v, e := s.store.Get(id)
 	if e != nil {
 		return v, e
@@ -236,10 +458,24 @@ func (s *Service) Complete(id uuid.UUID) (UploadSession, error) {
 	if v.Offset != v.Size {
 		return v, ErrSize
 	}
-	v.Status = StatusVerifying
-	if e = s.store.Update(v); e != nil {
-		return v, e
+	// uploading → verifying CAS：tus 自动补完与手动 complete 并发时仅一方
+	// 推进流水线；竞争失败方按重读到的状态返回幂等/终态/冲突语义。
+	marker, hasMarker := s.store.(stateMarker)
+	if hasMarker {
+		won, e := marker.MarkVerifying(id, v.Size)
+		if e != nil {
+			return v, e
+		}
+		if !won {
+			return s.resolveCompletionRace(id, v)
+		}
+	} else {
+		v.Status = StatusVerifying
+		if e = s.store.Update(v); e != nil {
+			return v, e
+		}
 	}
+	v.Status = StatusVerifying
 	// verify 阶段：读取 + SHA-256 全量校验（计入
 	// docflow_upload_processing_duration_seconds{stage=verify}）。
 	verifyStart := time.Now()
@@ -259,10 +495,22 @@ func (s *Service) Complete(id uuid.UUID) (UploadSession, error) {
 		_ = s.store.Update(v)
 		return v, ErrChecksum
 	}
-	v.Status = StatusScanning
-	if e = s.store.Update(v); e != nil {
-		return v, e
+	// verifying → scanning 条件迁移：中途被 janitor 置 failed 等情况下中止。
+	if hasMarker {
+		won, e := marker.MarkScanning(id)
+		if e != nil {
+			return v, e
+		}
+		if !won {
+			return s.resolveCompletionRace(id, v)
+		}
+	} else {
+		v.Status = StatusScanning
+		if e = s.store.Update(v); e != nil {
+			return v, e
+		}
 	}
+	v.Status = StatusScanning
 	r, e = s.storage.Read(v.StorageKey)
 	if e != nil {
 		v.Status = StatusFailed
@@ -320,22 +568,60 @@ func (s *Service) Complete(id uuid.UUID) (UploadSession, error) {
 			s.fileComplete(*v.TargetFileID)
 		}
 	} else if s.createFile != nil {
-		fileID, ce := s.createFile(v.UserID, v.ParentID, v.Name, v.StorageKey, v.Size, sum, "application/octet-stream")
+		fileID, newBlob, ce := s.createFile(v.UserID, v.ParentID, v.Name, v.StorageKey, v.Size, sum, "application/octet-stream")
 		if ce != nil {
 			v.Status = StatusFailed
 			_ = s.store.Update(v)
 			return v, ce
 		}
+		if !newBlob {
+			// 内容去重复用既有 blob：本次上传的 finalKey 物理对象冗余，
+			// 尽力清理（与 replace 分支同策略；失败由存储巡检兜底）。
+			_ = s.storage.Delete(finalKey)
+		}
 		if s.fileComplete != nil {
 			s.fileComplete(fileID)
 		}
 	}
-	v.Status = StatusAvailable
 	now := time.Now()
+	v.Status = StatusAvailable
 	v.CompletedAt = &now
-	if e = s.store.Update(v); e != nil {
+	// scanning → available 条件终态写入（同时落库终态 storage_key）：被并发
+	// 流转（如 janitor 置 failed）时不覆盖，按重读状态返回。
+	if hasMarker {
+		won, e := marker.MarkAvailable(id, v.StorageKey, now)
+		if e != nil {
+			return v, e
+		}
+		if !won {
+			return s.resolveCompletionRace(id, v)
+		}
+	} else if e = s.store.Update(v); e != nil {
 		return v, e
 	}
 	return v, nil
+}
+
+// resolveCompletionRace 在 CAS 状态迁移竞争失败后重读会话并映射语义：
+// available 幂等返回；quarantined/failed 返回对应终态错误；verifying/
+// scanning 表示另一方补完仍在进行（ErrInProgress，可重试/轮询）；
+// 仍为 uploading 说明 offset 已被并发 Append 改变（不符 size），返回 ErrSize。
+func (s *Service) resolveCompletionRace(id uuid.UUID, stale UploadSession) (UploadSession, error) {
+	cur, err := s.store.Get(id)
+	if err != nil {
+		return stale, err
+	}
+	switch cur.Status {
+	case StatusAvailable:
+		return cur, nil
+	case StatusQuarantined:
+		return cur, ErrRejected
+	case StatusFailed:
+		return cur, ErrFailed
+	case StatusVerifying, StatusScanning:
+		return cur, ErrInProgress
+	default:
+		return cur, ErrSize
+	}
 }
 func (s *Service) Get(id uuid.UUID) (UploadSession, error) { return s.store.Get(id) }

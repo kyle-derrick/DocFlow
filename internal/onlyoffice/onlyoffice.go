@@ -4,9 +4,15 @@
 //
 // 安全约束（与设计文档 11.1 一致）：
 //   - 编辑配置与下载 URL 均以 ONLYOFFICE_JWT_SECRET（HS256）签名；下载 token
-//     5 分钟过期且绑定 file_id+version_id，aud=onlyoffice-download 防用途混用；
+//     5 分钟过期且绑定 file_id+version_id，aud=onlyoffice-download、编辑配置
+//     token aud=onlyoffice-config，回调解析拒绝携带这两种 aud 的 token（用途
+//     混淆拦截；DS 自签回调 token 通常无 aud，允许通过）；
 //   - 回调做 JWT 校验（Authorization: Bearer 或 body.token，同密钥），校验通过后
-//     key/status/url 以 token claims 为信任源（claims 被签名覆盖，body 不可信）；
+//     status/key/url 以 token claims 为唯一信任源，claims 缺失必需声明即拒绝，
+//     禁止回退未签名 body（ONLYOFFICE_ENABLED 时 JWT_SECRET 必填，claims 必有）；
+//   - 保存回调（status 2/6）执行写鉴权（fail closed）：以 claims users[0] 为
+//     actor 调用注入的写授权器（SetWriteAuthorizer，ValidateReplaceTarget 语义），
+//     未接线或无写权限一律拒绝；
 //   - 回调下载 URL 仅允许与 ONLYOFFICE_SERVER_URL 同源（scheme/host/port 归一化
 //     默认端口后全等，重定向每一跳同样校验），防 SSRF；
 //   - 保存前校验文件未删除且 type=file；stream 到存储临时 key 再转正，SHA-256
@@ -40,6 +46,9 @@ const (
 	DefaultDownloadMaxBytes = 1 << 30
 	// downloadAudience 下载 token 的用途声明，防止与编辑配置等其他 token 混用。
 	downloadAudience = "onlyoffice-download"
+	// configAudience 编辑配置 token 的用途声明；回调解析拦截携带该 aud 的
+	// token（编辑配置 token 不得用于伪造保存回调）。
+	configAudience = "onlyoffice-config"
 )
 
 var (
@@ -51,6 +60,9 @@ var (
 	ErrURLNotAllowed = errors.New("onlyoffice callback url is not allowed")
 	// ErrDownloadTooLarge 回调下载内容超过大小上限。
 	ErrDownloadTooLarge = errors.New("onlyoffice callback download exceeds size limit")
+	// ErrSaveForbidden 保存回调写鉴权失败：actor（claims users[0]）无写权限，
+	// 或未接线写授权器（SetWriteAuthorizer）时一律 fail closed 拒绝。
+	ErrSaveForbidden = errors.New("onlyoffice save not authorized")
 )
 
 // Config 集成配置（来自 ONLYOFFICE_* 环境变量）。
@@ -72,6 +84,11 @@ type Config struct {
 	// DownloadMaxBytes 回调保存的单文件大小上限（默认 1GiB）。
 	DownloadMaxBytes int64
 }
+
+// WriteAuthorizer 校验 user 能否将新版本写入 fileID（与 files 包
+// ValidateReplaceTarget 同语义：个人文件 owner、团队文件 CanWrite）；
+// 返回 nil 表示允许写入。
+type WriteAuthorizer func(user, fileID uuid.UUID) error
 
 // FileStore 抽象集成所需的文件/版本数据访问（生产实现 *files.Store）。
 type FileStore interface {
@@ -97,6 +114,9 @@ type Service struct {
 	// callbacks 持久化回调幂等键 (file_id, document.key, url)；
 	// 默认进程内实现，生产经 SetCallbackStore 接线 Gorm 版。
 	callbacks CallbackStore
+	// authorizeWrite 写权限判定（main 经 SetWriteAuthorizer 注入）；
+	// 未接线时保存回调一律拒绝、编辑配置降级只读（fail closed）。
+	authorizeWrite WriteAuthorizer
 	// fetch 从 DocumentServer 下载保存后的文档，返回内容流与 Content-Type；
 	// 可注入 fake 以便单测（无网络）。
 	fetch func(rawURL string) (io.ReadCloser, string, error)
@@ -134,6 +154,14 @@ func New(cfg Config, store FileStore, storage upload.Storage, username func(uuid
 func (s *Service) SetCallbackStore(store CallbackStore) {
 	if store != nil {
 		s.callbacks = store
+	}
+}
+
+// SetWriteAuthorizer 注入写权限判定器（main 接线；应在服务启用前调用）。
+// 未注入时保存回调一律拒绝（{"error":1}）、编辑配置保守降级只读（fail closed）。
+func (s *Service) SetWriteAuthorizer(fn WriteAuthorizer) {
+	if fn != nil {
+		s.authorizeWrite = fn
 	}
 }
 
@@ -184,10 +212,13 @@ func documentType(name string) string {
 }
 
 // NewEditConfig 生成可直接传给 DocsAPI.DocEditor 的编辑配置（含 JWT token）。
-// 权限与 authorizeFileAccess 同规则（个人文件 owner、团队文件任意在册成员），
-// 且当前版本 blob 须为 available；document.key 绑定当前版本、document.url 为
+// 读取权限与 authorizeFileAccess 同规则（个人文件 owner、团队文件任意在册成员），
+// 且当前版本 blob 须为 available；编辑能力按写权限降级：注入的写授权器
+// （CanWrite/ValidateReplaceTarget 语义）判定通过时 mode=edit 且
+// permissions.edit=true，否则（只读 viewer，或未接线授权器时保守 fail closed）
+// mode=view 且 permissions.edit=false。document.key 绑定当前版本、document.url 为
 // 5 分钟有效期的签名下载 URL，token 以 ONLYOFFICE_JWT_SECRET（HS256）对
-// document+editorConfig 整体签名。
+// document+editorConfig 整体签名（aud=onlyoffice-config）。
 func (s *Service) NewEditConfig(user, fileID uuid.UUID) (map[string]any, error) {
 	f, err := s.files.Get(user, fileID)
 	if err != nil {
@@ -203,6 +234,12 @@ func (s *Service) NewEditConfig(user, fileID uuid.UUID) (map[string]any, error) 
 	if blob.Status != files.BlobStatusAvailable {
 		return nil, files.ErrBlobUnavailable
 	}
+	// 写权限判定：缺授权器时保守只读（fail closed），viewer 只读会话。
+	canEdit := s.authorizeWrite != nil && s.authorizeWrite(user, fileID) == nil
+	mode := "view"
+	if canEdit {
+		mode = "edit"
+	}
 	token, err := s.signDownloadToken(fileID, version.ID)
 	if err != nil {
 		return nil, err
@@ -214,7 +251,7 @@ func (s *Service) NewEditConfig(user, fileID uuid.UUID) (map[string]any, error) 
 		"title":    f.Name,
 		"url": fmt.Sprintf("%s/api/v1/onlyoffice/download/%s?v=%s&token=%s",
 			base, fileID, version.ID, url.QueryEscape(token)),
-		"permissions": map[string]any{"edit": true, "print": true, "download": true},
+		"permissions": map[string]any{"edit": canEdit, "print": true, "download": true},
 	}
 	name := user.String()
 	if s.username != nil {
@@ -224,7 +261,7 @@ func (s *Service) NewEditConfig(user, fileID uuid.UUID) (map[string]any, error) 
 	}
 	editorConfig := map[string]any{
 		"callbackUrl": base + "/api/v1/onlyoffice/callback",
-		"mode":        "edit",
+		"mode":        mode,
 		"lang":        "zh",
 		"user":        map[string]any{"id": user.String(), "name": name},
 	}
@@ -275,7 +312,8 @@ func (s *Service) ResolveDownload(fileID uuid.UUID, versionParam, token string) 
 	return f, version, blob, nil
 }
 
-// signConfig 对编辑配置整体签名（payload 含 document+editorConfig，附 iat/exp）。
+// signConfig 对编辑配置整体签名（payload 含 document+editorConfig，附
+// iat/exp 与 aud=onlyoffice-config 用途声明；回调解析拒绝携带该 aud 的 token）。
 func (s *Service) signConfig(config map[string]any) (string, error) {
 	raw, err := json.Marshal(config)
 	if err != nil {
@@ -288,6 +326,7 @@ func (s *Service) signConfig(config map[string]any) (string, error) {
 	now := s.now()
 	claims["iat"] = now.Unix()
 	claims["exp"] = now.Add(s.cfg.TokenTTL).Unix()
+	claims["aud"] = configAudience
 	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(s.cfg.JWTSecret))
 }
 
@@ -319,6 +358,9 @@ func (s *Service) parseDownloadToken(token string) (jwt.MapClaims, error) {
 
 // parseCallbackToken 校验 DocumentServer 回调 token 的签名（同密钥）；
 // exp 存在时按注入时钟校验，不强制存在（DS 回调 token 不一定携带 exp）。
+// 用途隔离：aud 为 onlyoffice-config 或 onlyoffice-download 的 token 一律
+// 拒绝（编辑配置/下载 token 不得混用为回调 token）；DS 自签回调 token 通常
+// 无 aud，允许通过。
 func (s *Service) parseCallbackToken(token string) (jwt.MapClaims, error) {
 	claims := jwt.MapClaims{}
 	parsed, err := jwt.ParseWithClaims(token, claims, func(t *jwt.Token) (any, error) {
@@ -327,12 +369,35 @@ func (s *Service) parseCallbackToken(token string) (jwt.MapClaims, error) {
 	if err != nil || !parsed.Valid {
 		return nil, ErrInvalidToken
 	}
+	for _, aud := range claimStrings(claims["aud"]) {
+		if aud == configAudience || aud == downloadAudience {
+			return nil, ErrInvalidToken
+		}
+	}
 	return claims, nil
 }
 
 func claimString(v any) string {
 	s, _ := v.(string)
 	return s
+}
+
+// claimStrings 提取字符串或字符串数组声明（JWT aud 允许两种形态）。
+func claimStrings(v any) []string {
+	switch t := v.(type) {
+	case string:
+		return []string{t}
+	case []any:
+		out := make([]string, 0, len(t))
+		for _, item := range t {
+			if s, ok := item.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 // claimNumber 提取 JSON 数字声明（jwt 解码后为 float64）。

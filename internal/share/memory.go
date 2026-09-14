@@ -171,6 +171,20 @@ func (m *MemoryStore) ConsumeDownload(id uuid.UUID, now time.Time) (bool, error)
 	return true, nil
 }
 
+// DecrementDownload 与 GormStore 语义一致：回退一次 download_count
+// （下限 0）；分享不存在或计数为 0 时静默成功。
+func (m *MemoryStore) DecrementDownload(id uuid.UUID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	v, ok := m.items[id]
+	if !ok || v.DownloadCount <= 0 {
+		return nil
+	}
+	v.DownloadCount--
+	m.items[id] = v
+	return nil
+}
+
 func (m *MemoryStore) CountActiveByFile(fileID uuid.UUID, now time.Time) (int64, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

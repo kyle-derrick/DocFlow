@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 var _ Repo = (*GormStore)(nil)
@@ -88,6 +89,28 @@ func (s *GormStore) ConsumeDownload(id uuid.UUID, now time.Time) (bool, error) {
 		return false, result.Error
 	}
 	return result.RowsAffected > 0, nil
+}
+
+// DecrementDownload 补偿回退一次下载计数（ConsumeDownload 已消耗但内容
+// 读取失败）：事务内先锁读分享行取 file_id，再同步递减 shares 与 files 的
+// download_count（条件 > 0 保证不为负）；分享不存在或计数为 0 时静默成功。
+func (s *GormStore) DecrementDownload(id uuid.UUID) error {
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		var sh Share
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ? AND download_count > 0", id).First(&sh).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			return err
+		}
+		if err := tx.Model(&Share{}).Where("id = ? AND download_count > 0", id).
+			UpdateColumn("download_count", gorm.Expr("download_count - 1")).Error; err != nil {
+			return err
+		}
+		return tx.Table("files").Where("id = ? AND download_count > 0", sh.FileID).
+			UpdateColumn("download_count", gorm.Expr("download_count - 1")).Error
+	})
 }
 
 func (s *GormStore) CountActiveByFile(fileID uuid.UUID, now time.Time) (int64, error) {

@@ -1008,7 +1008,9 @@ paths:
       summary: 私有分享文件元数据（登录用户）
       description: >-
         分享 owner 可直接访问；其他登录用户须被显式授权（user_ids）或属于授权团队
-        （team_ids）。仅暴露安全字段，不含 owner、内部 ID 与存储路径。
+        （team_ids），否则 403。公开分享不以用户入口开放：非 owner 访问一律 404
+        （公开分享按 token 解析，404 语义不泄露分享存在性）。仅暴露安全字段，
+        不含 owner、内部 ID 与存储路径。
       parameters:
         - name: id
           in: path
@@ -1044,7 +1046,9 @@ paths:
       summary: 私有分享下载（登录用户）
       description: >-
         需 download 权限；成功原子递增分享与文件 download_count（受 max_downloads 限制）；
-        支持单区间 Range 与 Content-Disposition: attachment。
+        存储内容读取失败（500）时补偿回退已消耗的计数。支持单区间 Range 与
+        Content-Disposition: attachment。授权语义同元数据端点（公开分享非 owner
+        一律 404；私有分享未授权 403）。
       parameters:
         - name: id
           in: path
@@ -1093,7 +1097,10 @@ paths:
       tags: [Shares]
       operationId: shareFilePreview
       summary: 私有分享预览（登录用户）
-      description: view 与 download 权限均可预览；不消耗分享 download_count；MIME 白名单同个人预览。
+      description: >-
+        view 与 download 权限均可预览；不消耗分享 download_count；MIME 白名单同
+        个人预览。授权语义同元数据端点（公开分享非 owner 一律 404；私有分享
+        未授权 403）。
       parameters:
         - name: id
           in: path
@@ -1174,7 +1181,8 @@ paths:
       summary: 公开分享下载（无认证）
       description: >-
         校验分享有效性与对象可用性；成功原子递增分享与文件 download_count；
-        支持单区间 Range 与 Content-Disposition: attachment。
+        存储内容读取失败（500）时补偿回退已消耗的计数；支持单区间 Range 与
+        Content-Disposition: attachment。
       security: []
       parameters:
         - name: token
@@ -1356,6 +1364,7 @@ paths:
       tags: [Teams]
       operationId: listTeamMembers
       summary: 成员列表（须为团队成员）
+      description: 仅团队成员（含 owner）可见；非成员 404（不泄露团队存在性）。
       parameters:
         - name: id
           in: path
@@ -1369,7 +1378,6 @@ paths:
               schema: { $ref: '#/components/schemas/TeamMemberList' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '429': { $ref: '#/components/responses/RateLimited' }
 
@@ -1506,11 +1514,16 @@ paths:
       summary: 生成编辑器配置（DocsAPI.DocEditor 可直接使用）
       description: >-
         校验读权限（authorizeFileAccess 同规则：个人文件 owner、团队文件任意
-        在册成员）且当前版本 blob 为 available。document.key 绑定
-        `file_id:version_id`（编辑会话与版本绑定）；document.url 为 5 分钟有效期
-        的签名下载 URL（ONLYOFFICE_DOWNLOAD_URL_BASE 前缀）；token 为对
-        document+editorConfig 整体签名的 JWT（HS256，ONLYOFFICE_JWT_SECRET，
-        TTL 5 分钟）。集成未启用（ONLYOFFICE_ENABLED=false）时路由不注册（404）。
+        在册成员）且当前版本 blob 为 available。editorConfig.mode 按写权限判定：
+        可写（个人 owner / 团队 CanWrite，与「覆盖为新版本」目标校验同语义）时
+        为 edit 且 document.permissions.edit=true；只读用户为 view 且
+        permissions.edit=false（服务端未接线写授权器时保守降级 view）。
+        document.key 绑定 `file_id:version_id`（编辑会话与版本绑定）；
+        document.url 为 5 分钟有效期的签名下载 URL
+        （ONLYOFFICE_DOWNLOAD_URL_BASE 前缀）；token 为对 document+
+        editorConfig 整体签名的 JWT（HS256，ONLYOFFICE_JWT_SECRET，TTL 5 分钟，
+        aud=onlyoffice-config，回调端点拒绝该用途 token）。集成未启用
+        （ONLYOFFICE_ENABLED=false）时路由不注册（404）。
       requestBody:
         required: true
         content:
@@ -1524,7 +1537,8 @@ paths:
         '200':
           description: >-
             DocsAPI.DocEditor 配置（documentType/document/editorConfig/token；
-            editorConfig 含 user.id/name、lang=zh 与 callbackUrl）
+            editorConfig 含 mode（edit|view，按写权限判定）、user.id/name、
+            lang=zh 与 callbackUrl；document.permissions.edit 与 mode 一致）
           content:
             application/json:
               schema:
@@ -1621,11 +1635,17 @@ paths:
       summary: 保存回调（DocumentServer → DocFlow，无 Bearer）
       description: >-
         DocumentServer command service 回调。JWT 校验取 body.token 或
-        Authorization: Bearer 头（HS256，ONLYOFFICE_JWT_SECRET；key/status/url
-        以验签后的 claims 为信任源）。status=2/6：仅接受与
-        ONLYOFFICE_SERVER_URL 同源的下载 URL（scheme/host/port 全等，防 SSRF），
-        下载后作为新版本保存（临时 key 转正、SHA-256 校验、复用内容去重）；
-        幂等键 (file_id, document.key, url) 命中的重复回调不重复建版本。
+        Authorization: Bearer 头（HS256，ONLYOFFICE_JWT_SECRET）。token 用途
+        隔离：aud 为 onlyoffice-config 或 onlyoffice-download 的 token 一律
+        拒绝（编辑配置/下载 token 不得混用为回调 token；DS 自签回调 token
+        通常无 aud，允许通过）。status/key/url 以验签后的 claims 为唯一信任
+        源：claims 缺失必需声明（status、key，保存类状态另需 url）即拒绝，
+        不回退未签名 body。status=2/6：先做写鉴权（claims users[0] 为 actor，
+        按「覆盖为新版本」目标校验同语义判定写权限；未接线授权器时 fail
+        closed 拒绝），通过后以幂等键 (file_id, document.key, url) 抢占
+        （重复回调不重复建版本），仅接受与 ONLYOFFICE_SERVER_URL 同源的下载
+        URL（scheme/host/port 全等，防 SSRF），下载后作为新版本保存（临时
+        key 转正、SHA-256 校验、复用内容去重）。
         status=4 仅清理（写 onlyoffice.cleanup 审计）；其他状态空处理。
         始终返回 HTTP 200：成功 {"error":0}，失败 {"error":1}（协议约定，
         非 200 会触发 DocumentServer 重试）。独立按 IP 轻限流。
@@ -1693,7 +1713,7 @@ paths:
           schema:
             type: string
             enum:
-              [site.name, upload.max_versions_per_file, upload.max_file_size,
+              [upload.max_versions_per_file, upload.max_file_size,
                share.default_expiry_hours, retention.trash_days]
       requestBody:
         required: true
@@ -1825,7 +1845,7 @@ components:
         key:
           type: string
           enum:
-            [site.name, upload.max_versions_per_file, upload.max_file_size,
+            [upload.max_versions_per_file, upload.max_file_size,
              share.default_expiry_hours, retention.trash_days]
         value: { description: 当前生效值（未设置时为默认值） }
         type: { type: string, enum: [bool, int, string] }

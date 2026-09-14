@@ -20,17 +20,24 @@ import (
 
 // memRepo 是 Repo 的内存实现。
 type memRepo struct {
-	mu       sync.Mutex
-	sessions map[uuid.UUID]upload.UploadSession
-	blobs    map[uuid.UUID]files.ObjectBlob
-	files    map[uuid.UUID]files.File
-	failErr  error
+	mu           sync.Mutex
+	sessions     map[uuid.UUID]upload.UploadSession
+	blobs        map[uuid.UUID]files.ObjectBlob
+	files        map[uuid.UUID]files.File
+	authSessions map[uuid.UUID]fakeAuthSession
+	failErr      error
 	// recheckHook 在 DeleteBlobRechecked 复核前调用，模拟「先复活后清理」竞速。
 	recheckHook func(id uuid.UUID)
 }
 
+// fakeAuthSession 模拟 auth sessions 表行的清理相关字段。
+type fakeAuthSession struct {
+	expiresAt time.Time
+	revokedAt *time.Time
+}
+
 func newMemRepo() *memRepo {
-	return &memRepo{sessions: make(map[uuid.UUID]upload.UploadSession), blobs: make(map[uuid.UUID]files.ObjectBlob), files: make(map[uuid.UUID]files.File)}
+	return &memRepo{sessions: make(map[uuid.UUID]upload.UploadSession), blobs: make(map[uuid.UUID]files.ObjectBlob), files: make(map[uuid.UUID]files.File), authSessions: make(map[uuid.UUID]fakeAuthSession)}
 }
 
 func (m *memRepo) ExpiredActiveSessions(now time.Time, limit int) ([]upload.UploadSession, error) {
@@ -143,6 +150,23 @@ func (m *memRepo) ExpiredTrashTopLevel(now time.Time, retain time.Duration, limi
 		out = append(out, f)
 	}
 	return out, nil
+}
+
+// DeleteExpiredSessions 的内存等价物：expires_at 或 revoked_at 早于 now-7d 删行。
+func (m *memRepo) DeleteExpiredSessions(now time.Time) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cutoff := now.Add(-sessionRetention)
+	var n int64
+	for id, s := range m.authSessions {
+		expired := s.expiresAt.Before(cutoff)
+		revoked := s.revokedAt != nil && s.revokedAt.Before(cutoff)
+		if expired || revoked {
+			delete(m.authSessions, id)
+			n++
+		}
+	}
+	return n, nil
 }
 
 // fakePurger 实现 Purger：记录调用并模拟硬删除（含返回待物理删除的 blob）。
@@ -472,6 +496,46 @@ func TestSweepTrashErrorIsolation(t *testing.T) {
 
 	if len(purger.purged) != 1 || purger.purged[0] != b.ID {
 		t.Fatalf("purged = %v, want only b (a raced with restore)", purger.purged)
+	}
+}
+
+// ---- 认证会话清理 ----
+
+// 过期/撤销超 7 天的会话行删除；未超期保留；撤销但未超期保留。
+func TestSweepAuthSessions(t *testing.T) {
+	repo := newMemRepo()
+	storage := &fakeStorage{}
+	longExpired := testNow.Add(-8 * 24 * time.Hour)
+	longRevoked := testNow.Add(-9 * 24 * time.Hour)
+	recent := testNow.Add(-3 * 24 * time.Hour)
+	future := testNow.Add(24 * time.Hour)
+	expiredOld := uuid.New()
+	revokedOld := uuid.New()
+	revokedRecent := uuid.New()
+	active := uuid.New()
+	expiredRecent := uuid.New()
+	repo.authSessions[expiredOld] = fakeAuthSession{expiresAt: longExpired}
+	repo.authSessions[revokedOld] = fakeAuthSession{expiresAt: future, revokedAt: &longRevoked}
+	repo.authSessions[revokedRecent] = fakeAuthSession{expiresAt: future, revokedAt: &recent}
+	repo.authSessions[active] = fakeAuthSession{expiresAt: future}
+	repo.authSessions[expiredRecent] = fakeAuthSession{expiresAt: recent}
+
+	j := newTestJanitor(repo, &fakePurger{}, storage, nil, audit.NopRecorder{})
+	j.RunOnce()
+
+	for _, id := range []uuid.UUID{expiredOld, revokedOld} {
+		if _, ok := repo.authSessions[id]; ok {
+			t.Fatal("stale session row must be removed")
+		}
+	}
+	for _, id := range []uuid.UUID{revokedRecent, active, expiredRecent} {
+		if _, ok := repo.authSessions[id]; !ok {
+			t.Fatalf("session %s must be kept (within 7d retention)", id)
+		}
+	}
+	// 纯行删除：不触碰任何存储对象。
+	if keys := storage.deletedKeys(); len(keys) != 0 {
+		t.Fatalf("physical deletes = %v, want none", keys)
 	}
 }
 

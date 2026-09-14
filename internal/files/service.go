@@ -24,12 +24,14 @@ var (
 func NormalizeName(name string) (string, error) {
 	name = norm.NFC.String(name)
 	for _, r := range name {
-		if r == '/' || r == '\\' || unicode.IsControl(r) {
+		// Cf（格式字符，如 RLO U+202E、零宽字符）可欺骗展示层排序/渲染，
+		// 与控制字符一并拒绝。
+		if r == '/' || r == '\\' || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
 			return "", ErrInvalidName
 		}
 	}
 	name = strings.TrimSpace(name)
-	if name == "" || strings.HasSuffix(name, ".") || strings.HasSuffix(name, " ") || len([]rune(name)) > 255 {
+	if name == "" || strings.HasSuffix(name, ".") || len([]rune(name)) > 255 {
 		return "", ErrInvalidName
 	}
 	base := strings.ToUpper(strings.SplitN(name, ".", 2)[0])
@@ -55,6 +57,9 @@ type Store struct {
 	maxVersions int
 	// maxVersionsFn 为版本保留数的运行时提供器（settings 热读取）；nil 时用 maxVersions。
 	maxVersionsFn func() int
+	// webpkgCleaner 清理网页包对象前缀（webpkg/<public_id>，webpkg.Remove 注入）；
+	// Purge 事务提交后 best-effort 调用。nil 表示未接线（不清理）。
+	webpkgCleaner func(prefix string) error
 }
 
 func NewStore(db *gorm.DB) *Store { return &Store{db: db, maxVersions: defaultMaxVersions} }
@@ -70,6 +75,15 @@ func (s *Store) SetTeamWriter(w TeamWriter) {
 func (s *Store) SetTeamReader(r TeamReader) {
 	if r != nil {
 		s.teamReader = r
+	}
+}
+
+// SetWebpkgCleaner 注入网页包对象前缀清理回调（幂等；main 接线 webpkg.Remove，
+// 不改 upload.Storage 接口）：Purge 彻底删除文件时删除其关联网页包的
+// webpkg/<public_id>/ 前缀对象。
+func (s *Store) SetWebpkgCleaner(fn func(prefix string) error) {
+	if fn != nil {
+		s.webpkgCleaner = fn
 	}
 }
 
@@ -370,16 +384,77 @@ func (s *Store) Rename(owner, id uuid.UUID, name string) (File, error) {
 	return f, nil
 }
 
+// uploadBlobRepo 抽象 CreateUploadedFile 事务内 blob 内容去重所需的数据访问；
+// gormVersionsRepo 满足（复用与 addVersionLogic 一致的复活/复用语义）。
+type uploadBlobRepo interface {
+	// GetBlobBySHA 按 sha256 返回 blob（不限状态，供复活判定）；不存在返回 ErrNotFound。
+	GetBlobBySHA(sha256 string) (ObjectBlob, error)
+	// IncrementBlobRef 引用计数 +1。
+	IncrementBlobRef(id uuid.UUID) error
+	// ResurrectBlob 将 deleting 且 ref_count=0 的 blob 复活为 available/ref_count=1；
+	// 返回 false 表示已被 janitor 删除（应走新建分支）。
+	ResurrectBlob(id uuid.UUID) (bool, error)
+	// CreateBlob 新建 blob 行（调用方负责设置 RefCount/Status）。
+	CreateBlob(b ObjectBlob) error
+}
+
+// resolveUploadBlobLogic 事务内按 sha256 解析落库应使用的 blob，分支与
+// addVersionLogic 对齐：
+//   - available → ref_count+1 复用（newBlob=false，调用方应删除本次上传的冗余对象）；
+//   - deleting 且 ref_count=0（裁剪后待回收）→ 复活复用；janitor 恰已删行则新建；
+//   - quarantined/failed 等其余状态 → ErrBlobUnavailable（sha256 唯一约束阻止新建）；
+//   - 不存在 → 新建（newBlob=true）。
+func resolveUploadBlobLogic(r uploadBlobRepo, storageKey, sha256 string, size int64, mimeType string) (ObjectBlob, bool, error) {
+	blob, err := r.GetBlobBySHA(sha256)
+	switch {
+	case err == nil && blob.Status == BlobStatusAvailable:
+		if err := r.IncrementBlobRef(blob.ID); err != nil {
+			return ObjectBlob{}, false, err
+		}
+		return blob, false, nil
+	case err == nil && blob.Status == BlobStatusDeleting && blob.RefCount == 0:
+		// 裁剪遗留的待回收行：复活复用；若 janitor 恰好已删行则退回新建。
+		resurrected, rerr := r.ResurrectBlob(blob.ID)
+		if rerr != nil {
+			return ObjectBlob{}, false, rerr
+		}
+		if resurrected {
+			blob.Status, blob.RefCount = BlobStatusAvailable, 1
+			return blob, false, nil
+		}
+		blob = ObjectBlob{ID: uuid.New(), SHA256: sha256, StorageKey: storageKey, Size: size, MimeType: mimeType, RefCount: 1, Status: BlobStatusAvailable}
+		if cerr := r.CreateBlob(blob); cerr != nil {
+			return ObjectBlob{}, false, cerr
+		}
+		return blob, true, nil
+	case errors.Is(err, ErrNotFound):
+		// 内容去重未命中：新建物理对象行。
+		blob = ObjectBlob{ID: uuid.New(), SHA256: sha256, StorageKey: storageKey, Size: size, MimeType: mimeType, RefCount: 1, Status: BlobStatusAvailable}
+		if cerr := r.CreateBlob(blob); cerr != nil {
+			return ObjectBlob{}, false, cerr
+		}
+		return blob, true, nil
+	case err == nil:
+		// quarantined/failed 等状态：不可复用，且 sha256 唯一约束阻止新建。
+		return ObjectBlob{}, false, ErrBlobUnavailable
+	default:
+		return ObjectBlob{}, false, err
+	}
+}
+
 // CreateUploadedFile 在 parent 下落库上传完成的文件（含 blob 与 v1 版本），
-// 返回新建文件 ID（供上传完成钩子等后置处理使用）。
-func (s *Store) CreateUploadedFile(owner, parent uuid.UUID, name, storageKey string, size int64, sha256 string, mimeType string) (uuid.UUID, error) {
+// 返回新建文件 ID 与是否新建了 blob：事务内按 sha256 内容去重，同内容
+// available blob 复用（ref_count+1，newBlob=false 表示本次上传的物理对象
+// 冗余，调用方应删除——upload 包在 Complete 后按此清理，与 ReplaceFileVersion
+// 的 newBlob 语义一致）。
+func (s *Store) CreateUploadedFile(owner, parent uuid.UUID, name, storageKey string, size int64, sha256 string, mimeType string) (uuid.UUID, bool, error) {
 	n, err := NormalizeName(name)
 	if err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, false, err
 	}
 	p, err := authorizeParentFolder(s, owner, parent, s.teamWriter)
 	if err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, false, err
 	}
 	// 团队目录下创建的文件继承团队作用域；个人目录保持 personal。
 	scopeType, teamID := "personal", (*uuid.UUID)(nil)
@@ -387,6 +462,7 @@ func (s *Store) CreateUploadedFile(owner, parent uuid.UUID, name, storageKey str
 		scopeType, teamID = "team", id
 	}
 	var created uuid.UUID
+	var newBlob bool
 	err = s.db.Transaction(func(tx *gorm.DB) error {
 		f := File{ID: uuid.New(), Name: n, ParentID: &parent, OwnerID: owner, TeamID: teamID, Type: "file", ScopeType: scopeType}
 		if err := tx.Create(&f).Error; err != nil {
@@ -396,10 +472,11 @@ func (s *Store) CreateUploadedFile(owner, parent uuid.UUID, name, storageKey str
 			return err
 		}
 		created = f.ID
-		blob := ObjectBlob{ID: uuid.New(), SHA256: sha256, StorageKey: storageKey, Size: size, MimeType: mimeType, RefCount: 1, Status: "available"}
-		if err := tx.Create(&blob).Error; err != nil {
-			return err
+		blob, isNew, berr := resolveUploadBlobLogic(&gormVersionsRepo{tx: tx}, storageKey, sha256, size, mimeType)
+		if berr != nil {
+			return berr
 		}
+		newBlob = isNew
 		version := FileVersion{ID: uuid.New(), FileID: f.ID, Version: 1, ObjectBlobID: blob.ID, ContentSHA256: sha256, Size: size, UserID: owner}
 		if err := tx.Create(&version).Error; err != nil {
 			return err
@@ -407,9 +484,9 @@ func (s *Store) CreateUploadedFile(owner, parent uuid.UUID, name, storageKey str
 		return tx.Model(&f).Update("current_version_id", version.ID).Error
 	})
 	if err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, false, err
 	}
-	return created, nil
+	return created, newBlob, nil
 }
 
 func (s *Store) Delete(owner, id uuid.UUID) error {

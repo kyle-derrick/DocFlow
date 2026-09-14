@@ -2,6 +2,7 @@ package files
 
 import (
 	"errors"
+	"log"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -26,17 +27,23 @@ type trashRepo interface {
 	HasActiveSibling(parent *uuid.UUID, name string, exclude uuid.UUID) (bool, error)
 	// Undelete 清除软删除标记；并发下唯一索引冲突返回 ErrConflict。
 	Undelete(id uuid.UUID) error
-	// Descendants 返回 root 及其全部后代（含软删除）的 ID。
+	// Descendants 返回 root 及其全部后代（含软删除）的 ID；
+	// 生产实现以 FOR UPDATE 锁定后代行，与 AddVersion 的 GetFileForUpdate
+	// 串行化（防止 Purge 期间对后代追加版本导致引用计数错乱）。
 	Descendants(root uuid.UUID) ([]uuid.UUID, error)
 	// FilesByIDs 返回指定 ID 的文件行。
 	FilesByIDs(ids []uuid.UUID) ([]File, error)
+	// WebpkgPublicIDs 返回挂在这些文件上的 web_packages.public_id
+	//（须在删除文件行之前读取：web_packages.file_id 对 files.id 级联删除）。
+	WebpkgPublicIDs(fileIDs []uuid.UUID) ([]string, error)
 	// BlobRefsForFiles 返回这些文件通过 file_versions 引用的 blob 及引用条数
 	//（同一文件的多个版本可指向同一 blob，需按版本数递减计数）。
 	BlobRefsForFiles(fileIDs []uuid.UUID) ([]BlobRef, error)
+	// ClearCurrentVersions 清空这些文件的 current_version_id
+	//（须先于 DeleteVersions：files.current_version_id 外键指向 file_versions）。
+	ClearCurrentVersions(fileIDs []uuid.UUID) error
 	// DeleteVersions 删除这些文件的 file_versions。
 	DeleteVersions(fileIDs []uuid.UUID) error
-	// ClearCurrentVersions 清空这些文件的 current_version_id。
-	ClearCurrentVersions(fileIDs []uuid.UUID) error
 	// DeleteFiles 硬删除这些文件行。
 	DeleteFiles(ids []uuid.UUID) error
 	// CountBlobRefs 统计仍引用该 blob 的 file_versions 数量。
@@ -47,9 +54,11 @@ type trashRepo interface {
 	DecrementBlobBy(id uuid.UUID, n int64) error
 	// ZeroBlobAndMarkDeleting 将引用计数清零并标记 deleting（仅在没有其他引用时调用）。
 	ZeroBlobAndMarkDeleting(id uuid.UUID) error
-	// DeleteBlobRowIfUnreferenced 在 ref_count=0 且 status=deleting 时删除 blob 行，
-	// 返回是否删除。
-	DeleteBlobRowIfUnreferenced(id uuid.UUID) (bool, error)
+	// DeleteBlobRechecked 单事务内「SELECT FOR UPDATE 锁行 → 复核
+	// status='deleting' 且 ref_count=0 → 锁内删物理对象 → 删行」，返回是否删除。
+	// 复核不通过（已被 AddVersion 复活/仍被引用/不存在）返回 false 且不删对象，
+	// 与 ResurrectBlob 的行更新取行锁互斥。
+	DeleteBlobRechecked(id uuid.UUID, deleteObject func(storageKey string) error) (bool, error)
 }
 
 // BlobRef 表示待处理 blob 及本次删除移除的引用条数。
@@ -98,36 +107,49 @@ func restoreLogic(r trashRepo, owner, id uuid.UUID) (File, error) {
 // 处理其全部后代、删除 file_versions 引用并递减 object_blobs 引用计数；
 // 引用计数归零的 blob 标记 deleting 交由调用方删除物理对象，
 // 仍被引用的对象只递减计数、绝不删除。根目录不可删除。
-func purgeLogic(r trashRepo, owner, id uuid.UUID) (purged []File, deleting []ObjectBlob, err error) {
+// 返回被删文件、待物理删除的 blob 与关联网页包的对象前缀
+// （webpkg/<public_id>，供事务提交后清理，见 Store.Purge）。
+func purgeLogic(r trashRepo, owner, id uuid.UUID) (purged []File, deleting []ObjectBlob, webpkgPrefixes []string, err error) {
 	f, err := r.GetAny(owner, id)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if f.DeletedAt == nil {
-		return nil, nil, ErrNotDeleted
+		return nil, nil, nil, ErrNotDeleted
 	}
 	if f.IsRoot {
-		return nil, nil, ErrRoot
+		return nil, nil, nil, ErrRoot
 	}
 	ids, err := r.Descendants(f.ID)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
+	}
+	// purge 前读取关联网页包前缀：web_packages.file_id 对 files.id 级联删除，
+	// 文件行删除后 public_id 不可再查。
+	pids, err := r.WebpkgPublicIDs(ids)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	for _, pid := range pids {
+		webpkgPrefixes = append(webpkgPrefixes, "webpkg/"+pid)
 	}
 	if purged, err = r.FilesByIDs(ids); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	blobIDs, err := r.BlobRefsForFiles(ids)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
+	}
+	// FK 顺序：先清空 files.current_version_id（外键指向 file_versions），
+	// 再删 file_versions，最后删文件行。
+	if err = r.ClearCurrentVersions(ids); err != nil {
+		return nil, nil, nil, err
 	}
 	if err = r.DeleteVersions(ids); err != nil {
-		return nil, nil, err
-	}
-	if err = r.ClearCurrentVersions(ids); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if err = r.DeleteFiles(ids); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	for _, ref := range blobIDs {
 		blob, err := r.GetBlob(ref.BlobID)
@@ -135,42 +157,40 @@ func purgeLogic(r trashRepo, owner, id uuid.UUID) (purged []File, deleting []Obj
 			if errors.Is(err, ErrNotFound) {
 				continue
 			}
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		remaining, err := r.CountBlobRefs(ref.BlobID)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		if remaining > 0 {
 			// 仍有其他版本引用：按本次删除的版本数递减计数，不删除对象。
 			if err = r.DecrementBlobBy(ref.BlobID, ref.Count); err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 			continue
 		}
 		// 引用计数归零：清零计数并标记 deleting，物理对象由调用方删除。
 		if err = r.ZeroBlobAndMarkDeleting(ref.BlobID); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		blob.RefCount = 0
 		blob.Status = BlobStatusDeleting
 		deleting = append(deleting, blob)
 	}
-	return purged, deleting, nil
+	return purged, deleting, webpkgPrefixes, nil
 }
 
 // purgeBlobsLogic 删除已标记 deleting 且引用计数归零的 blob 的物理对象与行记录。
+// 逐 blob 独立事务「SELECT FOR UPDATE 复核 status='deleting' 且 ref_count=0 →
+// 锁内删物理对象 → 删行」：复核不过（期间被 AddVersion 复活/仍被引用）直接跳过，
+// 绝不删除仍可能被引用的对象；单个 blob 失败回滚可安全重试。
 func purgeBlobsLogic(r trashRepo, blobs []ObjectBlob, deleteObject func(storageKey string) error) error {
 	for _, b := range blobs {
 		if b.Status != BlobStatusDeleting || b.RefCount != 0 {
 			continue
 		}
-		if deleteObject != nil {
-			if err := deleteObject(b.StorageKey); err != nil {
-				return err
-			}
-		}
-		if _, err := r.DeleteBlobRowIfUnreferenced(b.ID); err != nil {
+		if _, err := r.DeleteBlobRechecked(b.ID, deleteObject); err != nil {
 			return err
 		}
 	}
@@ -206,15 +226,34 @@ func (s *Store) Restore(owner, id uuid.UUID) (File, error) {
 
 // Purge 彻底删除（硬删除）软删除文件及其全部后代，并按引用计数处理 object_blobs。
 // 返回被删除的文件与引用计数归零（待物理删除）的 blob。
+// 事务提交后经注入的 webpkg 清理回调（SetWebpkgCleaner）删除关联网页包的
+// webpkg/<public_id>/ 前缀对象（best-effort）；HTTP purge 与 janitor sweepTrash
+// 均经本方法，两路清理统一生效。
 func (s *Store) Purge(owner, id uuid.UUID) (purged []File, deleting []ObjectBlob, err error) {
+	var webpkgPrefixes []string
 	err = s.db.Transaction(func(tx *gorm.DB) error {
-		purged, deleting, err = purgeLogic(&gormTrashRepo{tx: tx}, owner, id)
-		return err
+		var e error
+		purged, deleting, webpkgPrefixes, e = purgeLogic(&gormTrashRepo{tx: tx}, owner, id)
+		return e
 	})
 	if err != nil {
 		return nil, nil, err
 	}
+	s.cleanupWebpkgObjects(webpkgPrefixes)
 	return purged, deleting, nil
+}
+
+// cleanupWebpkgObjects best-effort 清理网页包对象前缀；失败仅记日志
+// （孤儿前缀不影响数据一致性，可由存储巡检兜底）。
+func (s *Store) cleanupWebpkgObjects(prefixes []string) {
+	if s.webpkgCleaner == nil {
+		return
+	}
+	for _, prefix := range prefixes {
+		if err := s.webpkgCleaner(prefix); err != nil {
+			log.Printf("[files] cleanup webpkg objects %s: %v", prefix, err)
+		}
+	}
 }
 
 // PurgeBlobs 删除已标记 deleting 的 blob 对应的物理对象并删除其行记录。

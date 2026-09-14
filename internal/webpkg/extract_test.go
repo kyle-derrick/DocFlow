@@ -331,3 +331,35 @@ func TestExtractRebuildReplacesOldEntries(t *testing.T) {
 		t.Fatal("stale old.txt still exists after rebuild")
 	}
 }
+
+// failPutStorage 对命中 key 先真实写入（模拟部分写入落盘）再返回错误。
+type failPutStorage struct {
+	*upload.LocalStorage
+	failKeys map[string]bool
+}
+
+func (f *failPutStorage) Put(key string, r io.Reader) error {
+	if f.failKeys[key] {
+		_ = f.LocalStorage.Put(key, r)
+		return errors.New("simulated partial write failure")
+	}
+	return f.LocalStorage.Put(key, r)
+}
+
+// TestExtractFailureDeletesPartialKey：copyEntry 失败时当前条目（可能已部分
+// 写入）与此前已写出的条目一并清理，不留半写状态。
+func TestExtractFailureDeletesPartialKey(t *testing.T) {
+	storage := &failPutStorage{LocalStorage: mustLocal(t), failKeys: map[string]bool{"webpkg/z/assets/app.js": true}}
+	data := buildZip(t, []zipSpec{
+		{name: "index.html", data: "ok"},
+		{name: "assets/app.js", data: "partial"},
+	})
+	if _, err := Extract(storage, bytes.NewReader(data), "webpkg/z", DefaultLimits()); err == nil {
+		t.Fatal("unexpectedly succeeded with failing Put")
+	}
+	for _, key := range []string{"webpkg/z/index.html", "webpkg/z/assets/app.js", "webpkg/z/" + manifestName} {
+		if _, rerr := storage.Read(key); rerr == nil {
+			t.Fatalf("key %q still exists after failed extract", key)
+		}
+	}
+}

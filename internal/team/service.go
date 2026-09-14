@@ -115,6 +115,8 @@ func (s *Service) RemoveMember(actor, teamID, userID uuid.UUID) error {
 }
 
 // ListMembers 返回团队成员列表；actor 必须是团队成员（含 owner）。
+// 非成员返回 ErrNotFound（对外「不存在」语义，不泄露团队存在性，
+// HTTP 层映射 404）。
 func (s *Service) ListMembers(actor, teamID uuid.UUID) ([]Member, error) {
 	if _, err := s.repo.Get(teamID); err != nil {
 		return nil, err
@@ -124,7 +126,7 @@ func (s *Service) ListMembers(actor, teamID uuid.UUID) ([]Member, error) {
 		return nil, err
 	}
 	if role == "" {
-		return nil, ErrForbidden
+		return nil, ErrNotFound
 	}
 	return s.repo.ListMembers(teamID)
 }

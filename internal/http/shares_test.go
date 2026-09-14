@@ -3,11 +3,13 @@ package http
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"testing"
 
+	"github.com/docflow/docflow/internal/audit"
 	"github.com/docflow/docflow/internal/auth"
 	"github.com/docflow/docflow/internal/files"
 	"github.com/docflow/docflow/internal/share"
@@ -295,5 +297,75 @@ func TestListSharedWithMeHandler(t *testing.T) {
 		if len(empty.Shares) != 0 {
 			t.Fatalf("user %v sees %d items, want 0", who, len(empty.Shares))
 		}
+	}
+}
+
+// readFailStorage 的 Read 一律失败（补偿路径测试用）。
+type readFailStorage struct{}
+
+func (readFailStorage) Put(string, io.Reader) error             { return nil }
+func (readFailStorage) Append(string, io.Reader) (int64, error) { return 0, nil }
+func (readFailStorage) Read(string) (io.ReadCloser, error) {
+	return nil, errors.New("storage down")
+}
+func (readFailStorage) Delete(string) error { return nil }
+
+// 下载内容读取失败（500）时补偿回退已消耗的分享 download_count：
+// 公开下载与私有分享下载（登录用户）两条路径均覆盖。
+func TestShareDownloadReadFailureCompensatesCount(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	owner := uuid.New()
+	source := &previewFakeSource{
+		owner:   owner,
+		file:    files.File{ID: uuid.New(), Name: "f.txt", OwnerID: owner, Type: "file"},
+		version: files.FileVersion{Version: 1},
+		blob:    files.ObjectBlob{StorageKey: "k", Size: 4, MimeType: "text/plain", Status: files.BlobStatusAvailable},
+	}
+	repo := share.NewMemoryStore()
+	svc := share.NewService(repo, source)
+	h := &Handler{shares: svc, storage: readFailStorage{}, audit: audit.NopRecorder{}}
+
+	// 公开下载：ResolveForDownload 已递增计数 → Read 失败 500 → 补偿回 0。
+	pub, token, err := svc.Create(owner, source.file.ID, share.PermissionDownload, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/public/shares/"+token+"/download", nil)
+	c.Params = gin.Params{{Key: "token", Value: token}}
+	h.publicShareDownload(c)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("public download read failure: status = %d, body = %s", w.Code, w.Body.String())
+	}
+	stored, err := repo.Get(pub.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.DownloadCount != 0 {
+		t.Fatalf("public share download_count after compensation = %d, want 0", stored.DownloadCount)
+	}
+
+	// 私有分享下载（登录用户）：同样补偿。
+	grantee := uuid.New()
+	private, err := svc.CreatePrivate(owner, source.file.ID, share.PermissionDownload, 0, nil, []uuid.UUID{grantee}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w = httptest.NewRecorder()
+	c, _ = gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/shares/"+private.ID.String()+"/files/"+source.file.ID.String()+"/download", nil)
+	c.Params = gin.Params{{Key: "id", Value: private.ID.String()}, {Key: "fid", Value: source.file.ID.String()}}
+	c.Set(auth.UserIDContextKey, grantee)
+	h.shareFileDownload(c)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("private download read failure: status = %d, body = %s", w.Code, w.Body.String())
+	}
+	stored, err = repo.Get(private.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.DownloadCount != 0 {
+		t.Fatalf("private share download_count after compensation = %d, want 0", stored.DownloadCount)
 	}
 }

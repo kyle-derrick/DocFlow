@@ -9,6 +9,8 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"sync"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -87,9 +89,20 @@ func decodePayload(taskType string, payload []byte) (uuid.UUID, error) {
 
 // InProcess 进程内队列（默认驱动）：入队即启动 goroutine 执行任务，
 // panic recover 防止拖垮进程；入队本身无外部依赖、不返回错误。
+// 优雅退出经 Close：取消在途任务共享的执行 ctx，并等待（带超时）全部
+// 在途任务返回。
 type InProcess struct {
 	completeUpload TaskFunc
 	extractWebpkg  TaskFunc
+	// ctx 为全部在途任务共享的执行 ctx（Close 时取消；处理函数自行决定
+	// 是否响应取消——当前处理函数不感知 ctx，等待其自然返回即可）。
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+	// closeMu/closeDone 保护 Close 幂等：首次调用启动「cancel + wg.Wait」，
+	// 后续调用等待同一收尾结果（channel 关闭即全部完成）。
+	closeMu   sync.Mutex
+	closeDone chan struct{}
 }
 
 var _ Enqueuer = (*InProcess)(nil)
@@ -97,7 +110,8 @@ var _ Enqueuer = (*InProcess)(nil)
 // NewInProcess 构造进程内驱动；两个处理函数与 redis 驱动共用
 // （CompleteUploadHandler / ExtractWebpkgHandler 产出）。
 func NewInProcess(completeUpload, extractWebpkg TaskFunc) *InProcess {
-	return &InProcess{completeUpload: completeUpload, extractWebpkg: extractWebpkg}
+	ctx, cancel := context.WithCancel(context.Background())
+	return &InProcess{completeUpload: completeUpload, extractWebpkg: extractWebpkg, ctx: ctx, cancel: cancel}
 }
 
 func (p *InProcess) EnqueueCompleteUpload(sessionID uuid.UUID) error {
@@ -114,19 +128,44 @@ func (p *InProcess) EnqueueExtractWebpkg(fileID uuid.UUID) error {
 
 func (p *InProcess) Driver() string { return metrics.QueueDriverInProcess }
 
+// Close 优雅退出（幂等）：取消在途任务的执行 ctx，随后等待（至多
+// timeout）全部在途任务返回；超时仍有任务未结束时返回 false（调用方
+// 决定是否继续退出，残留 goroutine 随进程结束）。
+func (p *InProcess) Close(timeout time.Duration) bool {
+	p.closeMu.Lock()
+	if p.closeDone == nil {
+		p.cancel()
+		p.closeDone = make(chan struct{})
+		go func() {
+			p.wg.Wait()
+			close(p.closeDone)
+		}()
+	}
+	done := p.closeDone
+	p.closeMu.Unlock()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
+
 // goRun 在新 goroutine 中执行任务，统一 recover / 计数 / 日志。
 func (p *InProcess) goRun(taskType string, fn TaskFunc, id uuid.UUID) {
 	if fn == nil {
 		return
 	}
+	p.wg.Add(1)
 	go func() {
+		defer p.wg.Done()
 		defer func() {
 			if r := recover(); r != nil {
 				metrics.IncQueueProcessed(taskType, metrics.QueueStatusFailed)
 				log.Printf("[tasks:%s] %s panicked: %v", p.Driver(), taskType, r)
 			}
 		}()
-		if err := fn(context.Background(), id); err != nil {
+		if err := fn(p.ctx, id); err != nil {
 			metrics.IncQueueProcessed(taskType, metrics.QueueStatusFailed)
 			log.Printf("[tasks:%s] %s %s failed: %v", p.Driver(), taskType, id, err)
 			return

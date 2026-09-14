@@ -195,6 +195,77 @@ func TestInProcessHandlerErrorCountedFailed(t *testing.T) {
 	waitMetric(t, "docflow_queue_processed_total", map[string]string{"type": TaskTypeCompleteUpload, "status": "failed"}, failedBefore, 1)
 }
 
+// Close 取消在途任务的执行 ctx 并等待其返回；等待在途任务（不感知 ctx）
+// 时阻塞至任务结束，且 Close 幂等（二次调用立即返回已完成状态）。
+func TestInProcessCloseWaitsForInFlightTasks(t *testing.T) {
+	ctxSeen := make(chan context.Context, 1)
+	release := make(chan struct{})
+	p := NewInProcess(func(ctx context.Context, id uuid.UUID) error {
+		ctxSeen <- ctx
+		<-release
+		return nil
+	}, nil)
+	if err := p.EnqueueCompleteUpload(uuid.New()); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	var taskCtx context.Context
+	select {
+	case taskCtx = <-ctxSeen:
+	case <-time.After(2 * time.Second):
+		t.Fatal("task was not invoked within timeout")
+	}
+
+	closed := make(chan bool, 1)
+	go func() { closed <- p.Close(2 * time.Second) }()
+	// 在途任务未结束：Close 不得提前返回。
+	select {
+	case <-closed:
+		t.Fatal("Close returned while task still running")
+	case <-time.After(100 * time.Millisecond):
+	}
+	// Close 已取消在途任务的执行 ctx。
+	select {
+	case <-taskCtx.Done():
+	default:
+		t.Fatal("task ctx was not canceled by Close")
+	}
+
+	close(release)
+	select {
+	case ok := <-closed:
+		if !ok {
+			t.Fatal("Close = false, want true after tasks drained")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not return after task finished")
+	}
+	// 幂等：收尾完成后再次 Close 立即返回 true。
+	if !p.Close(100 * time.Millisecond) {
+		t.Fatal("second Close = false, want true")
+	}
+}
+
+// Close 超时：任务卡死（既不结束也不响应 ctx）时按 timeout 返回 false，
+// 不无限阻塞退出序列。
+func TestInProcessCloseTimesOut(t *testing.T) {
+	block := make(chan struct{})
+	p := NewInProcess(func(context.Context, uuid.UUID) error {
+		<-block
+		return nil
+	}, nil)
+	defer close(block)
+	if err := p.EnqueueCompleteUpload(uuid.New()); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	start := time.Now()
+	if p.Close(50 * time.Millisecond) {
+		t.Fatal("Close = true, want false on timeout")
+	}
+	if elapsed := time.Since(start); elapsed < 50*time.Millisecond {
+		t.Fatalf("Close returned early: %v", elapsed)
+	}
+}
+
 // --- 载荷序列化 / asynq mux 派发（不连 Redis） ---
 
 // 载荷 JSON 形状与 decodePayload 往返一致。

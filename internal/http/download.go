@@ -2,7 +2,6 @@ package http
 
 import (
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -10,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/docflow/docflow/internal/files"
+	"github.com/docflow/docflow/internal/upload"
 )
 
 type byteRange struct {
@@ -22,7 +22,9 @@ func (r byteRange) Length() int64 { return r.End - r.Start + 1 }
 // parseRange 解析 "Range: bytes=start-end" 头。
 // 返回 ok=false 表示无 Range 头（返回 200 全量）；
 // 返回 err 非 nil 表示 Range 语义无效或不可满足（返回 416）。
-// 仅支持单个区间，多区间请求视为无效（按任务约定“简单 Range”）。
+// 仅支持单个区间；多区间请求（含逗号）按「忽略 Range」处理——返回
+// ok=false、err=nil 哨兵，handler 以 200 全量响应（RFC 9110 允许服务器
+// 忽略 Range 头），避免整段 416 破坏大文件多线程下载器。
 func parseRange(header string, size int64) (byteRange, bool, error) {
 	header = strings.TrimSpace(header)
 	if header == "" {
@@ -33,8 +35,11 @@ func parseRange(header string, size int64) (byteRange, bool, error) {
 		return byteRange{}, false, fmt.Errorf("unsupported range unit")
 	}
 	spec := strings.TrimSpace(header[len(prefix):])
-	if spec == "" || strings.Contains(spec, ",") {
+	if spec == "" {
 		return byteRange{}, false, fmt.Errorf("invalid range")
+	}
+	if strings.Contains(spec, ",") {
+		return byteRange{}, false, nil
 	}
 	dash := strings.IndexByte(spec, '-')
 	if dash < 0 {
@@ -209,32 +214,28 @@ func (h *Handler) downloadFile(c *gin.Context) {
 		c.JSON(http.StatusRequestedRangeNotSatisfiable, gin.H{"error": "invalid range"})
 		return
 	}
-	file, err := h.storage.Read(blob.StorageKey)
+	// 区间读取统一走 upload.ReadSection：S3 走原生 GetObject Range（不再
+	// 依赖 io.Seeker 断言——分片拼接流不可 Seek，此前 hasRange 会直接 500），
+	// LocalStorage 走 Open+Seek；无 Range / 多区间（忽略）时整读 [0, size)。
+	start, length := int64(0), blob.Size
+	if hasRange {
+		start, length = r.Start, r.Length()
+	}
+	reader, err := upload.ReadSection(h.storage, blob.StorageKey, start, length)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to read file"})
 		return
 	}
-	defer file.Close()
-	seeker, ok := file.(io.Seeker)
-	if hasRange && !ok {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to read file"})
-		return
-	}
+	defer reader.Close()
 	if err := h.files.IncrementDownloadCount(owner, id); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to record download"})
 		return
 	}
 	status := http.StatusOK
 	contentLength := blob.Size
-	var reader io.Reader = file
 	if hasRange {
 		status = http.StatusPartialContent
 		contentLength = r.Length()
-		if _, serr := seeker.Seek(r.Start, io.SeekStart); serr != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to read file"})
-			return
-		}
-		reader = io.LimitReader(file, r.Length())
 		c.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", r.Start, r.End, blob.Size))
 	}
 	c.Header("Content-Disposition", contentDisposition(f.Name))

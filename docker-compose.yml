@@ -58,8 +58,11 @@ services:
       DATABASE_URL: ${DATABASE_URL:-postgres://docflow:change-me@postgres:5432/docflow?sslmode=disable}
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
       PORT: 8080
-      # 生产经 caddy 提供 HTTPS 时应设 COOKIE_SECURE=true。
-      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      # 默认 true（后端 config 同款默认，生产 HTTPS）；本地经 http 访问
+      # 需在 .env 显式设 false，否则浏览器不会回传 refresh cookie。
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      ACCESS_TOKEN_TTL: ${ACCESS_TOKEN_TTL:-15m}
+      REFRESH_TOKEN_TTL: ${REFRESH_TOKEN_TTL:-720h}
       STORAGE_DRIVER: ${STORAGE_DRIVER:-local}
       STORAGE_ROOT: /data/storage
       S3_ENDPOINT: ${S3_ENDPOINT:-}
@@ -69,6 +72,12 @@ services:
       S3_SECRET_KEY: ${S3_SECRET_KEY:-}
       S3_PATH_STYLE: ${S3_PATH_STYLE:-true}
       MAX_FILE_SIZE: ${MAX_FILE_SIZE:-1073741824}
+      # 单次上传 PATCH 请求体上限（默认 64MiB）。
+      PATCH_MAX_BYTES: ${PATCH_MAX_BYTES:-67108864}
+      UPLOAD_SESSION_TTL: ${UPLOAD_SESSION_TTL:-24h}
+      # 可信代理 CIDR/IP（逗号分隔）：caddy 反代场景需设为 compose 网段
+      #（如 172.16.0.0/12）才会采信 X-Forwarded-For；默认空不信任任何代理。
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
       # 病毒扫描联动 antivirus profile：启用 clamav 后设 .env
       # SCAN_ENABLED=true、CLAMAV_ADDR=clamav:3310（容器内 localhost 不可达；
       # CLAMAV_REQUIRED=true 时 clamd 不可达会 fail closed 拒绝上传）。
@@ -80,6 +89,15 @@ services:
       LOGIN_RATE_LIMIT_PER_MIN: ${LOGIN_RATE_LIMIT_PER_MIN:-10}
       PUBLIC_RATE_LIMIT_PER_MIN: ${PUBLIC_RATE_LIMIT_PER_MIN:-60}
       MAX_VERSIONS_PER_FILE: ${MAX_VERSIONS_PER_FILE:-5}
+      # 后台清理任务（janitor）。
+      JANITOR_ENABLED: ${JANITOR_ENABLED:-true}
+      JANITOR_INTERVAL: ${JANITOR_INTERVAL:-10m}
+      # 后台任务队列：inprocess（默认）| redis（需 --profile full 且
+      # REDIS_ADDR 指向 redis 服务；QUEUE_DRIVER=redis 时启动 ping 失败即退出）。
+      QUEUE_DRIVER: ${QUEUE_DRIVER:-inprocess}
+      REDIS_ADDR: ${REDIS_ADDR:-redis:6379}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      QUEUE_CONCURRENCY: ${QUEUE_CONCURRENCY:-5}
       # ONLYOFFICE 集成（默认关闭）：启用需在 .env 设置 ONLYOFFICE_ENABLED=true、
       # ONLYOFFICE_JWT_SECRET（≥32 字节，与下方 onlyoffice 服务的 JWT_SECRET 一致）。
       ONLYOFFICE_ENABLED: ${ONLYOFFICE_ENABLED:-false}
@@ -97,6 +115,13 @@ services:
       #（Caddyfile 无该反代规则，未匹配路径返回 SPA 首页）；内网监控在
       # compose 网络内直连 backend:8080/metrics，无内网抓取可设 false 关闭。
       METRICS_ENABLED: ${METRICS_ENABLED:-true}
+      # 网页包（zip）安全预览开关与解包限制（与后端 config 默认一致）。
+      WEBPKG_ENABLED: ${WEBPKG_ENABLED:-true}
+      WEBPKG_MAX_ENTRIES: ${WEBPKG_MAX_ENTRIES:-500}
+      WEBPKG_MAX_FILE_SIZE: ${WEBPKG_MAX_FILE_SIZE:-33554432}
+      WEBPKG_MAX_TOTAL_SIZE: ${WEBPKG_MAX_TOTAL_SIZE:-268435456}
+      WEBPKG_MAX_DEPTH: ${WEBPKG_MAX_DEPTH:-10}
+      WEBPKG_RATE_LIMIT_PER_MIN: ${WEBPKG_RATE_LIMIT_PER_MIN:-120}
     expose:
       - "8080"
     volumes:
