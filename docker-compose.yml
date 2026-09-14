@@ -7,7 +7,7 @@
 #
 # Profiles（服务矩阵）：
 #   minimal    caddy + backend + postgres                  —— make up-minimal
-#   full       minimal + redis + onlyoffice                —— make up-full
+#   full       minimal + redis + onlyoffice + drawio       —— make up-full
 #   antivirus  minimal + clamav（可与 full 叠加）          —— docker compose
 #              --profile full --profile antivirus up -d
 # 三个 profile 均含核心三件套（caddy/backend/postgres），可单独或叠加启动。
@@ -40,6 +40,10 @@ services:
       # 会让 Caddy 启动时 DNS 解析失败退出，故默认 discard 端口
       #（/onlyoffice/* 502 属预期）；make up-full 注入 onlyoffice:80。
       ONLYOFFICE_UPSTREAM: ${ONLYOFFICE_UPSTREAM:-127.0.0.1:9}
+      # draw.io 反代上游：机制同 ONLYOFFICE（minimal 下无 drawio 服务，
+      # 默认 discard 端口，/drawio/* 502 属预期）；make up-full 注入
+      # drawio:8080。
+      DRAWIO_UPSTREAM: ${DRAWIO_UPSTREAM:-127.0.0.1:9}
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
@@ -111,6 +115,16 @@ services:
       ONLYOFFICE_JWT_SECRET: ${ONLYOFFICE_JWT_SECRET:-}
       ONLYOFFICE_DOWNLOAD_URL_BASE: ${ONLYOFFICE_DOWNLOAD_URL_BASE:-http://backend:8080}
       ONLYOFFICE_RATE_LIMIT_PER_MIN: ${ONLYOFFICE_RATE_LIMIT_PER_MIN:-60}
+      # draw.io 图表编辑集成（默认关闭）：编辑器为浏览器侧 iframe embed
+      #（postMessage JSON 协议），后端不与 drawio 服务通信，仅
+      # /api/v1/drawio/config 探测端点返回地址；启用需 .env 设
+      # DRAWIO_ENABLED=true，并配置 DRAWIO_PUBLIC_URL（full profile 经 caddy
+      # /drawio/* 反代时为 https://<对外域名>/drawio；SERVER_URL 为内网
+      # 回退地址，见 .env.example 联动说明）。保存走「上传 file_id 覆盖
+      # 新版本」通用链路，无新增后端端点。
+      DRAWIO_ENABLED: ${DRAWIO_ENABLED:-false}
+      DRAWIO_SERVER_URL: ${DRAWIO_SERVER_URL:-http://drawio:8080}
+      DRAWIO_PUBLIC_URL: ${DRAWIO_PUBLIC_URL:-}
       # Prometheus 指标端点（默认启用，无认证）。/metrics 不经 Caddy 暴露
       #（Caddyfile 无该反代规则，未匹配路径返回 SPA 首页）；内网监控在
       # compose 网络内直连 backend:8080/metrics，无内网抓取可设 false 关闭。
@@ -205,6 +219,25 @@ services:
       - onlyoffice_data:/var/www/onlyoffice/Data
       - onlyoffice_logs:/var/log/onlyoffice
     restart: unless-stopped
+
+  # draw.io Diagrams（full profile）：make up-full 或
+  # docker compose --profile full up -d 启用。
+  # 浏览器侧 iframe embed 编辑器（postMessage JSON 协议：init→load→save），
+  # 后端不与该服务通信——保存由前端经「上传 file_id 覆盖新版本」链路落库，
+  # 图表文件即普通 .drawio 文件（初始模板由前端上传，无专用创建端点）。
+  # 对应 .env：DRAWIO_ENABLED=true、DRAWIO_SERVER_URL=http://drawio:8080
+  #（内网回退地址）、DRAWIO_PUBLIC_URL=https://<对外域名>/drawio（caddy
+  # /drawio/* 反代路径；make up-full 注入 DRAWIO_UPSTREAM=drawio:8080）。
+  # 端口仅 compose 内网（不映射宿主）：jgraph/drawio 默认监听 8080。
+  # 本地联调可临时 docker run -p 8082:8080 起服务，把 SERVER_URL 与
+  # PUBLIC_URL 均指向 http://localhost:8082。
+  # 版本锁定 27.0.9。
+  drawio:
+    image: jgraph/drawio:27.0.9
+    restart: unless-stopped
+    expose:
+      - "8080"
+    profiles: ["full"]
   #
   # 如需 S3 兼容对象存储（STORAGE_DRIVER=s3），可参考以下示例自行启用
   #（本仓库默认不启用，仅作说明；MinIO 与 SeaweedFS 二选一即可）：

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -20,10 +21,14 @@ import (
 	"github.com/docflow/docflow/internal/config"
 	"github.com/docflow/docflow/internal/files"
 	httpapi "github.com/docflow/docflow/internal/http"
+	"github.com/docflow/docflow/internal/invite"
 	"github.com/docflow/docflow/internal/janitor"
+	"github.com/docflow/docflow/internal/mail"
+	"github.com/docflow/docflow/internal/notify"
 	"github.com/docflow/docflow/internal/onlyoffice"
 	"github.com/docflow/docflow/internal/settings"
 	"github.com/docflow/docflow/internal/share"
+	"github.com/docflow/docflow/internal/tagging"
 	"github.com/docflow/docflow/internal/tasks"
 	"github.com/docflow/docflow/internal/team"
 	"github.com/docflow/docflow/internal/upload"
@@ -72,6 +77,42 @@ func main() {
 		return teamStore.UserInAnyTeam(userID, []uuid.UUID{teamID})
 	})
 	userStore := auth.NewUserStore(db)
+	// 站内通知与通知偏好（migration 017）：Dispatcher 检查偏好
+	//（无记录=默认开启）后落库；HTTP 通知端点与各业务回调共用。
+	notifyService := notify.NewService(notify.NewGormStore(db), notify.NewGormPreferenceRepo(db))
+	// 团队文件版本更新通知（file.updated）：AddVersion 事务提交后回调
+	//（files.dispatchVersionAdded 已过滤——仅 scope_type=team 且 actor≠owner）；
+	// 异步通知团队全部成员（文件 owner 除外，避免噪音）该文件有新版本。
+	fileStore.SetNotifyDispatcher(func(f files.File, actor uuid.UUID, version files.FileVersion) {
+		teamID := uuid.Nil
+		if f.TeamID != nil {
+			teamID = *f.TeamID
+		}
+		go func() {
+			members, err := teamStore.ListMembers(teamID)
+			if err != nil {
+				log.Printf("[notify] list team %s members: %v", teamID, err)
+				return
+			}
+			recipients := make([]uuid.UUID, 0, len(members))
+			for _, m := range members {
+				if m.UserID != f.OwnerID {
+					recipients = append(recipients, m.UserID)
+				}
+			}
+			if len(recipients) == 0 {
+				return
+			}
+			actorName := "团队成员"
+			if name, err := userStore.Username(actor); err == nil && name != "" {
+				actorName = name
+			}
+			body := fmt.Sprintf("%s 更新了团队文件「%s」（新版本 v%d）。", actorName, f.Name, version.Version)
+			if err := notifyService.NotifyMany(recipients, notify.EventFileUpdated, "团队文件已更新："+f.Name, body, f.ID); err != nil {
+				log.Printf("[notify] file.updated %s: %v", f.ID, err)
+			}
+		}()
+	})
 	// files.CreateUploadedFile 返回 (fileID, newBlob, err)（blob 内容去重）：
 	// newBlob=false 表示同 sha256 复用既有 blob，Complete 侧据 !newBlob
 	// 清理冗余物理对象（upload.Service.createFile 同签名直传）。
@@ -94,6 +135,9 @@ func main() {
 	})
 	// 单次 PATCH 请求体上限（PATCH_MAX_BYTES，默认 64MiB）。
 	uploadService.SetPatchMaxBytes(cfg.PatchMaxBytes)
+	// 站内通知接线（upload.completed / upload.quarantined）：完成路径
+	//（新文件/覆盖新版本成功）与隔离终态通知属主，标题含文件名。
+	uploadService.SetNotifyDispatcher(notifyDispatch(notifyService, "upload"))
 	// 网页包（zip）安全预览：上传完成（文件落库）后自动尝试解包
 	//（WEBPKG_ENABLED；失败置 blocked，不影响文件本身可用性），解包对象
 	// 存于 webpkg/<public_id>/ 前缀，经 /content/<public_id>/<path> 提供。
@@ -163,6 +207,9 @@ func main() {
 	shareService := share.NewService(share.NewGormStore(db), fileStore)
 	shareService.SetTeamMembership(teamStore)
 	shareService.SetUserDirectory(userStore)
+	// 站内通知接线（share.accessed）：公开/私有分享下载成功（计数已消耗）
+	// 通知分享 owner，标题含文件名（私有分享 owner 本人下载不通知）。
+	shareService.SetNotifyDispatcher(notifyDispatch(notifyService, "share"))
 	// 分享默认有效期热读取：创建请求未指定有效期（expires_in==0）时采用
 	// share.default_expiry_hours（小时）；未设置/读失败回退既有「永久」行为。
 	shareService.SetDefaultExpiryProvider(func() int {
@@ -173,6 +220,24 @@ func main() {
 		return n
 	})
 	service := auth.NewService(auth.NewGormSessionStore(db), cfg.JWTSecret, cfg.AccessTokenTTL, cfg.RefreshTokenTTL)
+	// 密码管理：改密/重置所需的凭据读写与一次性重置令牌存储
+	//（password_reset_tokens，migration 014）。
+	service.SetCredentials(userStore)
+	service.SetPasswordResetStore(auth.NewGormPasswordResetStore(db))
+	// 个人访问令牌（PAT）：api_tokens（migration 016），Bearer dfpat_ 前缀
+	// 凭证经 RequireAccessToken 双路径校验（见 internal/auth）。
+	service.SetTokenStore(auth.NewGormAPITokenStore(db))
+	// 邀请制注册：邀请生命周期管理 + 邮件通道（邀请/重置链接）。
+	// SMTP_ENABLED=true 时经 net/smtp 投递；默认 Noop 仅日志输出链接，
+	// 不建立任何网络连接。PUBLIC_BASE_URL 用于拼接邮件中的绝对链接。
+	inviteService := invite.NewService(invite.NewGormRepo(db), userStore)
+	var mailer mail.Mailer = mail.NewNoopMailer()
+	if cfg.SMTPEnabled {
+		mailer = mail.NewSMTPMailer(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPUser, cfg.SMTPPass, cfg.SMTPFrom)
+		log.Printf("mail transport: smtp (%s:%d from=%s)", cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPFrom)
+	} else {
+		log.Print("mail transport: noop (invitation/reset links are logged only)")
+	}
 	router := gin.Default()
 	// 可信代理（TRUSTED_PROXIES，逗号分隔 CIDR/IP）：控制 gin ClientIP 是否
 	// 采信 X-Forwarded-For。默认空 = 不信任任何代理（ClientIP 取 RemoteAddr），
@@ -182,12 +247,20 @@ func main() {
 	}
 	handler := httpapi.NewHandler(service, userStore, fileStore, shareService, teamService, uploadService, storage, cfg.CookieSecure, cfg.CookieDomain, cfg.RefreshTokenTTL)
 	handler.SetAuditRecorder(auditStore)
+	// 标签与收藏：Tag CRUD / 文件打去标签 / is_starred / 列表过滤
+	//（文件读授权复用 fileStore.Get 的 authorizeFileAccess 语义）。
+	handler.SetTagging(tagging.NewService(tagging.NewGormRepo(db), fileStore))
+	// 站内通知：列表/已读/未读数与通知偏好端点（本人维度）。
+	handler.SetNotifications(notifyService)
 	// 后台补完任务经队列派发（tus PATCH 写满后入队；inprocess 行为不变）。
 	handler.SetTaskEnqueuer(enqueuer)
 	// 管理端：系统设置（system_settings）、基础统计与 admin 角色查询。
 	handler.SetSettingsService(settingsStore)
 	handler.SetStatsSource(httpapi.NewAdminStats(db))
 	handler.SetRoleLookup(userStore)
+	// 邀请制注册与邮件通道（POST /api/v1/admin/invitations、/api/v1/auth/register、
+	// /forgot-password、/reset-password）。
+	handler.SetInvites(inviteService, mailer, cfg.PublicBaseURL)
 	// ONLYOFFICE 集成：启用时注入服务（挂载 /api/v1/onlyoffice 路由；
 	// 编辑配置/下载 token 用 ONLYOFFICE_JWT_SECRET 签名，回调保存复用
 	// AddVersion+Prune 的版本链路，下载大小上限沿用 MAX_FILE_SIZE）。
@@ -217,6 +290,13 @@ func main() {
 	// Prometheus 指标：全局 HTTP 中间件在 Register 内挂载；/metrics 端点由
 	// METRICS_ENABLED 控制（默认启用，无认证，生产由 Caddy/网络层限制访问）。
 	handler.SetMetricsEnabled(cfg.MetricsEnabled)
+	// draw.io 图表编辑集成：仅注入配置（编辑器为浏览器侧 iframe embed，
+	// postMessage JSON 协议；后端不与 drawio 服务通信，保存复用「上传 file_id
+	// 覆盖新版本」链路）。config 探测端点恒注册（禁用时 enabled=false）。
+	handler.SetDrawio(cfg.DrawioEnabled, cfg.DrawioServerURL, cfg.DrawioPublicURL)
+	if cfg.DrawioEnabled {
+		log.Printf("drawio integration enabled (server=%s public=%s)", cfg.DrawioServerURL, cfg.DrawioPublicURL)
+	}
 	// 网页包内容端点 /content/:pid/*filepath（独立按 IP 轻限流）与手动解包入口。
 	handler.SetWebpkg(webpkgService, cfg.WebpkgRateLimitPerMinute)
 	handler.Register(router, cfg.JWTSecret, cfg.RateLimitPerMinute, cfg.LoginRateLimitPerMinute, cfg.PublicRateLimitPerMinute)
@@ -267,5 +347,15 @@ func newStorage(cfg config.Config) (upload.Storage, error) {
 	default:
 		log.Printf("storage driver: local (root=%s)", cfg.StorageRoot)
 		return upload.NewLocalStorage(cfg.StorageRoot)
+	}
+}
+
+// notifyDispatch 把 upload/share 的通知回调适配为 notify.Dispatcher 调用
+// （source 仅用于错误日志定位）；写库失败只记日志，不影响业务主流程。
+func notifyDispatch(dispatcher notify.Dispatcher, source string) func(uuid.UUID, string, string, string, uuid.UUID) {
+	return func(userID uuid.UUID, eventType, title, body string, resourceID uuid.UUID) {
+		if err := dispatcher.Notify(userID, eventType, title, body, resourceID); err != nil {
+			log.Printf("[notify] %s event %s for user %s: %v", source, eventType, userID, err)
+		}
 	}
 }

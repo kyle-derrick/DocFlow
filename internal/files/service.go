@@ -60,7 +60,16 @@ type Store struct {
 	// webpkgCleaner 清理网页包对象前缀（webpkg/<public_id>，webpkg.Remove 注入）；
 	// Purge 事务提交后 best-effort 调用。nil 表示未接线（不清理）。
 	webpkgCleaner func(prefix string) error
+	// versionNotify 版本落库完成回调（AddVersion 事务提交后调用）：
+	// main 注入团队 file.updated 通知逻辑；nil 表示未接线。回调不改变
+	// 版本写入结果（错误由注入方自理）。
+	versionNotify VersionNotifyFunc
 }
+
+// VersionNotifyFunc 版本写入完成回调：f 为目标文件行、actor 为写入者、
+// version 为新落库的版本（事务已提交）。main 接线：团队文件且 actor≠owner
+// 时通知团队其他成员 file.updated。
+type VersionNotifyFunc func(f File, actor uuid.UUID, version FileVersion)
 
 func NewStore(db *gorm.DB) *Store { return &Store{db: db, maxVersions: defaultMaxVersions} }
 
@@ -84,6 +93,14 @@ func (s *Store) SetTeamReader(r TeamReader) {
 func (s *Store) SetWebpkgCleaner(fn func(prefix string) error) {
 	if fn != nil {
 		s.webpkgCleaner = fn
+	}
+}
+
+// SetNotifyDispatcher 注入版本写入完成回调（幂等）：AddVersion 事务提交后
+// 调用（团队 file.updated 通知的接线点）；回调自行决定同步/异步执行策略。
+func (s *Store) SetNotifyDispatcher(fn VersionNotifyFunc) {
+	if fn != nil {
+		s.versionNotify = fn
 	}
 }
 
@@ -280,7 +297,14 @@ func (s *Store) EnsureRoot(owner uuid.UUID) (File, error) {
 	})
 	return root, err
 }
-func (s *Store) List(owner uuid.UUID, parent *uuid.UUID, limit int) ([]File, error) {
+func (s *Store) List(owner uuid.UUID, parent *uuid.UUID, limit int, sort SortOptions) ([]File, error) {
+	if sort.Sort == "" {
+		sort.Sort = "name"
+	}
+	clause, ok := SortClause(sort.Sort, sort.Order)
+	if !ok {
+		clause = "lower(name) ASC, id ASC"
+	}
 	var out []File
 	q := s.db.Where("owner_id = ? AND deleted_at IS NULL", owner)
 	if parent == nil {
@@ -288,7 +312,7 @@ func (s *Store) List(owner uuid.UUID, parent *uuid.UUID, limit int) ([]File, err
 	} else {
 		q = q.Where("parent_id = ? AND is_root = false", *parent)
 	}
-	err := q.Order("lower(name), id").Limit(limit).Find(&out).Error
+	err := q.Order(clause).Limit(limit).Find(&out).Error
 	return out, err
 }
 func (s *Store) CreateFolder(owner, parent uuid.UUID, name string) (File, error) {
@@ -354,11 +378,32 @@ func (s *Store) GetTeamFolder(teamID, id uuid.UUID) (File, error) {
 	return f, nil
 }
 
+// TeamListFilter 团队目录列举过滤：tag（可选）/收藏（可选）+ 排序。
+type TeamListFilter struct {
+	TagID   *uuid.UUID
+	Starred *bool
+	SortOptions
+}
+
 // ListTeam 列出团队目录内容（根目录或子目录）；成员读权限由调用方（HTTP 层）校验。
-func (s *Store) ListTeam(teamID, parent uuid.UUID, limit int) ([]File, error) {
+// tag_id/starred 过滤在目录范围内生效（EXISTS file_tags / is_starred）。
+func (s *Store) ListTeam(teamID, parent uuid.UUID, limit int, f TeamListFilter) ([]File, error) {
+	if f.Sort == "" {
+		f.Sort = "name"
+	}
+	clause, ok := SortClause(f.Sort, f.Order)
+	if !ok {
+		clause = "lower(name) ASC, id ASC"
+	}
+	q := s.db.Where("team_id = ? AND parent_id = ? AND is_root = false AND deleted_at IS NULL", teamID, parent)
+	if f.TagID != nil {
+		q = q.Where("EXISTS (SELECT 1 FROM file_tags ft WHERE ft.file_id = files.id AND ft.tag_id = ?)", *f.TagID)
+	}
+	if f.Starred != nil {
+		q = q.Where("is_starred = ?", *f.Starred)
+	}
 	var out []File
-	err := s.db.Where("team_id = ? AND parent_id = ? AND is_root = false AND deleted_at IS NULL", teamID, parent).
-		Order("lower(name), id").Limit(limit).Find(&out).Error
+	err := q.Order(clause).Limit(limit).Find(&out).Error
 	return out, err
 }
 func (s *Store) Rename(owner, id uuid.UUID, name string) (File, error) {

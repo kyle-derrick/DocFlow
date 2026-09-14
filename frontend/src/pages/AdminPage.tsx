@@ -1,16 +1,21 @@
 // 管理设置页（仅 admin 角色）：顶部五类计数概览 + 按前缀分组的设置卡片，
 // 行内编辑保存（bool 开关 / int 数字 / string 文本，按 value type 渲染）。
+// 另含邀请管理卡片：创建邀请（一次性注册链接展示/复制）、列表状态与撤销。
 // 非 admin（403）显示无权限页；保存成功后刷新设置列表并提示。
 import { FormEvent, useEffect, useMemo, useState } from 'react'
 import {
   AdminStats,
   ApiError,
+  Invitation,
   SettingItem,
   SettingType,
   SettingValue,
+  adminCreateInvitation,
   adminGetSettings,
   adminGetStats,
+  adminListInvitations,
   adminPutSetting,
+  adminRevokeInvitation,
 } from '../api'
 import { formatTime } from '../components/FileBrowser'
 
@@ -35,6 +40,159 @@ const statCards: Array<{ key: keyof AdminStats; label: string }> = [
   { key: 'sessions', label: '登录会话' },
   { key: 'shares', label: '分享' },
 ]
+
+/** 邀请派生状态的展示徽章 class（复用既有 badge 样式）。 */
+const invitationStatusBadge: Record<Invitation['status'], string> = {
+  pending: 'badge available',
+  accepted: 'badge',
+  expired: 'badge failed',
+}
+
+const invitationStatusText: Record<Invitation['status'], string> = {
+  pending: '待接受',
+  accepted: '已接受',
+  expired: '已过期',
+}
+
+/** 邀请管理卡片：创建（一次性注册链接展示/复制）、列表状态与撤销。 */
+function InvitationsPanel({ onError, onNotice }: { onError: (msg: string) => void; onNotice: (msg: string) => void }) {
+  const [invitations, setInvitations] = useState<Invitation[]>([])
+  const [email, setEmail] = useState('')
+  const [role, setRole] = useState<'user' | 'admin'>('user')
+  const [busy, setBusy] = useState(false)
+  const [revoking, setRevoking] = useState<string | null>(null)
+  /** 最近一次创建的一次性注册链接（明文仅创建响应返回一次，保存在内存）。 */
+  const [oneTimeLink, setOneTimeLink] = useState('')
+  const [copied, setCopied] = useState(false)
+
+  const load = async () => {
+    try {
+      setInvitations(await adminListInvitations())
+    } catch (err) {
+      onError(err instanceof Error ? err.message : '邀请列表加载失败')
+    }
+  }
+
+  useEffect(() => {
+    void load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault()
+    if (busy) return
+    setBusy(true)
+    onError('')
+    try {
+      const created = await adminCreateInvitation(email.trim(), role)
+      setEmail('')
+      if (created.accept_url) {
+        // 拼成可分享的完整链接（当前站点 + 前端路由）。
+        const link = new URL(created.accept_url, window.location.origin).toString()
+        setOneTimeLink(link)
+        setCopied(false)
+        onNotice(`已创建给 ${created.email} 的邀请，请立即复制一次性注册链接`)
+      } else {
+        setOneTimeLink('')
+        onNotice(`${created.email} 已有待接受的邀请，未重复创建`)
+      }
+      await load()
+    } catch (err) {
+      onError(err instanceof Error ? err.message : '创建邀请失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const copyLink = async () => {
+    try {
+      await navigator.clipboard.writeText(oneTimeLink)
+      setCopied(true)
+    } catch {
+      // 剪贴板不可用（如非安全上下文）：保留输入框展示，由管理员手动复制。
+      setCopied(false)
+    }
+  }
+
+  const revoke = async (id: string) => {
+    if (revoking !== null) return
+    setRevoking(id)
+    try {
+      await adminRevokeInvitation(id)
+      onNotice('已撤销邀请')
+      await load()
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 404) await load()
+      else onError(err instanceof Error ? err.message : '撤销失败')
+    } finally {
+      setRevoking(null)
+    }
+  }
+
+  return (
+    <div className="panel setting-group">
+      <h3>邀请管理</h3>
+      {oneTimeLink && (
+        <div className="share-link" style={{ marginBottom: 12 }}>
+          <input type="text" readOnly value={oneTimeLink} onFocus={(e) => e.currentTarget.select()} />
+          <button className="btn small" type="button" onClick={() => void copyLink()}>
+            {copied ? '已复制' : '复制链接'}
+          </button>
+        </div>
+      )}
+      {oneTimeLink && <div className="setting-desc muted" style={{ marginBottom: 12 }}>该注册链接仅显示这一次，请立即复制发送给被邀请人（7 天内有效，仅可使用一次）</div>}
+      <form className="team-create-row" onSubmit={(e) => void submit(e)}>
+        <label className="field">
+          <span>邮箱</span>
+          <input
+            type="email"
+            required
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder="teammate@example.com"
+          />
+        </label>
+        <label className="field">
+          <span>角色</span>
+          <select value={role} onChange={(e) => setRole(e.target.value === 'admin' ? 'admin' : 'user')}>
+            <option value="user">user</option>
+            <option value="admin">admin</option>
+          </select>
+        </label>
+        <button className="btn primary" type="submit" disabled={busy}>
+          {busy ? '创建中…' : '创建邀请'}
+        </button>
+      </form>
+      {invitations.length === 0 ? (
+        <div className="empty">暂无邀请记录</div>
+      ) : (
+        invitations.map((inv) => (
+          <div key={inv.id} className="setting-row">
+            <div className="setting-main">
+              <div className="setting-key">{inv.email}</div>
+              <div className="setting-meta muted">
+                角色 {inv.role} · 创建于 {formatTime(inv.created_at)} · 有效期至 {formatTime(inv.expires_at)}
+                {inv.accepted_at && ` · 已于 ${formatTime(inv.accepted_at)} 接受`}
+              </div>
+            </div>
+            <div className="setting-control">
+              <span className={invitationStatusBadge[inv.status]}>{invitationStatusText[inv.status]}</span>
+              {inv.status === 'pending' && (
+                <button
+                  className="btn small danger"
+                  disabled={revoking !== null}
+                  onClick={() => void revoke(inv.id)}
+                >
+                  {revoking === inv.id ? '撤销中…' : '撤销'}
+                </button>
+              )}
+            </div>
+          </div>
+        ))
+      )}
+    </div>
+  )
+}
 
 function formatSettingValue(value: SettingValue): string {
   return String(value)
@@ -167,6 +325,13 @@ export default function AdminPage() {
             </div>
           ))}
         </div>
+      )}
+
+      {!loading && !forbidden && (
+        <InvitationsPanel
+          onError={(msg) => { setError(msg); setNotice('') }}
+          onNotice={(msg) => { setNotice(msg); setError('') }}
+        />
       )}
 
       {!loading && groups.map(([prefix, items]) => (

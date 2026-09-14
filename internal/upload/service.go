@@ -171,6 +171,11 @@ type Service struct {
 	// replaceFile 在 Complete 成功时向目标文件追加新版本（AddVersion+Prune），
 	// 返回是否新建了 blob（false 表示命中去重复用，新物理对象冗余应删除）。
 	replaceFile func(uuid.UUID, uuid.UUID, string, string, int64, string) (bool, error)
+	// notifyDispatcher 站内通知回调（main 注入 notify.Dispatcher 适配器）：
+	// 完成路径（新文件/覆盖新版本成功）与隔离终态各回调一次；回调错误由
+	// 注入方自理，不影响会话终态。eventType 见 notify 包常量
+	//（upload.completed / upload.quarantined），resourceID=uuid.Nil 表示无资源。
+	notifyDispatcher NotifyFunc
 	// patchMax 单次 PATCH 请求体上限（0 = 不限）。
 	patchMax int64
 	// maxSizeProvider 单文件大小上限热读取（system_settings 的
@@ -251,6 +256,27 @@ func (s *Service) SetFileCompleteHook(fn func(fileID uuid.UUID)) {
 	if fn != nil {
 		s.fileComplete = fn
 	}
+}
+
+// NotifyFunc 站内通知回调签名（main 注入 notify 包 Dispatcher 的适配器；
+// upload 包不依赖 notify 以避免环）：resourceID 为 uuid.Nil 表示无关联资源。
+type NotifyFunc func(userID uuid.UUID, eventType, title, body string, resourceID uuid.UUID)
+
+// SetNotifyDispatcher 注入站内通知回调（幂等）：Complete 的完成路径
+// （新文件创建/覆盖新版本成功）通知属主 upload.completed（标题含文件名），
+// 隔离终态通知 upload.quarantined。回调不改变会话终态。
+func (s *Service) SetNotifyDispatcher(fn NotifyFunc) {
+	if fn != nil {
+		s.notifyDispatcher = fn
+	}
+}
+
+// notifyOwner 尽力通知（回调未注入或错误均忽略，不阻断上传终态）。
+func (s *Service) notifyOwner(v UploadSession, eventType, title, body string, resourceID uuid.UUID) {
+	if s.notifyDispatcher == nil {
+		return
+	}
+	s.notifyDispatcher(v.UserID, eventType, title, body, resourceID)
 }
 
 // SetVersionTarget 注入「覆盖为新版本」能力（validate 与 replace 需成对注入，幂等）：
@@ -524,6 +550,8 @@ func (s *Service) Complete(id uuid.UUID) (UploadSession, error) {
 		if updateErr := s.store.Update(v); updateErr != nil {
 			return v, updateErr
 		}
+		// 隔离终态通知属主（尽力而为；未落成文件，resource 为空）。
+		s.notifyOwner(v, "upload.quarantined", "上传已隔离："+v.Name, "文件「"+v.Name+"」未通过安全扫描，已被隔离；请检查文件内容后重新上传。", uuid.Nil)
 		return v, ErrRejected
 	}
 	finalKey := fmt.Sprintf("objects/%s/%s", v.UserID, v.ID)
@@ -564,6 +592,8 @@ func (s *Service) Complete(id uuid.UUID) (UploadSession, error) {
 			// 尽力清理；失败不影响会话终态（孤儿对象不产生引用，由存储巡检兜底）。
 			_ = s.storage.Delete(finalKey)
 		}
+		// 完成路径通知属主（覆盖新版本成功，资源为目标文件）。
+		s.notifyOwner(v, "upload.completed", "上传完成："+v.Name, "文件「"+v.Name+"」已作为新版本写入，校验与安全扫描通过。", *v.TargetFileID)
 		if s.fileComplete != nil {
 			s.fileComplete(*v.TargetFileID)
 		}
@@ -579,6 +609,8 @@ func (s *Service) Complete(id uuid.UUID) (UploadSession, error) {
 			// 尽力清理（与 replace 分支同策略；失败由存储巡检兜底）。
 			_ = s.storage.Delete(finalKey)
 		}
+		// 完成路径通知属主（新文件创建成功，资源为新建文件）。
+		s.notifyOwner(v, "upload.completed", "上传完成："+v.Name, "文件「"+v.Name+"」已完成校验与安全扫描，可以下载或预览。", fileID)
 		if s.fileComplete != nil {
 			s.fileComplete(fileID)
 		}

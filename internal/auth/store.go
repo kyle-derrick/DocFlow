@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -21,8 +22,42 @@ func NewGormSessionStore(db *gorm.DB) *GormSessionStore {
 	return &GormSessionStore{db: db}
 }
 
-func (s *GormSessionStore) Create(session Session) error {
-	return s.db.Create(&session).Error
+func (s *GormSessionStore) Create(session Session, info SessionInfo) error {
+	if err := s.db.Create(&session).Error; err != nil {
+		return err
+	}
+	// ip/user_agent 为审计性元数据（best-effort）：写入失败不影响会话可用性。
+	// ip 为 INET 列，*string 参数写入与 audit_logs.ip 同一模式。
+	if info.IP == "" && info.UserAgent == "" {
+		return nil
+	}
+	if info.IP != "" {
+		ip := info.IP
+		session.IP = &ip
+	}
+	session.UserAgent = info.UserAgent
+	return s.db.Model(&Session{}).Where("id = ?", session.ID).
+		Updates(map[string]any{"ip": session.IP, "user_agent": session.UserAgent}).Error
+}
+
+// ListActive 返回 user 的全部活跃会话（未撤销且未过期，last_active_at 倒序）。
+// ip 经 host() 归一为文本；不读取 refresh_token_hash（凭据材料不出服务端）。
+func (s *GormSessionStore) ListActive(userID uuid.UUID, now time.Time) ([]SessionView, error) {
+	var out []SessionView
+	err := s.db.Raw(
+		"SELECT id, created_at, last_active_at, expires_at, host(ip) AS ip, user_agent FROM sessions WHERE user_id = ? AND revoked_at IS NULL AND expires_at > ? ORDER BY last_active_at DESC, id",
+		userID, now,
+	).Scan(&out).Error
+	return out, err
+}
+
+// RevokeByID 撤销属主 own 的指定会话（仅未撤销时生效）；会话不存在、
+// 非属主或已撤销返回 false（HTTP 层统一映射 404，不泄露存在性）。
+func (s *GormSessionStore) RevokeByID(owner, id uuid.UUID, now time.Time) (bool, error) {
+	result := s.db.Model(&Session{}).
+		Where("id = ? AND user_id = ? AND revoked_at IS NULL", id, owner).
+		Update("revoked_at", now)
+	return result.RowsAffected == 1, result.Error
 }
 
 // Rotate 原子轮换 refresh token 哈希（单条 session 记录即一个 token family）：
@@ -38,7 +73,10 @@ func (s *GormSessionStore) Rotate(tokenHash, replacementHash string, now, expire
 	var session Session
 	replayed := false
 	err := s.db.Transaction(func(tx *gorm.DB) error {
-		result := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+		// 显式列清单：sessions.ip 为 INET 列，扫描进 *string 依赖驱动解码，
+		// 轮换路径不需要它（及 user_agent），限定列以规避并保持行为不变。
+		result := tx.Select("id", "user_id", "created_at", "last_active_at", "expires_at", "revoked_at").
+			Clauses(clause.Locking{Strength: "UPDATE"}).
 			Where("refresh_token_hash = ? AND revoked_at IS NULL AND expires_at > ?", tokenHash, now).
 			First(&session)
 		if result.Error != nil {
@@ -80,6 +118,109 @@ func (s *GormSessionStore) Revoke(tokenHash string, now time.Time) error {
 	return nil
 }
 
+// RevokeAllForUser 撤销 user 的全部未撤销会话；exceptHash 非空时保留该
+// refresh token hash 对应的会话（改密场景保留当前会话）。
+func (s *GormSessionStore) RevokeAllForUser(userID uuid.UUID, exceptHash string, now time.Time) error {
+	query := s.db.Model(&Session{}).Where("user_id = ? AND revoked_at IS NULL", userID)
+	if exceptHash != "" {
+		query = query.Where("refresh_token_hash <> ?", exceptHash)
+	}
+	return query.Update("revoked_at", now).Error
+}
+
+// GormPasswordResetStore 是 PasswordResetStore 的 PostgreSQL 实现
+// （password_reset_tokens 表见 migrations/014）。
+type GormPasswordResetStore struct{ db *gorm.DB }
+
+func NewGormPasswordResetStore(db *gorm.DB) *GormPasswordResetStore {
+	return &GormPasswordResetStore{db: db}
+}
+
+func (s *GormPasswordResetStore) Create(token PasswordResetToken) error {
+	return s.db.Create(&token).Error
+}
+
+// Consume 原子标记 used_at：先按 token_hash 读取属主，再以
+// used_at IS NULL AND expires_at > now 条件更新；RowsAffected != 1 说明
+// 令牌已被并发消费/使用/过期，返回 false（一次性语义）。
+func (s *GormPasswordResetStore) Consume(tokenHash string, now time.Time) (uuid.UUID, bool, error) {
+	var token PasswordResetToken
+	if err := s.db.First(&token, "token_hash = ?", tokenHash).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return uuid.Nil, false, nil
+		}
+		return uuid.Nil, false, err
+	}
+	result := s.db.Model(&PasswordResetToken{}).
+		Where("id = ? AND used_at IS NULL AND expires_at > ?", token.ID, now).
+		Update("used_at", now)
+	if result.Error != nil {
+		return uuid.Nil, false, result.Error
+	}
+	return token.UserID, result.RowsAffected == 1, nil
+}
+
+// GormAPITokenStore 是 TokenStore 的 PostgreSQL 实现
+// （api_tokens 表见 migrations/016）。
+type GormAPITokenStore struct{ db *gorm.DB }
+
+func NewGormAPITokenStore(db *gorm.DB) *GormAPITokenStore {
+	return &GormAPITokenStore{db: db}
+}
+
+func (s *GormAPITokenStore) Create(token APIToken) error {
+	return s.db.Create(&token).Error
+}
+
+// List 返回 owner 的未撤销令牌（含已过期，由调用方按 expires_at 呈现），
+// 按创建时间倒序。
+func (s *GormAPITokenStore) List(owner uuid.UUID) ([]APIToken, error) {
+	var out []APIToken
+	err := s.db.Where("user_id = ? AND revoked_at IS NULL", owner).
+		Order("created_at DESC, id").Find(&out).Error
+	return out, err
+}
+
+// Revoke 撤销属主的令牌（仅未撤销时生效）；不存在、非属主或已撤销返回 false。
+func (s *GormAPITokenStore) Revoke(owner, id uuid.UUID, now time.Time) (bool, error) {
+	result := s.db.Model(&APIToken{}).
+		Where("id = ? AND user_id = ? AND revoked_at IS NULL", id, owner).
+		Update("revoked_at", now)
+	return result.RowsAffected == 1, result.Error
+}
+
+// FindActiveByPrefix 按 prefix 定位唯一候选行（未撤销且未过期），仅取认证
+// 所需最小字段（id/user_id/token_hash）。prefix 碰撞概率极低（8 字符
+// base64url ≈ 2^48），命中多行时取首行，随后仍以全量哈希常量时间比对裁决。
+func (s *GormAPITokenStore) FindActiveByPrefix(prefix string, now time.Time) (PATLookup, bool, error) {
+	var token APIToken
+	err := s.db.Select("id", "user_id", "token_hash").
+		Where("prefix = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)", prefix, now).
+		Order("id").First(&token).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return PATLookup{}, false, nil
+	}
+	if err != nil {
+		return PATLookup{}, false, err
+	}
+	return PATLookup{ID: token.ID, UserID: token.UserID, TokenHash: token.TokenHash}, true, nil
+}
+
+// TouchLastUsed 更新 last_used_at 单列（UpdateColumn：跳过 hooks、不联动
+// updated_at）。best-effort：错误不上抛，不阻塞认证路径。
+func (s *GormAPITokenStore) TouchLastUsed(id uuid.UUID) {
+	_ = s.db.Model(&APIToken{}).Where("id = ?", id).
+		UpdateColumn("last_used_at", time.Now().UTC()).Error
+}
+
+// DeleteExpired 删除 expires_at 或 revoked_at 早于阈值（now-30d）的令牌行，
+// 返回删除行数。expires_at 为 NULL（永久）且未撤销的行不会被删除。
+func (s *GormAPITokenStore) DeleteExpired(now time.Time) (int64, error) {
+	cutoff := now.Add(-PATRetention)
+	result := s.db.Exec("DELETE FROM api_tokens WHERE (expires_at IS NOT NULL AND expires_at < ?) OR (revoked_at IS NOT NULL AND revoked_at < ?)", cutoff, cutoff)
+	return result.RowsAffected, result.Error
+}
+
 type UserStore struct {
 	db *gorm.DB
 }
@@ -88,10 +229,44 @@ func NewUserStore(db *gorm.DB) *UserStore {
 	return &UserStore{db: db}
 }
 
+// FindActiveByEmail 按邮箱精确查找 active 用户；邮箱统一小写归一后匹配
+// （注册/seed 侧写入即为归一值，登录输入大小写不敏感）。
 func (s *UserStore) FindActiveByEmail(email string) (User, error) {
 	var user User
-	err := s.db.Where("email = ? AND status = ?", email, "active").First(&user).Error
+	err := s.db.Where("email = ? AND status = ?", NormalizeEmail(email), "active").First(&user).Error
 	return user, err
+}
+
+// GetByID 按 ID 返回完整用户记录（含密码哈希）；不存在返回 ErrUserNotFound。
+// 供改密（校验旧密码）等需要凭据的场景使用。
+func (s *UserStore) GetByID(id uuid.UUID) (User, error) {
+	var user User
+	err := s.db.First(&user, "id = ?", id).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return User{}, ErrUserNotFound
+	}
+	return user, err
+}
+
+// UpdatePasswordHash 更新用户密码哈希（改密/重置链路）。
+func (s *UserStore) UpdatePasswordHash(id uuid.UUID, passwordHash string) error {
+	return s.db.Model(&User{}).Where("id = ?", id).Updates(map[string]any{"password_hash": passwordHash, "updated_at": time.Now().UTC()}).Error
+}
+
+// pgUniqueViolation 为 PostgreSQL 唯一约束冲突错误码（23505）。
+const pgUniqueViolation = "23505"
+
+// CreateUser 写入新用户（邀请接受注册）。用户名或邮箱已被占用（任意状态的
+// 用户均占用唯一约束）返回 ErrUserExists。
+func (s *UserStore) CreateUser(u User) error {
+	if err := s.db.Create(&u).Error; err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
+			return ErrUserExists
+		}
+		return err
+	}
+	return nil
 }
 
 // likePrefixPattern 构造前缀匹配的 LIKE 模式：转义 \、%、_ 通配符后追加 %。

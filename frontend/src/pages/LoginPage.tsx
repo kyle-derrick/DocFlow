@@ -1,5 +1,5 @@
 import { FormEvent, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { login } from '../api'
 
 export default function LoginPage() {
@@ -55,6 +55,9 @@ export default function LoginPage() {
         <button className="btn primary block" type="submit" disabled={busy}>
           {busy ? '登录中…' : '登录'}
         </button>
+        <p className="hint">
+          <Link to="/forgot">忘记密码？</Link>
+        </p>
       </form>
     </div>
   )

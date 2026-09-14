@@ -1,6 +1,7 @@
 # DocFlow HTTP API 契约（OpenAPI 3.1）。
 # 本文件以 internal/http 实际实现为准（handler.go / uploads.go / tus.go / shares.go /
-# teams.go / trash.go / preview.go / download.go / ratelimit.go / webpkg.go），由
+# teams.go / trash.go / preview.go / download.go / ratelimit.go / webpkg.go / tags.go /
+# batch.go），由
 # internal/http/openapi_test.go 做双向路由一致性校验，契约与实现不允许漂移。
 # 说明：/health、/ready 为基础设施探针，不属于业务契约；路由参数统一写作 {id} 形式。
 # 网页包内容域端点 GET /content/{pid}/{filepath} 为契约外路由（openapi_test.go
@@ -29,11 +30,19 @@ security:
   - bearerAuth: []
 tags:
   - name: Auth
-    description: 登录、刷新与登出
+    description: 登录、刷新、登出、会话管理、邀请注册与密码管理（忘记/重置/修改）
+  - name: Tokens
+    description: 个人访问令牌（PAT，dfpat_ 前缀 Bearer 凭证）：创建（明文仅返回一次）、列表与撤销
+  - name: Notifications
+    description: 站内通知与通知偏好（本人维度）：列表/未读数/已读、各事件类型开关
   - name: Users
     description: 用户目录查找（邀请场景）
   - name: Files
     description: 个人空间文件与目录
+  - name: Tags
+    description: 标签与收藏（用户维度标签 CRUD、文件打/去标签、行级星标）
+  - name: Batch
+    description: 批量操作（部分成功语义，可选 Idempotency-Key 幂等）
   - name: Trash
     description: 回收站
   - name: Uploads
@@ -47,13 +56,19 @@ tags:
   - name: Teams
     description: 团队与团队空间
   - name: Admin
-    description: 管理端（仅 admin 角色）：系统设置与基础统计
+    description: 管理端（仅 admin 角色）：系统设置、基础统计与邀请管理
   - name: onlyoffice
     description: >-
       ONLYOFFICE Document Server 集成（可用性探测、编辑会话、回源下载与
       保存回调）；除 config 探测端点恒注册（禁用时 enabled=false 且不暴露
       server_url）外，其余端点仅在 ONLYOFFICE_ENABLED=true 时注册
       （禁用时 404）
+  - name: drawio
+    description: >-
+      draw.io 图表编辑集成（可用性探测）；编辑器为浏览器侧 iframe embed
+      （postMessage JSON 协议：init→load→save），后端无独立编辑/保存端点
+      ——保存走通用「覆盖为新版本」上传链路（POST /uploads 携带 file_id），
+      图表文件即普通 .drawio 文件
 
 paths:
   /auth/login:
@@ -140,6 +155,361 @@ paths:
         '204':
           description: 已登出（Cookie 被清除）
 
+  /auth/register:
+    post:
+      tags: [Auth]
+      operationId: register
+      summary: 凭邀请注册（邀请接受）
+      description: >-
+        v1.0 仅管理员邀请制：凭一次性邀请 token 完成注册（用户名 3-32 字符
+        仅限字母/数字/_/-，密码与 seed 同规则：≥12 字符且含大小写与数字），
+        用户邮箱继承邀请、角色继承邀请。成功即视为登录：签发 access token
+        并创建新 refresh 会话（响应同 login）。token 未知 404、已过期或已
+        使用 410、用户名/邮箱冲突 409。按 IP 独立严格限流（10/min）。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterRequest' }
+      responses:
+        '200':
+          description: 注册成功并已登录；Set-Cookie 下发 refresh_token
+          headers:
+            Set-Cookie:
+              description: refresh_token=...; Path=/api/v1/auth/refresh; HttpOnly; SameSite=Lax
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenPair' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404':
+          description: 邀请 token 未知
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: 用户名或邮箱已被占用
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '410':
+          description: 邀请已过期或已被使用
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/forgot-password:
+    post:
+      tags: [Auth]
+      operationId: forgotPassword
+      summary: 请求密码重置邮件
+      description: >-
+        邮箱存在活跃账号时创建 30 分钟有效的一次性重置令牌并发送邮件
+        （链接 {PUBLIC_BASE_URL}/reset/{token}）；无论邮箱是否存在一律 202，
+        不泄露账号存在性。按 IP 独立严格限流（10/min）。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string }
+      responses:
+        '202':
+          description: 已受理（不区分邮箱是否存在）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, const: accepted }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/reset-password:
+    post:
+      tags: [Auth]
+      operationId: resetPassword
+      summary: 凭一次性令牌重置密码
+      description: >-
+        消费一次性重置令牌（原子标记 used_at），更新密码并撤销该用户全部
+        会话。令牌未知/已使用/已过期 400。按 IP 独立严格限流（10/min）。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ResetPasswordRequest' }
+      responses:
+        '204':
+          description: 已重置（全部会话失效，需重新登录）
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/change-password:
+    post:
+      tags: [Auth]
+      operationId: changePassword
+      summary: 修改密码（认证）
+      description: >-
+        校验旧密码（错误 403）与新密码强度后更新哈希，撤销该用户全部其他
+        会话，并轮换当前会话——响应头 Set-Cookie 下发本会话新的 refresh_token。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChangePasswordRequest' }
+      responses:
+        '204':
+          description: 已修改；Set-Cookie 轮换本会话 refresh_token
+          headers:
+            Set-Cookie:
+              description: 轮换后的 refresh_token Cookie（其他会话已被撤销）
+              schema: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: 旧密码错误
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/sessions:
+    get:
+      tags: [Auth]
+      operationId: listSessions
+      summary: 我的活跃登录会话
+      description: >-
+        列出当前用户全部活跃会话（未撤销且未过期，last_active_at 倒序）。
+        实现取舍：不标记「当前会话」——会话由 refresh cookie 识别，其哈希
+        不参与任何响应（凭据材料不出服务端），可伪造的请求头不作为信任源。
+        响应不含 refresh_token 任何形态。
+      responses:
+        '200':
+          description: 活跃会话列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    delete:
+      tags: [Auth]
+      operationId: revokeAllSessions
+      summary: 撤销全部会话（含当前）
+      description: >-
+        撤销当前用户的全部会话——包括发起本请求的「当前」会话（实现取舍：
+        不依赖可伪造的 X-Session-Hint 之类请求头区分当前会话），并清除
+        refresh_token Cookie。前端收到 204 后应清除本地 access token 并跳转
+        登录页。PAT 不受影响（无 session 语义，另行经 /tokens 撤销）。
+      responses:
+        '204':
+          description: 已全部撤销（Cookie 被清除）
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/sessions/{id}:
+    delete:
+      tags: [Auth]
+      operationId: revokeSession
+      summary: 撤销指定会话
+      description: 撤销自己的指定会话（远程登出某设备）；会话不存在、非属主或已撤销一律 404（不泄露存在性）。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: 已撤销 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /tokens:
+    post:
+      tags: [Tokens]
+      operationId: createToken
+      summary: 创建个人访问令牌
+      description: >-
+        创建 PAT：明文 token（dfpat_ + 43 字符 URL-safe base64）仅在本 201
+        响应返回一次，服务端只存 SHA-256 哈希；prefix 为明文前 14 字符
+        （UI 展示用）。name 去空白后限 1-100 字符；expires_in_days 缺省或 0
+        表示永久，1-3650 天。写 token.create 审计（PAT 认证本身不审计）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, maxLength: 100 }
+                expires_in_days:
+                  { type: integer, minimum: 0, maximum: 3650, default: 0, description: 有效期（天）；0 表示永久 }
+      responses:
+        '201':
+          description: 已创建；token 明文仅此一次返回
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CreatedApiToken' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    get:
+      tags: [Tokens]
+      operationId: listTokens
+      summary: 我的个人访问令牌列表
+      description: 当前用户未撤销的 PAT（含已过期，按 created_at 倒序）；不含明文 token，附 last_used_at（最近一次认证，未使用为 null）。
+      responses:
+        '200':
+          description: 令牌列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiTokenList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /tokens/{id}:
+    delete:
+      tags: [Tokens]
+      operationId: revokeToken
+      summary: 撤销个人访问令牌
+      description: 撤销自己的 PAT（立即失效，后续认证 401）；不存在、非属主或已撤销一律 404。写 token.revoke 审计。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: 已撤销 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /notifications:
+    get:
+      tags: [Notifications]
+      operationId: listNotifications
+      summary: 我的站内通知列表
+      description: >-
+        当前用户通知（created_at 倒序），响应恒附 unread_count（顶栏铃铛徽标）。
+        游标分页：next_cursor 为本页最后一条的 created_at（RFC3339Nano），
+        作为下一页请求的 cursor（取该时间点之前的记录）；无更多页时为空串。
+        简化取舍：同一时刻多条通知可能跨页跳漏，v1.0 可接受。
+      parameters:
+        - name: unread_only
+          in: query
+          required: false
+          schema: { type: boolean, default: false }
+          description: 仅返回未读通知
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, default: 20, maximum: 100 }
+        - name: cursor
+          in: query
+          required: false
+          schema: { type: string }
+          description: 上一页 next_cursor（RFC3339Nano）；非法格式 400
+      responses:
+        '200':
+          description: 通知列表（含未读数与下一页游标）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /notifications/read-all:
+    post:
+      tags: [Notifications]
+      operationId: markAllNotificationsRead
+      summary: 全部标记已读
+      description: 当前用户全部未读通知置为已读（read_at=now）；无未读时幂等成功。
+      responses:
+        '204': { description: 已全部标记已读 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /notifications/{id}/read:
+    post:
+      tags: [Notifications]
+      operationId: markNotificationRead
+      summary: 标记单条已读
+      description: 标记自己的通知为已读（幂等，已读不重复更新 read_at）；不存在或不属于当前用户一律 404（不泄露存在性）。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: 已标记已读 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /notification-preferences:
+    get:
+      tags: [Notifications]
+      operationId: listNotificationPreferences
+      summary: 我的通知偏好
+      description: >-
+        返回全部事件类型的生效开关；无偏好记录的事件类型按默认值
+        （当前全部默认开启）返回。事件类型：upload.completed（上传完成）、
+        upload.quarantined（上传被隔离）、share.accessed（分享被下载）、
+        file.updated（团队文件更新）。
+      responses:
+        '200':
+          description: 各事件类型开关
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationPreferenceList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /notification-preferences/{type}:
+    put:
+      tags: [Notifications]
+      operationId: updateNotificationPreference
+      summary: 更新单个通知偏好
+      description: >-
+        upsert 当前用户对事件类型的开关（user_id+event_type 冲突覆盖）；
+        关闭后该类型事件不再生成通知（分发时短路）。未知事件类型 400。
+      parameters:
+        - name: type
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [upload.completed, upload.quarantined, share.accessed, file.updated]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled]
+              properties:
+                enabled: { type: boolean }
+      responses:
+        '200':
+          description: 已更新；返回生效值
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationPreference' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
   /users/lookup:
     get:
       tags: [Users]
@@ -176,14 +546,38 @@ paths:
     get:
       tags: [Files]
       operationId: listFiles
-      summary: 列出目录内容
-      description: 列出当前用户 parent_id 指定目录（缺省为用户根目录，服务端按需创建）的直接子项。
+      summary: 列出目录内容（或按标签/收藏跨目录检索）
+      description: >-
+        缺省（无 tag_id/starred）列出 parent_id 指定目录（缺省为用户根目录，
+        服务端按需创建）的直接子项。提供 tag_id 或 starred 时切换为跨目录
+        检索模式（忽略 parent_id）：覆盖个人 + 团队可读文件（个人 owner、
+        团队在册成员，实时判定）。sort/order 两种模式均生效。
+        tag_id 须属于当前用户（否则 404，不泄露存在性）。
       parameters:
         - name: parent_id
           in: query
           required: false
           schema: { type: string, format: uuid }
-          description: 父目录 ID；缺省为用户根目录
+          description: 父目录 ID；缺省为用户根目录（检索模式下忽略）
+        - name: tag_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+          description: 标签过滤（提供即进入跨目录检索模式）
+        - name: starred
+          in: query
+          required: false
+          schema: { type: string, enum: ["true", "false"] }
+          description: 收藏过滤（提供即进入跨目录检索模式）
+        - name: sort
+          in: query
+          required: false
+          schema: { type: string, enum: [name, updated_at, size], default: name }
+          description: 排序键（size 取当前版本字节数）
+        - name: order
+          in: query
+          required: false
+          schema: { type: string, enum: [asc, desc], default: asc }
         - name: limit
           in: query
           required: false
@@ -191,12 +585,207 @@ paths:
           description: 返回条数上限（服务端固定上限 100）
       responses:
         '200':
-          description: 目录内容
+          description: 目录内容或检索结果
           content:
             application/json:
               schema: { $ref: '#/components/schemas/FileList' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /files/batch/move:
+    post:
+      tags: [Batch]
+      operationId: batchMove
+      summary: 批量移动（部分成功）
+      description: >-
+        把多个文件/目录移动到 target_parent_id（缺省为个人根目录）下。
+        目标目录整体校验失败（不存在 404 / 无写权限 403）时整个请求失败；
+        其余逐项执行、逐项收集结果 [{id,ok,error_code}]，单项失败不回滚
+        其他项（部分成功语义），目标目录同名冲突项跳过（NAME_CONFLICT）。
+        移动继承目标目录作用域（个人↔团队移动更新 scope/team）。根目录与
+        移入自身/后代（INVALID_TARGET）拒绝。file_ids 去重、上限 100。
+        可选 Idempotency-Key：同 key+同请求体 60s 内重放缓存响应
+        （Idempotency-Replayed: true），同 key 不同请求体 409；
+        缓存为进程内实现，多实例部署下不跨实例共享。
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema: { type: string }
+          description: 幂等键（batch 三端点通用语义）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [file_ids]
+              properties:
+                file_ids:
+                  type: array
+                  items: { type: string, format: uuid }
+                  minItems: 1
+                  maxItems: 100
+                target_parent_id:
+                  { type: string, format: uuid, description: 目标目录 ID；缺省为个人根目录 }
+      responses:
+        '200':
+          description: 逐项结果（含失败项 error_code）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BatchResults' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Idempotency-Key 已被不同请求体使用
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /files/batch/trash:
+    post:
+      tags: [Batch]
+      operationId: batchTrash
+      summary: 批量软删除（部分成功）
+      description: >-
+        批量移入回收站（软删除）；根目录跳过（ROOT），个人文件仅 owner、
+        团队文件要求成员写权限（FORBIDDEN）。逐项结果语义与上限同 move。
+        Idempotency-Key 语义同 move。
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [file_ids]
+              properties:
+                file_ids:
+                  type: array
+                  items: { type: string, format: uuid }
+                  minItems: 1
+                  maxItems: 100
+      responses:
+        '200':
+          description: 逐项结果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BatchResults' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409':
+          description: Idempotency-Key 已被不同请求体使用
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /files/batch/restore:
+    post:
+      tags: [Batch]
+      operationId: batchRestore
+      summary: 批量恢复（部分成功）
+      description: >-
+        批量从回收站恢复，逐项复用单文件 Restore 语义：原父目录已删除
+        （PARENT_DELETED）/ 名称冲突（NAME_CONFLICT）/ 未删除（NOT_DELETED）
+        记入 per-item 结果，不静默改名。Idempotency-Key 语义同 move。
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [file_ids]
+              properties:
+                file_ids:
+                  type: array
+                  items: { type: string, format: uuid }
+                  minItems: 1
+                  maxItems: 100
+      responses:
+        '200':
+          description: 逐项结果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BatchResults' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409':
+          description: Idempotency-Key 已被不同请求体使用
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /tags:
+    get:
+      tags: [Tags]
+      operationId: listTags
+      summary: 我的标签列表
+      description: 当前用户的标签（用户维度，按名称排序）。
+      responses:
+        '200':
+          description: 标签列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TagList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    post:
+      tags: [Tags]
+      operationId: createTag
+      summary: 创建标签
+      description: 名称 NFC 归一、非空、≤64 rune、拒绝控制字符；(user_id, name) 唯一。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, maxLength: 64 }
+      responses:
+        '201':
+          description: 标签已创建
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Tag' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /tags/{id}:
+    delete:
+      tags: [Tags]
+      operationId: deleteTag
+      summary: 删除标签（解除全部关联）
+      description: 仅创建者可删；file_tags 关联级联清理。他人的标签按 404 处理。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: 已删除 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
         '429': { $ref: '#/components/responses/RateLimited' }
 
   /folders:
@@ -526,6 +1115,121 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /files/{id}/tags:
+    get:
+      tags: [Tags]
+      operationId: listFileTags
+      summary: 文件上的标签（当前用户的）
+      description: 列出该文件上属于当前用户的标签；文件读权限（个人 owner、团队任意在册成员）。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 标签列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TagList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    post:
+      tags: [Tags]
+      operationId: addFileTag
+      summary: 给文件打标签
+      description: >-
+        把当前用户自己的标签打到文件上；文件读权限即可（标签为用户维度
+        组织视图，不改动文件内容）。幂等：重复打同一标签仍 201。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tag_id]
+              properties:
+                tag_id: { type: string, format: uuid }
+      responses:
+        '201':
+          description: 关联已建立（或已存在，幂等）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tag_id: { type: string, format: uuid }
+                  file_id: { type: string, format: uuid }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /files/{id}/tags/{tagId}:
+    delete:
+      tags: [Tags]
+      operationId: removeFileTag
+      summary: 解除文件标签（幂等）
+      description: 解除当前用户自己的标签与文件的关联；未关联时同样 204。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: tagId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: 已解除（或本就未关联） }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /files/{id}/starred:
+    patch:
+      tags: [Tags]
+      operationId: setFileStarred
+      summary: 切换收藏
+      description: >-
+        设置 files.is_starred。取舍：星标为行级共享标记（团队文件全队
+        共享，不引入 per-user 表），写权限放宽为读权限即可切换；不影响
+        updated_at/ETag。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [starred]
+              properties:
+                starred: { type: boolean }
+      responses:
+        '200':
+          description: 更新后的文件元数据
+          headers:
+            ETag: { schema: { type: string } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/File' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
         '429': { $ref: '#/components/responses/RateLimited' }
 
   /files/{id}/restore:
@@ -1413,6 +2117,7 @@ paths:
       description: >-
         列出团队根目录（缺省）或 parent_id 指定团队目录的直接子项；
         成员可读；非成员 404（不泄露团队存在性）。
+        tag_id/starred 过滤（目录范围内）与 sort/order 排序可选，语义同个人 /files。
       parameters:
         - name: id
           in: path
@@ -1423,6 +2128,24 @@ paths:
           required: false
           schema: { type: string, format: uuid }
           description: 团队目录 ID；缺省为团队根目录
+        - name: tag_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+          description: 标签过滤（须为当前用户的标签，否则 404）
+        - name: starred
+          in: query
+          required: false
+          schema: { type: string, enum: ["true", "false"] }
+          description: 收藏过滤
+        - name: sort
+          in: query
+          required: false
+          schema: { type: string, enum: [name, updated_at, size], default: name }
+        - name: order
+          in: query
+          required: false
+          schema: { type: string, enum: [asc, desc], default: asc }
         - name: limit
           in: query
           required: false
@@ -1673,6 +2396,41 @@ paths:
                   error: { type: integer, enum: [0, 1] }
         '429': { $ref: '#/components/responses/RateLimited' }
 
+  /drawio/config:
+    get:
+      tags: [drawio]
+      operationId: getDrawioConfig
+      summary: 图表编辑集成可用性探测（前端据此显示「图表」入口）
+      description: >-
+        返回 draw.io 集成状态与浏览器可达的编辑器地址（前端以 iframe embed
+        模式加载 `{url}?embed=1&proto=json&spin=1`）：url 优先取
+        DRAWIO_PUBLIC_URL（如经反向代理暴露的 https://example.com/drawio，
+        本地直连可为 http://localhost:8082），未设置时回退 DRAWIO_SERVER_URL
+        （注意：该值为服务间内网地址时，浏览器可能无法加载）。该端点恒注册：
+        DRAWIO_ENABLED=false 时返回 `{enabled:false, url:null}`（不暴露内部
+        URL）。编辑与保存均在浏览器侧完成（postMessage JSON 协议：
+        receive init → send load{xml}；receive save{xml} → 前端经 POST
+        /uploads 携带 file_id 把导出 XML 覆盖为新版本），后端无其他
+        drawio 端点；新建空图表文件亦直接走普通上传（初始模板
+        <mxfile><diagram/></mxfile>）。
+      responses:
+        '200':
+          description: 集成状态
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [enabled, url]
+                properties:
+                  enabled: { type: boolean }
+                  url:
+                    type: [string, 'null']
+                    description: 浏览器可达的 draw.io 编辑器地址
+                      （DRAWIO_PUBLIC_URL 优先，回退 DRAWIO_SERVER_URL）；
+                      禁用时为 null
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
   /admin/settings:
     get:
       tags: [Admin]
@@ -1761,6 +2519,86 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '429': { $ref: '#/components/responses/RateLimited' }
 
+  /admin/invitations:
+    post:
+      tags: [Admin]
+      operationId: createInvitation
+      summary: 创建邀请（仅 admin）
+      description: >-
+        为邮箱创建邀请（7 天有效，邮箱小写归一并做格式校验，role 限
+        user|admin），生成一次性注册 token（32 字节随机数 URL-safe base64，
+        数据库仅存 SHA-256 哈希）。新建返回 201 与一次性 accept_url
+        （前端路由 /register/{token}，明文仅本次响应可见）并 best-effort
+        发送邀请邮件。幂等：该邮箱已有未过期未接受的邀请时返回 200 与既有
+        记录（不新发 token，无 accept_url）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, description: 被邀请人邮箱（服务端小写归一） }
+                role:
+                  type: string
+                  enum: [user, admin]
+                  default: user
+                  description: 新用户角色
+      responses:
+        '201':
+          description: 已创建；accept_url 一次性返回
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CreatedInvitation' }
+        '200':
+          description: 幂等命中既有未过期未接受邀请（无新 accept_url）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Invitation' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    get:
+      tags: [Admin]
+      operationId: listInvitations
+      summary: 邀请列表（仅 admin）
+      description: 按 created_at 倒序返回邀请，每条附派生状态 pending/accepted/expired；limit 参数默认 100、上限 1000。
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, default: 100 }
+      responses:
+        '200':
+          description: 邀请列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InvitationList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /admin/invitations/{id}:
+    delete:
+      tags: [Admin]
+      operationId: revokeInvitation
+      summary: 撤销邀请（仅 admin）
+      description: 删除邀请行，token 立即不可解析（注册返回 404）；已接受的邀请撤销无实际效果。不存在 404。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204':
+          description: 已撤销
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1768,8 +2606,10 @@ components:
       scheme: bearer
       bearerFormat: JWT
       description: >-
-        Authorization: Bearer <access_token>；HS256 JWT，subject 为用户 UUID，
-        过期时间以服务配置为准。
+        Authorization: Bearer <token>，两类凭证等价可用：
+        ① HS256 JWT（subject 为用户 UUID，过期时间以服务配置为准）；
+        ② PAT 个人访问令牌：dfpat_ + 43 字符 URL-safe base64（经
+        POST /tokens 创建，撤销/过期即失效；无 refresh 语义）。
 
   responses:
     BadRequest:
@@ -1865,6 +2705,74 @@ components:
         uploads: { type: integer, format: int64, description: upload_sessions 行数 }
         sessions: { type: integer, format: int64 }
         shares: { type: integer, format: int64 }
+    Invitation:
+      type: object
+      description: 邀请记录（invitations 表）；明文 token 不落库也不回传，仅创建时一次性返回 accept_url
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, description: 已小写归一 }
+        invited_by:
+          type: [string, 'null']
+          format: uuid
+          description: 邀请人（admin）用户 ID
+        role: { type: string, enum: [user, admin] }
+        status:
+          type: string
+          enum: [pending, accepted, expired]
+          description: 派生状态（accepted_at/expires_at 计算，不落库）
+        expires_at: { type: string, format: date-time }
+        accepted_at:
+          type: [string, 'null']
+          format: date-time
+        created_at: { type: string, format: date-time }
+    CreatedInvitation:
+      allOf:
+        - $ref: '#/components/schemas/Invitation'
+        - type: object
+          properties:
+            accept_url:
+              type: string
+              description: 一次性注册链接（前端路由 /register/{token}；仅创建响应返回，之后不可再取）
+    InvitationList:
+      type: object
+      properties:
+        invitations:
+          type: array
+          items: { $ref: '#/components/schemas/Invitation' }
+    RegisterRequest:
+      type: object
+      required: [token, username, password]
+      properties:
+        token:
+          type: string
+          description: 一次性邀请 token（邀请邮件/accept_url 中的明文）
+        username:
+          type: string
+          description: 3-32 字符，仅限字母、数字、'_' 与 '-'
+        password:
+          type: string
+          format: password
+          description: 至少 12 字符，须含大写、小写与数字
+    ResetPasswordRequest:
+      type: object
+      required: [token, password]
+      properties:
+        token:
+          type: string
+          description: 一次性重置令牌（重置邮件 /reset/{token} 链接中的明文，30 分钟有效）
+        password:
+          type: string
+          format: password
+          description: 至少 12 字符，须含大写、小写与数字
+    ChangePasswordRequest:
+      type: object
+      required: [old_password, new_password]
+      properties:
+        old_password: { type: string, format: password }
+        new_password:
+          type: string
+          format: password
+          description: 至少 12 字符，须含大写、小写与数字
     TokenPair:
       type: object
       required: [access_token, token_type]
@@ -1920,6 +2828,8 @@ components:
         description: { type: string }
         is_public:
           { type: boolean, description: 是否存在有效公开分享（冗余辅助字段） }
+        is_starred:
+          { type: boolean, description: 收藏标记（行级共享；团队文件全队共享星标） }
         view_count: { type: integer, format: int64 }
         download_count: { type: integer, format: int64 }
         created_at: { type: string, format: date-time }
@@ -1961,6 +2871,36 @@ components:
         files:
           type: array
           items: { $ref: '#/components/schemas/File' }
+    Tag:
+      type: object
+      description: 用户维度标签（tags 表）；(user_id, name) 唯一
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, maxLength: 64 }
+        created_at: { type: string, format: date-time }
+    TagList:
+      type: object
+      properties:
+        tags:
+          type: array
+          items: { $ref: '#/components/schemas/Tag' }
+    BatchResultItem:
+      type: object
+      description: 批量操作单项结果；ok=false 时附机器可读错误码
+      properties:
+        id: { type: string, format: uuid }
+        ok: { type: boolean }
+        error_code:
+          type: string
+          description: >-
+            NOT_FOUND / FORBIDDEN / ROOT / NAME_CONFLICT / INVALID_TARGET /
+            PARENT_DELETED / NOT_DELETED / INTERNAL
+    BatchResults:
+      type: object
+      properties:
+        results:
+          type: array
+          items: { $ref: '#/components/schemas/BatchResultItem' }
     TeamFileList:
       type: object
       properties:
@@ -2137,3 +3077,52 @@ components:
         members:
           type: array
           items: { $ref: '#/components/schemas/TeamMember' }
+    Notification:
+      type: object
+      description: >-
+        站内通知（notifications 表，user 维度）；type 为事件类型，
+        resource_id 指向关联资源（通常为文件 ID，可空）。已读通知超过
+        90 天由 janitor 清理。
+      properties:
+        id: { type: string, format: uuid }
+        type:
+          type: string
+          enum: [upload.completed, upload.quarantined, share.accessed, file.updated]
+        title: { type: string, description: 通知标题（含关联文件名） }
+        body: { type: string, description: 通知正文说明 }
+        resource_id:
+          type: [string, 'null']
+          format: uuid
+          description: 关联资源 ID（文件 ID 等）；无关联时为 null
+        is_read: { type: boolean }
+        created_at: { type: string, format: date-time }
+        read_at:
+          type: [string, 'null']
+          format: date-time
+          description: 已读时间；未读为 null
+    NotificationList:
+      type: object
+      required: [items, next_cursor, unread_count]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Notification' }
+        next_cursor:
+          type: string
+          description: >-
+            下一页游标（本页最后一条的 created_at，RFC3339Nano）；无更多页时为空串
+        unread_count: { type: integer, description: 当前用户未读总数（铃铛徽标） }
+    NotificationPreference:
+      type: object
+      description: 通知偏好条目：事件类型的生效开关（无记录 = 默认开启）
+      properties:
+        event_type:
+          type: string
+          enum: [upload.completed, upload.quarantined, share.accessed, file.updated]
+        enabled: { type: boolean }
+    NotificationPreferenceList:
+      type: object
+      properties:
+        preferences:
+          type: array
+          items: { $ref: '#/components/schemas/NotificationPreference' }

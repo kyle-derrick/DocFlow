@@ -11,9 +11,13 @@ import (
 	"github.com/docflow/docflow/internal/audit"
 	"github.com/docflow/docflow/internal/auth"
 	"github.com/docflow/docflow/internal/files"
+	"github.com/docflow/docflow/internal/invite"
+	"github.com/docflow/docflow/internal/mail"
 	"github.com/docflow/docflow/internal/metrics"
+	"github.com/docflow/docflow/internal/notify"
 	"github.com/docflow/docflow/internal/onlyoffice"
 	"github.com/docflow/docflow/internal/share"
+	"github.com/docflow/docflow/internal/tagging"
 	"github.com/docflow/docflow/internal/tasks"
 	"github.com/docflow/docflow/internal/team"
 	"github.com/docflow/docflow/internal/upload"
@@ -50,6 +54,11 @@ var dummyPasswordHash = func() string {
 // （每分钟次数；防无认证刷轮换/登出，复用 publicLimiter 模式的独立实例）。
 const authOpsRateLimitPerMin = 60
 
+// authSensitiveRateLimitPerMin 为注册/忘记密码/重置密码三个公开端点的独立
+// 按 IP 限流（每分钟 10 次，防无认证刷注册与重置邮件，复用 publicLimiter
+// 模式的独立实例，比公开分享接口更严）。
+const authSensitiveRateLimitPerMin = 10
+
 type Handler struct {
 	auth            *auth.Service
 	users           userDirectory
@@ -66,11 +75,23 @@ type Handler struct {
 	settings settingsService
 	stats    statsSource
 	roles    auth.RoleLookup
+	// invites 为邀请制注册服务、mailer 为邮件通道（邀请/重置链接），
+	// publicBaseURL 用于拼接邮件里的绝对链接；SetInvites 注入，未注入时
+	// 邀请与注册/重置端点返回 503。
+	invites       *invite.Service
+	mailer        mail.Mailer
+	publicBaseURL string
 	// onlyoffice 为 ONLYOFFICE 集成服务；非 nil（SetOnlyOffice 注入）时
 	// Register 挂载 /api/v1/onlyoffice 的 session/download/callback 路由，
 	// 否则不注册（默认 404）；config 探测端点恒注册（禁用时 enabled=false）。
 	onlyoffice                *onlyoffice.Service
 	onlyofficeRateLimitPerMin int
+	// drawioEnabled / drawioURL 为 draw.io 图表编辑集成配置（SetDrawio 注入）：
+	// 编辑器为浏览器侧 iframe embed（postMessage JSON 协议），后端不与 drawio
+	// 服务通信，保存走通用「上传 file_id 覆盖新版本」链路——仅 config 探测
+	// 端点需要这两个值，且恒注册（禁用时 enabled=false、url=null）。
+	drawioEnabled bool
+	drawioURL     string
 	// webpkg 为网页包安全预览服务；非 nil（SetWebpkg 注入）时 Register 挂载
 	// 内容端点 /content/:pid/*filepath（无认证、独立按 IP 轻限流）与手动
 	// 解包 POST /api/v1/files/:id/webpkg/extract，否则不注册（默认 404）。
@@ -83,10 +104,18 @@ type Handler struct {
 	// 的后台补完经其派发（inprocess 与原内联 goroutine 行为一致；redis 时
 	// 由任意实例 worker 处理）。nil 时回退进程内 goroutine（tusAutocomplete）。
 	tasks tasks.Enqueuer
+	// tags 为标签服务（SetTagging 注入）：标签 CRUD 与文件打/去标签；
+	// 未注入时 tags 端点返回 503（生产恒注入，契约测试注入内存实现）。
+	tags *tagging.Service
+	// notifications 为站内通知服务（SetNotifications 注入）：通知列表/已读
+	// 与通知偏好；未注入时通知端点返回 503（生产恒注入）。
+	notifications *notify.Service
+	// idem 为批量端点的幂等响应缓存（进程内，TTL 60s；见 batch.go）。
+	idem *idemCache
 }
 
 func NewHandler(authService *auth.Service, users *auth.UserStore, fileStore *files.Store, shares *share.Service, teams *team.Service, uploads *upload.Service, storage upload.Storage, cookieSecure bool, cookieDomain string, refreshTokenTTL time.Duration) *Handler {
-	return &Handler{auth: authService, users: users, files: fileStore, shares: shares, teams: teams, uploads: uploads, storage: storage, cookieSecure: cookieSecure, cookieDomain: cookieDomain, refreshTokenTTL: refreshTokenTTL, audit: audit.NopRecorder{}}
+	return &Handler{auth: authService, users: users, files: fileStore, shares: shares, teams: teams, uploads: uploads, storage: storage, cookieSecure: cookieSecure, cookieDomain: cookieDomain, refreshTokenTTL: refreshTokenTTL, audit: audit.NopRecorder{}, mailer: mail.NewNoopMailer(), idem: newIdemCache(idempotencyTTL)}
 }
 
 // SetAuditRecorder 注入审计写入器；nil 时保持 Nop。
@@ -117,6 +146,38 @@ func (h *Handler) SetTaskEnqueuer(enqueuer tasks.Enqueuer) {
 	}
 }
 
+// SetTagging 注入标签服务（幂等）；repo 通常为 tagging.NewGormRepo(db)，
+// fileSource 为 *files.Store（文件读授权）。未注入时 tags 端点 503。
+func (h *Handler) SetTagging(svc *tagging.Service) {
+	if svc != nil {
+		h.tags = svc
+	}
+}
+
+// SetInvites 注入邀请制注册服务与邮件通道（幂等）；publicBaseURL 用于拼接
+// 邀请/重置邮件中的绝对链接（空则输出相对路径）。mailer 为 nil 时回退
+// Noop（仅日志输出链接）。未注入 invites 时邀请管理与注册/重置端点 503。
+func (h *Handler) SetInvites(svc *invite.Service, mailer mail.Mailer, publicBaseURL string) {
+	if svc == nil {
+		return
+	}
+	h.invites = svc
+	if mailer == nil {
+		mailer = mail.NewNoopMailer()
+	}
+	h.mailer = mailer
+	h.publicBaseURL = publicBaseURL
+}
+
+// publicLink 拼接邮件/一次性响应里的链接：配置了 PUBLIC_BASE_URL 时返回
+// 绝对地址，否则返回相对路径（由日志型邮件通道原样输出）。
+func (h *Handler) publicLink(path string) string {
+	if h.publicBaseURL == "" {
+		return path
+	}
+	return strings.TrimSuffix(h.publicBaseURL, "/") + path
+}
+
 func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRateLimit, publicRateLimit int) {
 	// Prometheus HTTP 指标中间件：全局挂载（须先于任何路由注册），
 	// route 标签取 gin 路由模板，未匹配路由（404）归一为 unknown。
@@ -133,11 +194,41 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	// refresh/logout：无认证的会话操作端点，独立实例按 IP 轻限流
 	//（与 login 限流互不挤占；publicLimiter 模式复用）。
 	authOpsLimiterMW := publicLimiter(NewRateLimiter(authOpsRateLimitPerMin))
+	// 注册/忘记密码/重置密码：无认证的敏感公开端点，共享独立实例按 IP
+	// 更严限流（10/min），防刷注册与重置邮件。
+	authSensitiveLimiterMW := publicLimiter(NewRateLimiter(authSensitiveRateLimitPerMin))
 	authGroup := r.Group("/api/v1/auth")
 	authGroup.POST("/login", loginLimiterMW, h.login)
 	authGroup.POST("/refresh", authOpsLimiterMW, h.refresh)
 	authGroup.POST("/logout", authOpsLimiterMW, h.logout)
-	api := r.Group("/api/v1", auth.RequireAccessToken(jwtSecret), apiLimiter(NewRateLimiter(rateLimit)))
+	// 邀请制注册（凭一次性邀请 token）与密码找回/重置：公开端点。
+	authGroup.POST("/register", authSensitiveLimiterMW, h.register)
+	authGroup.POST("/forgot-password", authSensitiveLimiterMW, h.forgotPassword)
+	authGroup.POST("/reset-password", authSensitiveLimiterMW, h.resetPassword)
+	// PAT 认证路径挂在中间件上（dfpat_ 前缀走 Service.VerifyPersonalAccessToken）；
+	// h.auth 未注入（契约测试）时显式传 nil，中间件对该前缀一律 401。
+	var patVerifier auth.AccessTokenVerifier
+	if h.auth != nil {
+		patVerifier = h.auth
+	}
+	api := r.Group("/api/v1", auth.RequireAccessToken(jwtSecret, patVerifier), apiLimiter(NewRateLimiter(rateLimit)))
+	// 修改密码（认证）：成功撤销其他会话并轮换当前会话。
+	api.POST("/auth/change-password", h.changePassword)
+	// 会话管理（多端登录）：活跃会话列表、撤销单个、撤销全部（含当前）。
+	api.GET("/auth/sessions", h.listSessions)
+	api.DELETE("/auth/sessions/:id", h.revokeSession)
+	api.DELETE("/auth/sessions", h.revokeAllSessions)
+	// 个人访问令牌（PAT）：创建（明文仅返回一次）、列表、撤销。
+	api.POST("/tokens", h.createToken)
+	api.GET("/tokens", h.listTokens)
+	api.DELETE("/tokens/:id", h.revokeToken)
+	// 站内通知与通知偏好（本人维度）：列表分页（created_at 游标）+未读数、
+	// 单条已读、全部已读、各事件类型开关与更新。
+	api.GET("/notifications", h.listNotifications)
+	api.POST("/notifications/:id/read", h.markNotificationRead)
+	api.POST("/notifications/read-all", h.markAllNotificationsRead)
+	api.GET("/notification-preferences", h.listNotificationPreferences)
+	api.PUT("/notification-preferences/:type", h.updateNotificationPreference)
 	api.GET("/files", h.listFiles)
 	api.POST("/folders", h.createFolder)
 	api.GET("/files/:id", h.getFile)
@@ -151,6 +242,19 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	api.GET("/trash", h.listTrash)
 	api.POST("/files/:id/restore", h.restoreFile)
 	api.DELETE("/trash/:id", h.purgeFile)
+	// 标签与收藏：标签 CRUD、文件打/去标签、行级星标切换
+	//（starred 切换读权限即可；files 列表的 tag/starred 过滤见 listFiles）。
+	api.GET("/tags", h.listTags)
+	api.POST("/tags", h.createTag)
+	api.DELETE("/tags/:id", h.deleteTag)
+	api.GET("/files/:id/tags", h.listFileTags)
+	api.POST("/files/:id/tags", h.addFileTag)
+	api.DELETE("/files/:id/tags/:tagId", h.removeFileTag)
+	api.PATCH("/files/:id/starred", h.setFileStarred)
+	// 批量操作（部分成功语义；可选 Idempotency-Key 60s 幂等重放，见 batch.go）。
+	api.POST("/files/batch/move", h.idempotency, h.batchMove)
+	api.POST("/files/batch/trash", h.idempotency, h.batchTrash)
+	api.POST("/files/batch/restore", h.idempotency, h.batchRestore)
 	api.POST("/uploads", h.createUpload)
 	api.PATCH("/uploads/:id", h.patchUpload)
 	api.POST("/uploads/:id/complete", h.completeUpload)
@@ -183,6 +287,11 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	if h.onlyoffice != nil {
 		h.registerOnlyOfficeRoutes(api, r)
 	}
+	// draw.io 图表编辑集成：config 探测端点恒注册（认证组；禁用时 enabled=false
+	// 且不暴露 url）。编辑器为浏览器侧 iframe embed（postMessage JSON 协议：
+	// init→load→save），后端无其他 drawio 路由；保存走通用「上传 file_id
+	// 覆盖新版本」链路（前端把导出 XML 作为新版本上传）。
+	api.GET("/drawio/config", h.drawioConfig)
 	// 网页包安全预览：内容端点挂根路由（/content 在 /api/v1 之外，无 Bearer、
 	// 不携带主站 refresh cookie——其 Path 为 /api/v1/auth/refresh），按 IP
 	// 独立轻限流；手动解包入口挂认证组。未注入时不注册（默认 404）。
@@ -195,6 +304,10 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	admin.GET("/settings", h.listAdminSettings)
 	admin.PUT("/settings/:key", h.updateAdminSetting)
 	admin.GET("/stats", h.adminStats)
+	// 邀请管理（仅 admin）：创建（返回一次性注册链接）、列表、撤销。
+	admin.POST("/invitations", h.createInvitation)
+	admin.GET("/invitations", h.listInvitations)
+	admin.DELETE("/invitations/:id", h.revokeInvitation)
 	// 公开分享接口：无认证、不设 cookie，单独按 IP 限流。
 	public := r.Group("/api/v1/public", publicLimiter(NewRateLimiter(publicRateLimit)))
 	public.GET("/shares/:token", h.publicShareInfo)
@@ -235,7 +348,7 @@ func (h *Handler) login(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "token generation failed"})
 		return
 	}
-	refresh, err := h.auth.NewSession(user.ID)
+	refresh, err := h.auth.NewSessionWithInfo(user.ID, sessionInfoFromRequest(c))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "session creation failed"})
 		return
@@ -243,6 +356,11 @@ func (h *Handler) login(c *gin.Context) {
 	h.setRefreshCookie(c, refresh)
 	h.recordAudit(c, audit.Entry{UserID: &user.ID, Action: audit.ActionLoginSuccess, ResourceType: audit.ResourceSession, ResourceID: user.ID.String(), Status: audit.StatusSuccess})
 	c.JSON(http.StatusOK, gin.H{"access_token": access, "token_type": "Bearer"})
+}
+
+// sessionInfoFromRequest 采集会话创建时的请求环境（ip/user_agent，审计用途）。
+func sessionInfoFromRequest(c *gin.Context) auth.SessionInfo {
+	return auth.SessionInfo{IP: c.ClientIP(), UserAgent: c.GetHeader("User-Agent")}
 }
 
 // sanitizeAuditToken 只保留可安全嵌入 JSON 字符串的字符，避免审计日志注入。
@@ -342,25 +460,28 @@ func parseID(c *gin.Context, value string) (uuid.UUID, bool) {
 	return id, true
 }
 func fileJSON(f files.File) gin.H {
-	return gin.H{"id": f.ID, "name": f.Name, "parent_id": f.ParentID, "type": f.Type, "is_root": f.IsRoot, "description": f.Description, "is_public": f.IsPublic, "view_count": f.ViewCount, "download_count": f.DownloadCount, "created_at": f.CreatedAt, "updated_at": f.UpdatedAt}
+	return gin.H{"id": f.ID, "name": f.Name, "parent_id": f.ParentID, "type": f.Type, "is_root": f.IsRoot, "description": f.Description, "is_public": f.IsPublic, "is_starred": f.IsStarred, "view_count": f.ViewCount, "download_count": f.DownloadCount, "created_at": f.CreatedAt, "updated_at": f.UpdatedAt}
 }
 func setETag(c *gin.Context, f files.File) {
 	c.Header("ETag", fmt.Sprintf("\"%s\"", f.UpdatedAt.UTC().Format(time.RFC3339Nano)))
 }
+
+// listFiles GET /api/v1/files：目录列举（缺省/parent_id）或跨目录检索。
+// 提供 tag_id 或 starred 过滤时切换为检索模式（忽略 parent_id）：
+// 覆盖个人 + 团队可读文件（owner/在册成员，见 files.SearchAccessible）。
+// sort=name|updated_at|size × order=asc|desc 对两种模式均生效。
 func (h *Handler) listFiles(c *gin.Context) {
 	owner := userID(c)
-	parentText := c.Query("parent_id")
-	var parent uuid.UUID
-	if parentText == "" {
-		root, err := h.files.EnsureRoot(owner)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to ensure root folder"})
-			return
-		}
-		parent = root.ID
-	} else if id, ok := parseID(c, parentText); ok {
-		parent = id
-	} else {
+	tagID, ok := h.parseTagFilter(c)
+	if !ok {
+		return
+	}
+	starred, ok := parseStarredFilter(c)
+	if !ok {
+		return
+	}
+	sortOpt, ok := parseSortQuery(c)
+	if !ok {
 		return
 	}
 	limit := 100
@@ -374,7 +495,26 @@ func (h *Handler) listFiles(c *gin.Context) {
 			limit = n
 		}
 	}
-	out, err := h.files.List(owner, &parent, limit)
+	var out []files.File
+	var err error
+	if tagID != nil || starred != nil {
+		out, err = h.files.SearchAccessible(owner, files.SearchOptions{TagID: tagID, Starred: starred, SortOptions: sortOpt, Limit: limit})
+	} else {
+		var parent uuid.UUID
+		if parentText := c.Query("parent_id"); parentText == "" {
+			root, rerr := h.files.EnsureRoot(owner)
+			if rerr != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to ensure root folder"})
+				return
+			}
+			parent = root.ID
+		} else if id, pok := parseID(c, parentText); pok {
+			parent = id
+		} else {
+			return
+		}
+		out, err = h.files.List(owner, &parent, limit, sortOpt)
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to list files"})
 		return

@@ -2,6 +2,8 @@
 //   - 过期且非终态的上传会话置 failed 并删除临时存储对象（tmp/*，幂等）；
 //     终态会话超过保留期后删除行；
 //   - 过期/已撤销超过 7 天的认证会话行（原生 SQL 删 sessions，不引 auth 模型）；
+//   - 过期/已撤销超过 30 天的个人访问令牌行（原生 SQL 删 api_tokens）；
+//   - 已读超过 90 天的通知行（原生 SQL 删 notifications，未读不受影响）；
 //   - status='deleting' 且 ref_count=0 的 object_blobs 行（SELECT FOR UPDATE
 //     行锁复核后）物理删除存储对象与行，与 AddVersion 的复活路径互斥；
 //   - 回收站软删除超过 retention.trash_days 的文件复用 files.Store.Purge
@@ -53,6 +55,12 @@ type Repo interface {
 	// DeleteExpiredSessions 删除 expires_at 或 revoked_at 早于阈值（7 天）的
 	// 认证会话行（原生 SQL，不依赖 auth 包模型），返回删除行数。
 	DeleteExpiredSessions(now time.Time) (int64, error)
+	// DeleteExpiredTokens 删除 expires_at 或 revoked_at 早于阈值（30 天）的
+	// 个人访问令牌行（api_tokens，原生 SQL），返回删除行数。
+	DeleteExpiredTokens(now time.Time) (int64, error)
+	// DeleteOldReadNotifications 删除已读超过保留期（90 天）的通知行
+	//（notifications，原生 SQL，read_at 缺失时回退 created_at），返回删除行数。
+	DeleteOldReadNotifications(now time.Time, retain time.Duration) (int64, error)
 }
 
 // Purger 抽象回收站彻底删除能力；生产实现为 *files.Store。
@@ -82,6 +90,12 @@ const (
 	// now-7d 的行删除（DELETE FROM sessions WHERE expires_at < now()-interval '7 days'
 	// OR revoked_at < now()-interval '7 days' 的参数化等价形式）。
 	sessionRetention = 7 * 24 * time.Hour
+	// tokenRetention 个人访问令牌行的清理阈值：expires_at/revoked_at 早于
+	// now-30d 的 api_tokens 行删除（永久且未撤销的令牌不受影响）。
+	tokenRetention = 30 * 24 * time.Hour
+	// notificationRetention 已读通知的清理阈值：已读时间早于 now-90d 的
+	// notifications 行删除（未读通知不受影响，避免丢失用户尚未处理的信息）。
+	notificationRetention = 90 * 24 * time.Hour
 	// defaultBatchLimit 单轮每类清理的批量上限，防止长事务。
 	defaultBatchLimit = 500
 )
@@ -156,8 +170,23 @@ func (j *Janitor) RunOnce() {
 	j.runs.Add(1)
 	j.sweepUploadSessions()
 	j.sweepSessions()
+	j.sweepTokens()
+	j.sweepNotifications()
 	j.sweepDeletingBlobs()
 	j.sweepTrash()
+}
+
+// sweepNotifications 清理已读超过保留期（90 天）的通知行。
+// 纯行删除（无关联物理对象），暂只记日志（同 sweepSessions/sweepTokens 模式）。
+func (j *Janitor) sweepNotifications() {
+	n, err := j.repo.DeleteOldReadNotifications(j.clock(), notificationRetention)
+	if err != nil {
+		j.logf("janitor: delete old read notifications: %v", err)
+		return
+	}
+	if n > 0 {
+		j.logf("janitor: removed %d old read notifications", n)
+	}
 }
 
 // sweepSessions 清理过期/已撤销超过保留期（7 天）的认证会话行。
@@ -171,6 +200,20 @@ func (j *Janitor) sweepSessions() {
 	}
 	if n > 0 {
 		j.logf("janitor: removed %d expired sessions", n)
+	}
+}
+
+// sweepTokens 清理过期/已撤销超过保留期（30 天）的个人访问令牌行
+// （复用 sweepSessions 模式：纯行删除，暂只记日志）。
+// expires_at 为 NULL（永久）且未撤销的令牌不会被删除。
+func (j *Janitor) sweepTokens() {
+	n, err := j.repo.DeleteExpiredTokens(j.clock())
+	if err != nil {
+		j.logf("janitor: delete expired api tokens: %v", err)
+		return
+	}
+	if n > 0 {
+		j.logf("janitor: removed %d expired api tokens", n)
 	}
 }
 

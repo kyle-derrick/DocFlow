@@ -29,6 +29,7 @@ type File struct {
 	CurrentVersionID *uuid.UUID `gorm:"type:uuid"`
 	Description      string
 	IsPublic         bool
+	IsStarred        bool `gorm:"not null;default:false"`
 	ViewCount        int64
 	DownloadCount    int64
 	CreatedAt        time.Time

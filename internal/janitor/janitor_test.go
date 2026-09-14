@@ -20,12 +20,14 @@ import (
 
 // memRepo 是 Repo 的内存实现。
 type memRepo struct {
-	mu           sync.Mutex
-	sessions     map[uuid.UUID]upload.UploadSession
-	blobs        map[uuid.UUID]files.ObjectBlob
-	files        map[uuid.UUID]files.File
-	authSessions map[uuid.UUID]fakeAuthSession
-	failErr      error
+	mu            sync.Mutex
+	sessions      map[uuid.UUID]upload.UploadSession
+	blobs         map[uuid.UUID]files.ObjectBlob
+	files         map[uuid.UUID]files.File
+	authSessions  map[uuid.UUID]fakeAuthSession
+	apiTokens     map[uuid.UUID]fakeAPIToken
+	notifications map[uuid.UUID]fakeNotification
+	failErr       error
 	// recheckHook 在 DeleteBlobRechecked 复核前调用，模拟「先复活后清理」竞速。
 	recheckHook func(id uuid.UUID)
 }
@@ -36,8 +38,22 @@ type fakeAuthSession struct {
 	revokedAt *time.Time
 }
 
+// fakeAPIToken 模拟 api_tokens 表行的清理相关字段（expires_at 可空=永久）。
+type fakeAPIToken struct {
+	expiresAt *time.Time
+	revokedAt *time.Time
+}
+
+// fakeNotification 模拟 notifications 表行的清理相关字段。
+type fakeNotification struct {
+	userID    uuid.UUID
+	isRead    bool
+	createdAt time.Time
+	readAt    *time.Time
+}
+
 func newMemRepo() *memRepo {
-	return &memRepo{sessions: make(map[uuid.UUID]upload.UploadSession), blobs: make(map[uuid.UUID]files.ObjectBlob), files: make(map[uuid.UUID]files.File), authSessions: make(map[uuid.UUID]fakeAuthSession)}
+	return &memRepo{sessions: make(map[uuid.UUID]upload.UploadSession), blobs: make(map[uuid.UUID]files.ObjectBlob), files: make(map[uuid.UUID]files.File), authSessions: make(map[uuid.UUID]fakeAuthSession), apiTokens: make(map[uuid.UUID]fakeAPIToken), notifications: make(map[uuid.UUID]fakeNotification)}
 }
 
 func (m *memRepo) ExpiredActiveSessions(now time.Time, limit int) ([]upload.UploadSession, error) {
@@ -163,6 +179,47 @@ func (m *memRepo) DeleteExpiredSessions(now time.Time) (int64, error) {
 		revoked := s.revokedAt != nil && s.revokedAt.Before(cutoff)
 		if expired || revoked {
 			delete(m.authSessions, id)
+			n++
+		}
+	}
+	return n, nil
+}
+
+// DeleteExpiredTokens 的内存等价物：expires_at（非 NULL）或 revoked_at 早于
+// now-30d 删行；永久（expires_at=nil）且未撤销的行保留。
+func (m *memRepo) DeleteExpiredTokens(now time.Time) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cutoff := now.Add(-tokenRetention)
+	var n int64
+	for id, t := range m.apiTokens {
+		expired := t.expiresAt != nil && t.expiresAt.Before(cutoff)
+		revoked := t.revokedAt != nil && t.revokedAt.Before(cutoff)
+		if expired || revoked {
+			delete(m.apiTokens, id)
+			n++
+		}
+	}
+	return n, nil
+}
+
+// DeleteOldReadNotifications 的内存等价物：已读且 COALESCE(read_at, created_at)
+// 早于 now-retain（90 天）的行删除；未读或未超期保留。
+func (m *memRepo) DeleteOldReadNotifications(now time.Time, retain time.Duration) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cutoff := now.Add(-retain)
+	var n int64
+	for id, v := range m.notifications {
+		if !v.isRead {
+			continue
+		}
+		read := v.createdAt
+		if v.readAt != nil {
+			read = *v.readAt
+		}
+		if read.Before(cutoff) {
+			delete(m.notifications, id)
 			n++
 		}
 	}
@@ -534,6 +591,85 @@ func TestSweepAuthSessions(t *testing.T) {
 		}
 	}
 	// 纯行删除：不触碰任何存储对象。
+	if keys := storage.deletedKeys(); len(keys) != 0 {
+		t.Fatalf("physical deletes = %v, want none", keys)
+	}
+}
+
+// ---- 个人访问令牌清理 ----
+
+// 过期/撤销超 30 天的令牌行删除；未超期、永久（expires_at=nil）且未撤销的
+// 令牌保留；纯行删除不触碰存储对象。
+func TestSweepApiTokens(t *testing.T) {
+	repo := newMemRepo()
+	storage := &fakeStorage{}
+	longExpired := testNow.Add(-31 * 24 * time.Hour)
+	longRevoked := testNow.Add(-40 * 24 * time.Hour)
+	recent := testNow.Add(-10 * 24 * time.Hour)
+	future := testNow.Add(24 * time.Hour)
+	expiredOld := uuid.New()
+	revokedOld := uuid.New()
+	revokedRecent := uuid.New()
+	permanent := uuid.New()
+	expiredRecent := uuid.New()
+	repo.apiTokens[expiredOld] = fakeAPIToken{expiresAt: &longExpired}
+	repo.apiTokens[revokedOld] = fakeAPIToken{expiresAt: &future, revokedAt: &longRevoked}
+	repo.apiTokens[revokedRecent] = fakeAPIToken{expiresAt: &future, revokedAt: &recent}
+	repo.apiTokens[permanent] = fakeAPIToken{expiresAt: nil}
+	repo.apiTokens[expiredRecent] = fakeAPIToken{expiresAt: &recent}
+
+	j := newTestJanitor(repo, &fakePurger{}, storage, nil, audit.NopRecorder{})
+	j.RunOnce()
+
+	for _, id := range []uuid.UUID{expiredOld, revokedOld} {
+		if _, ok := repo.apiTokens[id]; ok {
+			t.Fatal("stale api token row must be removed")
+		}
+	}
+	for _, id := range []uuid.UUID{revokedRecent, permanent, expiredRecent} {
+		if _, ok := repo.apiTokens[id]; !ok {
+			t.Fatalf("api token %s must be kept (within 30d retention or permanent)", id)
+		}
+	}
+	if keys := storage.deletedKeys(); len(keys) != 0 {
+		t.Fatalf("physical deletes = %v, want none", keys)
+	}
+}
+
+// ---- 通知清理 ----
+
+// 已读超 90 天的通知行删除；未读（无论多久）与已读未超期保留；
+// read_at 缺失时回退 created_at 判定；纯行删除不触碰存储对象。
+func TestSweepNotifications(t *testing.T) {
+	repo := newMemRepo()
+	storage := &fakeStorage{}
+	user := uuid.New()
+	oldRead := testNow.Add(-91 * 24 * time.Hour)
+	recentRead := testNow.Add(-10 * 24 * time.Hour)
+	oldUnread := testNow.Add(-200 * 24 * time.Hour)
+	readAtMissingOld := testNow.Add(-120 * 24 * time.Hour)
+	staleRead := uuid.New() // 已读且 read_at 很旧
+	freshRead := uuid.New()
+	ancientUnread := uuid.New()
+	noReadAt := uuid.New() // 已读但 read_at 缺失：回退 created_at（120d 前）
+	repo.notifications[staleRead] = fakeNotification{userID: user, isRead: true, createdAt: recentRead, readAt: &oldRead}
+	repo.notifications[freshRead] = fakeNotification{userID: user, isRead: true, createdAt: recentRead, readAt: &recentRead}
+	repo.notifications[ancientUnread] = fakeNotification{userID: user, isRead: false, createdAt: oldUnread}
+	repo.notifications[noReadAt] = fakeNotification{userID: user, isRead: true, createdAt: readAtMissingOld}
+
+	j := newTestJanitor(repo, &fakePurger{}, storage, nil, audit.NopRecorder{})
+	j.RunOnce()
+
+	for id, desc := range map[uuid.UUID]string{staleRead: "old read notification", noReadAt: "read_at missing fallback to old created_at"} {
+		if _, ok := repo.notifications[id]; ok {
+			t.Fatalf("%s must be removed", desc)
+		}
+	}
+	for id, desc := range map[uuid.UUID]string{freshRead: "recent read", ancientUnread: "ancient unread"} {
+		if _, ok := repo.notifications[id]; !ok {
+			t.Fatalf("%s must be kept", desc)
+		}
+	}
 	if keys := storage.deletedKeys(); len(keys) != 0 {
 		t.Fatalf("physical deletes = %v, want none", keys)
 	}

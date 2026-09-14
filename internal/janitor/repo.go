@@ -76,3 +76,21 @@ func (g *GormRepo) DeleteExpiredSessions(now time.Time) (int64, error) {
 	result := g.db.Exec("DELETE FROM sessions WHERE expires_at < ? OR revoked_at < ?", cutoff, cutoff)
 	return result.RowsAffected, result.Error
 }
+
+// DeleteExpiredTokens 删除 expires_at 或 revoked_at 早于阈值（now-30d）的
+// 个人访问令牌行，返回删除行数。原生 SQL 直查 api_tokens 表（同
+// DeleteExpiredSessions 不引 auth 模型）；expires_at 为 NULL（永久）且
+// 未撤销的行不匹配任何条件，不会被删除。
+func (g *GormRepo) DeleteExpiredTokens(now time.Time) (int64, error) {
+	cutoff := now.Add(-tokenRetention)
+	result := g.db.Exec("DELETE FROM api_tokens WHERE (expires_at IS NOT NULL AND expires_at < ?) OR (revoked_at IS NOT NULL AND revoked_at < ?)", cutoff, cutoff)
+	return result.RowsAffected, result.Error
+}
+
+// DeleteOldReadNotifications 删除已读（is_read=true）且已读时间
+// （COALESCE(read_at, created_at)）早于 now-retain 的通知行；未读通知不受影响。
+func (g *GormRepo) DeleteOldReadNotifications(now time.Time, retain time.Duration) (int64, error) {
+	cutoff := now.Add(-retain)
+	result := g.db.Exec("DELETE FROM notifications WHERE is_read = true AND COALESCE(read_at, created_at) < ?", cutoff)
+	return result.RowsAffected, result.Error
+}

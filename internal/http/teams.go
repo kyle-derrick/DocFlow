@@ -158,6 +158,7 @@ func teamFolderLimit(c *gin.Context) (int, bool) {
 
 // listTeamFiles GET /api/v1/teams/:id/files?parent_id=：列出团队根目录或子目录，成员可读；
 // 非成员 404（不泄露团队存在性）。parent_id 缺省时返回团队根目录内容。
+// tag_id/starred 过滤（目录范围内）与 sort/order 排序可选，语义同个人 /files。
 func (h *Handler) listTeamFiles(c *gin.Context) {
 	teamID, ok := parseID(c, c.Param("id"))
 	if !ok {
@@ -178,6 +179,18 @@ func (h *Handler) listTeamFiles(c *gin.Context) {
 		return
 	}
 	limit, ok := teamFolderLimit(c)
+	if !ok {
+		return
+	}
+	tagID, ok := h.parseTagFilter(c)
+	if !ok {
+		return
+	}
+	starred, ok := parseStarredFilter(c)
+	if !ok {
+		return
+	}
+	sortOpt, ok := parseSortQuery(c)
 	if !ok {
 		return
 	}
@@ -208,7 +221,7 @@ func (h *Handler) listTeamFiles(c *gin.Context) {
 			return
 		}
 	}
-	out, err := h.files.ListTeam(teamID, parent.ID, limit)
+	out, err := h.files.ListTeam(teamID, parent.ID, limit, files.TeamListFilter{TagID: tagID, Starred: starred, SortOptions: sortOpt})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to list files"})
 		return

@@ -325,6 +325,7 @@ func (s *Store) effectiveMaxVersions() int {
 
 // AddVersion 为文件追加新版本并设为 current（事务）。
 // blob 复用/新建与版本号分配见 addVersionLogic；返回新版本及是否新建了 blob。
+// 事务提交后经 dispatchVersionAdded 触发版本通知回调（团队 file.updated 接线点）。
 func (s *Store) AddVersion(f File, storageKey, sha256 string, size int64, mimeType string, userID uuid.UUID) (FileVersion, bool, error) {
 	var version FileVersion
 	var newBlob bool
@@ -336,7 +337,19 @@ func (s *Store) AddVersion(f File, storageKey, sha256 string, size int64, mimeTy
 	if err != nil {
 		return FileVersion{}, false, err
 	}
+	dispatchVersionAdded(s.versionNotify, f, userID, version)
 	return version, newBlob, nil
+}
+
+// dispatchVersionAdded 版本写入完成的通知分发判定：仅团队文件
+// （scope_type=team 且有 team_id）且写入者非文件行 owner 时回调；
+// 个人文件或 owner 自身写入不通知（避免噪音）。接收者范围（团队全部成员、
+// owner 除外）由注入方解析。
+func dispatchVersionAdded(cb VersionNotifyFunc, f File, actor uuid.UUID, version FileVersion) {
+	if cb == nil || teamScope(f) == nil || actor == f.OwnerID {
+		return
+	}
+	cb(f, actor, version)
 }
 
 // GetVersionBlob 返回属于 fileID 的指定版本及其关联 blob（文件须未删除）。

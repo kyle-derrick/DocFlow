@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import {
   FileItem,
+  FileQueryOptions,
   Team,
   TeamMember,
   UUID_RE,
@@ -100,8 +101,8 @@ export default function TeamSpacePage() {
     }
   }
 
-  const listItems = async (parentId: string | null): Promise<DirListing> => {
-    const res = await listTeamFiles(id, parentId)
+  const listItems = async (parentId: string | null, opts?: FileQueryOptions): Promise<DirListing> => {
+    const res = await listTeamFiles(id, parentId, opts)
     return { items: res.files ?? [], folderId: res.parent_id }
   }
 

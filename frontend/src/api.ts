@@ -124,11 +124,131 @@ export interface FileItem {
   is_root: boolean
   description: string
   is_public: boolean
+  is_starred?: boolean
   view_count: number
   download_count: number
   created_at: string
   updated_at: string
   deleted_at?: string
+}
+
+// ---------- 标签与收藏 ----------
+
+export interface Tag {
+  id: string
+  name: string
+  created_at: string
+}
+
+/** 我的标签列表（按名称排序）。 */
+export async function listTags(): Promise<Tag[]> {
+  const data = await api<{ tags: Tag[] }>('/api/v1/tags')
+  return data.tags ?? []
+}
+
+/** 创建标签（服务端 NFC 归一，≤64 rune，拒绝控制字符；同名 409）。 */
+export async function createTag(name: string): Promise<Tag> {
+  return api<Tag>('/api/v1/tags', jsonInit('POST', { name }))
+}
+
+/** 删除标签并解除其全部文件关联（仅创建者）。 */
+export async function deleteTag(id: string): Promise<void> {
+  await api(`/api/v1/tags/${id}`, { method: 'DELETE' })
+}
+
+/** 文件上属于当前用户的标签。 */
+export async function listFileTags(fileId: string): Promise<Tag[]> {
+  const data = await api<{ tags: Tag[] }>(`/api/v1/files/${fileId}/tags`)
+  return data.tags ?? []
+}
+
+/** 给文件打标签（读权限即可；重复打幂等成功）。 */
+export async function addFileTag(fileId: string, tagId: string): Promise<void> {
+  await api(`/api/v1/files/${fileId}/tags`, jsonInit('POST', { tag_id: tagId }))
+}
+
+/** 解除文件标签（幂等）。 */
+export async function removeFileTag(fileId: string, tagId: string): Promise<void> {
+  await api(`/api/v1/files/${fileId}/tags/${tagId}`, { method: 'DELETE' })
+}
+
+/** 切换收藏（读权限即可；团队文件为行级共享星标）。 */
+export async function setFileStarred(fileId: string, starred: boolean): Promise<FileItem> {
+  return api<FileItem>(`/api/v1/files/${fileId}/starred`, jsonInit('PATCH', { starred }))
+}
+
+/** 列表查询选项：标签/收藏过滤（进入跨目录检索模式）与排序。 */
+export interface FileQueryOptions {
+  tagId?: string | null
+  starred?: boolean
+  sort?: 'name' | 'updated_at' | 'size'
+  order?: 'asc' | 'desc'
+}
+
+function buildFileQuery(parentId: string | null, opts?: FileQueryOptions): string {
+  const params = new URLSearchParams()
+  if (opts?.tagId || opts?.starred !== undefined) {
+    // 检索模式：忽略 parent_id（服务端语义），跨个人+团队可读文件。
+    if (opts?.tagId) params.set('tag_id', opts.tagId)
+    if (opts?.starred !== undefined) params.set('starred', String(opts.starred))
+  } else if (parentId) {
+    params.set('parent_id', parentId)
+  }
+  if (opts?.sort) params.set('sort', opts.sort)
+  if (opts?.order) params.set('order', opts.order)
+  const query = params.toString()
+  return query ? `?${query}` : ''
+}
+
+// ---------- 批量操作（部分成功；幂等键重放由服务端处理） ----------
+
+export interface BatchItemResult {
+  id: string
+  ok: boolean
+  error_code?: string
+}
+
+/** 生成批量请求幂等键（每次用户操作一个新 key；同 key 重试由调用方保持）。 */
+function newIdempotencyKey(): string {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID()
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
+
+/** JSON 请求 + Idempotency-Key 头。 */
+function idemInit(body: unknown): RequestInit {
+  const init = jsonInit('POST', body)
+  const headers = { ...(init.headers as Record<string, string>), 'Idempotency-Key': newIdempotencyKey() }
+  return { ...init, headers }
+}
+
+/** 批量移动；targetParentId 为空串表示个人根目录。 */
+export async function batchMoveFiles(fileIds: string[], targetParentId: string): Promise<BatchItemResult[]> {
+  const data = await api<{ results: BatchItemResult[] }>(
+    '/api/v1/files/batch/move',
+    idemInit({ file_ids: fileIds, target_parent_id: targetParentId }),
+  )
+  return data.results ?? []
+}
+
+/** 批量移入回收站（软删除）。 */
+export async function batchTrashFiles(fileIds: string[]): Promise<BatchItemResult[]> {
+  const data = await api<{ results: BatchItemResult[] }>('/api/v1/files/batch/trash', idemInit({ file_ids: fileIds }))
+  return data.results ?? []
+}
+
+/** 批量从回收站恢复。 */
+export async function batchRestoreFiles(fileIds: string[]): Promise<BatchItemResult[]> {
+  const data = await api<{ results: BatchItemResult[] }>('/api/v1/files/batch/restore', idemInit({ file_ids: fileIds }))
+  return data.results ?? []
+}
+
+/** 批量结果的简短摘要文案（成功 N 项 / 失败码统计）。 */
+export function summarizeBatchResults(results: BatchItemResult[]): string {
+  const okCount = results.filter((r) => r.ok).length
+  const failures = results.filter((r) => !r.ok)
+  if (failures.length === 0) return `全部 ${okCount} 项成功`
+  const codes = [...new Set(failures.map((r) => r.error_code ?? 'UNKNOWN'))].join('、')
+  return `${okCount} 项成功，${failures.length} 项失败（${codes}）`
 }
 
 // ---------- 文件版本 ----------
@@ -221,11 +341,171 @@ export async function logout(): Promise<void> {
   }
 }
 
+// ---------- 会话管理（多端登录） ----------
+
+/** 活跃登录会话（GET /auth/sessions）；不含 refresh token 任何形态，也不标记当前会话。 */
+export interface SessionItem {
+  id: string
+  created_at: string
+  last_active_at: string
+  expires_at: string
+  ip: string | null
+  user_agent: string
+}
+
+/** 我的活跃会话列表（未撤销未过期，last_active_at 倒序）。 */
+export async function listSessions(): Promise<SessionItem[]> {
+  const data = await api<{ sessions: SessionItem[] }>('/api/v1/auth/sessions')
+  return data.sessions ?? []
+}
+
+/** 撤销自己的指定会话（非属主/不存在/已撤销 404）。 */
+export async function revokeSession(id: string): Promise<void> {
+  await api(`/api/v1/auth/sessions/${id}`, { method: 'DELETE' })
+}
+
+/**
+ * 撤销全部会话（含当前）：服务端无法凭 Bearer 反推当前 session，一律撤销
+ * （含发起请求的会话）并清除 refresh cookie；成功后调用方应清空本地令牌
+ * 并跳转登录页。
+ */
+export async function revokeAllSessions(): Promise<void> {
+  await api('/api/v1/auth/sessions', { method: 'DELETE' })
+}
+
+// ---------- 个人访问令牌（PAT） ----------
+
+/** PAT 条目（列表与创建响应共用字段；明文仅创建时附带）。 */
+export interface ApiTokenItem {
+  id: string
+  name: string
+  /** 明文前 14 字符（dfpat_ + 8 字符），UI 展示用。 */
+  prefix: string
+  last_used_at: string | null
+  expires_at: string | null
+  revoked_at: string | null
+  created_at: string
+}
+
+export interface CreatedApiToken extends ApiTokenItem {
+  /** 一次性明文 token（dfpat_ 前缀；仅创建响应返回，之后不可再取）。 */
+  token: string
+}
+
+/** 我的 PAT 列表（未撤销，含已过期；不含明文）。 */
+export async function listTokens(): Promise<ApiTokenItem[]> {
+  const data = await api<{ tokens: ApiTokenItem[] }>('/api/v1/tokens')
+  return data.tokens ?? []
+}
+
+/** 创建 PAT；expiresInDays 为 0 表示永久（1-3650）。 */
+export async function createToken(name: string, expiresInDays: number): Promise<CreatedApiToken> {
+  return api<CreatedApiToken>('/api/v1/tokens', jsonInit('POST', { name, expires_in_days: expiresInDays }))
+}
+
+/** 撤销自己的 PAT（立即失效；非属主/不存在/已撤销 404）。 */
+export async function revokeToken(id: string): Promise<void> {
+  await api(`/api/v1/tokens/${id}`, { method: 'DELETE' })
+}
+
+// ---------- 站内通知与通知偏好 ----------
+
+/** 通知事件类型（v1.0 范围）。 */
+export type NotificationEventType = 'upload.completed' | 'upload.quarantined' | 'share.accessed' | 'file.updated'
+
+/** 通知条目（GET /notifications）。 */
+export interface NotificationItem {
+  id: string
+  type: NotificationEventType
+  title: string
+  body: string
+  /** 关联资源 ID（通常为文件 ID）；无关联时为 null。 */
+  resource_id: string | null
+  is_read: boolean
+  created_at: string
+  read_at: string | null
+}
+
+/** 通知列表响应：本页条目 + 下一页游标（空串=无更多）+ 未读总数。 */
+export interface NotificationListResult {
+  items: NotificationItem[]
+  next_cursor: string
+  unread_count: number
+}
+
+/** 通知列表查询选项。 */
+export interface NotificationQueryOptions {
+  unreadOnly?: boolean
+  limit?: number
+  cursor?: string
+}
+
+/** 我的站内通知列表（created_at 倒序，created_at 游标分页）。 */
+export async function listNotifications(opts?: NotificationQueryOptions): Promise<NotificationListResult> {
+  const params = new URLSearchParams()
+  if (opts?.unreadOnly) params.set('unread_only', 'true')
+  if (opts?.limit) params.set('limit', String(opts.limit))
+  if (opts?.cursor) params.set('cursor', opts.cursor)
+  const query = params.toString()
+  return api<NotificationListResult>(`/api/v1/notifications${query ? `?${query}` : ''}`)
+}
+
+/** 标记自己的单条通知已读（幂等；非属主/不存在 404）。 */
+export async function markNotificationRead(id: string): Promise<void> {
+  await api(`/api/v1/notifications/${id}/read`, { method: 'POST' })
+}
+
+/** 我的全部未读通知标记已读。 */
+export async function markAllNotificationsRead(): Promise<void> {
+  await api('/api/v1/notifications/read-all', { method: 'POST' })
+}
+
+/** 通知偏好条目：事件类型的生效开关（无记录 = 默认开启）。 */
+export interface NotificationPreference {
+  event_type: NotificationEventType
+  enabled: boolean
+}
+
+/** 我的全部通知偏好（各事件类型）。 */
+export async function listNotificationPreferences(): Promise<NotificationPreference[]> {
+  const data = await api<{ preferences: NotificationPreference[] }>('/api/v1/notification-preferences')
+  return data.preferences ?? []
+}
+
+/** 更新单个事件类型开关；返回更新后的条目（未知类型 400）。 */
+export async function updateNotificationPreference(
+  eventType: NotificationEventType,
+  enabled: boolean,
+): Promise<NotificationPreference> {
+  return api<NotificationPreference>(
+    `/api/v1/notification-preferences/${encodeURIComponent(eventType)}`,
+    jsonInit('PUT', { enabled }),
+  )
+}
+
+// ---------- 邀请注册与密码找回（公开端点） ----------
+
+/** 凭一次性邀请 token 注册；成功即登录（响应同 login，access_token 入内存）。 */
+export async function register(token: string, username: string, password: string): Promise<void> {
+  const data = await api<{ access_token: string }>('/api/v1/auth/register', jsonInit('POST', { token, username, password }))
+  accessToken = data.access_token
+  adminProbe = null
+}
+
+/** 请求密码重置邮件：无论邮箱是否存在一律 202（不泄露账号存在性）。 */
+export async function forgotPassword(email: string): Promise<void> {
+  await api('/api/v1/auth/forgot-password', jsonInit('POST', { email }))
+}
+
+/** 凭一次性重置 token 重置密码（成功后全部会话失效，需重新登录）。 */
+export async function resetPassword(token: string, password: string): Promise<void> {
+  await api('/api/v1/auth/reset-password', jsonInit('POST', { token, password }))
+}
+
 // ---------- 文件与回收站 ----------
 
-export async function listFiles(parentId: string | null): Promise<FileItem[]> {
-  const query = parentId ? `?parent_id=${encodeURIComponent(parentId)}` : ''
-  const data = await api<{ files: FileItem[] }>(`/api/v1/files${query}`)
+export async function listFiles(parentId: string | null, opts?: FileQueryOptions): Promise<FileItem[]> {
+  const data = await api<{ files: FileItem[] }>(`/api/v1/files${buildFileQuery(parentId, opts)}`)
   return data.files ?? []
 }
 
@@ -280,6 +560,16 @@ async function fetchBlob(path: string, failText: string): Promise<Blob> {
 export async function downloadFile(item: FileItem): Promise<void> {
   const blob = await fetchBlob(`/api/v1/files/${item.id}/download`, '下载失败')
   saveBlob(blob, item.name)
+}
+
+/** 认证读取文件当前版本内容为文本（draw.io 编辑器加载 XML 用；走下载端点）。 */
+export async function fetchFileText(fileId: string): Promise<string> {
+  const res = await authFetch(`/api/v1/files/${fileId}/download`)
+  if (!res.ok) {
+    const data = (await res.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(res.status, data?.error ?? '文件读取失败')
+  }
+  return res.text()
 }
 
 /** 私有分享下载（需 download 权限，成功计入分享下载次数）。 */
@@ -538,10 +828,20 @@ export interface TeamFileListing {
   parent_id: string
 }
 
-/** 团队空间文件列表（parentId 为 null 表示团队根目录）。 */
-export async function listTeamFiles(teamId: string, parentId: string | null): Promise<TeamFileListing> {
-  const query = parentId ? `?parent_id=${encodeURIComponent(parentId)}` : ''
-  return api<TeamFileListing>(`/api/v1/teams/${teamId}/files${query}`)
+/** 团队空间文件列表（parentId 为 null 表示团队根目录；tag/starred/排序同 /files 语义，目录范围内过滤）。 */
+export async function listTeamFiles(
+  teamId: string,
+  parentId: string | null,
+  opts?: FileQueryOptions,
+): Promise<TeamFileListing> {
+  const params = new URLSearchParams()
+  if (parentId) params.set('parent_id', parentId)
+  if (opts?.tagId) params.set('tag_id', opts.tagId)
+  if (opts?.starred !== undefined) params.set('starred', String(opts.starred))
+  if (opts?.sort) params.set('sort', opts.sort)
+  if (opts?.order) params.set('order', opts.order)
+  const query = params.toString()
+  return api<TeamFileListing>(`/api/v1/teams/${teamId}/files${query ? `?${query}` : ''}`)
 }
 
 /** 在团队根目录（parentId 为 null）或指定团队目录下创建目录（editor 及以上角色）。 */
@@ -680,6 +980,42 @@ export function onlyOfficeStatus(): Promise<OnlyOfficeStatus> {
   return onlyOfficeProbe
 }
 
+// ---------- draw.io 图表编辑器 ----------
+
+/** GET /drawio/config：draw.io 集成可用性与编辑器基地址。 */
+export interface DrawioStatus {
+  enabled: boolean
+  /** 浏览器可达的 draw.io 编辑器基地址（iframe embed 加载用）；禁用时为 null。 */
+  url: string | null
+}
+
+/**
+ * 仅 .drawio 扩展名进入图表编辑。取舍：.xml 也可能是合法的 drawio 图表，
+ * 但无法与普通 XML 文件区分（避免误判不做「打开方式」选择），v1.0 不识别；
+ * 用户可手动把扩展名改为 .drawio 后编辑。
+ */
+export function isDrawioFile(name: string): boolean {
+  return name.toLowerCase().endsWith('.drawio')
+}
+
+/** 空图表初始模板（新建 .drawio 文件与空内容容错共用）。 */
+export const EMPTY_DRAWIO_XML = '<mxfile><diagram/></mxfile>'
+
+// 集成可用性探测缓存（见 drawioStatus）：文件列表行「图表」按钮与 DrawioPage
+// 共用，按会话缓存一次；失败（含旧后端 404）保守视为未启用。
+let drawioProbe: Promise<DrawioStatus> | null = null
+
+/** draw.io 集成可用性探测：结果按会话缓存；请求失败时视为 {enabled:false}。 */
+export function drawioStatus(): Promise<DrawioStatus> {
+  if (!drawioProbe) {
+    drawioProbe = api<DrawioStatus>('/api/v1/drawio/config').catch(() => ({
+      enabled: false,
+      url: null,
+    }))
+  }
+  return drawioProbe
+}
+
 // ---------- 管理端（仅 admin 角色） ----------
 
 export type SettingType = 'bool' | 'int' | 'string'
@@ -722,6 +1058,43 @@ export async function adminPutSetting(key: string, value: SettingValue): Promise
 
 export async function adminGetStats(): Promise<AdminStats> {
   return api<AdminStats>('/api/v1/admin/stats')
+}
+
+// ---------- 邀请管理（仅 admin 角色） ----------
+
+/** 邀请派生状态（后端按 accepted_at/expires_at 计算）。 */
+export type InvitationStatus = 'pending' | 'accepted' | 'expired'
+
+export interface Invitation {
+  id: string
+  email: string
+  invited_by: string | null
+  role: 'user' | 'admin'
+  status: InvitationStatus
+  expires_at: string
+  accepted_at: string | null
+  created_at: string
+}
+
+export interface CreatedInvitation extends Invitation {
+  /** 一次性注册链接（/register/<token>；仅新建响应返回一次，幂等命中既有邀请时缺省）。 */
+  accept_url?: string | null
+}
+
+/** 创建邀请；返回一次性 accept_url（明文 token 仅此一次可见）。 */
+export async function adminCreateInvitation(email: string, role: 'user' | 'admin'): Promise<CreatedInvitation> {
+  return api<CreatedInvitation>('/api/v1/admin/invitations', jsonInit('POST', { email, role }))
+}
+
+/** 邀请列表（created_at 倒序，含派生状态）。 */
+export async function adminListInvitations(): Promise<Invitation[]> {
+  const data = await api<{ invitations: Invitation[] }>('/api/v1/admin/invitations')
+  return data.invitations ?? []
+}
+
+/** 撤销邀请（删行，token 立即失效；不存在 404）。 */
+export async function adminRevokeInvitation(id: string): Promise<void> {
+  await api(`/api/v1/admin/invitations/${id}`, { method: 'DELETE' })
 }
 
 /**

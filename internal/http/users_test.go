@@ -63,9 +63,33 @@ func newFakeSessionStore() *fakeSessionStore {
 	return &fakeSessionStore{sessions: make(map[string]auth.Session)}
 }
 
-func (f *fakeSessionStore) Create(session auth.Session) error {
+func (f *fakeSessionStore) Create(session auth.Session, info auth.SessionInfo) error {
 	f.sessions[session.RefreshTokenHash] = session
 	return nil
+}
+
+// ListActive / RevokeByID 与 GormSessionStore 语义一致（会话管理端点测试使用）。
+func (f *fakeSessionStore) ListActive(userID uuid.UUID, now time.Time) ([]auth.SessionView, error) {
+	seen := make(map[uuid.UUID]bool)
+	var out []auth.SessionView
+	for _, session := range f.sessions {
+		if session.UserID == userID && session.RevokedAt == nil && session.ExpiresAt.After(now) && !seen[session.ID] {
+			seen[session.ID] = true
+			out = append(out, auth.SessionView{ID: session.ID, CreatedAt: session.CreatedAt, LastActiveAt: session.LastActiveAt, ExpiresAt: session.ExpiresAt, IP: session.IP, UserAgent: session.UserAgent})
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeSessionStore) RevokeByID(owner, id uuid.UUID, now time.Time) (bool, error) {
+	for hash, session := range f.sessions {
+		if session.ID == id && session.UserID == owner && session.RevokedAt == nil {
+			session.RevokedAt = &now
+			f.sessions[hash] = session
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (f *fakeSessionStore) writeBack(session auth.Session) {
@@ -99,6 +123,18 @@ func (f *fakeSessionStore) Revoke(hash string, now time.Time) error {
 	}
 	session.RevokedAt = &now
 	f.writeBack(session)
+	return nil
+}
+
+// RevokeAllForUser 与 GormSessionStore 语义一致：撤销 user 的全部未撤销
+// 会话，exceptHash 非空时保留对应会话。
+func (f *fakeSessionStore) RevokeAllForUser(userID uuid.UUID, exceptHash string, now time.Time) error {
+	for hash, session := range f.sessions {
+		if session.UserID == userID && session.RevokedAt == nil && hash != exceptHash {
+			session.RevokedAt = &now
+			f.writeBack(session)
+		}
+	}
 	return nil
 }
 

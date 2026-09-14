@@ -14,7 +14,6 @@ import (
 	"log"
 	"os"
 	"strings"
-	"unicode"
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -23,23 +22,23 @@ import (
 )
 
 func main() {
-	email := strings.TrimSpace(os.Getenv("SEED_ADMIN_EMAIL"))
+	email := auth.NormalizeEmail(os.Getenv("SEED_ADMIN_EMAIL"))
 	password := os.Getenv("SEED_ADMIN_PASSWORD")
 	username := strings.TrimSpace(os.Getenv("SEED_ADMIN_USERNAME"))
 	role := strings.TrimSpace(os.Getenv("SEED_ADMIN_ROLE"))
 	if email == "" || password == "" {
 		log.Fatal("SEED_ADMIN_EMAIL and SEED_ADMIN_PASSWORD are required")
 	}
-	if err := validateEmail(email); err != nil {
+	if err := auth.ValidateEmail(email); err != nil {
 		log.Fatal(err)
 	}
-	if err := validatePassword(password); err != nil {
+	if err := auth.ValidatePasswordStrength(password); err != nil {
 		log.Fatal(err)
 	}
 	if username == "" {
 		username = strings.SplitN(email, "@", 2)[0]
 	}
-	if err := validateUsername(username); err != nil {
+	if err := auth.ValidateUsername(username); err != nil {
 		log.Fatal(err)
 	}
 	if role == "" {
@@ -80,48 +79,4 @@ SET username = EXCLUDED.username, password_hash = EXCLUDED.password_hash, role =
 WHERE users.status = 'active'`,
 		username, email, passwordHash, role)
 	return result.Error
-}
-
-// validatePassword 校验密码强度：至少 12 个字符（按 Unicode 字符计数，
-// 避免多字节字符被字节计数误判），且同时包含大写、小写和数字。
-func validatePassword(password string) error {
-	if len([]rune(password)) < 12 {
-		return fmt.Errorf("password must be at least 12 characters")
-	}
-	var hasUpper, hasLower, hasDigit bool
-	for _, r := range password {
-		switch {
-		case unicode.IsUpper(r):
-			hasUpper = true
-		case unicode.IsLower(r):
-			hasLower = true
-		case unicode.IsDigit(r):
-			hasDigit = true
-		}
-	}
-	if !hasUpper || !hasLower || !hasDigit {
-		return fmt.Errorf("password must contain upper case, lower case and digit characters")
-	}
-	return nil
-}
-
-func validateEmail(email string) error {
-	at := strings.IndexByte(email, '@')
-	if at <= 0 || at == len(email)-1 || strings.Count(email, "@") != 1 {
-		return fmt.Errorf("invalid email address")
-	}
-	return nil
-}
-
-func validateUsername(username string) error {
-	n := len([]rune(username))
-	if n < 3 || n > 32 {
-		return fmt.Errorf("username must be 3-32 characters")
-	}
-	for _, r := range username {
-		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-') {
-			return fmt.Errorf("username may only contain letters, digits, '_' and '-'")
-		}
-	}
-	return nil
 }

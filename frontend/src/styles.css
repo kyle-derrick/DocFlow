@@ -88,6 +88,129 @@ body {
   background: var(--surface-2);
 }
 
+/* ---------- 顶栏通知铃铛 ---------- */
+
+.bell-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.bell-btn {
+  position: relative;
+  font-size: 16px;
+  line-height: 1;
+  padding: 7px 10px;
+}
+
+.bell-badge {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--danger);
+  color: #fff;
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+  pointer-events: none;
+}
+
+.notif-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: 340px;
+  max-width: calc(100vw - 32px);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  z-index: 50;
+}
+
+.notif-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+}
+
+.notif-head-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.notif-list {
+  max-height: 380px;
+  overflow: auto;
+}
+
+.notif-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+  padding: 10px 14px;
+}
+
+.notif-item:last-child {
+  border-bottom: none;
+}
+
+.notif-item:hover {
+  background: var(--surface-2);
+}
+
+.notif-item.unread .notif-title {
+  font-weight: 600;
+}
+
+.notif-item.unread {
+  background: color-mix(in srgb, var(--primary) 8%, transparent);
+}
+
+.notif-item.unread:hover {
+  background: color-mix(in srgb, var(--primary) 14%, transparent);
+}
+
+.notif-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  word-break: break-all;
+}
+
+.notif-dot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--primary);
+}
+
+.notif-time {
+  font-size: 12px;
+}
+
+.notif-empty {
+  padding: 32px 0;
+  text-align: center;
+  color: var(--muted);
+}
+
 /* ---------- 页面 ---------- */
 
 .page-head {
@@ -118,6 +241,89 @@ body {
   margin-bottom: 12px;
   color: var(--muted);
 }
+
+/* ---------- 筛选栏 / 批量工具条（标签、收藏、排序与多选批量操作） ---------- */
+
+.filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.filter-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.filter-item select {
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+
+.search-mode-hint {
+  margin-bottom: 8px;
+}
+
+.batch-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 14px;
+}
+
+.file-table .col-check {
+  width: 36px;
+  text-align: center;
+}
+
+.file-table tbody tr.selected td {
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+}
+
+.star-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0 4px;
+  color: #e0a800;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.star-btn:hover {
+  filter: brightness(1.15);
+}
+
+.tag-modal .check-list {
+  max-height: 260px;
+  overflow: auto;
+  margin-bottom: 12px;
+}
+
+.tag-create {
+  display: flex;
+  gap: 8px;
+}
+
+.tag-create input {
+  flex: 1;
+}
+
 
 .crumb .sep {
   margin: 0 6px;
@@ -1115,4 +1321,15 @@ body {
 .editor-placeholder {
   width: 100%;
   height: 100%;
+}
+
+/* ---------- draw.io 图表编辑页（复用 editor-page/editor-shell 布局） ---------- */
+
+/* embed 模式编辑器 iframe：吃满 editor-shell 剩余高度。 */
+.drawio-frame {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: #fff;
 }

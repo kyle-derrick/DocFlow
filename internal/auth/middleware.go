@@ -12,6 +12,22 @@ import (
 
 const UserIDContextKey = "user_id"
 
+// auth_kind 上下文标记：区分本次请求的 Bearer 凭证类型。
+// PAT 无 session/refresh 语义，依赖方（如 refresh 流程）可据此区分。
+const (
+	AuthKindContextKey = "auth_kind"
+	AuthKindJWT        = "jwt"
+	AuthKindPAT        = "pat"
+)
+
+// AccessTokenVerifier 抽象 PAT 认证路径（生产实现为 *Service 的
+// VerifyPersonalAccessToken）；未注入（nil）时 dfpat_ 前缀凭证一律 401。
+type AccessTokenVerifier interface {
+	VerifyPersonalAccessToken(token string) (uuid.UUID, error)
+}
+
+var _ AccessTokenVerifier = (*Service)(nil)
+
 // RoleLookup 按 user id 返回角色（生产实现为 *UserStore），
 // 供 RequireRole 鉴权；用户不存在返回 ErrUserNotFound。
 type RoleLookup interface {
@@ -56,7 +72,14 @@ func RequireRole(role string, lookup RoleLookup) gin.HandlerFunc {
 	}
 }
 
-func RequireAccessToken(secret string) gin.HandlerFunc {
+// RequireAccessToken 同时接受两类 Bearer 凭证：
+//   - 以 dfpat_ 开头：走 PAT 路径（prefix 定位 + 哈希比对 + 未过期未撤销
+//   - 属主 active + TouchLastUsed，见 Service.VerifyPersonalAccessToken），
+//     成功后 context 标记 auth_kind=pat；PAT 无 refresh 语义；
+//   - 其余：按 HS256 JWT 解析（subject 为用户 UUID），标记 auth_kind=jwt。
+//
+// 两类凭证统一注入 user_id；下游按 IP+user_id 的限流键不变。
+func RequireAccessToken(secret string, pat AccessTokenVerifier) gin.HandlerFunc {
 	key := []byte(secret)
 	return func(c *gin.Context) {
 		header := c.GetHeader("Authorization")
@@ -64,6 +87,23 @@ func RequireAccessToken(secret string) gin.HandlerFunc {
 		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 			c.Abort()
+			return
+		}
+		if strings.HasPrefix(parts[1], PATPrefix) {
+			if pat == nil {
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+				c.Abort()
+				return
+			}
+			id, err := pat.VerifyPersonalAccessToken(parts[1])
+			if err != nil {
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+				c.Abort()
+				return
+			}
+			c.Set(UserIDContextKey, id)
+			c.Set(AuthKindContextKey, AuthKindPAT)
+			c.Next()
 			return
 		}
 		claims := &jwt.RegisteredClaims{}
@@ -85,6 +125,7 @@ func RequireAccessToken(secret string) gin.HandlerFunc {
 			return
 		}
 		c.Set(UserIDContextKey, id)
+		c.Set(AuthKindContextKey, AuthKindJWT)
 		c.Next()
 	}
 }

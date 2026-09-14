@@ -79,6 +79,19 @@ type Config struct {
 	// MetricsEnabled 控制 GET /metrics 端点（env METRICS_ENABLED，默认 true）。
 	// 端点无认证：生产环境应由反向代理（Caddy）或网络层限制访问。
 	MetricsEnabled bool
+	// DrawioEnabled 控制 draw.io 图表编辑集成（DRAWIO_ENABLED，默认 false）：
+	// 编辑器为浏览器侧 iframe embed（postMessage JSON 协议），后端不与 drawio
+	// 服务通信，仅恒注册 /api/v1/drawio/config 探测端点（禁用时
+	// {enabled:false, url:null}）；保存走「上传 file_id 覆盖新版本」通用链路。
+	DrawioEnabled bool
+	// DrawioServerURL 为 drawio 服务内网基地址（如 http://drawio:8080，
+	// compose full profile）；DRAWIO_PUBLIC_URL 未配置时作为 config 端点
+	// 返回给前端的回退地址（内网名浏览器通常不可达，生产应配置 PUBLIC_URL）。
+	DrawioServerURL string
+	// DrawioPublicURL 为浏览器可达的 drawio 地址（如 https://example.com/drawio
+	// 或本地直连 http://localhost:8082），/drawio/config 优先返回；
+	// 为空时回退 DrawioServerURL。
+	DrawioPublicURL string
 	// WebpkgEnabled 控制网页包（zip）上传完成后的自动解包（默认 true）；
 	// 关闭后仍可经 POST /api/v1/files/:id/webpkg/extract 手动解包。
 	WebpkgEnabled bool
@@ -108,6 +121,21 @@ type Config struct {
 	// 64MiB，与 upload.DefaultPatchMaxBytes 一致）；接线 upload.Service.
 	// SetPatchMaxBytes，约束单请求的存储写入量与连接占用时长。
 	PatchMaxBytes int64
+	// SMTPEnabled 控制邮件通道（SMTP_ENABLED，默认 false）：false 时使用
+	// Noop 邮件通道（仅日志输出邀请/重置链接，不建立任何网络连接）。
+	SMTPEnabled bool
+	// SMTPHost/SMTPPort/SMTPUser/SMTPPass 为 SMTP 服务器连接与认证参数
+	//（PORT 默认 587；USER 为空表示匿名投递）。
+	SMTPHost string
+	SMTPPort int
+	SMTPUser string
+	SMTPPass string
+	// SMTPFrom 为发件人地址（启用 SMTP 时必填）。
+	SMTPFrom string
+	// PublicBaseURL 为站点对外基地址（PUBLIC_BASE_URL，如
+	// https://docflow.example.com）：拼接邀请注册与密码重置邮件里的链接；
+	// 为空时邮件/日志输出相对路径 /register/<token>、/reset/<token>。
+	PublicBaseURL string
 }
 
 func Load() (Config, error) {
@@ -187,6 +215,10 @@ func Load() (Config, error) {
 	if e != nil {
 		return Config{}, e
 	}
+	drawioEnabled, e := boolEnv("DRAWIO_ENABLED", false)
+	if e != nil {
+		return Config{}, e
+	}
 	webpkgEnabled, e := boolEnv("WEBPKG_ENABLED", true)
 	if e != nil {
 		return Config{}, e
@@ -219,7 +251,15 @@ func Load() (Config, error) {
 	if e != nil {
 		return Config{}, e
 	}
-	c := Config{Port: stringEnv("PORT", "8080"), DatabaseURL: os.Getenv("DATABASE_URL"), JWTSecret: os.Getenv("JWT_SECRET"), AccessTokenTTL: a, RefreshTokenTTL: r, CookieSecure: secure, CookieDomain: os.Getenv("COOKIE_DOMAIN"), StorageRoot: stringEnv("STORAGE_ROOT", "./storage"), MaxFileSize: max, ScanEnabled: scan, UploadSessionTTL: ttl, TrustedProxies: listEnv("TRUSTED_PROXIES"), StorageDriver: stringEnv("STORAGE_DRIVER", "local"), S3Endpoint: os.Getenv("S3_ENDPOINT"), S3Bucket: os.Getenv("S3_BUCKET"), S3Region: stringEnv("S3_REGION", "us-east-1"), S3AccessKey: os.Getenv("S3_ACCESS_KEY"), S3SecretKey: os.Getenv("S3_SECRET_KEY"), S3PathStyle: pathStyle, ClamAVAddr: os.Getenv("CLAMAV_ADDR"), ClamAVTimeout: clamavTimeout, ClamAVRequired: clamavRequired, RateLimitPerMinute: rateLimit, LoginRateLimitPerMinute: loginRateLimit, PublicRateLimitPerMinute: publicRateLimit, MaxVersionsPerFile: maxVersions, JanitorEnabled: janitorEnabled, JanitorInterval: janitorInterval, OnlyOfficeEnabled: ooEnabled, OnlyOfficeServerURL: stringEnv("ONLYOFFICE_SERVER_URL", "http://onlyoffice:80"), OnlyOfficePublicURL: stringEnv("ONLYOFFICE_PUBLIC_URL", ""), OnlyOfficeJWTSecret: os.Getenv("ONLYOFFICE_JWT_SECRET"), OnlyOfficeDownloadURLBase: stringEnv("ONLYOFFICE_DOWNLOAD_URL_BASE", "http://backend:8080"), OnlyOfficeRateLimitPerMinute: ooRateLimit, MetricsEnabled: metricsEnabled, WebpkgEnabled: webpkgEnabled, WebpkgMaxEntries: webpkgMaxEntries, WebpkgMaxFileSize: webpkgMaxFileSize, WebpkgMaxTotalSize: webpkgMaxTotalSize, WebpkgMaxDepth: webpkgMaxDepth, WebpkgRateLimitPerMinute: webpkgRateLimit, QueueDriver: stringEnv("QUEUE_DRIVER", "inprocess"), RedisAddr: stringEnv("REDIS_ADDR", "localhost:6379"), RedisPassword: os.Getenv("REDIS_PASSWORD"), QueueConcurrency: queueConcurrency, PatchMaxBytes: patchMax}
+	smtpEnabled, e := boolEnv("SMTP_ENABLED", false)
+	if e != nil {
+		return Config{}, e
+	}
+	smtpPort, e := intEnv("SMTP_PORT", 587)
+	if e != nil {
+		return Config{}, e
+	}
+	c := Config{Port: stringEnv("PORT", "8080"), DatabaseURL: os.Getenv("DATABASE_URL"), JWTSecret: os.Getenv("JWT_SECRET"), AccessTokenTTL: a, RefreshTokenTTL: r, CookieSecure: secure, CookieDomain: os.Getenv("COOKIE_DOMAIN"), StorageRoot: stringEnv("STORAGE_ROOT", "./storage"), MaxFileSize: max, ScanEnabled: scan, UploadSessionTTL: ttl, TrustedProxies: listEnv("TRUSTED_PROXIES"), StorageDriver: stringEnv("STORAGE_DRIVER", "local"), S3Endpoint: os.Getenv("S3_ENDPOINT"), S3Bucket: os.Getenv("S3_BUCKET"), S3Region: stringEnv("S3_REGION", "us-east-1"), S3AccessKey: os.Getenv("S3_ACCESS_KEY"), S3SecretKey: os.Getenv("S3_SECRET_KEY"), S3PathStyle: pathStyle, ClamAVAddr: os.Getenv("CLAMAV_ADDR"), ClamAVTimeout: clamavTimeout, ClamAVRequired: clamavRequired, RateLimitPerMinute: rateLimit, LoginRateLimitPerMinute: loginRateLimit, PublicRateLimitPerMinute: publicRateLimit, MaxVersionsPerFile: maxVersions, JanitorEnabled: janitorEnabled, JanitorInterval: janitorInterval, OnlyOfficeEnabled: ooEnabled, OnlyOfficeServerURL: stringEnv("ONLYOFFICE_SERVER_URL", "http://onlyoffice:80"), OnlyOfficePublicURL: stringEnv("ONLYOFFICE_PUBLIC_URL", ""), OnlyOfficeJWTSecret: os.Getenv("ONLYOFFICE_JWT_SECRET"), OnlyOfficeDownloadURLBase: stringEnv("ONLYOFFICE_DOWNLOAD_URL_BASE", "http://backend:8080"), OnlyOfficeRateLimitPerMinute: ooRateLimit, MetricsEnabled: metricsEnabled, DrawioEnabled: drawioEnabled, DrawioServerURL: stringEnv("DRAWIO_SERVER_URL", "http://drawio:8080"), DrawioPublicURL: stringEnv("DRAWIO_PUBLIC_URL", ""), WebpkgEnabled: webpkgEnabled, WebpkgMaxEntries: webpkgMaxEntries, WebpkgMaxFileSize: webpkgMaxFileSize, WebpkgMaxTotalSize: webpkgMaxTotalSize, WebpkgMaxDepth: webpkgMaxDepth, WebpkgRateLimitPerMinute: webpkgRateLimit, QueueDriver: stringEnv("QUEUE_DRIVER", "inprocess"), RedisAddr: stringEnv("REDIS_ADDR", "localhost:6379"), RedisPassword: os.Getenv("REDIS_PASSWORD"), QueueConcurrency: queueConcurrency, PatchMaxBytes: patchMax, SMTPEnabled: smtpEnabled, SMTPHost: os.Getenv("SMTP_HOST"), SMTPPort: smtpPort, SMTPUser: os.Getenv("SMTP_USER"), SMTPPass: os.Getenv("SMTP_PASS"), SMTPFrom: os.Getenv("SMTP_FROM"), PublicBaseURL: stringEnv("PUBLIC_BASE_URL", "")}
 	if c.DatabaseURL == "" {
 		return Config{}, errors.New("DATABASE_URL is required")
 	}
@@ -241,13 +281,42 @@ func Load() (Config, error) {
 	if e := validateOnlyOffice(c); e != nil {
 		return Config{}, e
 	}
+	if e := validateDrawio(c); e != nil {
+		return Config{}, e
+	}
 	if e := validateWebpkg(c); e != nil {
 		return Config{}, e
 	}
 	if e := validateQueue(c); e != nil {
 		return Config{}, e
 	}
+	if e := validateSMTP(c); e != nil {
+		return Config{}, e
+	}
 	return c, nil
+}
+
+// validateSMTP 校验邮件通道配置：启用 SMTP 时 HOST 与 FROM 必填，
+// PORT 为正，PUBLIC_BASE_URL 可选（为空时邮件链接退化为相对路径）。
+func validateSMTP(c Config) error {
+	if !c.SMTPEnabled {
+		return nil
+	}
+	if c.SMTPHost == "" {
+		return errors.New("SMTP_HOST is required when SMTP_ENABLED")
+	}
+	if c.SMTPPort < 1 || c.SMTPPort > 65535 {
+		return errors.New("SMTP_PORT must be 1-65535")
+	}
+	if c.SMTPFrom == "" {
+		return errors.New("SMTP_FROM is required when SMTP_ENABLED")
+	}
+	if c.PublicBaseURL != "" {
+		if e := checkAbsoluteHTTPURL(c.PublicBaseURL, "PUBLIC_BASE_URL"); e != nil {
+			return e
+		}
+	}
+	return nil
 }
 
 // validateQueue 校验任务队列配置：驱动取值 inprocess|redis，并行数为正
@@ -276,6 +345,24 @@ func validateWebpkg(c Config) error {
 	}
 	if c.WebpkgMaxTotalSize < c.WebpkgMaxFileSize {
 		return errors.New("WEBPKG_MAX_TOTAL_SIZE must be >= WEBPKG_MAX_FILE_SIZE")
+	}
+	return nil
+}
+
+// validateDrawio 校验 draw.io 图表编辑集成配置：启用时 SERVER_URL 须为合法
+// http(s) URL；PUBLIC_URL 可选（浏览器可达地址，留空回退 SERVER_URL），设置时
+// 同样须为合法 http(s) URL。后端不与 drawio 服务通信，无凭据类配置。
+func validateDrawio(c Config) error {
+	if !c.DrawioEnabled {
+		return nil
+	}
+	if e := checkAbsoluteHTTPURL(c.DrawioServerURL, "DRAWIO_SERVER_URL"); e != nil {
+		return e
+	}
+	if c.DrawioPublicURL != "" {
+		if e := checkAbsoluteHTTPURL(c.DrawioPublicURL, "DRAWIO_PUBLIC_URL"); e != nil {
+			return e
+		}
 	}
 	return nil
 }

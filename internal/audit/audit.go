@@ -27,6 +27,14 @@ const (
 	// ONLYOFFICE 集成：保存回调落新版本与编辑会话清理。
 	ActionOnlyOfficeSave    = "onlyoffice.save"
 	ActionOnlyOfficeCleanup = "onlyoffice.cleanup"
+	// 邀请制认证与密码管理。
+	ActionInviteCreate  = "invite.create"
+	ActionInviteRevoke  = "invite.revoke"
+	ActionInviteAccept  = "invite.accept"
+	ActionPasswordReset = "auth.password_reset"
+	// 个人访问令牌（PAT）管理：创建与撤销（PAT 认证本身不审计，噪音）。
+	ActionTokenCreate = "token.create"
+	ActionTokenRevoke = "token.revoke"
 )
 
 // resource_type 常量。
@@ -38,6 +46,11 @@ const (
 	// ResourceSettings 系统设置键；ResourceBlob 为 object_blobs 行。
 	ResourceSettings = "settings"
 	ResourceBlob     = "blob"
+	// ResourceInvitation 邀请（invitations 行）；ResourceUser 为 users 行。
+	ResourceInvitation = "invitation"
+	ResourceUser       = "user"
+	// ResourceToken 为个人访问令牌（api_tokens 行）。
+	ResourceToken = "token"
 )
 
 // status 常量。

@@ -43,10 +43,10 @@ build-frontend:
 up-minimal:
 	docker compose --profile minimal up -d --build
 
-# 完整部署（minimal + redis + onlyoffice；注入 ONLYOFFICE 反代上游，
-# 否则 caddy 在 onlyoffice 未运行时不解析该主机名）。
+# 完整部署（minimal + redis + onlyoffice + drawio；注入 ONLYOFFICE/DRAWIO
+# 反代上游，否则 caddy 在对应服务未运行时不解析该主机名）。
 up-full:
-	ONLYOFFICE_UPSTREAM=onlyoffice:80 docker compose --profile full up -d --build
+	ONLYOFFICE_UPSTREAM=onlyoffice:80 DRAWIO_UPSTREAM=drawio:8080 docker compose --profile full up -d --build
 
 # 叠加病毒扫描：docker compose --profile minimal --profile antivirus up -d
 #（或 --profile full --profile antivirus），并设 .env SCAN_ENABLED=true、

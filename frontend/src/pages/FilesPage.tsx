@@ -156,9 +156,10 @@ export default function FilesPage() {
         title="文件"
         rootLabel="我的文件"
         reloadKey={reloadKey}
-        listItems={async (parentId) => ({ items: await listFiles(parentId), folderId: parentId })}
+        listItems={async (parentId, opts) => ({ items: await listFiles(parentId, opts), folderId: parentId })}
         createFolderFn={createFolder}
         uploadFn={uploadFile}
+        rootTargetLabel="我的文件（根目录）"
         rowActions={(item) => (
           <>
             {item.type === 'file' && (

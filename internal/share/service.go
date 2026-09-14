@@ -122,7 +122,36 @@ type Service struct {
 	// 热读取（system_settings 的 share.default_expiry_hours，main 注入）；
 	// nil 或返回非正值时回退既有行为（不设默认，即永久）。
 	defaultExpiryHours func() int
-	now                func() time.Time
+	// notifyDispatcher 站内通知回调（main 注入 notify.Dispatcher 适配器）：
+	// 公开/私有分享下载成功（计数已消耗）后通知分享 owner share.accessed。
+	// 私有分享 owner 本人下载不通知（避免噪音）。
+	notifyDispatcher NotifyFunc
+	now              func() time.Time
+}
+
+// NotifyFunc 站内通知回调签名（main 注入 notify 包 Dispatcher 的适配器；
+// share 包不依赖 notify 以避免环）：resourceID 为 uuid.Nil 表示无关联资源。
+type NotifyFunc func(userID uuid.UUID, eventType, title, body string, resourceID uuid.UUID)
+
+// SetNotifyDispatcher 注入站内通知回调（幂等）：公开/私有分享下载成功时
+// 通知分享 owner（share.accessed，标题含文件名）。回调不影响下载流程。
+func (s *Service) SetNotifyDispatcher(fn NotifyFunc) {
+	if fn != nil {
+		s.notifyDispatcher = fn
+	}
+}
+
+// notifyAccessed 尽力通知分享 owner（回调未注入或 owner 本人下载均跳过）。
+func (s *Service) notifyAccessed(r Resolved, downloader uuid.UUID) {
+	if s.notifyDispatcher == nil || r.Share.OwnerID == downloader {
+		return
+	}
+	visText := "公开分享"
+	if r.Share.Visibility == VisibilityPrivate {
+		visText = "私有分享"
+	}
+	s.notifyDispatcher(r.Share.OwnerID, "share.accessed", "分享文件被下载："+r.File.Name,
+		"你的文件「"+r.File.Name+"」通过"+visText+"被下载。", r.Share.FileID)
 }
 
 func NewService(repo Repo, source FileSource) *Service {
@@ -394,6 +423,8 @@ func (s *Service) ResolveForUserForDownload(shareID, fileID, user uuid.UUID) (Re
 	if err := s.files.IncrementDownloadCount(r.Share.OwnerID, r.Share.FileID); err != nil {
 		return Resolved{}, err
 	}
+	// 下载成功（计数已消耗）：尽力通知分享 owner（owner 本人下载跳过）。
+	s.notifyAccessed(r, user)
 	return r, nil
 }
 
@@ -571,5 +602,7 @@ func (s *Service) ResolveForDownload(token string) (Resolved, error) {
 	if err := s.files.IncrementDownloadCount(r.Share.OwnerID, r.Share.FileID); err != nil {
 		return Resolved{}, err
 	}
+	// 公开下载无访问者身份（downloader 传零值）：恒通知分享 owner。
+	s.notifyAccessed(r, uuid.Nil)
 	return r, nil
 }

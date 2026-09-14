@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/docflow/docflow/internal/onlyoffice"
+	"github.com/docflow/docflow/internal/tagging"
 	"github.com/docflow/docflow/internal/webpkg"
 	"github.com/gin-gonic/gin"
 	"gopkg.in/yaml.v3"
@@ -68,10 +69,12 @@ func loadContractSpec(t *testing.T) (base string, spec contractSpec) {
 // onlyoffice 端点参与双向校验；生产未启用时不注册该组路由（404）。
 // 网页包手动解包端点（POST /files/{id}/webpkg/extract）同理恒启用；
 // 内容端点 /content/:pid/*filepath 为契约外内容域路由（isExcludedRoute 豁免）。
+// 标签服务同理恒注入（内存实现），保证 tags/starred/batch 端点参与校验。
 func contractRouter(t *testing.T) *gin.Engine {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	h := NewHandler(nil, nil, nil, nil, nil, nil, nil, false, "", 0)
+	h.SetTagging(tagging.NewService(tagging.NewMemoryRepo(), nil))
 	h.SetOnlyOffice(onlyoffice.New(onlyoffice.Config{
 		ServerURL:    "http://onlyoffice:80",
 		DownloadBase: "http://backend:8080",
