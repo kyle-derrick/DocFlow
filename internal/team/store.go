@@ -13,7 +13,8 @@ import (
 var _ Repo = (*GormStore)(nil)
 
 // Repo 是团队持久化与权限查询接口；GormStore 为 PostgreSQL 实现，MemoryStore 供测试使用。
-// 权限判定（CanWrite/UserInAnyTeam/Role）集中在此接口，便于以后替换为 Casbin 等策略引擎。
+// 权限判定所需的成员/角色查询（MemberRole/RolePermissions）集中在此接口，
+// 动作求值（deny 优先等）在 Service 层完成；未来可替换为 Casbin 等策略引擎。
 type Repo interface {
 	// CreateTeamWithRoot 在同一事务内写入团队、owner 成员与团队根目录。
 	CreateTeamWithRoot(t Team, owner Member, root files.File) error
@@ -23,21 +24,30 @@ type Repo interface {
 	AddMember(m Member) error
 	RemoveMember(teamID, userID uuid.UUID) error
 	ListMembers(teamID uuid.UUID) ([]Member, error)
-	// Role 返回用户在团队中的角色，非成员返回空串。
+	// UpdateMemberRole 修改成员角色（系统角色或自定义 role_id）；成员不存在返回 ErrNotFound。
+	UpdateMemberRole(teamID, userID uuid.UUID, role string, roleID *uuid.UUID) (Member, error)
+	// Role 返回用户在团队中的角色，非成员返回空串（自定义角色返回 'custom'）。
 	Role(teamID, userID uuid.UUID) (string, error)
-	// CanWrite 判定用户能否写入团队空间（owner/editor）。
-	CanWrite(userID, teamID uuid.UUID) (bool, error)
+	// MemberRole 返回成员的角色字符串与自定义角色 ID（非成员空串 + nil）。
+	MemberRole(teamID, userID uuid.UUID) (string, *uuid.UUID, error)
+	// RolePermissions 返回自定义角色的 permissions JSON；角色不存在或不属于
+	// 该团队返回 ErrNotFound。
+	RolePermissions(teamID, roleID uuid.UUID) (map[string]any, error)
+	// CountMembersByRole 统计引用该自定义角色的成员数（删除角色前的引用检查）。
+	CountMembersByRole(teamID, roleID uuid.UUID) (int64, error)
 	// UserInAnyTeam 实时判定用户是否属于 teamIDs 中任一团队（供私有分享 share_teams 授权）。
 	UserInAnyTeam(userID uuid.UUID, teamIDs []uuid.UUID) (bool, error)
 	Update(teamID uuid.UUID, name string, description *string) error
 	Delete(teamID uuid.UUID) error
+	// ListRoles 返回团队自定义角色（含 member_count 引用统计）。
 	ListRoles(teamID uuid.UUID) ([]Role, error)
 	CreateRole(role Role) error
 	UpdateRole(teamID, roleID uuid.UUID, name string, permissions map[string]any) error
 	DeleteRole(teamID, roleID uuid.UUID) error
 }
 
-// GormStore 是 Repo 的 PostgreSQL 实现（teams/team_members 表见 migrations/008_teams_shares.sql）。
+// GormStore 是 Repo 的 PostgreSQL 实现（teams/team_members 表见 migrations/008_teams_shares.sql，
+// roles 表与 team_members.role_id 见 migrations/026/029）。
 type GormStore struct{ db *gorm.DB }
 
 func NewGormStore(db *gorm.DB) *GormStore { return &GormStore{db: db} }
@@ -93,28 +103,73 @@ func (s *GormStore) RemoveMember(teamID, userID uuid.UUID) error {
 
 func (s *GormStore) ListMembers(teamID uuid.UUID) ([]Member, error) {
 	var out []Member
-	err := s.db.Where("team_id = ?", teamID).Order("created_at, user_id").Find(&out).Error
+	// LEFT JOIN roles 解析自定义角色名（role_name，系统角色为空）。
+	err := s.db.Model(&Member{}).
+		Select("team_members.*, r.name AS role_name").
+		Joins("LEFT JOIN roles r ON r.id = team_members.role_id").
+		Where("team_members.team_id = ?", teamID).
+		Order("team_members.created_at, team_members.user_id").Find(&out).Error
 	return out, err
 }
 
-func (s *GormStore) Role(teamID, userID uuid.UUID) (string, error) {
-	var m Member
-	err := s.db.Where("team_id = ? AND user_id = ?", teamID, userID).First(&m).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return "", nil
+func (s *GormStore) UpdateMemberRole(teamID, userID uuid.UUID, role string, roleID *uuid.UUID) (Member, error) {
+	result := s.db.Model(&Member{}).
+		Where("team_id = ? AND user_id = ?", teamID, userID).
+		Updates(map[string]any{"role": role, "role_id": roleID})
+	if result.Error != nil {
+		return Member{}, result.Error
 	}
+	if result.RowsAffected == 0 {
+		return Member{}, ErrNotFound
+	}
+	m, err := s.ListMembers(teamID)
 	if err != nil {
-		return "", err
+		return Member{}, err
 	}
-	return m.Role, nil
+	for _, item := range m {
+		if item.UserID == userID {
+			return item, nil
+		}
+	}
+	return Member{}, ErrNotFound
 }
 
-func (s *GormStore) CanWrite(userID, teamID uuid.UUID) (bool, error) {
+func (s *GormStore) Role(teamID, userID uuid.UUID) (string, error) {
+	role, _, err := s.MemberRole(teamID, userID)
+	return role, err
+}
+
+func (s *GormStore) MemberRole(teamID, userID uuid.UUID) (string, *uuid.UUID, error) {
+	var m Member
+	err := s.db.Select("role", "role_id").
+		Where("team_id = ? AND user_id = ?", teamID, userID).First(&m).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", nil, nil
+	}
+	if err != nil {
+		return "", nil, err
+	}
+	return m.Role, m.RoleID, nil
+}
+
+func (s *GormStore) RolePermissions(teamID, roleID uuid.UUID) (map[string]any, error) {
+	var r Role
+	err := s.db.Select("permissions").
+		Where("id = ? AND team_id = ?", roleID, teamID).First(&r).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return r.Permissions, nil
+}
+
+func (s *GormStore) CountMembersByRole(teamID, roleID uuid.UUID) (int64, error) {
 	var count int64
 	err := s.db.Model(&Member{}).
-		Where("team_id = ? AND user_id = ? AND role IN (?, ?)", teamID, userID, RoleOwner, RoleEditor).
-		Count(&count).Error
-	return count > 0, err
+		Where("team_id = ? AND role_id = ?", teamID, roleID).Count(&count).Error
+	return count, err
 }
 
 func (s *GormStore) UserInAnyTeam(userID uuid.UUID, teamIDs []uuid.UUID) (bool, error) {
@@ -152,12 +207,18 @@ func (s *GormStore) Delete(teamID uuid.UUID) error {
 }
 func (s *GormStore) ListRoles(teamID uuid.UUID) ([]Role, error) {
 	var out []Role
-	err := s.db.Where("team_id = ?", teamID).Order("created_at, id").Find(&out).Error
+	// member_count：引用该角色的成员数（删除角色的引用检查与前端展示共用）。
+	err := s.db.Model(&Role{}).
+		Select("roles.*, (SELECT COUNT(*) FROM team_members tm WHERE tm.role_id = roles.id) AS member_count").
+		Where("team_id = ?", teamID).Order("created_at, id").Find(&out).Error
 	return out, err
 }
 func (s *GormStore) CreateRole(role Role) error { return s.db.Create(&role).Error }
 func (s *GormStore) UpdateRole(teamID, roleID uuid.UUID, name string, permissions map[string]any) error {
 	r := s.db.Model(&Role{}).Where("id = ? AND team_id = ?", roleID, teamID).Updates(map[string]any{"name": name, "permissions": permissions})
+	if r.Error != nil && isUniqueViolation(r.Error) {
+		return ErrNameConflict
+	}
 	if r.Error == nil && r.RowsAffected == 0 {
 		return ErrNotFound
 	}

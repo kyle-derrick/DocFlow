@@ -21,6 +21,8 @@ var (
 	ErrFolderCopy  = errors.New("folders cannot be copied")
 	// ErrForbidden 表示用户对团队目录无写权限（如 viewer 或非成员）。
 	ErrForbidden = errors.New("no permission to write this folder")
+	// ErrFolderDepth 目录嵌套深度超过上限（folder.max_depth，默认 32）。
+	ErrFolderDepth = errors.New("folder depth limit exceeded")
 )
 
 func NormalizeName(name string) (string, error) {
@@ -44,21 +46,38 @@ func NormalizeName(name string) (string, error) {
 	return name, nil
 }
 
-// TeamWriter 判定用户能否写入团队空间（owner/editor），由 team 包注入实现；
-// 未来可替换为 Casbin 等策略引擎。nil 表示团队权限源未配置（拒绝团队目录写入）。
+// TeamWriter 判定用户能否写入团队空间（owner/editor/含 write 权限的自定义角色），
+// 由 team 包注入实现；未来可替换为 Casbin 等策略引擎。nil 表示团队权限源未配置
+// （拒绝团队目录写入）。
 type TeamWriter func(userID, teamID uuid.UUID) (bool, error)
 
-// TeamReader 判定用户是否为团队在册成员（读权限，任意角色），由 team 包注入实现。
+// TeamReader 判定用户是否可读取团队空间（成员 + read 权限），由 team 包注入实现。
 // nil 表示成员判定源未配置（拒绝团队文件读取，安全默认）。
 type TeamReader func(userID, teamID uuid.UUID) (bool, error)
+
+// TeamDeleter 判定用户能否删除团队文件（CanDelete：系统仅 owner、自定义角色
+// 按 delete 勾选且未被 deny），由 team 包注入实现；nil 表示未配置（拒绝，安全默认）。
+type TeamDeleter func(userID, teamID uuid.UUID) (bool, error)
+
+// defaultMaxFolderDepth 目录默认最大深度（根为 1；可经
+// SetMaxFolderDepthProvider / folder.max_depth 覆盖）。
+const defaultMaxFolderDepth = 32
 
 type Store struct {
 	db          *gorm.DB
 	teamWriter  TeamWriter
 	teamReader  TeamReader
+	teamDeleter TeamDeleter
 	maxVersions int
 	// maxVersionsFn 为版本保留数的运行时提供器（settings 热读取）；nil 时用 maxVersions。
 	maxVersionsFn func() int
+	// retentionDaysFn 为版本保留时间窗（天）的运行时提供器（settings
+	// 热读取，upload.version_retention_days）；nil 或 0 = 不启用时间窗。
+	retentionDaysFn func() int
+	// maxFolderDepthFn 为目录最大深度的运行时提供器（settings 热读取，
+	// folder.max_depth）；nil 时用 maxFolderDepth。
+	maxFolderDepthFn func() int
+	maxFolderDepth   int
 	// webpkgCleaner 清理网页包对象前缀（webpkg/<public_id>，webpkg.Remove 注入）；
 	// Purge 事务提交后 best-effort 调用。nil 表示未接线（不清理）。
 	webpkgCleaner func(prefix string) error
@@ -66,6 +85,9 @@ type Store struct {
 	// main 注入团队 file.updated 通知逻辑；nil 表示未接线。回调不改变
 	// 版本写入结果（错误由注入方自理）。
 	versionNotify VersionNotifyFunc
+	// versionDeletedNotify 历史版本删除完成回调（DeleteVersion 事务提交后
+	// 调用）：main 注入团队 file.version.deleted 通知逻辑；nil 表示未接线。
+	versionDeletedNotify VersionNotifyFunc
 }
 
 // VersionNotifyFunc 版本写入完成回调：f 为目标文件行、actor 为写入者、
@@ -73,7 +95,9 @@ type Store struct {
 // 时通知团队其他成员 file.updated。
 type VersionNotifyFunc func(f File, actor uuid.UUID, version FileVersion)
 
-func NewStore(db *gorm.DB) *Store { return &Store{db: db, maxVersions: defaultMaxVersions} }
+func NewStore(db *gorm.DB) *Store {
+	return &Store{db: db, maxVersions: defaultMaxVersions, maxFolderDepth: defaultMaxFolderDepth}
+}
 
 // SetTeamWriter 注入团队写权限判定器（幂等）。
 func (s *Store) SetTeamWriter(w TeamWriter) {
@@ -86,6 +110,13 @@ func (s *Store) SetTeamWriter(w TeamWriter) {
 func (s *Store) SetTeamReader(r TeamReader) {
 	if r != nil {
 		s.teamReader = r
+	}
+}
+
+// SetTeamDeleter 注入团队删除权限判定器（幂等）。
+func (s *Store) SetTeamDeleter(d TeamDeleter) {
+	if d != nil {
+		s.teamDeleter = d
 	}
 }
 
@@ -104,6 +135,94 @@ func (s *Store) SetNotifyDispatcher(fn VersionNotifyFunc) {
 	if fn != nil {
 		s.versionNotify = fn
 	}
+}
+
+// SetVersionDeletedDispatcher 注入历史版本删除完成回调（幂等）：DeleteVersion
+// 事务提交后调用（团队 file.version.deleted 通知文件 owner 的接线点）；
+// 回调自行决定同步/异步执行策略，不改变删除结果。
+func (s *Store) SetVersionDeletedDispatcher(fn VersionNotifyFunc) {
+	if fn != nil {
+		s.versionDeletedNotify = fn
+	}
+}
+
+// SetMaxFolderDepthProvider 注入目录最大深度的运行时提供器（幂等；nil 不
+// 覆盖）：每次建目录/移动前热读取（system_settings 的 folder.max_depth），
+// 返回非正值（读取失败回退哨兵）时回退 maxFolderDepth（默认 32）。
+func (s *Store) SetMaxFolderDepthProvider(fn func() int) {
+	if fn != nil {
+		s.maxFolderDepthFn = fn
+	}
+}
+
+// effectiveMaxFolderDepth 返回当前生效的目录最大深度：提供器优先，异常回退静态值。
+func (s *Store) effectiveMaxFolderDepth() int {
+	if s.maxFolderDepthFn != nil {
+		if n := s.maxFolderDepthFn(); n >= 1 {
+			return n
+		}
+	}
+	return s.maxFolderDepth
+}
+
+// folderDepthOf 沿 parent 链向上数层级（根目录为 1，parent 自身即第 1 层）。
+// files.tree_path（ltree）列当前无维护方，深度按 parent 链遍历计数；
+// 环/断链防御：上限 effectiveMaxFolderDepth+1 步。
+func (s *Store) folderDepthOf(folderID uuid.UUID) (int, error) {
+	cur := folderID
+	for depth := 1; depth <= s.effectiveMaxFolderDepth()+1; depth++ {
+		var f File
+		if err := s.db.Select("id", "parent_id").Where("id = ?", cur).First(&f).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return 0, ErrNotFound
+			}
+			return 0, err
+		}
+		if f.ParentID == nil {
+			return depth, nil
+		}
+		cur = *f.ParentID
+	}
+	return 0, ErrFolderDepth
+}
+
+// folderSubtreeHeight 返回目录子树高度（自身为 1；按子目录逐层下探）。
+// 深度受 effectiveMaxFolderDepth 约束，遍历步数有界。
+func (s *Store) folderSubtreeHeight(root uuid.UUID) (int, error) {
+	height := 0
+	level := []uuid.UUID{root}
+	for len(level) > 0 && height < s.effectiveMaxFolderDepth()+1 {
+		height++
+		var next []uuid.UUID
+		rows := make([]File, 0, len(level)*4)
+		if err := s.db.Select("id").Where("parent_id IN ? AND type = 'folder' AND deleted_at IS NULL", level).Find(&rows).Error; err != nil {
+			return 0, err
+		}
+		for _, r := range rows {
+			next = append(next, r.ID)
+		}
+		level = next
+	}
+	return height, nil
+}
+
+// validateCreateDepth 校验在 parentDepth 层的目录下新建子项后不超上限
+// （纯逻辑，供内存单测）：新子项深度 = parentDepth + 1 ≤ maxDepth。
+func validateCreateDepth(parentDepth, maxDepth int) error {
+	if parentDepth+1 > maxDepth {
+		return ErrFolderDepth
+	}
+	return nil
+}
+
+// validateMoveDepth 校验把高度 subtreeHeight 的子树移动到 targetDepth 层
+// 目录下不超上限（纯逻辑，供内存单测）：新子树最深深度 =
+// targetDepth + subtreeHeight ≤ maxDepth。
+func validateMoveDepth(targetDepth, subtreeHeight, maxDepth int) error {
+	if targetDepth+subtreeHeight > maxDepth {
+		return ErrFolderDepth
+	}
+	return nil
 }
 
 // getFolder 返回未删除的目录（不限 owner，供团队/个人作用域分支判定）。
@@ -165,8 +284,9 @@ func (s *Store) ValidateFolder(user, parent uuid.UUID) error {
 }
 
 // authorizeFileAccess 判定 user 能否读取 file（元数据/当前版本/下载/预览共用入口）：
-// 个人文件仅 owner；团队文件（scope_type='team'）任意在册成员可读（viewer 同样可读）。
-// 未注入成员判定器时团队文件一律拒绝（ErrForbidden，与写路径一致的安全默认）。
+// 个人文件仅 owner；团队文件（scope_type='team'）经注入的 CanRead 判定
+// （系统角色任意在册成员可读；自定义角色按 read 勾选且未被 deny）。
+// 未注入判定器时团队文件一律拒绝（ErrForbidden，与写路径一致的安全默认）。
 // 非授权访问统一返回 ErrNotFound，不泄露资源存在性；owner 判定短路，行为与旧版一致。
 func authorizeFileAccess(f File, user uuid.UUID, isMember TeamReader) error {
 	if f.OwnerID == user {
@@ -330,6 +450,13 @@ func (s *Store) CreateFolder(owner, parent uuid.UUID, name string) (File, error)
 	if err := s.db.Where("id = ? AND owner_id = ? AND type = 'folder' AND deleted_at IS NULL", parent, owner).First(&parentFile).Error; err != nil {
 		return File{}, ErrNotFound
 	}
+	if depth, derr := s.folderDepthOf(parent); derr == nil {
+		if verr := validateCreateDepth(depth, s.effectiveMaxFolderDepth()); verr != nil {
+			return File{}, verr
+		}
+	} else if !errors.Is(derr, ErrNotFound) {
+		return File{}, derr
+	}
 	f := File{ID: uuid.New(), Name: n, ParentID: &parent, OwnerID: owner, Type: "folder", ScopeType: "personal"}
 	err = s.db.Create(&f).Error
 	if err != nil && strings.Contains(strings.ToLower(err.Error()), "unique") {
@@ -340,6 +467,7 @@ func (s *Store) CreateFolder(owner, parent uuid.UUID, name string) (File, error)
 
 // CreateFolderIn 在 parent 下创建子目录并继承其作用域：
 // 个人目录要求 owner；团队目录要求成员写权限（owner/editor，viewer 403）。
+// 深度校验（folder.max_depth）：parent 深度 + 1 不得超过上限。
 func (s *Store) CreateFolderIn(user, parent uuid.UUID, name string) (File, error) {
 	n, err := NormalizeName(name)
 	if err != nil {
@@ -348,6 +476,13 @@ func (s *Store) CreateFolderIn(user, parent uuid.UUID, name string) (File, error
 	p, err := authorizeParentFolder(s, user, parent, s.teamWriter)
 	if err != nil {
 		return File{}, err
+	}
+	if depth, derr := s.folderDepthOf(parent); derr == nil {
+		if verr := validateCreateDepth(depth, s.effectiveMaxFolderDepth()); verr != nil {
+			return File{}, verr
+		}
+	} else if !errors.Is(derr, ErrNotFound) {
+		return File{}, derr
 	}
 	f := File{ID: uuid.New(), Name: n, ParentID: &parent, OwnerID: user, Type: "folder", ScopeType: "personal"}
 	if id := teamScope(p); id != nil {
@@ -412,17 +547,52 @@ func (s *Store) ListTeam(teamID, parent uuid.UUID, limit int, f TeamListFilter) 
 	err := q.Order(clause).Limit(limit).Find(&out).Error
 	return out, err
 }
-func (s *Store) Rename(owner, id uuid.UUID, name string) (File, error) {
+
+// authorizeTeamDelete 判定 user 能否删除 file（软删除/彻底删除共用）：
+// 个人文件仅 owner（非 owner 统一 ErrNotFound，不泄露存在性）；
+// 团队文件要求 CanDelete（系统仅 owner；自定义角色按 delete 勾选且未被 deny）——
+// 文件行 owner（上传者）不短路：delete 是独立于 write 的权限（设计 6.5.2）。
+func authorizeTeamDelete(f File, user uuid.UUID, canDeleteTeam TeamDeleter) error {
+	teamID := teamScope(f)
+	if teamID == nil {
+		if f.OwnerID != user {
+			return ErrNotFound
+		}
+		return nil
+	}
+	if canDeleteTeam == nil {
+		return ErrForbidden
+	}
+	ok, err := canDeleteTeam(user, *teamID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrForbidden
+	}
+	return nil
+}
+
+// Rename 重命名文件或目录（根目录不可改名）。
+// 个人文件仅 owner；团队文件走 CanWrite（authorizeFileWrite：文件行 owner 短路，
+// 其余成员 owner/editor/含 write 权限的自定义角色可改）。
+func (s *Store) Rename(user, id uuid.UUID, name string) (File, error) {
 	n, err := NormalizeName(name)
 	if err != nil {
 		return File{}, err
 	}
 	var f File
-	if err = s.db.Where("id = ? AND owner_id = ? AND deleted_at IS NULL", id, owner).First(&f).Error; err != nil {
-		return File{}, ErrNotFound
+	if err = s.db.Where("id = ? AND deleted_at IS NULL", id).First(&f).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return File{}, ErrNotFound
+		}
+		return File{}, err
 	}
 	if f.IsRoot {
 		return File{}, ErrRoot
+	}
+	if err := authorizeFileWrite(f, user, s.teamWriter); err != nil {
+		return File{}, err
 	}
 	result := s.db.Model(&f).Updates(map[string]any{"name": n})
 	if result.Error != nil && strings.Contains(strings.ToLower(result.Error.Error()), "unique") {
@@ -601,13 +771,21 @@ func (s *Store) Recent(owner uuid.UUID, limit int) ([]File, error) {
 	return out, err
 }
 
-func (s *Store) Delete(owner, id uuid.UUID) error {
+// Delete 软删除文件（移入回收站；根目录不可删）。
+// 个人文件仅 owner；团队文件走 CanDelete（authorizeTeamDelete，含自定义角色）。
+func (s *Store) Delete(user, id uuid.UUID) error {
 	var f File
-	if err := s.db.Where("id = ? AND owner_id = ? AND deleted_at IS NULL", id, owner).First(&f).Error; err != nil {
-		return ErrNotFound
+	if err := s.db.Where("id = ? AND deleted_at IS NULL", id).First(&f).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrNotFound
+		}
+		return err
 	}
 	if f.IsRoot {
 		return ErrRoot
+	}
+	if err := authorizeTeamDelete(f, user, s.teamDeleter); err != nil {
+		return err
 	}
 	return s.db.Model(&f).Update("deleted_at", gorm.Expr("CURRENT_TIMESTAMP")).Error
 }

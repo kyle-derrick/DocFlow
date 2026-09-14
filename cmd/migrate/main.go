@@ -1,18 +1,4 @@
-// Command migrate 按文件名序执行迁移 SQL（默认 migrations/*.sql）。
-//
-// 迁移脚本内建幂等（CREATE TABLE/INDEX IF NOT EXISTS、ADD COLUMN IF NOT
-// EXISTS、先 DROP CONSTRAINT IF EXISTS 再 ADD CONSTRAINT），因此整组迁移可
-// 重复执行；本工具不记录版本、不支持回滚（--down 不提供）。执行前先取
-// 会话级 advisory lock（pg_advisory_lock，见 advisoryLockKey），并发实例
-// 串行化，防止两个实例交错应用同一批迁移。
-//
-// 用法（DATABASE_URL 复用服务端约定）：
-//
-//	DATABASE_URL=postgres://docflow:change-me@localhost:5432/docflow?sslmode=disable \
-//	  go run ./cmd/migrate [-dir migrations]
-//
-// 说明：通过 PreferSimpleProtocol 走 simple query 协议，单次 Exec 即可执行
-// 整个迁移文件内的多条语句（默认扩展协议不支持多语句 Exec）。
+// Command migrate applies SQL migrations in filename order and records each version.
 package main
 
 import (
@@ -23,74 +9,125 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
 
-// advisoryLockKey 为 DocFlow 迁移专用的 PostgreSQL 会话级 advisory lock 键
-// （0x444F4346 即 ASCII "DOCF"，十进制 1146045254）。并发执行的两个
-// migrate 实例经此键互斥串行；进程崩溃/断连时会话结束锁自动释放。
 const advisoryLockKey int64 = 0x444F4346
 
 func main() {
-	dir := flag.String("dir", "migrations", "迁移 SQL 目录（相对当前工作目录）")
+	dir := flag.String("dir", "migrations", "迁移 SQL 目录")
+	dryRun := flag.Bool("dry-run", false, "仅列出待执行迁移")
 	flag.Parse()
-
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
 		log.Fatal("DATABASE_URL is required")
 	}
 	entries, err := os.ReadDir(*dir)
 	if err != nil {
-		log.Fatalf("read migrations dir %s: %v", *dir, err)
+		log.Fatalf("read migrations dir: %v", err)
 	}
-	var files []string
+	var names []string
 	for _, e := range entries {
 		if !e.IsDir() && strings.HasSuffix(e.Name(), ".sql") {
-			files = append(files, e.Name())
+			names = append(names, e.Name())
 		}
 	}
-	sort.Strings(files)
-	if len(files) == 0 {
-		log.Fatalf("no .sql files found in %s", *dir)
+	sort.Strings(names)
+	if len(names) == 0 {
+		log.Fatal("no .sql files found")
 	}
 	db, err := gorm.Open(postgres.New(postgres.Config{DSN: dsn, PreferSimpleProtocol: true}), &gorm.Config{})
 	if err != nil {
 		log.Fatalf("connect database: %v", err)
 	}
-	// 会话级 advisory lock 防并发迁移：advisory lock 绑定取得它的连接，
-	// 故从连接池单独钉一条连接执行加锁/解锁（迁移语句本身仍走池），
-	// 其余 migrate 实例在 pg_advisory_lock 上阻塞直至本实例解锁。
+	if *dryRun {
+		if err := listPending(db, names); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	sqlDB, err := db.DB()
 	if err != nil {
-		log.Fatalf("raw database handle: %v", err)
+		log.Fatal(err)
 	}
-	lockCtx := context.Background()
-	lockConn, err := sqlDB.Conn(lockCtx)
+	conn, err := sqlDB.Conn(context.Background())
 	if err != nil {
-		log.Fatalf("acquire connection: %v", err)
+		log.Fatal(err)
 	}
-	defer lockConn.Close()
-	if _, err := lockConn.ExecContext(lockCtx, "SELECT pg_advisory_lock($1)", advisoryLockKey); err != nil {
-		log.Fatalf("acquire advisory lock %d: %v", advisoryLockKey, err)
+	defer conn.Close()
+	if _, err := conn.ExecContext(context.Background(), "SELECT pg_advisory_lock($1)", advisoryLockKey); err != nil {
+		log.Fatal(err)
 	}
-	defer func() {
-		if _, err := lockConn.ExecContext(lockCtx, "SELECT pg_advisory_unlock($1)", advisoryLockKey); err != nil {
-			log.Printf("release advisory lock %d: %v", advisoryLockKey, err)
+	defer conn.ExecContext(context.Background(), "SELECT pg_advisory_unlock($1)", advisoryLockKey)
+	if err := db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (version BIGINT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`).Error; err != nil {
+		log.Fatalf("create schema_migrations: %v", err)
+	}
+	applied := map[int64]bool{}
+	var versions []int64
+	if err := db.Raw("SELECT version FROM schema_migrations").Scan(&versions).Error; err != nil {
+		log.Fatal(err)
+	}
+	for _, v := range versions {
+		applied[v] = true
+	}
+	count := 0
+	for _, name := range names {
+		v, err := migrationVersion(name)
+		if err != nil {
+			log.Fatal(err)
 		}
-	}()
-	for _, name := range files {
+		if applied[v] {
+			continue
+		}
 		content, err := os.ReadFile(filepath.Join(*dir, name))
 		if err != nil {
-			log.Fatalf("read %s: %v", name, err)
+			log.Fatal(err)
 		}
 		if err := db.Exec(string(content)).Error; err != nil {
-			// 单文件失败即退出：保持「失败于哪一步」可诊断，由调用方修复后重跑（幂等）。
 			log.Fatalf("apply %s: %v", name, err)
 		}
+		if err := db.Exec("INSERT INTO schema_migrations(version) VALUES (?)", v).Error; err != nil {
+			log.Fatalf("record %s: %v", name, err)
+		}
 		fmt.Printf("applied %s\n", name)
+		count++
 	}
-	fmt.Printf("done: %d migration file(s) applied from %s\n", len(files), *dir)
+	fmt.Printf("done: %d migration file(s) applied from %s\n", count, *dir)
+}
+
+func migrationVersion(name string) (int64, error) {
+	base := strings.TrimSuffix(name, filepath.Ext(name))
+	first := strings.SplitN(base, "_", 2)[0]
+	v, err := strconv.ParseInt(first, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid migration filename %s", name)
+	}
+	return v, nil
+}
+func listPending(db *gorm.DB, names []string) error {
+	if err := db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (version BIGINT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`).Error; err != nil {
+		return err
+	}
+	var versions []int64
+	if err := db.Raw("SELECT version FROM schema_migrations").Scan(&versions).Error; err != nil {
+		return err
+	}
+	seen := map[int64]bool{}
+	for _, v := range versions {
+		seen[v] = true
+	}
+	for _, name := range names {
+		v, err := migrationVersion(name)
+		if err != nil {
+			return err
+		}
+		if !seen[v] {
+			fmt.Println(name)
+		}
+	}
+	return nil
 }

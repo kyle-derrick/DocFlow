@@ -17,6 +17,7 @@ const (
 	BatchCodeInvalidTarget = "INVALID_TARGET"
 	BatchCodeParentDeleted = "PARENT_DELETED"
 	BatchCodeNotDeleted    = "NOT_DELETED"
+	BatchCodeDepthLimit    = "DEPTH_LIMIT"
 	BatchCodeInternal      = "INTERNAL"
 )
 
@@ -50,6 +51,8 @@ func batchErrorCode(err error) string {
 		return BatchCodeParentDeleted
 	case errors.Is(err, ErrNotDeleted):
 		return BatchCodeNotDeleted
+	case errors.Is(err, ErrFolderDepth):
+		return BatchCodeDepthLimit
 	default:
 		return BatchCodeInternal
 	}
@@ -158,6 +161,23 @@ func (s *Store) moveOne(user, id uuid.UUID, target File) error {
 	}
 	if err := s.authorizeBatchWrite(f, user); err != nil {
 		return err
+	}
+	// 深度校验（folder.max_depth）：目标深度 + 待移动子树高度不得超过上限
+	//（仅目录参与：子树高度>1；文件自身高度恒为 1）。
+	targetDepth, derr := s.folderDepthOf(target.ID)
+	if derr != nil {
+		return derr
+	}
+	if f.Type == "folder" {
+		height, herr := s.folderSubtreeHeight(f.ID)
+		if herr != nil {
+			return herr
+		}
+		if verr := validateMoveDepth(targetDepth, height, s.effectiveMaxFolderDepth()); verr != nil {
+			return verr
+		}
+	} else if verr := validateMoveDepth(targetDepth, 1, s.effectiveMaxFolderDepth()); verr != nil {
+		return verr
 	}
 	var conflict int64
 	if err := s.db.Model(&File{}).

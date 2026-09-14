@@ -16,9 +16,12 @@
 		Referrer-Policy same-origin
 	}
 
-	# Caddy 自身存活探针（区别于 backend 的 /health）。
+	# 基础探针：存活由 Caddy 自身提供，就绪转发到 backend。
 	handle /health {
 		respond 200
+	}
+	handle /ready {
+		reverse_proxy backend:8080
 	}
 
 	# REST API → Go 后端（backend 仅 compose 内网，无宿主端口映射）。

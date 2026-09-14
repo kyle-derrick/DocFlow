@@ -124,12 +124,15 @@ func teamError(c *gin.Context, err error) bool {
 		return false
 	}
 	switch {
-	case errors.Is(err, team.ErrInvalidName), errors.Is(err, team.ErrInvalidRole):
+	case errors.Is(err, team.ErrInvalidName), errors.Is(err, team.ErrInvalidRole), errors.Is(err, team.ErrInvalidPermission):
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 	case errors.Is(err, team.ErrNameConflict):
 		c.JSON(http.StatusConflict, gin.H{"error": "team name already exists"})
 	case errors.Is(err, team.ErrMemberExists):
 		c.JSON(http.StatusConflict, gin.H{"error": "user is already a member"})
+	case errors.Is(err, team.ErrRoleInUse):
+		// 删除角色前须先改派引用该角色的成员（migration 029 另有 ON DELETE RESTRICT 兜底）。
+		c.JSON(http.StatusConflict, gin.H{"error": "role is assigned to team members"})
 	case errors.Is(err, team.ErrOwnerMember):
 		c.JSON(http.StatusForbidden, gin.H{"error": "team owner membership cannot be removed"})
 	case errors.Is(err, team.ErrForbidden):
@@ -177,9 +180,37 @@ func (h *Handler) listTeams(c *gin.Context) {
 type teamMemberRequest struct {
 	UserID string `json:"user_id"`
 	Role   string `json:"role"`
+	// RoleID 自定义角色 ID（可选）：非空时成员绑定该自定义角色（role 归一为 custom）。
+	RoleID string `json:"role_id"`
 }
 
-// addTeamMember POST /api/v1/teams/:id/members {user_id, role}：仅团队 owner 可添加成员。
+// parseMemberRole 解析成员角色入参：返回 (role, roleID)；role_id 非法 UUID 时 400。
+func parseMemberRole(c *gin.Context, req teamMemberRequest) (string, *uuid.UUID, bool) {
+	if req.RoleID == "" {
+		return req.Role, nil, true
+	}
+	roleID, ok := parseID(c, req.RoleID)
+	if !ok {
+		return "", nil, false
+	}
+	return req.Role, &roleID, true
+}
+
+// memberJSON 序列化成员安全字段：role（owner/editor/viewer/custom）、
+// role_id/role_name（自定义角色时返回，供前端展示与改派）。
+func memberJSON(m team.Member) gin.H {
+	out := gin.H{"user_id": m.UserID, "role": m.Role, "created_at": m.CreatedAt}
+	if m.RoleID != nil {
+		out["role_id"] = m.RoleID
+	}
+	if m.RoleName != "" {
+		out["role_name"] = m.RoleName
+	}
+	return out
+}
+
+// addTeamMember POST /api/v1/teams/:id/members {user_id, role?, role_id?}：
+// 仅团队 owner 可添加成员；角色为系统角色（editor/viewer）或自定义角色（role_id）。
 func (h *Handler) addTeamMember(c *gin.Context) {
 	teamID, ok := parseID(c, c.Param("id"))
 	if !ok {
@@ -194,11 +225,42 @@ func (h *Handler) addTeamMember(c *gin.Context) {
 	if !ok {
 		return
 	}
-	m, err := h.teams.AddMember(userID(c), teamID, memberUserID, req.Role)
+	role, roleID, ok := parseMemberRole(c, req)
+	if !ok {
+		return
+	}
+	m, err := h.teams.AddMember(userID(c), teamID, memberUserID, role, roleID)
 	if teamError(c, err) {
 		return
 	}
-	c.JSON(http.StatusCreated, gin.H{"user_id": m.UserID, "role": m.Role, "created_at": m.CreatedAt})
+	c.JSON(http.StatusCreated, memberJSON(m))
+}
+
+// updateTeamMember PATCH /api/v1/teams/:id/members/:uid {role?, role_id?}：
+// 仅团队 owner 可改成员角色（系统角色或自定义角色）；owner 成员不可改（403）。
+func (h *Handler) updateTeamMember(c *gin.Context) {
+	teamID, ok := parseID(c, c.Param("id"))
+	if !ok {
+		return
+	}
+	memberUserID, ok := parseID(c, c.Param("uid"))
+	if !ok {
+		return
+	}
+	var req teamMemberRequest
+	if c.ShouldBindJSON(&req) != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	role, roleID, ok := parseMemberRole(c, req)
+	if !ok {
+		return
+	}
+	m, err := h.teams.UpdateMemberRole(userID(c), teamID, memberUserID, role, roleID)
+	if teamError(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, memberJSON(m))
 }
 
 // removeTeamMember DELETE /api/v1/teams/:id/members/:uid：仅团队 owner 可移除成员；owner 成员不可移除。
@@ -229,7 +291,7 @@ func (h *Handler) listTeamMembers(c *gin.Context) {
 	}
 	items := make([]gin.H, 0, len(members))
 	for _, m := range members {
-		items = append(items, gin.H{"user_id": m.UserID, "role": m.Role, "created_at": m.CreatedAt})
+		items = append(items, memberJSON(m))
 	}
 	c.JSON(http.StatusOK, gin.H{"members": items})
 }
@@ -252,6 +314,26 @@ func teamFolderLimit(c *gin.Context) (int, bool) {
 	return limit, true
 }
 
+// requireTeamRead 校验 actor 对团队空间的读权限（系统角色任意成员；自定义角色
+// 按 read 勾选且未被 deny；角色行缺失 fail closed）。无读权限按 404 处理
+// （不泄露团队存在性）。返回 true 表示校验通过（false 时已写响应）。
+func (h *Handler) requireTeamRead(c *gin.Context, teamID, actor uuid.UUID) bool {
+	if _, err := h.teams.Get(teamID); err != nil {
+		teamError(c, err)
+		return false
+	}
+	ok, err := h.teams.CanRead(actor, teamID)
+	if err != nil {
+		teamError(c, err)
+		return false
+	}
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "team not found"})
+		return false
+	}
+	return true
+}
+
 // listTeamFiles GET /api/v1/teams/:id/files?parent_id=：列出团队根目录或子目录，成员可读；
 // 非成员 404（不泄露团队存在性）。parent_id 缺省时返回团队根目录内容。
 // tag_id/starred 过滤（目录范围内）与 sort/order 排序可选，语义同个人 /files。
@@ -261,17 +343,7 @@ func (h *Handler) listTeamFiles(c *gin.Context) {
 		return
 	}
 	actor := userID(c)
-	if _, err := h.teams.Get(teamID); err != nil {
-		teamError(c, err)
-		return
-	}
-	role, err := h.teams.Role(teamID, actor)
-	if err != nil {
-		teamError(c, err)
-		return
-	}
-	if role == "" {
-		c.JSON(http.StatusNotFound, gin.H{"error": "team not found"})
+	if !h.requireTeamRead(c, teamID, actor) {
 		return
 	}
 	limit, ok := teamFolderLimit(c)
@@ -296,7 +368,7 @@ func (h *Handler) listTeamFiles(c *gin.Context) {
 		if !ok {
 			return
 		}
-		parent, err = h.files.Get(actor, parentID)
+		parent, err := h.files.Get(actor, parentID)
 		if err != nil {
 			// 团队目录不以 actor 为 owner，改按团队作用域查询。
 			var ferr error
@@ -311,6 +383,7 @@ func (h *Handler) listTeamFiles(c *gin.Context) {
 			return
 		}
 	} else {
+		var err error
 		parent, err = h.files.TeamRoot(teamID)
 		if err != nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": "folder not found"})
@@ -335,7 +408,8 @@ type teamFolderRequest struct {
 }
 
 // createTeamFolder POST /api/v1/teams/:id/folders {name, parent_id?}：
-// 在团队根目录（缺省）或指定目录下建目录，editor 及以上角色可写（viewer 403）。
+// 在团队根目录（缺省）或指定目录下建目录；写权限由 CreateFolderIn 内的
+// CanWrite 判定（owner/editor/含 write 权限的自定义角色，viewer 403）。
 func (h *Handler) createTeamFolder(c *gin.Context) {
 	teamID, ok := parseID(c, c.Param("id"))
 	if !ok {
@@ -347,33 +421,29 @@ func (h *Handler) createTeamFolder(c *gin.Context) {
 		return
 	}
 	actor := userID(c)
-	if _, err := h.teams.Get(teamID); err != nil {
-		teamError(c, err)
-		return
-	}
-	role, err := h.teams.Role(teamID, actor)
-	if err != nil {
-		teamError(c, err)
-		return
-	}
-	if role == "" {
-		c.JSON(http.StatusNotFound, gin.H{"error": "team not found"})
+	if !h.requireTeamRead(c, teamID, actor) {
 		return
 	}
 	var parent files.File
 	if req.ParentID == "" {
+		var err error
 		parent, err = h.files.TeamRoot(teamID)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "folder not found"})
+			return
+		}
 	} else {
 		var parentID uuid.UUID
 		parentID, ok = parseID(c, req.ParentID)
 		if !ok {
 			return
 		}
+		var err error
 		parent, err = h.files.GetTeamFolder(teamID, parentID)
-	}
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "folder not found"})
-		return
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "folder not found"})
+			return
+		}
 	}
 	f, err := h.files.CreateFolderIn(actor, parent.ID, req.Name)
 	if h.fileError(c, err) {

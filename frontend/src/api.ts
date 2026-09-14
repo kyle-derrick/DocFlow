@@ -213,17 +213,22 @@ export async function setFileStarred(fileId: string, starred: boolean): Promise<
   return api<FileItem>(`/api/v1/files/${fileId}/starred`, jsonInit('PATCH', { starred }))
 }
 
-/** 列表查询选项：标签/收藏过滤（进入跨目录检索模式）与排序。 */
+/** 列表查询选项：标签/收藏过滤（进入跨目录检索模式）、最近访问与排序。 */
 export interface FileQueryOptions {
   tagId?: string | null
   starred?: boolean
+  /** true 时走 ?recent=true：最近访问文件（last_access_at 倒序，服务端忽略其余过滤与 parent_id）。 */
+  recent?: boolean
   sort?: 'name' | 'updated_at' | 'size'
   order?: 'asc' | 'desc'
 }
 
 function buildFileQuery(parentId: string | null, opts?: FileQueryOptions): string {
   const params = new URLSearchParams()
-  if (opts?.tagId || opts?.starred !== undefined) {
+  if (opts?.recent) {
+    // 最近访问模式优先级最高（服务端语义），忽略 parent_id 与标签/收藏过滤。
+    params.set('recent', 'true')
+  } else if (opts?.tagId || opts?.starred !== undefined) {
     // 检索模式：忽略 parent_id（服务端语义），跨个人+团队可读文件。
     if (opts?.tagId) params.set('tag_id', opts.tagId)
     if (opts?.starred !== undefined) params.set('starred', String(opts.starred))
@@ -553,12 +558,13 @@ export const OIDC_LOGIN_PATH = '/api/v1/auth/oidc/login'
 
 // ---------- 站内通知与通知偏好 ----------
 
-/** 通知事件类型（v1.0 范围 + v1.1 配额警告）。 */
+/** 通知事件类型（v1.0 范围 + v1.1 配额警告 + G6 版本删除通知）。 */
 export type NotificationEventType =
   | 'upload.completed'
   | 'upload.quarantined'
   | 'share.accessed'
   | 'file.updated'
+  | 'file.version.deleted'
   | 'quota.warning'
 
 /** 通知条目（GET /notifications）。 */
@@ -735,6 +741,16 @@ export async function createFolder(name: string, parentId: string | null): Promi
 
 export async function renameFile(id: string, name: string): Promise<FileItem> {
   return api<FileItem>(`/api/v1/files/${id}`, jsonInit('PATCH', { name }))
+}
+
+/**
+ * 复制文件（仅文件，文件夹 400）：默认副本名「<原名> copy」，name 可覆盖；
+ * parentId 为目标目录 UUID（须对目标目录有写权限）。返回新文件元数据。
+ */
+export async function copyFile(id: string, parentId: string, name?: string): Promise<FileItem> {
+  const body: Record<string, unknown> = { parent_id: parentId }
+  if (name) body.name = name
+  return api<FileItem>(`/api/v1/files/${id}/copy`, jsonInit('POST', body))
 }
 
 export async function deleteFile(id: string): Promise<void> {
@@ -1081,13 +1097,36 @@ export interface CreatedTeam extends Team {
   root_folder_id: string
 }
 
-export type TeamRole = 'owner' | 'editor' | 'viewer'
+export type TeamRole = 'owner' | 'editor' | 'viewer' | 'custom'
 
 export interface TeamMember {
   user_id: string
   role: TeamRole
+  /** 自定义角色 ID（role=custom 时存在）。 */
+  role_id?: string
+  /** 自定义角色名（role=custom 时存在）。 */
+  role_name?: string
   created_at: string
   team_id?: string
+}
+
+/** 角色细粒度权限（设计 6.5.2）；deny 中的动作显式拒绝且优先于 allow。 */
+export interface RolePermissions {
+  read?: boolean
+  write?: boolean
+  delete?: boolean
+  share?: boolean
+  admin?: boolean
+  deny?: string[]
+}
+
+export interface TeamRoleDef {
+  id: string
+  team_id: string
+  name: string
+  permissions: RolePermissions
+  member_count: number
+  created_at: string
 }
 
 /** 创建团队：创建者自动成为 owner 成员并生成团队根目录。 */
@@ -1106,14 +1145,67 @@ export async function listTeamMembers(teamId: string): Promise<TeamMember[]> {
   return data.members ?? []
 }
 
-/** 添加成员（仅团队 owner）。 */
-export async function addTeamMember(teamId: string, userId: string, role: 'editor' | 'viewer'): Promise<TeamMember> {
-  return api<TeamMember>(`/api/v1/teams/${teamId}/members`, jsonInit('POST', { user_id: userId, role }))
+/** 添加成员（仅团队 owner）。roleId 非空时绑定自定义角色（忽略 role）。 */
+export async function addTeamMember(
+  teamId: string,
+  userId: string,
+  role: 'editor' | 'viewer',
+  roleId?: string,
+): Promise<TeamMember> {
+  const body = roleId
+    ? { user_id: userId, role_id: roleId }
+    : { user_id: userId, role }
+  return api<TeamMember>(`/api/v1/teams/${teamId}/members`, jsonInit('POST', body))
+}
+
+/** 修改成员角色（仅团队 owner；owner 成员不可改）。roleId 非空时绑定自定义角色。 */
+export async function updateTeamMemberRole(
+  teamId: string,
+  userId: string,
+  role: 'editor' | 'viewer',
+  roleId?: string,
+): Promise<TeamMember> {
+  const body = roleId
+    ? { role_id: roleId }
+    : { role }
+  return api<TeamMember>(`/api/v1/teams/${teamId}/members/${userId}`, jsonInit('PATCH', body))
 }
 
 /** 移除成员（仅团队 owner；owner 成员不可移除）。 */
 export async function removeTeamMember(teamId: string, userId: string): Promise<void> {
   await api(`/api/v1/teams/${teamId}/members/${userId}`, { method: 'DELETE' })
+}
+
+// ---------- 团队自定义角色（设计 6.5.2） ----------
+
+/** 自定义角色列表（仅团队 owner；含 member_count 引用统计）。 */
+export async function listTeamRoles(teamId: string): Promise<TeamRoleDef[]> {
+  const data = await api<{ roles: TeamRoleDef[] }>(`/api/v1/teams/${teamId}/roles`)
+  return data.roles ?? []
+}
+
+/** 创建自定义角色（permissions 勾选 + deny 显式拒绝）。 */
+export async function createTeamRole(
+  teamId: string,
+  name: string,
+  permissions: RolePermissions,
+): Promise<TeamRoleDef> {
+  return api<TeamRoleDef>(`/api/v1/teams/${teamId}/roles`, jsonInit('POST', { name, permissions }))
+}
+
+/** 更新自定义角色。 */
+export async function updateTeamRole(
+  teamId: string,
+  roleId: string,
+  name: string,
+  permissions: RolePermissions,
+): Promise<void> {
+  await api(`/api/v1/teams/${teamId}/roles/${roleId}`, jsonInit('PATCH', { name, permissions }))
+}
+
+/** 删除自定义角色；仍有成员引用时 409。 */
+export async function deleteTeamRole(teamId: string, roleId: string): Promise<void> {
+  await api(`/api/v1/teams/${teamId}/roles/${roleId}`, { method: 'DELETE' })
 }
 
 export interface TeamFileListing {
@@ -1357,6 +1449,9 @@ export type SettingType = 'bool' | 'int' | 'string'
 
 export type SettingValue = boolean | number | string
 
+/** 设置变更的生效方式（G6）：立即 / 新会话 / 需重启。 */
+export type SettingEffect = 'immediate' | 'new_session' | 'restart'
+
 /** GET /admin/settings 条目；value 为按 type 解析后的当前生效值（未设置时为默认值）。 */
 export interface SettingItem {
   key: string
@@ -1364,8 +1459,16 @@ export interface SettingItem {
   type: SettingType
   description: string
   default: SettingValue
+  /** 变更生效方式徽章数据源（立即/新会话/需重启）。 */
+  effect: SettingEffect
   updated_at?: string
   updated_by?: string | null
+}
+
+/** GET /admin/settings 响应：设置列表 + 密钥类配置的只读状态（只报 configured，不回显值）。 */
+export interface AdminSettingsResult {
+  settings: SettingItem[]
+  secrets: Record<string, boolean>
 }
 
 export interface AdminStats {
@@ -1379,9 +1482,8 @@ export interface AdminStats {
   tokens: number
 }
 
-export async function adminGetSettings(): Promise<SettingItem[]> {
-  const data = await api<{ settings: SettingItem[] }>('/api/v1/admin/settings')
-  return data.settings ?? []
+export async function adminGetSettings(): Promise<AdminSettingsResult> {
+  return api<AdminSettingsResult>('/api/v1/admin/settings')
 }
 
 /** 更新单个设置（未知键 404、类型/范围不符 400、非 admin 403）；返回归一化后的值。 */
@@ -1395,6 +1497,46 @@ export async function adminPutSetting(key: string, value: SettingValue): Promise
 
 export async function adminGetStats(): Promise<AdminStats> {
   return api<AdminStats>('/api/v1/admin/stats')
+}
+
+// ---------- 隔离区管理（仅 admin；G6） ----------
+
+/** 隔离 blob 条目（GET /admin/quarantine）；file_* 经 file_versions join，孤儿 blob 为 null。 */
+export interface QuarantineItem {
+  sha256: string
+  size: number
+  mime_type: string
+  ref_count: number
+  file_id?: string | null
+  file_name?: string | null
+  created_at: string
+}
+
+export async function adminListQuarantine(limit = 100): Promise<QuarantineItem[]> {
+  const data = await api<{ items: QuarantineItem[] }>(`/api/v1/admin/quarantine?limit=${limit}`)
+  return data.items ?? []
+}
+
+export type QuarantineAction = 'rescan' | 'release' | 'delete'
+
+/**
+ * 处置隔离 blob（POST /admin/quarantine/:sha256/action）：
+ * rescan 返回处置后状态；release 须 confirm=true（缺省 400）；delete 成功 204
+ * （返回 null）。全部动作服务端写审计。
+ */
+export async function adminQuarantineAction(
+  sha256: string,
+  action: QuarantineAction,
+  opts: { confirm?: boolean } = {},
+): Promise<{ status: string } | null> {
+  if (action === 'delete') {
+    await api(`/api/v1/admin/quarantine/${encodeURIComponent(sha256)}/action`, jsonInit('POST', { action }))
+    return null
+  }
+  return api<{ sha256: string; status: string }>(
+    `/api/v1/admin/quarantine/${encodeURIComponent(sha256)}/action`,
+    jsonInit('POST', { action, confirm: opts.confirm ?? false }),
+  )
 }
 
 export interface AuditEntry {
@@ -1421,10 +1563,65 @@ export async function adminDownloadAuditCSV(action = ''): Promise<void> {
   if (!res.ok) throw new ApiError(res.status, '审计日志导出失败')
   saveBlob(await res.blob(), 'audit-logs.csv')
 }
-export interface BackupStatus { configured: boolean; latest?: { name: string; size: number; modified_at: string; manifest: string } }
+// ---------- 管理端备份（仅 admin；执行由 scripts/backup 在服务进程外完成） ----------
+
+/** 备份清单内的单文件条目（GET /admin/backups/status 返回）。 */
+export interface BackupFileEntry {
+  path: string
+  type: string
+  sha256: string
+  size: number
+}
+
+/** 最近备份摘要（组件 / 对象存储模式 / 总大小 / 时间）。 */
+export interface BackupLastInfo {
+  name: string
+  manifest: string
+  timestamp?: string
+  modified_at: string
+  size: number
+  components?: string[]
+  object_store?: string
+  encryption?: string
+}
+
+/** GET /admin/backups/status：enabled=BACKUP_DIR 已配置；verified 为 null 表示从未校验。 */
+export interface BackupStatus {
+  enabled: boolean
+  last_backup: BackupLastInfo | null
+  verified: boolean | null
+  verified_at?: string
+  files: BackupFileEntry[]
+}
+
+/** POST /admin/backups/verify：对最近备份的只读 sha256 复核结果。 */
+export interface BackupVerifyResult {
+  manifest: string
+  backup: string
+  timestamp?: string
+  files: number
+  verified: boolean
+  errors?: string[]
+}
+
 export async function adminGetBackupStatus(): Promise<BackupStatus> {
   return api<BackupStatus>('/api/v1/admin/backups/status')
 }
+
+/**
+ * 校验最近备份（只读 sha256 复核，服务端不执行脚本）。校验未通过时服务端
+ * 返回 422 且响应体为复核明细——此处同样解析为结果对象（verified=false，
+ * errors 为失败原因），仅网络/权限等错误抛 ApiError。
+ */
+export async function adminVerifyBackup(): Promise<BackupVerifyResult> {
+  const res = await authFetch('/api/v1/admin/backups/verify', { method: 'POST' })
+  const data = (await parseBody(res)) as (BackupVerifyResult & { error?: string }) | null
+  if (res.status === 200 || res.status === 422) {
+    return data as BackupVerifyResult
+  }
+  throw new ApiError(res.status, data?.error ?? '备份校验失败')
+}
+
 export async function adminRunBackup(): Promise<void> {
   await api('/api/v1/admin/backups/run', { method: 'POST' })
 }

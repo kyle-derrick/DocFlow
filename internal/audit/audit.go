@@ -19,6 +19,7 @@ const (
 	// 文件版本管理：新版本写入（上传覆盖）与 current_version 回滚。
 	ActionVersionCreate  = "version.create"
 	ActionVersionRestore = "version.restore"
+	ActionVersionDelete  = "file.version.delete"
 	// 系统设置与后台清理（janitor）。
 	ActionSettingsUpdate = "settings.update"
 	ActionJanitorUpload  = "janitor.upload"
@@ -50,6 +51,14 @@ const (
 	ActionFileCopy          = "file.copy"
 	ActionUserUpdate        = "user.update"
 	ActionUserResetPassword = "user.reset_password"
+	// 备份管理：POST /admin/backups/verify 的只读 sha256 复核（成功/失败均记录；
+	// 备份执行在服务进程外，run 端点恒 501 不审计）。
+	ActionBackupVerify = "backup.verify"
+	// 隔离区管理（仅 admin，POST /admin/quarantine/:sha256/action）：
+	// 重扫 / 解除隔离（release 须显式 confirm）/ 删除（解除引用并删对象）。
+	ActionQuarantineRescan  = "quarantine.rescan"
+	ActionQuarantineRelease = "quarantine.release"
+	ActionQuarantineDelete  = "quarantine.delete"
 )
 
 // resource_type 常量。
@@ -68,6 +77,8 @@ const (
 	ResourceToken = "token"
 	// ResourceWebhook 为出站 webhook（webhooks 行）。
 	ResourceWebhook = "webhook"
+	// ResourceBackup 为备份产物（BACKUP_DIR 下的 docflow-backup-<ts> 目录）。
+	ResourceBackup = "backup"
 )
 
 // status 常量。

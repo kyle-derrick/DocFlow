@@ -3,6 +3,7 @@ package files
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -257,7 +258,7 @@ func TestAddVersionDoesNotReuseNonAvailableBlob(t *testing.T) {
 	if _, _, err := addVersionLogic(repo, f2.ID, "objects/c", shaC, 3, "text/plain", owner); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pruneVersionsLogic(repo, f2.ID, 1); err != nil { // 裁掉 v1(shaB)，current=v2 受保护
+	if _, err := pruneVersionsLogic(repo, f2.ID, 1, time.Time{}); err != nil { // 裁掉 v1(shaB)，current=v2 受保护
 		t.Fatal(err)
 	}
 	if b := repo.blobs[blobB.ID]; b.Status != BlobStatusDeleting || b.RefCount != 0 {
@@ -334,7 +335,7 @@ func TestPruneVersionsKeepsLatestAndProtectsCurrent(t *testing.T) {
 		t.Fatalf("seed versions = %d, want 7", len(versions))
 	}
 
-	pruned, err := pruneVersionsLogic(repo, f.ID, 5)
+	pruned, err := pruneVersionsLogic(repo, f.ID, 5, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -365,7 +366,7 @@ func TestPruneVersionsKeepsLatestAndProtectsCurrent(t *testing.T) {
 	}
 	// 现在 7 个版本（v3..v9），keep=5 → 保留窗口 v9..v5；窗口外 v4 被裁，
 	// v3 是 current 受保护 → 最终 6 个版本，pruned=1。
-	pruned, err = pruneVersionsLogic(repo, f.ID, 5)
+	pruned, err = pruneVersionsLogic(repo, f.ID, 5, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -408,7 +409,7 @@ func TestPruneVersionsSharedBlobOnlyDecrements(t *testing.T) {
 		t.Fatalf("ref_count = %d, want 2", got)
 	}
 	// keep=1：裁掉 v1，blob 仍被 v2 引用 → 只递减、绝不标记 deleting。
-	pruned, err := pruneVersionsLogic(repo, f.ID, 1)
+	pruned, err := pruneVersionsLogic(repo, f.ID, 1, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,4 +1,4 @@
-.PHONY: run test fmt seed migrate e2e build-frontend up-minimal up-full down backup backup-windows
+.PHONY: run test fmt seed migrate e2e build-frontend up-minimal up-full down backup backup-verify backup-windows backup-windows-verify
 
 run:
 	go run ./cmd/server
@@ -59,5 +59,12 @@ down:
 backup:
 	sh scripts/backup.sh
 
+# 对最近一次备份重算 sha256 校验（写 verify.json 标记，GET /admin/backups/status 读取展示）。
+backup-verify:
+	sh scripts/backup.sh --verify
+
 backup-windows:
 	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/backup.ps1
+
+backup-windows-verify:
+	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/backup.ps1 -verify

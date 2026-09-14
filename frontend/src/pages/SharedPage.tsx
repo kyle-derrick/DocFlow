@@ -10,6 +10,7 @@ import {
   revokeShare,
 } from '../api'
 import { formatTime } from '../components/FileBrowser'
+import { MessageKey, t, useLocale } from '../i18n'
 
 /**
  * 我的分享：按 created_at 倒序列出我创建的分享（公开与私有）。
@@ -20,6 +21,8 @@ import { formatTime } from '../components/FileBrowser'
  *（GET /shares/:id 详情端点，IP 已脱敏为前缀）。
  */
 export default function SharedPage() {
+  const locale = useLocale()
+  const msg = (key: MessageKey) => t(locale, key)
   const [shares, setShares] = useState<ShareItem[]>([])
   const [names, setNames] = useState<Record<string, string>>({})
   const [loading, setLoading] = useState(true)
@@ -46,7 +49,7 @@ export default function SharedPage() {
       })
       setNames(map)
     } catch (err) {
-      setError(err instanceof Error ? err.message : '加载分享失败')
+      setError(err instanceof Error ? err.message : msg('sharedLoadFailed'))
       setShares([])
     } finally {
       setLoading(false)
@@ -55,6 +58,7 @@ export default function SharedPage() {
 
   useEffect(() => {
     void load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const toggleStats = async (s: ShareItem) => {
@@ -86,11 +90,11 @@ export default function SharedPage() {
   }
 
   const handleRevoke = async (s: ShareItem) => {
-    if (!window.confirm('确定撤销该分享？撤销后立即失效，不可恢复。')) return
+    if (!window.confirm(msg('revokeConfirm'))) return
     setError('')
     try {
       await revokeShare(s.id)
-      setNotice('分享已撤销')
+      setNotice(msg('shareRevoked'))
       setStatsOpen((prev) => {
         const next = { ...prev }
         delete next[s.id]
@@ -99,7 +103,7 @@ export default function SharedPage() {
       await load()
     } catch (err) {
       setNotice('')
-      setError(err instanceof Error ? err.message : '撤销失败')
+      setError(err instanceof Error ? err.message : msg('revokeFailed'))
     }
   }
 
@@ -110,33 +114,33 @@ export default function SharedPage() {
       setCopiedId(s.id)
       setTimeout(() => setCopiedId((cur) => (cur === s.id ? '' : cur)), 2000)
     } catch {
-      setError('复制失败，请手动复制')
+      setError(msg('clipboardCopyFailed'))
     }
   }
 
   return (
     <div className="page">
       <div className="page-head">
-        <h2>我的分享</h2>
-        <button className="btn ghost" onClick={() => void load()}>刷新</button>
+        <h2>{msg('sharedTitle')}</h2>
+        <button className="btn ghost" onClick={() => void load()}>{msg('refresh')}</button>
       </div>
 
       {error && <div className="banner error">{error}</div>}
       {notice && <div className="banner ok">{notice}</div>}
-      {loading && <div className="hint">加载中…</div>}
-      {!loading && !error && shares.length === 0 && <div className="empty">暂无分享记录</div>}
+      {loading && <div className="hint">{msg('loading')}</div>}
+      {!loading && !error && shares.length === 0 && <div className="empty">{msg('sharedEmpty')}</div>}
 
       {shares.length > 0 && (
         <table className="file-table share-table">
           <thead>
             <tr>
-              <th>文件名</th>
-              <th>权限</th>
-              <th>可见性</th>
-              <th>链接</th>
-              <th>下载次数</th>
-              <th>过期时间</th>
-              <th className="col-actions">操作</th>
+              <th>{msg('fileName')}</th>
+              <th>{msg('permission')}</th>
+              <th>{msg('visibility')}</th>
+              <th>{msg('link')}</th>
+              <th>{msg('downloadCount')}</th>
+              <th>{msg('expiresAt')}</th>
+              <th className="col-actions">{msg('actions')}</th>
             </tr>
           </thead>
           <tbody>
@@ -152,15 +156,13 @@ export default function SharedPage() {
                   <tr className={invalid ? 'row-muted' : ''}>
                     <td title={s.file_id}>
                       {s.file_name ?? names[s.file_id] ?? `${s.file_id.slice(0, 8)}…`}
-                      {s.has_password && <span className="badge" title="受密码保护"> 🔒</span>}
-                      {s.watermark_enabled !== false && <span className="badge" title="水印已开启"> ◍</span>}
                     </td>
-                    <td>{s.permission === 'download' ? '可下载' : '仅查看'}</td>
+                    <td>{s.permission === 'download' ? msg('canDownload') : msg('viewOnly')}</td>
                     <td>
                       {visibility === 'public' ? (
-                        <span className="badge">公开</span>
+                        <span className="badge">{msg('publicBadge')}</span>
                       ) : visibility === 'private' ? (
-                        <span className="badge private">私有</span>
+                        <span className="badge private">{msg('privateBadge')}</span>
                       ) : (
                         <span className="muted">—</span>
                       )}
@@ -172,12 +174,12 @@ export default function SharedPage() {
                           title={`${window.location.origin}/s/${publicToken}`}
                           onClick={() => void copyLink(s, publicToken)}
                         >
-                          {copiedId === s.id ? '已复制 ✓' : '复制链接'}
+                          {copiedId === s.id ? msg('copied') : msg('copyLink')}
                         </button>
                       ) : visibility === 'public' ? (
-                        <span className="muted">链接创建时已展示</span>
+                        <span className="muted">{msg('linkShownOnCreate')}</span>
                       ) : visibility === 'private' ? (
-                        <span className="muted">授权用户/团队访问</span>
+                        <span className="muted">{msg('grantedAccess')}</span>
                       ) : (
                         <span className="muted">—</span>
                       )}
@@ -188,19 +190,19 @@ export default function SharedPage() {
                     </td>
                     <td className="muted">
                       {revoked ? (
-                        <span className="badge failed">已撤销</span>
+                        <span className="badge failed">{msg('revokedBadge')}</span>
                       ) : expired ? (
-                        <span className="badge failed">已过期</span>
+                        <span className="badge failed">{msg('expiredBadge')}</span>
                       ) : (
                         formatTime(s.expires_at as string)
                       )}
                     </td>
                     <td className="col-actions">
                       <button className="btn small" onClick={() => void toggleStats(s)}>
-                        {stats ? '收起统计' : '统计'}
+                        {stats ? msg('hideStats') : msg('stats')}
                       </button>
                       {!revoked && (
-                        <button className="btn small danger" onClick={() => void handleRevoke(s)}>撤销</button>
+                        <button className="btn small danger" onClick={() => void handleRevoke(s)}>{msg('revoke')}</button>
                       )}
                     </td>
                   </tr>
@@ -208,23 +210,22 @@ export default function SharedPage() {
                     <tr className="share-stats-row">
                       <td colSpan={7}>
                         {stats === 'loading' ? (
-                          <span className="hint">统计加载中…</span>
+                          <span className="hint">{msg('statsLoading')}</span>
                         ) : stats === 'error' ? (
-                          <span className="error-text">统计加载失败，请重试</span>
+                          <span className="error-text">{msg('statsFailed')}</span>
                         ) : (
                           <div className="share-stats">
                             <div className="share-stats-summary">
-                              <span>总访问：<strong>{stats.stats.total_access}</strong></span>
-                              <span>独立访客：<strong>{stats.stats.unique_visitors}</strong></span>
-                              <span className="muted">（公开下载/预览成功计入；IP 以哈希存储，仅展示脱敏前缀）</span>
+                              <span>{msg('totalAccess')}：<strong>{stats.stats.total_access}</strong></span>
+                              <span>{msg('uniqueVisitors')}：<strong>{stats.stats.unique_visitors}</strong></span>
                             </div>
                             {stats.stats.recent.length > 0 ? (
                               <table className="file-table share-stats-table">
                                 <thead>
                                   <tr>
-                                    <th>时间</th>
-                                    <th>动作</th>
-                                    <th>IP 前缀</th>
+                                    <th>{msg('time')}</th>
+                                    <th>{msg('actionCol')}</th>
+                                    <th>{msg('ipPrefix')}</th>
                                     <th>User-Agent</th>
                                   </tr>
                                 </thead>
@@ -232,7 +233,7 @@ export default function SharedPage() {
                                   {stats.stats.recent.map((r, i) => (
                                     <tr key={i}>
                                       <td className="muted">{formatTime(r.time)}</td>
-                                      <td>{r.action === 'download' ? '下载' : '预览'}</td>
+                                      <td>{r.action === 'download' ? msg('download') : msg('preview')}</td>
                                       <td className="muted">{r.ip_prefix || '—'}</td>
                                       <td className="muted share-stats-ua" title={r.user_agent}>{r.user_agent || '—'}</td>
                                     </tr>
@@ -240,7 +241,7 @@ export default function SharedPage() {
                                 </tbody>
                               </table>
                             ) : (
-                              <p className="hint">暂无访问记录</p>
+                              <p className="hint">{msg('noAccessRecords')}</p>
                             )}
                           </div>
                         )}

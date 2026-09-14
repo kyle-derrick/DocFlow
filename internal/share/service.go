@@ -229,6 +229,9 @@ type Service struct {
 	files      FileSource
 	membership TeamMembership
 	directory  UserDirectory
+	// teamSharer 团队文件分享门控（main 注入 team.CanShare）：nil 时团队文件
+	// 分享一律拒绝（fail closed），个人文件分享不受影响。
+	teamSharer TeamSharer
 	// defaultExpiryHours 为「创建请求未指定有效期」时的默认时长（小时）
 	// 热读取（system_settings 的 share.default_expiry_hours，main 注入）；
 	// nil 或返回非正值时回退既有行为（不设默认，即永久）。
@@ -339,6 +342,37 @@ func (s *Service) SetTeamMembership(m TeamMembership) {
 	}
 }
 
+// TeamSharer 判定用户能否为团队文件创建分享（team 包 CanShare 注入实现：
+// 系统角色 owner/editor、自定义角色按 share 勾选且未被 deny）。
+type TeamSharer func(userID, teamID uuid.UUID) (bool, error)
+
+// SetTeamSharer 注入团队文件分享门控（设计 6.5.5；幂等）：
+// 未注入时团队文件分享一律拒绝（fail closed），个人文件不受影响。
+func (s *Service) SetTeamSharer(fn TeamSharer) {
+	if fn != nil {
+		s.teamSharer = fn
+	}
+}
+
+// authorizeShare 团队文件分享门控：仅 CanShare（系统 owner/editor 或含 share
+// 权限的自定义角色）可创建分享；个人文件不经过本判定（Get 已校验 owner）。
+func (s *Service) authorizeShare(f files.File, user uuid.UUID) error {
+	if f.ScopeType != "team" || f.TeamID == nil {
+		return nil
+	}
+	if s.teamSharer == nil {
+		return ErrForbidden
+	}
+	ok, err := s.teamSharer(user, *f.TeamID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrForbidden
+	}
+	return nil
+}
+
 // SetUserDirectory 注入用户目录解析器（幂等）。
 func (s *Service) SetUserDirectory(d UserDirectory) {
 	if d != nil {
@@ -372,6 +406,7 @@ func (s *Service) Create(owner, fileID uuid.UUID, permission string, expiresIn t
 }
 
 // CreatePublic 在 Create 基础上支持可选的密码保护与水印字段（ShareOptions）。
+// 团队文件须经 CanShare 门控（设计 6.5.5：owner/editor/含 share 权限的自定义角色）。
 func (s *Service) CreatePublic(owner, fileID uuid.UUID, permission string, expiresIn time.Duration, maxDownloads *int, opts ShareOptions) (Share, string, error) {
 	if s.publicEnabled != nil && !s.publicEnabled() {
 		return Share{}, "", ErrPublicDisabled
@@ -402,6 +437,9 @@ func (s *Service) CreatePublic(owner, fileID uuid.UUID, permission string, expir
 	f, err := s.files.Get(owner, fileID)
 	if err != nil {
 		return Share{}, "", ErrFileNotFound
+	}
+	if err := s.authorizeShare(f, owner); err != nil {
+		return Share{}, "", err
 	}
 	if f.Type != "file" {
 		return Share{}, "", ErrFileNotShareable
@@ -444,6 +482,7 @@ func (s *Service) CreatePrivate(owner, fileID uuid.UUID, permission string, expi
 
 // CreatePrivateWithOptions 在 CreatePrivate 基础上支持水印字段；
 // 密码仅适用于公开分享，显式传入返回 ErrInvalidPassword。
+// 团队文件须经 CanShare 门控（同 CreatePublic）。
 func (s *Service) CreatePrivateWithOptions(owner, fileID uuid.UUID, permission string, expiresIn time.Duration, maxDownloads *int, userIds, teamIds []uuid.UUID, opts ShareOptions) (Share, error) {
 	if permission != PermissionView && permission != PermissionDownload {
 		return Share{}, ErrInvalidPermission
@@ -469,6 +508,9 @@ func (s *Service) CreatePrivateWithOptions(owner, fileID uuid.UUID, permission s
 	f, err := s.files.Get(owner, fileID)
 	if err != nil {
 		return Share{}, ErrFileNotFound
+	}
+	if err := s.authorizeShare(f, owner); err != nil {
+		return Share{}, err
 	}
 	if f.Type != "file" {
 		return Share{}, ErrFileNotShareable

@@ -197,3 +197,62 @@ func TestStoreHotReadFallbacks(t *testing.T) {
 		t.Fatalf("GetInt default = %d, %v; want 30, nil", n, err)
 	}
 }
+
+// TestDefinitionsEffectMetadata effect 元数据矩阵：每个内置键 effect 必须为
+// 合法枚举值；GetAll 视图透传 effect；关键键按真实行为标注
+// （热读取键 immediate、启动装配键 restart、本批次接线的门控键 immediate）。
+func TestDefinitionsEffectMetadata(t *testing.T) {
+	valid := map[string]bool{EffectImmediate: true, EffectNewSession: true, EffectRestart: true}
+	for _, d := range Definitions {
+		if !valid[d.Effect] {
+			t.Errorf("key %s: effect %q not in enum", d.Key, d.Effect)
+		}
+	}
+	// 关键键的 effect 按实现标注抽查。
+	want := map[string]string{
+		KeyUploadMaxVersionsPerFile:   EffectImmediate,
+		KeyUploadVersionRetentionDays: EffectImmediate,
+		KeyUploadBlockedExtensions:    EffectImmediate,
+		KeyMaxConcurrentUploads:       EffectImmediate,
+		KeyBatchMaxItems:              EffectImmediate,
+		KeyFolderMaxDepth:             EffectImmediate,
+		KeyAuditRetentionDays:         EffectImmediate,
+		KeyRateLimitPerMinute:         EffectRestart,
+		KeyLoginMaxRetries:            EffectRestart,
+		KeyLoginLockMinutes:           EffectRestart,
+		KeyBackupEnabled:              EffectRestart,
+		KeyBackupRetentionDays:        EffectRestart,
+	}
+	for key, effect := range want {
+		d, err := DefinitionByKey(key)
+		if err != nil {
+			t.Fatalf("%s: %v", key, err)
+		}
+		if d.Effect != effect {
+			t.Errorf("key %s: effect = %s, want %s", key, d.Effect, effect)
+		}
+	}
+	// GetAll 视图透传 effect；新键默认值语义（0 天窗口/空黑名单/深度 32）。
+	views, err := newTestStore(newMemRepo(), audit.NopRecorder{}).GetAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	byKey := make(map[string]SettingView, len(views))
+	for _, v := range views {
+		byKey[v.Key] = v
+	}
+	for key, effect := range want {
+		if byKey[key].Effect != effect {
+			t.Errorf("view %s: effect = %s, want %s", key, byKey[key].Effect, effect)
+		}
+	}
+	if v := byKey[KeyUploadVersionRetentionDays]; v.Value.(int64) != 0 {
+		t.Fatalf("retention default = %v, want 0（默认不启用时间窗）", v.Value)
+	}
+	if v := byKey[KeyUploadBlockedExtensions]; v.Value.(string) != "" {
+		t.Fatalf("blocked extensions default = %q, want empty", v.Value)
+	}
+	if v := byKey[KeyFolderMaxDepth]; v.Value.(int64) != 32 {
+		t.Fatalf("folder depth default = %v, want 32", v.Value)
+	}
+}

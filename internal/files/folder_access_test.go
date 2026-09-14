@@ -112,6 +112,57 @@ func fakeTeamReader(members map[uuid.UUID][]uuid.UUID) TeamReader {
 	}
 }
 
+// fakeTeamDeleter 按 (user, team) 集合模拟 team 包的 CanDelete 查询。
+func fakeTeamDeleter(deletable map[uuid.UUID][]uuid.UUID) TeamDeleter {
+	return func(user, teamID uuid.UUID) (bool, error) {
+		for _, t := range deletable[user] {
+			if t == teamID {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+}
+
+// TestAuthorizeTeamDeleteMatrix 覆盖删除入口（DELETE /files/:id、DELETE /trash/:id）
+// 的授权矩阵：个人文件仅 owner（404 不泄露）；团队文件按 CanDelete（系统仅 owner、
+// 自定义角色按 delete 勾选），文件行 owner（上传者）不短路。
+func TestAuthorizeTeamDeleteMatrix(t *testing.T) {
+	creator, teamOwner, editor, other := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	teamA := uuid.New()
+
+	personal := File{ID: uuid.New(), Name: "own.txt", OwnerID: creator, Type: "file", ScopeType: "personal"}
+	teamFile := File{ID: uuid.New(), Name: "team.txt", OwnerID: creator, Type: "file", ScopeType: "team", TeamID: &teamA}
+
+	deleter := fakeTeamDeleter(map[uuid.UUID][]uuid.UUID{
+		teamOwner: {teamA}, // 团队 owner：CanDelete=true
+		// creator（文件行 owner）非团队 owner：CanDelete=false（delete 独立于 write）；
+		// editor：delete=false；other：非成员。
+	})
+
+	tests := []struct {
+		name    string
+		user    uuid.UUID
+		file    File
+		deleter TeamDeleter
+		wantErr error
+	}{
+		{"personal file by owner", creator, personal, deleter, nil},
+		{"personal file by other user", other, personal, deleter, ErrNotFound},
+		{"team file by team owner", teamOwner, teamFile, deleter, nil},
+		{"team file by row owner without delete", creator, teamFile, deleter, ErrForbidden},
+		{"team file by editor (no delete)", editor, teamFile, deleter, ErrForbidden},
+		{"team file by non-member", other, teamFile, deleter, ErrForbidden},
+		{"team file without deleter injected", teamOwner, teamFile, nil, ErrForbidden},
+	}
+	for _, tc := range tests {
+		err := authorizeTeamDelete(tc.file, tc.user, tc.deleter)
+		if !errors.Is(err, tc.wantErr) {
+			t.Errorf("%s: err = %v, want %v", tc.name, err, tc.wantErr)
+		}
+	}
+}
+
 // TestAuthorizeFileAccessMatrix 覆盖 GET/下载/预览统一入口 authorizeFileAccess 的读授权矩阵：
 // 个人文件仅 owner；团队文件任意在册成员（owner/editor/viewer）可读；非成员/跨团队 404 不泄露存在性。
 func TestAuthorizeFileAccessMatrix(t *testing.T) {

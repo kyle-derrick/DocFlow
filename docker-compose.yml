@@ -98,6 +98,10 @@ services:
       JANITOR_INTERVAL: ${JANITOR_INTERVAL:-10m}
       # 后台任务队列：inprocess（默认）| redis（需 --profile full 且
       # REDIS_ADDR 指向 redis 服务；QUEUE_DRIVER=redis 时启动 ping 失败即退出）。
+      # 多实例横向扩展（backend 副本 >1）必须 QUEUE_DRIVER=redis：除任务
+      # 队列外，WebSocket 站内通知的跨实例广播也复用同一 Redis
+      #（docflow:notify Pub/Sub 扇出到全部实例的本地连接）；inprocess 下
+      # 通知仅达本实例连接（跨实例用户收不到实时推送）。
       QUEUE_DRIVER: ${QUEUE_DRIVER:-inprocess}
       REDIS_ADDR: ${REDIS_ADDR:-redis:6379}
       REDIS_PASSWORD: ${REDIS_PASSWORD:-}
@@ -138,6 +142,11 @@ services:
       WEBPKG_RATE_LIMIT_PER_MIN: ${WEBPKG_RATE_LIMIT_PER_MIN:-120}
     expose:
       - "8080"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     volumes:
       - backend_storage:/data/storage
     depends_on:
@@ -167,6 +176,8 @@ services:
   # Redis（full profile）：后台任务队列的后端存储——QUEUE_DRIVER=redis 时
   # backend 经 asynq（hibiken/asynq）把上传补完/网页包解包任务写入 Redis，
   # 多实例部署下任意实例的 worker 均可消费（无本地状态，横向扩展安全）；
+  # 同一 Redis 还承载 WebSocket 站内通知的跨实例广播（docflow:notify
+  # Pub/Sub 频道，QUEUE_DRIVER=redis 时启用），多实例 backend 共享。
   # 默认 QUEUE_DRIVER=inprocess 时本服务不被使用。进程内限流仍为内存实现，
   # 多实例下各实例独立计数。归入 full profile：minimal 栈保持零 Redis 依赖，
   # backend 亦不声明 depends_on（避免把 redis 拖入 minimal）；未挂宿主端口。

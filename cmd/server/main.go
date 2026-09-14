@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -27,6 +28,7 @@ import (
 	"github.com/docflow/docflow/internal/notify"
 	"github.com/docflow/docflow/internal/oidc"
 	"github.com/docflow/docflow/internal/onlyoffice"
+	"github.com/docflow/docflow/internal/readiness"
 	"github.com/docflow/docflow/internal/realtime"
 	"github.com/docflow/docflow/internal/search"
 	"github.com/docflow/docflow/internal/settings"
@@ -59,10 +61,15 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	// 团队：GormStore 提供成员/写权限查询（后续可替换为 Casbin 适配器）。
+	// 团队：GormStore 提供成员/角色查询，Service 按设计 6.5 权限模型求值
+	//（系统角色映射 + 自定义角色 permissions JSON + deny 优先 + 角色缺失
+	// fail closed；后续可替换为 Casbin 适配器）。
 	teamStore := team.NewGormStore(db)
 	teamService := team.NewService(teamStore)
-	fileStore.SetTeamWriter(teamStore.CanWrite)
+	// 团队写权限（上传/建目录/追加版本/重命名/恢复）：owner/editor/含 write 权限角色。
+	fileStore.SetTeamWriter(teamService.CanWrite)
+	// 团队删除权限（软删除/彻底删除）：系统仅 owner、自定义角色按 delete 勾选。
+	fileStore.SetTeamDeleter(teamService.CanDelete)
 	// 版本管理：每文件保留版本数上限（MAX_VERSIONS_PER_FILE，默认 5）为回退值；
 	// 运行时经 system_settings 的 upload.max_versions_per_file 热读取覆盖
 	//（读失败回退 config 值）。
@@ -76,10 +83,26 @@ func main() {
 		}
 		return n
 	})
-	// 团队文件读判定：任意在册成员（owner/editor/viewer）可读，成员变动实时生效。
-	fileStore.SetTeamReader(func(userID, teamID uuid.UUID) (bool, error) {
-		return teamStore.UserInAnyTeam(userID, []uuid.UUID{teamID})
+	// 版本保留时间窗（G6）：upload.version_retention_days 热读取；0 = 不启用
+	//（仅按数量上限裁剪，与既有行为一致），读取失败回退 0。
+	fileStore.SetVersionRetentionDaysProvider(func() int {
+		n, err := settingsStore.GetInt(settings.KeyUploadVersionRetentionDays)
+		if err != nil || n < 0 {
+			return 0
+		}
+		return n
 	})
+	// 目录最大深度（G6）：folder.max_depth 热读取（根为 1），读取失败回退 32。
+	fileStore.SetMaxFolderDepthProvider(func() int {
+		n, err := settingsStore.GetInt(settings.KeyFolderMaxDepth)
+		if err != nil || n < 1 {
+			return 32
+		}
+		return n
+	})
+	// 团队文件读判定（设计 6.5）：CanRead——系统角色任意在册成员可读、
+	// 自定义角色按 read 勾选且未被 deny（角色行缺失 fail closed），实时生效。
+	fileStore.SetTeamReader(teamService.CanRead)
 	userStore := auth.NewUserStore(db)
 	// 新用户开户默认配额（C3）：system_settings 的 upload.default_quota 热读取
 	//（邀请注册 / OIDC 自动开户共用 CreateUser 回填；读失败回退 10GiB 常量）。
@@ -135,6 +158,22 @@ func main() {
 	// 扫描结果与 scan 阶段耗时计入 Prometheus 指标（docflow_scan_results_total、
 	// docflow_upload_processing_duration_seconds{stage=scan}）。
 	uploadService.SetScanner(upload.NewCountingScanner(upload.SelectScanner(cfg.ScanEnabled, cfg.ClamAVAddr, cfg.ClamAVRequired, cfg.ClamAVTimeout)))
+	// 团队文件版本删除通知（file.version.deleted）：DeleteVersion 事务提交后
+	// 回调（files.dispatchVersionDeleted 已过滤——仅 scope_type=team 且
+	// 删除者≠owner）；异步通知文件 owner 该文件的一个历史版本被删除。
+	fileStore.SetVersionDeletedDispatcher(func(f files.File, actor uuid.UUID, version files.FileVersion) {
+		go func() {
+			actorName := "团队成员"
+			if name, err := userStore.Username(actor); err == nil && name != "" {
+				actorName = name
+			}
+			title := "文件版本已删除：" + f.Name
+			body := fmt.Sprintf("%s 删除了文件「%s」的历史版本 v%d；当前版本不受影响。", actorName, f.Name, version.Version)
+			if err := notifyService.Notify(f.OwnerID, notify.EventFileVersionDeleted, title, body, f.ID); err != nil {
+				log.Printf("[notify] file.version.deleted %s: %v", f.ID, err)
+			}
+		}()
+	})
 	// 上传链路「覆盖为新版本」：会话校验目标文件（CanWrite），Complete 时
 	// AddVersion + PruneVersions（版本保留数经 settings 热读取）。
 	uploadService.SetVersionTarget(fileStore.ValidateReplaceTarget, fileStore.ReplaceFileVersion)
@@ -150,6 +189,30 @@ func main() {
 	})
 	// 单次 PATCH 请求体上限（PATCH_MAX_BYTES，默认 64MiB）。
 	uploadService.SetPatchMaxBytes(cfg.PatchMaxBytes)
+	// 每用户并发上传会话上限（G6）：upload.max_concurrent_uploads_per_user
+	// 热读取（GormStore DB COUNT 计数，多实例共享同一计数来源）；读失败
+	// 回退 settings 默认 3。
+	uploadService.SetMaxConcurrentUploadsProvider(func() int {
+		n, err := settingsStore.GetInt(settings.KeyMaxConcurrentUploads)
+		if err != nil || n < 1 {
+			return 3
+		}
+		return n
+	})
+	// 上传扩展名黑名单（G6）：upload.blocked_extensions 热读取（逗号分隔，
+	// 默认空 = 不拦截）；建会话与 Complete 双侧校验，命中 400。
+	uploadService.SetBlockedExtensionsProvider(func() []string {
+		raw, err := settingsStore.GetString(settings.KeyUploadBlockedExtensions)
+		if err != nil || strings.TrimSpace(raw) == "" {
+			return nil
+		}
+		parts := strings.Split(raw, ",")
+		out := make([]string, 0, len(parts))
+		for _, part := range parts {
+			out = append(out, strings.TrimSpace(part))
+		}
+		return out
+	})
 	// 站内通知接线（upload.completed / upload.quarantined）：完成路径
 	//（新文件/覆盖新版本成功）与隔离终态通知属主，标题含文件名。
 	uploadService.SetNotifyDispatcher(notifyDispatch(notifyService, "upload"))
@@ -228,6 +291,17 @@ func main() {
 		enqueuer = inProcess
 		log.Print("queue driver: inprocess")
 	}
+	// WebSocket 跨实例广播桥：QUEUE_DRIVER=redis 时复用队列同一 Redis
+	//（REDIS_ADDR/REDIS_PASSWORD，连通性已由上方 PingRedis 一并校验），
+	// 经 docflow:notify Pub/Sub 频道把站内通知扇出到所有实例的本地连接
+	//（Hub 本地直发 + 远端订阅分发，msg_id seen 去重回环）；inprocess 下
+	// Noop 桥保持单实例纯本地行为。
+	var broadcaster realtime.Broadcaster = realtime.NoopBroadcaster{}
+	if cfg.QueueDriver == "redis" {
+		broadcaster = realtime.NewRedisBroadcaster(cfg.RedisAddr, cfg.RedisPassword)
+		log.Printf("ws broadcast: redis (channel=%s)", "docflow:notify")
+	}
+	realtimeHub.SetBroadcaster(broadcaster)
 	// 上传完成钩子（新建与覆盖版本两条成功路径均触发，见 upload.Complete）：
 	// 网页包自动解包与全文索引构建统一经队列派发（inprocess 时即原
 	//「goroutine 内联执行」行为；候选判定在处理侧）。
@@ -241,6 +315,9 @@ func main() {
 	})
 	shareService := share.NewService(share.NewGormStore(db), fileStore)
 	shareService.SetTeamMembership(teamStore)
+	// 团队文件分享门控（设计 6.5.5）：仅 CanShare（系统 owner/editor、
+	// 自定义角色按 share 勾选且未被 deny）可创建团队文件分享；个人文件不受影响。
+	shareService.SetTeamSharer(teamService.CanShare)
 	shareService.SetUserDirectory(userStore)
 	// 站内通知接线（share.accessed）：公开/私有分享下载成功（计数已消耗）
 	// 通知分享 owner，标题含文件名（私有分享 owner 本人下载不通知）。
@@ -339,7 +416,12 @@ func main() {
 	if err := router.SetTrustedProxies(cfg.TrustedProxies); err != nil {
 		log.Fatalf("TRUSTED_PROXIES: %v", err)
 	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		log.Fatal(err)
+	}
 	handler := httpapi.NewHandler(service, userStore, fileStore, shareService, teamService, uploadService, storage, cfg.CookieSecure, cfg.CookieDomain, cfg.RefreshTokenTTL)
+	handler.SetReadinessChecker(readiness.New(sqlDB, cfg, storage))
 	handler.SetAuditRecorder(auditStore)
 	handler.SetAuditQuerySource(auditStore)
 	handler.SetRealtimeHub(realtimeHub, cfg.AllowedOrigins, cfg.Environment)
@@ -360,6 +442,11 @@ func main() {
 	handler.SetSettingsService(settingsStore)
 	handler.SetStatsSource(httpapi.NewAdminStats(db))
 	handler.SetRoleLookup(userStore)
+	// 隔离区管理（G6，仅 admin）：隔离 blob 列表与 rescan/release/delete
+	// 处置（复用 fileStore.PurgeBlobs 的两步物理删除语义；扫描器与上传
+	// 链路同一选型的独立实例）。
+	handler.SetQuarantineService(httpapi.NewQuarantineService(db, storage,
+		upload.NewCountingScanner(upload.SelectScanner(cfg.ScanEnabled, cfg.ClamAVAddr, cfg.ClamAVRequired, cfg.ClamAVTimeout)), fileStore))
 	// C9 登录失败锁定策略与 C10 refresh/logout 同源严格校验（CSRF_STRICT）。
 	handler.SetLoginLockout(cfg.LoginMaxRetries, cfg.LoginLockDuration)
 	handler.SetCSRFStrict(cfg.CSRFStrict)
@@ -424,8 +511,10 @@ func main() {
 	handler.SetWebpkg(webpkgService, cfg.WebpkgRateLimitPerMinute)
 	handler.Register(router, cfg.JWTSecret, cfg.RateLimitPerMinute, cfg.LoginRateLimitPerMinute, cfg.PublicRateLimitPerMinute)
 	// 后台清理任务（janitor）：过期上传会话、deleting blob 回收与回收站超期清理。
+	// 回收站超期清理走系统级 PurgeSystem（不做用户 CanDelete 判定——清理的是
+	// 全部用户的超期项，与 HTTP purge 入口的授权删除区分）。
 	if cfg.JanitorEnabled {
-		j := janitor.New(janitor.NewGormRepo(db), fileStore, storage, settingsStore, auditStore)
+		j := janitor.New(janitor.NewGormRepo(db), systemPurger{store: fileStore}, storage, settingsStore, auditStore)
 		j.SetInterval(cfg.JanitorInterval)
 		go j.RunForever(ctx)
 		log.Printf("janitor enabled (interval=%s)", cfg.JanitorInterval)
@@ -459,6 +548,10 @@ func main() {
 	if closer, ok := enqueuer.(interface{ Close() error }); ok {
 		_ = closer.Close()
 	}
+	// 广播桥最后收尾（HTTP 已 Shutdown，本地连接均已在 Register cleanup 摘除）。
+	if closer, ok := broadcaster.(interface{ Close() error }); ok {
+		_ = closer.Close()
+	}
 }
 
 // newStorage 按 STORAGE_DRIVER 选择存储实现（local | s3）。
@@ -471,6 +564,19 @@ func newStorage(cfg config.Config) (upload.Storage, error) {
 		log.Printf("storage driver: local (root=%s)", cfg.StorageRoot)
 		return upload.NewLocalStorage(cfg.StorageRoot)
 	}
+}
+
+// systemPurger 将 files.Store 的系统级彻底删除适配为 janitor.Purger：
+// 回收站超期清理不做用户 CanDelete 判定（HTTP purge 入口走 Store.Purge 的
+// 授权版本），owner 参数仅为满足接口、实际忽略。
+type systemPurger struct{ store *files.Store }
+
+func (p systemPurger) Purge(_, id uuid.UUID) ([]files.File, []files.ObjectBlob, error) {
+	return p.store.PurgeSystem(id)
+}
+
+func (p systemPurger) PurgeBlobs(blobs []files.ObjectBlob, deleteObject func(string) error) error {
+	return p.store.PurgeBlobs(blobs, deleteObject)
 }
 
 // notifyDispatch 把 upload/share 的通知回调适配为 notify.Dispatcher 调用

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -13,13 +14,28 @@ import (
 	"time"
 
 	"github.com/docflow/docflow/internal/files"
+	"github.com/docflow/docflow/internal/settings"
 	"github.com/docflow/docflow/internal/upload"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
 
-// batchMaxItems 单次批量操作上限（设计 7.9 BATCH_OPERATION_MAX_ITEMS=100）。
+// batchMaxItems 单次批量操作上限的回退值（settings 读取失败/未注入时）；
+// 运行时经 system_settings 的 batch.max_items 热读取覆盖（设计 7.9
+// BATCH_OPERATION_MAX_ITEMS=100）。
 const batchMaxItems = 100
+
+// batchLimit 返回当前生效的批量操作上限：settings 热读取优先（每次请求），
+// 读取失败或非法值（<1）时回退 batchMaxItems。
+func (h *Handler) batchLimit() int {
+	if h.settings == nil {
+		return batchMaxItems
+	}
+	if n, err := h.settings.GetInt(settings.KeyBatchMaxItems); err == nil && n >= 1 {
+		return n
+	}
+	return batchMaxItems
+}
 
 // idempotencyTTL 幂等键缓存有效期（同 key+同 body hash 在窗口内重放缓存响应）。
 const idempotencyTTL = 60 * time.Second
@@ -133,13 +149,15 @@ func (h *Handler) idempotency(c *gin.Context) {
 }
 
 // parseBatchIDs 解析并去重 file_ids（保持顺序）：空/超上限/非 UUID 均整体 400。
-func parseBatchIDs(c *gin.Context, raw []string) ([]uuid.UUID, bool) {
+// 上限经 batch.max_items 热读取（settings 未注入或读取失败回退 100）。
+func (h *Handler) parseBatchIDs(c *gin.Context, raw []string) ([]uuid.UUID, bool) {
 	if len(raw) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "file_ids is required"})
 		return nil, false
 	}
-	if len(raw) > batchMaxItems {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "too many items (max 100)"})
+	limit := h.batchLimit()
+	if len(raw) > limit {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("too many items (max %d)", limit)})
 		return nil, false
 	}
 	seen := map[uuid.UUID]bool{}
@@ -173,7 +191,7 @@ func (h *Handler) batchMove(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
 	}
-	ids, ok := parseBatchIDs(c, req.FileIDs)
+	ids, ok := h.parseBatchIDs(c, req.FileIDs)
 	if !ok {
 		return
 	}
@@ -208,7 +226,7 @@ func (h *Handler) batchTrash(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
 	}
-	ids, ok := parseBatchIDs(c, req.FileIDs)
+	ids, ok := h.parseBatchIDs(c, req.FileIDs)
 	if !ok {
 		return
 	}
@@ -225,7 +243,7 @@ func (h *Handler) batchRestore(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
 	}
-	ids, ok := parseBatchIDs(c, req.FileIDs)
+	ids, ok := h.parseBatchIDs(c, req.FileIDs)
 	if !ok {
 		return
 	}
@@ -239,7 +257,7 @@ func (h *Handler) batchDownload(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
 	}
-	ids, ok := parseBatchIDs(c, req.FileIDs)
+	ids, ok := h.parseBatchIDs(c, req.FileIDs)
 	if !ok {
 		return
 	}

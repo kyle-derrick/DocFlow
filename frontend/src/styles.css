@@ -422,6 +422,33 @@ body {
   margin-bottom: 8px;
 }
 
+/* 视图切换（全部/收藏/最近）：置于筛选栏最左侧，与下拉筛选同高。 */
+.view-tabs .seg {
+  padding: 4px 14px;
+  font-size: 13px;
+}
+
+/* 批量分享结果：链接列表（文件名 + 链接 + 复制按钮），长列表内部滚动。 */
+.share-link-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 320px;
+  overflow: auto;
+  margin-bottom: 4px;
+}
+
+.share-link-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.share-link-name {
+  font-size: 12px;
+  word-break: break-all;
+}
+
 .batch-bar {
   display: flex;
   flex-wrap: wrap;
@@ -1096,6 +1123,102 @@ body {
 
 .badge.role-viewer {
   color: var(--muted);
+}
+
+.badge.role-custom {
+  color: var(--warn, #d19a26);
+}
+
+/* ---------- 团队空间：角色管理与成员改派 ---------- */
+
+.member-role-select {
+  font-size: 12px;
+  padding: 2px 6px;
+  max-width: 130px;
+}
+
+.role-panel {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.role-panel h3 {
+  margin: 0 0 10px;
+  font-size: 15px;
+}
+
+.role-list {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+}
+
+.role-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.role-row:last-child {
+  border-bottom: none;
+}
+
+.role-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.role-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.role-perms {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.role-count {
+  font-size: 11px;
+}
+
+.role-form {
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.role-form .field {
+  margin-bottom: 10px;
+}
+
+.perm-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin-bottom: 10px;
+}
+
+.perm-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  margin: 0;
+}
+
+.perm-check.deny {
+  color: var(--danger, #d9534f);
+}
+
+.role-form-actions {
+  justify-content: flex-start;
+  padding-bottom: 6px;
 }
 
 .badge.private {

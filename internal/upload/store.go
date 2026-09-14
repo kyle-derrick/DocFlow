@@ -75,3 +75,16 @@ func (s *GormStore) MarkAvailable(id uuid.UUID, storageKey string, completedAt t
 		Updates(map[string]any{"status": StatusAvailable, "storage_key": storageKey, "completed_at": completedAt})
 	return result.RowsAffected > 0, result.Error
 }
+
+// CountActiveByUser 统计用户当前活跃（uploading/verifying/scanning 且未
+// 过期）的上传会话数（DB COUNT）：作为 upload.max_concurrent_uploads_per_user
+// 门控的计数来源。DB 为多实例共享的单一事实来源，水平扩展下语义一致；
+// 计数在 Save 之前统计，瞬时并窗口下为软上限（并发建会话可短暂超出，
+// 不引入行锁以避免建会话热路径串行化）。
+func (s *GormStore) CountActiveByUser(user uuid.UUID, now time.Time) (int64, error) {
+	var n int64
+	err := s.db.Model(&UploadSession{}).
+		Where("user_id = ? AND status IN ? AND expires_at > ?", user, []Status{StatusUploading, StatusVerifying, StatusScanning}, now).
+		Count(&n).Error
+	return n, err
+}

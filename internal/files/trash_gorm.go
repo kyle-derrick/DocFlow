@@ -13,10 +13,10 @@ import (
 // 由 Store 在事务内构造，保证彻底删除的原子性。
 type gormTrashRepo struct{ tx *gorm.DB }
 
-func (g *gormTrashRepo) GetAny(owner, id uuid.UUID) (File, error) {
+func (g *gormTrashRepo) GetAny(id uuid.UUID) (File, error) {
 	var f File
 	err := g.tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-		Where("id = ? AND owner_id = ?", id, owner).First(&f).Error
+		Where("id = ?", id).First(&f).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return File{}, ErrNotFound
 	}

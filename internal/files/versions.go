@@ -70,29 +70,31 @@ type versionsRepo interface {
 	MarkBlobDeletingIfZero(id uuid.UUID) (bool, error)
 }
 
-func deleteVersionLogic(r versionsRepo, fileID, versionID uuid.UUID) error {
+func deleteVersionLogic(r versionsRepo, fileID, versionID uuid.UUID) (FileVersion, error) {
 	f, err := r.GetFileForUpdate(fileID)
 	if err != nil {
-		return err
+		return FileVersion{}, err
 	}
 	v, err := r.GetVersion(versionID)
 	if err != nil {
-		return err
+		return FileVersion{}, err
 	}
 	if v.FileID != fileID {
-		return ErrNotFileVersion
+		return FileVersion{}, ErrNotFileVersion
 	}
 	if f.CurrentVersionID != nil && *f.CurrentVersionID == versionID {
-		return ErrCurrentVersion
+		return FileVersion{}, ErrCurrentVersion
 	}
 	if err := r.DeleteVersion(versionID); err != nil {
-		return err
+		return FileVersion{}, err
 	}
 	if err := r.DecrementBlobRef(v.ObjectBlobID); err != nil {
-		return err
+		return FileVersion{}, err
 	}
-	_, err = r.MarkBlobDeletingIfZero(v.ObjectBlobID)
-	return err
+	if _, err := r.MarkBlobDeletingIfZero(v.ObjectBlobID); err != nil {
+		return FileVersion{}, err
+	}
+	return v, nil
 }
 
 // addVersionLogic 向文件追加新版本（事务内的纯逻辑）：
@@ -174,15 +176,17 @@ func setCurrentVersionLogic(r versionsRepo, fileID, versionID uuid.UUID) (FileVe
 	return version, nil
 }
 
-// pruneVersionsLogic 保留最新 keep 个版本，裁掉其余（current_version 指向的版本永不移除）。
+// pruneVersionsLogic 组合保留策略：保留「最新 keep 个」∪「创建时间晚于
+// keepNewerThan 的版本」（时间窗；零值时间表示不启用窗口，即仅按数量裁剪，
+// 与既有行为一致），裁掉其余（current_version 指向的版本永不移除）。
 // 被裁版本解除 blob 引用（ref_count-1）；计数归零的 blob 置 status=deleting——
 // 物理删除延后：本函数只标状态，由后台清理（janitor）对每行在单事务内执行
 // “行锁→复核 status=deleting 且 ref_count=0→删存储对象→删行”（复用 trash.go
 // PurgeBlobs 的两步语义，失败可安全重试）。行锁与 AddVersion 的复活路径互斥，
 // 先后取得锁的一方胜出，不会删除仍被引用（或已复活）的对象。
 // 仍被其他版本/文件引用的对象只递减计数，绝不标记或删除。
-// keep<=0 时仅保护 current。返回被裁版本数。
-func pruneVersionsLogic(r versionsRepo, fileID uuid.UUID, keep int) (int, error) {
+// keep<=0 时仅保护 current 与时间窗。返回被裁版本数。
+func pruneVersionsLogic(r versionsRepo, fileID uuid.UUID, keep int, keepNewerThan time.Time) (int, error) {
 	f, err := r.GetFileForUpdate(fileID)
 	if err != nil {
 		return 0, err
@@ -198,6 +202,9 @@ func pruneVersionsLogic(r versionsRepo, fileID uuid.UUID, keep int) (int, error)
 		}
 		if f.CurrentVersionID != nil && v.ID == *f.CurrentVersionID {
 			continue // 回滚后 current 可能落在保留窗口外：永不裁剪
+		}
+		if !keepNewerThan.IsZero() && v.CreatedAt.After(keepNewerThan) {
+			continue // 保留时间窗内（createdAt > now-retentionDays）的版本
 		}
 		if err := r.DeleteVersion(v.ID); err != nil {
 			return pruned, err
@@ -330,6 +337,33 @@ func (s *Store) SetMaxVersions(n int) {
 	}
 }
 
+// SetVersionRetentionDaysProvider 注入版本保留时间窗（天）的运行时提供器
+// （幂等；nil 不覆盖）：每次 Prune 前热读取（system_settings 的
+// upload.version_retention_days）；返回 0 表示不启用时间窗（仅按数量裁剪，
+// 默认），负值视为读取失败回退 0。
+func (s *Store) SetVersionRetentionDaysProvider(fn func() int) {
+	if fn != nil {
+		s.retentionDaysFn = fn
+	}
+}
+
+// effectiveRetentionDays 返回当前生效的版本保留时间窗（0 = 不启用）。
+func (s *Store) effectiveRetentionDays() int {
+	if s.retentionDaysFn != nil {
+		return max(s.retentionDaysFn(), 0)
+	}
+	return 0
+}
+
+// retentionCutoff 返回组合保留策略的时间窗下限（版本创建时间晚于该值的
+// 不因数量裁剪删除）；未启用时间窗时返回零值时间。
+func (s *Store) retentionCutoff(now time.Time) time.Time {
+	if days := s.effectiveRetentionDays(); days > 0 {
+		return now.Add(-time.Duration(days) * 24 * time.Hour)
+	}
+	return time.Time{}
+}
+
 // SetMaxVersionsProvider 注入版本保留数的运行时提供器（幂等；nil 不覆盖）：
 // 提供器在每次 Prune 前热读取（如 system_settings 的 upload.max_versions_per_file），
 // 返回非正值（含读取失败时的回退哨兵 0/-1）时回退 SetMaxVersions 的静态值。
@@ -448,6 +482,9 @@ func (s *Store) ListVersions(user, fileID uuid.UUID) ([]VersionDetail, error) {
 // 权限：个人文件 owner、团队文件 CanWrite（authorizeFileWrite）；
 // 仅允许指向该文件的版本（ErrNotFileVersion）。返回更新后的文件（供 ETag）与新当前版本。
 // DeleteVersion 删除非 current 历史版本，并递减 blob 引用；零引用仅标记 deleting，由 janitor 物理回收。
+// 边界语义：current 指向的版本不可删（ErrCurrentVersion），因此文件至少保留
+// 一个版本（剩余版本数恒 ≥1）。事务提交后经 versionDeletedNotify 回调
+// （团队文件且删除者非 owner 时通知文件 owner file.version.deleted）。
 func (s *Store) DeleteVersion(user, fileID, versionID uuid.UUID) error {
 	var f File
 	if err := s.db.Where("id = ? AND deleted_at IS NULL", fileID).First(&f).Error; err != nil {
@@ -459,7 +496,26 @@ func (s *Store) DeleteVersion(user, fileID, versionID uuid.UUID) error {
 	if err := authorizeFileWrite(f, user, s.teamWriter); err != nil {
 		return err
 	}
-	return s.db.Transaction(func(tx *gorm.DB) error { return deleteVersionLogic(&gormVersionsRepo{tx: tx}, fileID, versionID) })
+	var version FileVersion
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		var e error
+		version, e = deleteVersionLogic(&gormVersionsRepo{tx: tx}, fileID, versionID)
+		return e
+	})
+	if err != nil {
+		return err
+	}
+	dispatchVersionDeleted(s.versionDeletedNotify, f, user, version)
+	return nil
+}
+
+// dispatchVersionDeleted 版本删除完成的通知分发判定：仅团队文件且删除者
+// 非文件行 owner 时回调（个人文件仅 owner 可删，owner 自删不通知避免噪音）。
+func dispatchVersionDeleted(cb VersionNotifyFunc, f File, actor uuid.UUID, version FileVersion) {
+	if cb == nil || teamScope(f) == nil || actor == f.OwnerID {
+		return
+	}
+	cb(f, actor, version)
 }
 
 func (s *Store) SetCurrentVersion(user, fileID, versionID uuid.UUID) (File, FileVersion, error) {
@@ -489,13 +545,16 @@ func (s *Store) SetCurrentVersion(user, fileID, versionID uuid.UUID) (File, File
 	return f, version, nil
 }
 
-// PruneVersions 裁剪文件历史版本，保留最新 keep 个（current 指向的版本受保护）。
+// PruneVersions 裁剪文件历史版本，组合保留策略生效：保留最新 keep 个 ∪
+// 时间窗内（upload.version_retention_days，经 SetVersionRetentionDaysProvider
+// 热读取；0=不启用，仅按数量裁剪）的版本；current 指向的版本受保护。
 // 返回被裁数量；blob 物理删除延后至 janitor（见 pruneVersionsLogic）。
 func (s *Store) PruneVersions(fileID uuid.UUID, keep int) (int, error) {
+	cutoff := s.retentionCutoff(time.Now().UTC())
 	var pruned int
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		var e error
-		pruned, e = pruneVersionsLogic(&gormVersionsRepo{tx: tx}, fileID, keep)
+		pruned, e = pruneVersionsLogic(&gormVersionsRepo{tx: tx}, fileID, keep, cutoff)
 		return e
 	})
 	if err != nil {

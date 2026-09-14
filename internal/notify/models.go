@@ -18,12 +18,14 @@ const (
 	EventShareAccessed = "share.accessed"
 	// EventFileUpdated 团队文件被他人更新新版本（发给团队其他成员；仅团队文件）。
 	EventFileUpdated = "file.updated"
+	// EventFileVersionDeleted 团队文件历史版本被他人删除（发给文件 owner）。
+	EventFileVersionDeleted = "file.version.deleted"
 	// EventQuotaWarning 存储配额用量警告（上传成功后用量超过阈值 80%，C3）。
 	EventQuotaWarning = "quota.warning"
 )
 
 // EventTypes 全部事件类型（设置页展示顺序）。
-var EventTypes = []string{EventUploadCompleted, EventUploadQuarantined, EventShareAccessed, EventFileUpdated, EventQuotaWarning}
+var EventTypes = []string{EventUploadCompleted, EventUploadQuarantined, EventShareAccessed, EventFileUpdated, EventFileVersionDeleted, EventQuotaWarning}
 
 // ValidEventType 判定事件类型是否已知。
 func ValidEventType(eventType string) bool {
@@ -37,11 +39,12 @@ func ValidEventType(eventType string) bool {
 
 // defaultEnabled 默认开关表：无偏好记录时按此生效（当前全部默认开启）。
 var defaultEnabled = map[string]bool{
-	EventUploadCompleted:   true,
-	EventUploadQuarantined: true,
-	EventShareAccessed:     true,
-	EventFileUpdated:       true,
-	EventQuotaWarning:      true,
+	EventUploadCompleted:    true,
+	EventUploadQuarantined:  true,
+	EventShareAccessed:      true,
+	EventFileUpdated:        true,
+	EventFileVersionDeleted: true,
+	EventQuotaWarning:       true,
 }
 
 // DefaultEnabled 返回事件类型的默认开关（未知类型默认开启，保守不丢通知）。

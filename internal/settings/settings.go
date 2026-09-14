@@ -23,6 +23,16 @@ const (
 	TypeString = "string"
 )
 
+// effect 取值：设置变更的生效方式元数据（管理端展示用）。
+const (
+	// EffectImmediate 变更即时生效（消费方每次请求热读取 system_settings）。
+	EffectImmediate = "immediate"
+	// EffectNewSession 变更对新会话/新登录生效。
+	EffectNewSession = "new_session"
+	// EffectRestart 变更须重启服务进程生效（启动时装配读取的配置）。
+	EffectRestart = "restart"
+)
+
 var (
 	// ErrUnknownKey 表示键不在内置定义中（不可设置/读取）。
 	ErrUnknownKey = errors.New("unknown settings key")
@@ -55,10 +65,19 @@ const (
 	KeyScanQuarantinePolicy      = "security.scan_quarantine_policy"
 	KeyBackupEnabled             = "backup.enabled"
 	KeyBackupRetentionDays       = "backup.retention_days"
+	KeyBackupEncryptionRequired  = "backup.encryption_required"
+	KeyBackupLastVerify          = "backup.last_verify"
 	KeyAuditRetentionDays        = "audit.retention_days"
+	// KeyUploadVersionRetentionDays 版本保留时间窗（天）：与
+	// upload.max_versions_per_file 组合——时间窗内的版本不因数量裁剪删除；
+	// 0 = 不启用时间窗（仅按数量裁剪，默认，避免行为突变）。
+	KeyUploadVersionRetentionDays = "upload.version_retention_days"
+	// KeyUploadBlockedExtensions 上传扩展名黑名单（逗号分隔，如
+	// "exe,bat,sh"）；默认空 = 不拦截。建会话与 Complete 双侧校验。
+	KeyUploadBlockedExtensions = "upload.blocked_extensions"
 )
 
-// Definition 是一个内置键的元数据：类型、默认值、取值范围与描述。
+// Definition 是一个内置键的元数据：类型、默认值、取值范围、描述与生效方式。
 type Definition struct {
 	Key         string
 	Type        string
@@ -67,6 +86,10 @@ type Definition struct {
 	// Min/Max 仅对 int 类型生效（含边界）；nil 表示不限。
 	Min *int64
 	Max *int64
+	// Effect 表示变更的生效方式（EffectImmediate/NewSession/Restart）：
+	// immediate 为消费方每次请求热读取；restart 为启动装配读取（当前
+	// security.* 限流与登录锁定参数均由 env 在启动时注入，须重启生效）。
+	Effect string
 }
 
 func intPtr(v int64) *int64 { return &v }
@@ -74,25 +97,29 @@ func intPtr(v int64) *int64 { return &v }
 // Definitions 是全部内置键定义；键顺序即 GetAll 输出顺序。
 // int 类型键的默认值统一存 int64（与 normalizeValue 归一化结果一致）。
 var Definitions = []Definition{
-	{Key: KeyUploadMaxVersionsPerFile, Type: TypeInt, Default: int64(5), Min: intPtr(1), Max: intPtr(1000), Description: "每文件保留的版本数上限（覆盖上传后按版本号裁剪历史版本）"},
-	{Key: KeyUploadMaxFileSize, Type: TypeInt, Default: int64(1 << 30), Min: intPtr(1), Max: intPtr(1 << 40), Description: "单文件上传大小上限（字节）"},
-	{Key: KeyUploadDefaultQuota, Type: TypeInt, Default: int64(10 << 30), Min: intPtr(1), Max: intPtr(1 << 50), Description: "新用户开户默认存储配额（字节，默认 10GiB）；仅对新创建用户生效，存量用户经管理端单独调整"},
-	{Key: KeyShareDefaultExpiryHours, Type: TypeInt, Default: int64(168), Min: intPtr(1), Max: intPtr(8760), Description: "公开分享默认有效期（小时）"},
-	{Key: KeyShareDefaultWatermark, Type: TypeBool, Default: true, Description: "新分享默认启用水印（创建请求未显式指定 watermark_enabled 时采用）"},
-	{Key: KeyShareWatermarkText, Type: TypeString, Default: "{date} {name}", Description: "水印默认模板，支持 {email}/{date}/{name} 占位符（公开访问无登录身份，{email} 渲染为脱敏 IP 前缀）"},
-	{Key: KeyRetentionTrashDays, Type: TypeInt, Default: int64(30), Min: intPtr(1), Max: intPtr(3650), Description: "回收站保留天数：软删除超过该天数后由后台清理任务彻底删除"},
-	{Key: KeyRetentionAccessEventsDays, Type: TypeInt, Default: int64(90), Min: intPtr(1), Max: intPtr(3650), Description: "文件访问事件保留天数：超过该天数后由后台清理任务删除"},
-	{Key: KeyRateLimitPerMinute, Type: TypeInt, Default: int64(120), Min: intPtr(0), Max: intPtr(100000), Description: "认证 API 每分钟请求上限"},
-	{Key: KeyLoginMaxRetries, Type: TypeInt, Default: int64(5), Min: intPtr(1), Max: intPtr(100), Description: "连续登录失败锁定阈值"},
-	{Key: KeyLoginLockMinutes, Type: TypeInt, Default: int64(15), Min: intPtr(1), Max: intPtr(10080), Description: "登录失败锁定时长（分钟）"},
-	{Key: KeyMaxConcurrentUploads, Type: TypeInt, Default: int64(3), Min: intPtr(1), Max: intPtr(100), Description: "每用户并发上传会话上限"},
-	{Key: KeyBatchMaxItems, Type: TypeInt, Default: int64(100), Min: intPtr(1), Max: intPtr(1000), Description: "批量操作单次最大项目数"},
-	{Key: KeyFolderMaxDepth, Type: TypeInt, Default: int64(100), Min: intPtr(1), Max: intPtr(1000), Description: "目录最大深度"},
-	{Key: KeySharePublicEnabled, Type: TypeBool, Default: true, Description: "是否允许创建公开分享"},
-	{Key: KeyScanQuarantinePolicy, Type: TypeString, Default: "quarantine", Description: "扫描失败处理策略：quarantine 或 reject"},
-	{Key: KeyBackupEnabled, Type: TypeBool, Default: false, Description: "是否启用备份任务"},
-	{Key: KeyBackupRetentionDays, Type: TypeInt, Default: int64(30), Min: intPtr(1), Max: intPtr(3650), Description: "备份保留天数"},
-	{Key: KeyAuditRetentionDays, Type: TypeInt, Default: int64(90), Min: intPtr(1), Max: intPtr(3650), Description: "审计日志保留天数"},
+	{Key: KeyUploadMaxVersionsPerFile, Type: TypeInt, Default: int64(5), Min: intPtr(1), Max: intPtr(1000), Effect: EffectImmediate, Description: "每文件保留的版本数上限（覆盖上传后按版本号裁剪历史版本；与 upload.version_retention_days 组合生效）"},
+	{Key: KeyUploadVersionRetentionDays, Type: TypeInt, Default: int64(0), Min: intPtr(0), Max: intPtr(3650), Effect: EffectImmediate, Description: "版本保留时间窗（天）：创建时间在窗口内的版本不因数量裁剪删除；0 = 不启用时间窗（默认，仅按数量上限裁剪）"},
+	{Key: KeyUploadBlockedExtensions, Type: TypeString, Default: "", Effect: EffectImmediate, Description: "上传扩展名黑名单（逗号分隔，如 exe,bat,sh；不含点、大小写不敏感）：命中的文件名在建会话与完成时拒绝（400）；默认空 = 不拦截"},
+	{Key: KeyUploadMaxFileSize, Type: TypeInt, Default: int64(1 << 30), Min: intPtr(1), Max: intPtr(1 << 40), Effect: EffectImmediate, Description: "单文件上传大小上限（字节）"},
+	{Key: KeyUploadDefaultQuota, Type: TypeInt, Default: int64(10 << 30), Min: intPtr(1), Max: intPtr(1 << 50), Effect: EffectImmediate, Description: "新用户开户默认存储配额（字节，默认 10GiB）；仅对新创建用户生效，存量用户经管理端单独调整"},
+	{Key: KeyShareDefaultExpiryHours, Type: TypeInt, Default: int64(168), Min: intPtr(1), Max: intPtr(8760), Effect: EffectImmediate, Description: "公开分享默认有效期（小时）"},
+	{Key: KeyShareDefaultWatermark, Type: TypeBool, Default: true, Effect: EffectImmediate, Description: "新分享默认启用水印（创建请求未显式指定 watermark_enabled 时采用）"},
+	{Key: KeyShareWatermarkText, Type: TypeString, Default: "{date} {name}", Effect: EffectImmediate, Description: "水印默认模板，支持 {email}/{date}/{name} 占位符（公开访问无登录身份，{email} 渲染为脱敏 IP 前缀）"},
+	{Key: KeyRetentionTrashDays, Type: TypeInt, Default: int64(30), Min: intPtr(1), Max: intPtr(3650), Effect: EffectImmediate, Description: "回收站保留天数：软删除超过该天数后由后台清理任务彻底删除"},
+	{Key: KeyRetentionAccessEventsDays, Type: TypeInt, Default: int64(90), Min: intPtr(1), Max: intPtr(3650), Effect: EffectImmediate, Description: "文件访问事件保留天数：超过该天数后由后台清理任务删除"},
+	{Key: KeyRateLimitPerMinute, Type: TypeInt, Default: int64(120), Min: intPtr(0), Max: intPtr(100000), Effect: EffectRestart, Description: "认证 API 每分钟请求上限（须重启生效：限流器在启动时按 env 装配，本键当前无热读取消费方）"},
+	{Key: KeyLoginMaxRetries, Type: TypeInt, Default: int64(5), Min: intPtr(1), Max: intPtr(100), Effect: EffectRestart, Description: "连续登录失败锁定阈值（须重启生效：由 env LOGIN_MAX_RETRIES 启动时注入）"},
+	{Key: KeyLoginLockMinutes, Type: TypeInt, Default: int64(15), Min: intPtr(1), Max: intPtr(10080), Effect: EffectRestart, Description: "登录失败锁定时长（分钟；须重启生效：由 env LOGIN_LOCK_MINUTES 启动时注入）"},
+	{Key: KeyMaxConcurrentUploads, Type: TypeInt, Default: int64(3), Min: intPtr(1), Max: intPtr(100), Effect: EffectImmediate, Description: "每用户并发上传会话上限：非终态会话（uploading/verifying/scanning）达到上限时新建会话返回 429"},
+	{Key: KeyBatchMaxItems, Type: TypeInt, Default: int64(100), Min: intPtr(1), Max: intPtr(1000), Effect: EffectImmediate, Description: "批量操作单次最大项目数"},
+	{Key: KeyFolderMaxDepth, Type: TypeInt, Default: int64(32), Min: intPtr(1), Max: intPtr(1000), Effect: EffectImmediate, Description: "目录最大深度（根为 1）：创建子目录与目录移动超过上限拒绝"},
+	{Key: KeySharePublicEnabled, Type: TypeBool, Default: true, Effect: EffectImmediate, Description: "是否允许创建公开分享"},
+	{Key: KeyScanQuarantinePolicy, Type: TypeString, Default: "quarantine", Effect: EffectImmediate, Description: "扫描失败处理策略：quarantine 或 reject（当前版本未接线：扫描失败一律隔离，隔离区可经管理端处置）"},
+	{Key: KeyBackupEnabled, Type: TypeBool, Default: false, Effect: EffectRestart, Description: "是否启用备份任务"},
+	{Key: KeyBackupRetentionDays, Type: TypeInt, Default: int64(30), Min: intPtr(1), Max: intPtr(3650), Effect: EffectRestart, Description: "备份保留天数"},
+	{Key: KeyBackupEncryptionRequired, Type: TypeBool, Default: true, Effect: EffectRestart, Description: "是否要求备份加密"},
+	{Key: KeyBackupLastVerify, Type: TypeString, Default: "", Effect: EffectRestart, Description: "最近一次备份验证时间"},
+	{Key: KeyAuditRetentionDays, Type: TypeInt, Default: int64(90), Min: intPtr(1), Max: intPtr(3650), Effect: EffectImmediate, Description: "审计日志保留天数"},
 }
 
 // DefinitionByKey 返回键定义；未知键返回 ErrUnknownKey。
@@ -158,13 +185,14 @@ type Setting struct {
 // TableName 显式映射到 system_settings（gorm 默认复数化为 settings）。
 func (Setting) TableName() string { return "system_settings" }
 
-// SettingView 是管理 API 的响应视图：解析后的值 + 类型与描述。
+// SettingView 是管理 API 的响应视图：解析后的值 + 类型、描述与生效方式。
 type SettingView struct {
 	Key         string     `json:"key"`
 	Value       any        `json:"value"`
 	Type        string     `json:"type"`
 	Description string     `json:"description"`
 	Default     any        `json:"default"`
+	Effect      string     `json:"effect"`
 	UpdatedAt   time.Time  `json:"updated_at,omitempty"`
 	UpdatedBy   *uuid.UUID `json:"updated_by,omitempty"`
 }
@@ -263,7 +291,7 @@ func (s *Store) GetAll() ([]SettingView, error) {
 	}
 	out := make([]SettingView, 0, len(Definitions))
 	for _, d := range Definitions {
-		view := SettingView{Key: d.Key, Type: d.Type, Description: d.Description, Default: d.Default, Value: d.Default}
+		view := SettingView{Key: d.Key, Type: d.Type, Description: d.Description, Default: d.Default, Value: d.Default, Effect: d.Effect}
 		if row, ok := stored[d.Key]; ok {
 			if value, err := decode(d, row.ValueJSON); err == nil {
 				view.Value = value

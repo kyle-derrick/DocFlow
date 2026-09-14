@@ -23,9 +23,9 @@ func newMemTrashRepo() *memTrashRepo {
 	return &memTrashRepo{files: make(map[uuid.UUID]File), versions: make(map[uuid.UUID]FileVersion), blobs: make(map[uuid.UUID]ObjectBlob), webpkgs: make(map[uuid.UUID]string)}
 }
 
-func (m *memTrashRepo) GetAny(owner, id uuid.UUID) (File, error) {
+func (m *memTrashRepo) GetAny(id uuid.UUID) (File, error) {
 	f, ok := m.files[id]
-	if !ok || f.OwnerID != owner {
+	if !ok {
 		return File{}, ErrNotFound
 	}
 	return f, nil
@@ -247,6 +247,10 @@ func (m *memTrashRepo) addVersion(fileID, blobID uuid.UUID, set bool) FileVersio
 
 func ptrID(id uuid.UUID) *uuid.UUID { return &id }
 
+// allowAll 直通授权回调：逻辑层单测只关注恢复/删除语义（授权由 Store 层
+// authorizeFileWrite/authorizeTeamDelete 回调注入，另见 folder_access_test）。
+func allowAll(File) error { return nil }
+
 // ---- restoreLogic ----
 
 func TestRestoreRejectsWhenParentDeleted(t *testing.T) {
@@ -256,12 +260,12 @@ func TestRestoreRejectsWhenParentDeleted(t *testing.T) {
 	parent := repo.addFile(owner, nil, "parent", "folder", false, &now)
 	child := repo.addFile(owner, ptrID(parent.ID), "doc.txt", "file", false, &now)
 
-	_, err := restoreLogic(repo, owner, child.ID)
+	_, err := restoreLogic(repo, child.ID, allowAll)
 	if err != ErrParentDeleted {
 		t.Fatalf("expected ErrParentDeleted, got %v", err)
 	}
 	// 不静默改名/移动：文件保持原名原父且仍处于软删除状态。
-	got, _ := repo.GetAny(owner, child.ID)
+	got, _ := repo.GetAny(child.ID)
 	if got.DeletedAt == nil || got.Name != "doc.txt" || got.ParentID == nil || *got.ParentID != parent.ID {
 		t.Fatalf("file was mutated during failed restore: %+v", got)
 	}
@@ -275,11 +279,11 @@ func TestRestoreRejectsNameConflict(t *testing.T) {
 	deleted := repo.addFile(owner, ptrID(root.ID), "a.txt", "file", false, &now)
 	repo.addFile(owner, ptrID(root.ID), "A.txt", "file", false, nil) // 同名活跃文件（大小写不敏感）
 
-	_, err := restoreLogic(repo, owner, deleted.ID)
+	_, err := restoreLogic(repo, deleted.ID, allowAll)
 	if err != ErrConflict {
 		t.Fatalf("expected ErrConflict, got %v", err)
 	}
-	got, _ := repo.GetAny(owner, deleted.ID)
+	got, _ := repo.GetAny(deleted.ID)
 	if got.DeletedAt == nil || got.Name != "a.txt" {
 		t.Fatalf("file was renamed or restored on conflict: %+v", got)
 	}
@@ -292,7 +296,7 @@ func TestRestoreSuccess(t *testing.T) {
 	now := time.Now()
 	deleted := repo.addFile(owner, ptrID(root.ID), "b.txt", "file", false, &now)
 
-	f, err := restoreLogic(repo, owner, deleted.ID)
+	f, err := restoreLogic(repo, deleted.ID, allowAll)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -305,15 +309,15 @@ func TestRestoreOnlyDeletedAndNeverRoot(t *testing.T) {
 	repo := newMemTrashRepo()
 	owner := uuid.New()
 	active := repo.addFile(owner, nil, "active", "file", false, nil)
-	if _, err := restoreLogic(repo, owner, active.ID); err != ErrNotDeleted {
+	if _, err := restoreLogic(repo, active.ID, allowAll); err != ErrNotDeleted {
 		t.Fatalf("restore active file: expected ErrNotDeleted, got %v", err)
 	}
 	now := time.Now()
 	root := repo.addFile(owner, nil, "root", "folder", true, &now)
-	if _, err := restoreLogic(repo, owner, root.ID); err != ErrRoot {
+	if _, err := restoreLogic(repo, root.ID, allowAll); err != ErrRoot {
 		t.Fatalf("restore deleted root: expected ErrRoot, got %v", err)
 	}
-	if _, err := restoreLogic(repo, owner, uuid.New()); err != ErrNotFound {
+	if _, err := restoreLogic(repo, uuid.New(), allowAll); err != ErrNotFound {
 		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
 }
@@ -324,12 +328,12 @@ func TestPurgeRejectsActiveAndRoot(t *testing.T) {
 	repo := newMemTrashRepo()
 	owner := uuid.New()
 	active := repo.addFile(owner, nil, "active", "file", false, nil)
-	if _, _, _, err := purgeLogic(repo, owner, active.ID); err != ErrNotDeleted {
+	if _, _, _, err := purgeLogic(repo, active.ID, allowAll); err != ErrNotDeleted {
 		t.Fatalf("purge active file: expected ErrNotDeleted, got %v", err)
 	}
 	now := time.Now()
 	root := repo.addFile(owner, nil, "root", "folder", true, &now)
-	if _, _, _, err := purgeLogic(repo, owner, root.ID); err != ErrRoot {
+	if _, _, _, err := purgeLogic(repo, root.ID, allowAll); err != ErrRoot {
 		t.Fatalf("purge root: expected ErrRoot, got %v", err)
 	}
 }
@@ -348,7 +352,7 @@ func TestPurgeSharedBlobOnlyDecrementsRefCount(t *testing.T) {
 	repo.addVersion(f1.ID, blob.ID, true)
 	repo.addVersion(f2.ID, blob.ID, true)
 
-	purged, deleting, _, err := purgeLogic(repo, owner, f1.ID)
+	purged, deleting, _, err := purgeLogic(repo, f1.ID, allowAll)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -363,7 +367,7 @@ func TestPurgeSharedBlobOnlyDecrementsRefCount(t *testing.T) {
 		t.Fatalf("shared blob after purge = %+v, want ref_count=1 status=available", got)
 	}
 	// 仍被引用的文件 f2 与其版本不受影响。
-	if _, err := repo.GetAny(owner, f2.ID); err != nil {
+	if _, err := repo.GetAny(f2.ID); err != nil {
 		t.Fatal("referencing file must survive purge of sibling")
 	}
 	if n, _ := repo.CountBlobRefs(blob.ID); n != 1 {
@@ -382,7 +386,7 @@ func TestPurgeLastReferenceMarksBlobDeleting(t *testing.T) {
 	f := repo.addFile(owner, ptrID(root.ID), "only.txt", "file", false, &now)
 	repo.addVersion(f.ID, blob.ID, true)
 
-	purged, deleting, _, err := purgeLogic(repo, owner, f.ID)
+	purged, deleting, _, err := purgeLogic(repo, f.ID, allowAll)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -392,7 +396,7 @@ func TestPurgeLastReferenceMarksBlobDeleting(t *testing.T) {
 	if len(deleting) != 1 || deleting[0].ID != blob.ID || deleting[0].RefCount != 0 || deleting[0].Status != BlobStatusDeleting {
 		t.Fatalf("deleting = %+v", deleting)
 	}
-	if _, err := repo.GetAny(owner, f.ID); err != ErrNotFound {
+	if _, err := repo.GetAny(f.ID); err != ErrNotFound {
 		t.Fatal("file row must be hard-deleted")
 	}
 	if n, _ := repo.CountBlobRefs(blob.ID); n != 0 {
@@ -413,7 +417,7 @@ func TestPurgeMultipleVersionsSameBlobZeroesRefCount(t *testing.T) {
 	repo.addVersion(f.ID, blob.ID, true)
 	repo.addVersion(f.ID, blob.ID, false)
 
-	purged, deleting, _, err := purgeLogic(repo, owner, f.ID)
+	purged, deleting, _, err := purgeLogic(repo, f.ID, allowAll)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -439,7 +443,7 @@ func TestPurgeRemovesAllDescendants(t *testing.T) {
 	repo.blobs[blob.ID] = blob
 	repo.addVersion(file.ID, blob.ID, true)
 
-	purged, deleting, _, err := purgeLogic(repo, owner, dir.ID)
+	purged, deleting, _, err := purgeLogic(repo, dir.ID, allowAll)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -447,7 +451,7 @@ func TestPurgeRemovesAllDescendants(t *testing.T) {
 		t.Fatalf("expected 3 purged rows (dir/sub/file), got %d", len(purged))
 	}
 	for _, f := range purged {
-		if _, err := repo.GetAny(owner, f.ID); err != ErrNotFound {
+		if _, err := repo.GetAny(f.ID); err != ErrNotFound {
 			t.Fatalf("descendant %s still exists", f.ID)
 		}
 	}
@@ -499,7 +503,7 @@ func TestPurgeFKOrder(t *testing.T) {
 	f := repo.addFile(owner, ptrID(root.ID), "ordered.txt", "file", false, &now)
 	repo.addVersion(f.ID, blob.ID, true)
 
-	if _, _, _, err := purgeLogic(repo, owner, f.ID); err != nil {
+	if _, _, _, err := purgeLogic(repo, f.ID, allowAll); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{"clear_current_versions", "delete_versions", "delete_files"}
@@ -554,7 +558,7 @@ func TestPurgeReturnsWebpkgPrefixes(t *testing.T) {
 	repo.addVersion(packaged.ID, blob.ID, true)
 	repo.webpkgs[packaged.ID] = "pub123"
 
-	_, _, prefixes, err := purgeLogic(repo, owner, packaged.ID)
+	_, _, prefixes, err := purgeLogic(repo, packaged.ID, allowAll)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -562,7 +566,7 @@ func TestPurgeReturnsWebpkgPrefixes(t *testing.T) {
 		t.Fatalf("webpkg prefixes = %v, want [webpkg/pub123]", prefixes)
 	}
 
-	_, _, prefixes, err = purgeLogic(repo, owner, plain.ID)
+	_, _, prefixes, err = purgeLogic(repo, plain.ID, allowAll)
 	if err != nil {
 		t.Fatal(err)
 	}

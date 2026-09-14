@@ -80,6 +80,10 @@ func (h *Handler) fileVersionContent(c *gin.Context) {
 	c.DataFromReader(http.StatusOK, blob.Size, blob.MimeType, reader, nil)
 }
 
+// deleteFileVersion DELETE /api/v1/files/:id/versions/:versionId：删除非
+// current 历史版本。边界语义：current 指向的版本不可删（409），因此删除后
+// 文件剩余版本恒 ≥1；写审计 file.version.delete，团队文件且删除者非 owner
+// 时由 files 层回调通知 owner（file.version.deleted 站内通知）。
 func (h *Handler) deleteFileVersion(c *gin.Context) {
 	id, ok := parseID(c, c.Param("id"))
 	if !ok {
@@ -101,6 +105,8 @@ func (h *Handler) deleteFileVersion(c *gin.Context) {
 	if h.fileError(c, err) {
 		return
 	}
+	user := userID(c)
+	h.recordAudit(c, audit.Entry{UserID: &user, Action: audit.ActionVersionDelete, ResourceType: audit.ResourceFile, ResourceID: id.String(), Status: audit.StatusSuccess, Metadata: `{"version_id":"` + versionID.String() + `"}`})
 	c.Status(http.StatusNoContent)
 }
 

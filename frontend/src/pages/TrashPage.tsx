@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { FileItem, batchRestoreFiles, listTrash, purgeFile, restoreFile } from '../api'
 import { describeBatchResults } from '../components/FileBrowser'
+import { MessageKey, formatMessage, t, useLocale } from '../i18n'
 
 function formatTime(iso: string): string {
   return new Date(iso).toLocaleString('zh-CN', { hour12: false })
@@ -8,6 +9,8 @@ function formatTime(iso: string): string {
 
 /** 回收站：单项恢复/彻底删除 + 多选批量恢复（部分成功语义，逐项结果摘要）。 */
 export default function TrashPage() {
+  const locale = useLocale()
+  const msg = (key: MessageKey) => t(locale, key)
   const [items, setItems] = useState<FileItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -23,7 +26,7 @@ export default function TrashPage() {
       list.sort((a, b) => a.name.localeCompare(b.name))
       setItems(list)
     } catch (err) {
-      setError(err instanceof Error ? err.message : '加载回收站失败')
+      setError(err instanceof Error ? err.message : msg('trashLoadFailed'))
       setItems([])
     } finally {
       setLoading(false)
@@ -32,6 +35,7 @@ export default function TrashPage() {
 
   useEffect(() => {
     void load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const toggleSelect = (id: string) => {
@@ -56,10 +60,10 @@ export default function TrashPage() {
     setNotice('')
     try {
       const results = await batchRestoreFiles(ids)
-      setNotice(`批量恢复：${describeBatchResults(results)}`)
+      setNotice(formatMessage(msg('batchRestorePrefix'), { summary: describeBatchResults(results) }))
       await load()
     } catch (err) {
-      setError(err instanceof Error ? err.message : '批量恢复失败')
+      setError(err instanceof Error ? err.message : msg('batchRestoreFailed'))
     } finally {
       setBatchBusy(false)
     }
@@ -69,46 +73,46 @@ export default function TrashPage() {
     setError('')
     try {
       await restoreFile(item.id)
-      setNotice(`已恢复「${item.name}」`)
+      setNotice(formatMessage(msg('restoreOk'), { name: item.name }))
       await load()
     } catch (err) {
       setNotice('')
-      setError(`恢复「${item.name}」失败：${err instanceof Error ? err.message : '未知错误'}`)
+      setError(`${formatMessage(msg('restoreFailedItem'), { name: item.name })}：${err instanceof Error ? err.message : msg('unknownError')}`)
     }
   }
 
   const handlePurge = async (item: FileItem) => {
-    if (!window.confirm(`彻底删除「${item.name}」？此操作不可恢复。`)) return
+    if (!window.confirm(formatMessage(msg('purgeConfirm'), { name: item.name }))) return
     setError('')
     try {
       await purgeFile(item.id)
-      setNotice(`已彻底删除「${item.name}」`)
+      setNotice(formatMessage(msg('purgeOk'), { name: item.name }))
       await load()
     } catch (err) {
       setNotice('')
-      setError(`彻底删除「${item.name}」失败：${err instanceof Error ? err.message : '未知错误'}`)
+      setError(`${formatMessage(msg('purgeFailedItem'), { name: item.name })}：${err instanceof Error ? err.message : msg('unknownError')}`)
     }
   }
 
   return (
     <div className="page">
       <div className="page-head">
-        <h2>回收站</h2>
-        <button className="btn ghost" onClick={() => void load()}>刷新</button>
+        <h2>{msg('trash')}</h2>
+        <button className="btn ghost" onClick={() => void load()}>{msg('refresh')}</button>
       </div>
 
       {error && <div className="banner error">{error}</div>}
       {notice && <div className="banner ok">{notice}</div>}
-      {loading && <div className="hint">加载中…</div>}
-      {!loading && !error && items.length === 0 && <div className="empty">回收站为空</div>}
+      {loading && <div className="hint">{msg('loading')}</div>}
+      {!loading && !error && items.length === 0 && <div className="empty">{msg('trashEmpty')}</div>}
 
       {selected.size > 0 && (
         <div className="batch-bar">
-          <span>已选 {selected.size} 项</span>
+          <span>{formatMessage(msg('selectedCount'), { n: selected.size })}</span>
           <button className="btn small" disabled={batchBusy} onClick={() => void handleBatchRestore()}>
-            恢复所选
+            {msg('restoreSelected')}
           </button>
-          <button className="btn ghost small" onClick={() => setSelected(new Set())}>取消选择</button>
+          <button className="btn ghost small" onClick={() => setSelected(new Set())}>{msg('clearSelection')}</button>
         </div>
       )}
 
@@ -117,11 +121,11 @@ export default function TrashPage() {
           <thead>
             <tr>
               <th className="col-check">
-                <input type="checkbox" checked={allSelected} onChange={toggleSelectAll} aria-label="全选" />
+                <input type="checkbox" checked={allSelected} onChange={toggleSelectAll} aria-label={msg('selectAll')} />
               </th>
-              <th>名称</th>
-              <th>删除时间</th>
-              <th className="col-actions">操作</th>
+              <th>{msg('name')}</th>
+              <th>{msg('deletedAt')}</th>
+              <th className="col-actions">{msg('actions')}</th>
             </tr>
           </thead>
           <tbody>
@@ -132,7 +136,7 @@ export default function TrashPage() {
                     type="checkbox"
                     checked={selected.has(item.id)}
                     onChange={() => toggleSelect(item.id)}
-                    aria-label={`选择 ${item.name}`}
+                    aria-label={`${msg('selectItem')} ${item.name}`}
                   />
                 </td>
                 <td>
@@ -141,8 +145,8 @@ export default function TrashPage() {
                 </td>
                 <td className="muted">{item.deleted_at ? formatTime(item.deleted_at) : '-'}</td>
                 <td className="col-actions">
-                  <button className="btn small" onClick={() => void handleRestore(item)}>恢复</button>
-                  <button className="btn small danger" onClick={() => void handlePurge(item)}>彻底删除</button>
+                  <button className="btn small" onClick={() => void handleRestore(item)}>{msg('restore')}</button>
+                  <button className="btn small danger" onClick={() => void handlePurge(item)}>{msg('purge')}</button>
                 </td>
               </tr>
             ))}

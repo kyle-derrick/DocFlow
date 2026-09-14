@@ -141,6 +141,9 @@ func (h *Handler) shareCreateError(c *gin.Context, err error) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 	case errors.Is(err, share.ErrPublicDisabled):
 		c.JSON(http.StatusForbidden, gin.H{"error": err.Error(), "code": "PUBLIC_SHARING_DISABLED"})
+	case errors.Is(err, share.ErrForbidden):
+		// 团队文件 CanShare 门控（设计 6.5.5）：viewer/无 share 权限角色不可创建分享。
+		c.JSON(http.StatusForbidden, gin.H{"error": "no permission to share this file"})
 	case errors.Is(err, share.ErrFileNotFound):
 		c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
 	case errors.Is(err, share.ErrFileNotShareable):

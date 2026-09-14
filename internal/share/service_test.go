@@ -581,3 +581,62 @@ func shareByHash(t *testing.T, repo *MemoryStore, hash string) Share {
 	}
 	return sh
 }
+
+// ---------- 团队文件 CanShare 分享门控（设计 6.5.5） ----------
+
+// addTeamFile 向 fakeFiles 添加团队作用域文件（OwnerID=上传者本人，
+// fakeFiles.Get 的 owner 判定即可通过，CanShare 门控由 teamSharer 决定）。
+func (f *fakeFiles) addTeamFile(owner uuid.UUID, teamID uuid.UUID, name string) uuid.UUID {
+	f.seq++
+	blobID, fileID := uuid.New(), uuid.New()
+	f.blobs[blobID] = files.ObjectBlob{ID: blobID, SHA256: fmt.Sprintf("%064d", f.seq), StorageKey: "objects/" + fileID.String(), Size: 42, MimeType: "text/plain", Status: files.BlobStatusAvailable}
+	f.versions[fileID] = files.FileVersion{ID: uuid.New(), FileID: fileID, Version: 1, ObjectBlobID: blobID, Size: 42}
+	f.files[fileID] = files.File{ID: fileID, Name: name, OwnerID: owner, Type: "file", ScopeType: "team", TeamID: &teamID}
+	return fileID
+}
+
+// TestCreateShareTeamCanShareGate 覆盖团队文件分享门控：
+// CanShare=true（owner/editor/含 share 权限的自定义角色）可创建公开与私有分享；
+// CanShare=false（viewer/deny share）拒绝；门控未接线时 fail closed；个人文件不受影响。
+func TestCreateShareTeamCanShareGate(t *testing.T) {
+	teamID := uuid.New()
+	editor := uuid.New() // CanShare=true
+	viewer := uuid.New() // CanShare=false
+
+	svc, _, ff, owner, fileID, _ := newTestService()
+	svc.SetTeamSharer(func(user, team uuid.UUID) (bool, error) {
+		return user == editor, nil
+	})
+	editorTeamFile := ff.addTeamFile(editor, teamID, "editor.txt")
+	viewerTeamFile := ff.addTeamFile(viewer, teamID, "viewer.txt")
+
+	// CanShare=true：公开与私有分享均可创建。
+	if _, _, err := svc.CreatePublic(editor, editorTeamFile, PermissionView, 0, nil, ShareOptions{}); err != nil {
+		t.Fatalf("editor create public share: %v", err)
+	}
+	if _, err := svc.CreatePrivate(editor, editorTeamFile, PermissionView, 0, nil, nil, nil); err != nil {
+		t.Fatalf("editor create private share: %v", err)
+	}
+	// CanShare=false：拒绝（ErrForbidden）。
+	if _, _, err := svc.CreatePublic(viewer, viewerTeamFile, PermissionView, 0, nil, ShareOptions{}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("viewer create public share: err = %v, want ErrForbidden", err)
+	}
+	if _, err := svc.CreatePrivate(viewer, viewerTeamFile, PermissionView, 0, nil, nil, nil); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("viewer create private share: err = %v, want ErrForbidden", err)
+	}
+	// 个人文件不受门控影响（owner 可分享）。
+	if _, _, err := svc.CreatePublic(owner, fileID, PermissionView, 0, nil, ShareOptions{}); err != nil {
+		t.Fatalf("personal file share: %v", err)
+	}
+}
+
+// TestCreateShareTeamGateFailClosed 门控未接线（teamSharer=nil）时团队文件分享一律拒绝。
+func TestCreateShareTeamGateFailClosed(t *testing.T) {
+	teamID := uuid.New()
+	svc, _, ff, _, _, _ := newTestService()
+	member := uuid.New()
+	teamFile := ff.addTeamFile(member, teamID, "member.txt")
+	if _, _, err := svc.CreatePublic(member, teamFile, PermissionView, 0, nil, ShareOptions{}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("team share without gate: err = %v, want ErrForbidden", err)
+	}
+}

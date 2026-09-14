@@ -3,7 +3,7 @@
 # teams.go / trash.go / preview.go / download.go / ratelimit.go / webpkg.go / tags.go /
 # batch.go / dashboard.go / webhooks.go），由
 # internal/http/openapi_test.go 做双向路由一致性校验，契约与实现不允许漂移。
-# 说明：/health、/ready 为基础设施探针，不属于业务契约；路由参数统一写作 {id} 形式。
+# 说明：/health、/ready、/metrics 为基础设施端点，不属于业务契约；路由参数统一写作 {id} 形式。
 # 网页包内容域端点 GET /content/{pid}/{filepath} 为契约外路由（openapi_test.go
 # isExcludedRoute 豁免）：无认证、面向 sandbox iframe 而非 API 客户端，独立按 IP
 # 轻限流并携带严格 CSP/nosniff，语义见 /files/{id}/preview 的 webpkg 分支。
@@ -809,7 +809,7 @@ paths:
           required: true
           schema:
             type: string
-            enum: [upload.completed, upload.quarantined, share.accessed, file.updated]
+            enum: [upload.completed, upload.quarantined, share.accessed, file.updated, file.version.deleted, quota.warning]
       requestBody:
         required: true
         content:
@@ -1174,7 +1174,9 @@ paths:
         其余逐项执行、逐项收集结果 [{id,ok,error_code}]，单项失败不回滚
         其他项（部分成功语义），目标目录同名冲突项跳过（NAME_CONFLICT）。
         移动继承目标目录作用域（个人↔团队移动更新 scope/team）。根目录与
-        移入自身/后代（INVALID_TARGET）拒绝。file_ids 去重、上限 100。
+        移入自身/后代（INVALID_TARGET）拒绝；移动后子树最深深度超过
+        folder.max_depth（默认 32）时逐项 DEPTH_LIMIT 跳过。file_ids 去重、
+        上限经 batch.max_items 热读取（默认 100）。
         可选 Idempotency-Key：同 key+同请求体 60s 内重放缓存响应
         （Idempotency-Replayed: true），同 key 不同请求体 409；
         缓存为进程内实现，多实例部署下不跨实例共享。
@@ -1196,7 +1198,6 @@ paths:
                   type: array
                   items: { type: string, format: uuid }
                   minItems: 1
-                  maxItems: 100
                 target_parent_id:
                   { type: string, format: uuid, description: 目标目录 ID；缺省为个人根目录 }
       responses:
@@ -1397,6 +1398,9 @@ paths:
       tags: [Files]
       operationId: createFolder
       summary: 创建目录
+      description: >-
+        深度校验（folder.max_depth，默认 32、根为 1）：父目录深度 + 1 超过
+        上限时 400（code: FOLDER_DEPTH_LIMIT）。
       requestBody:
         required: true
         content:
@@ -1688,6 +1692,11 @@ paths:
       tags: [Files]
       operationId: deleteFileVersion
       summary: 删除非当前历史版本
+      description: >-
+        边界语义：current_version 指向的版本不可删（409），因此删除后文件
+        剩余版本恒 ≥1；零引用 blob 延后由 janitor 物理回收。成功写审计
+        file.version.delete；团队文件且删除者非 owner 时向文件 owner 发
+        file.version.deleted 站内通知（偏好可关）。
       parameters:
         - name: id
           in: path
@@ -1992,7 +2001,12 @@ paths:
         携带 file_id 时为「覆盖为新版本」会话：目标须为 type=file 且当前用户有
         CanWrite 权限（个人 owner / 团队 editor+），name 与 parent_id 被忽略，
         沿用目标文件现有名称与父目录；Complete 成功后内容成为该文件的新版本，
-        并按 MAX_VERSIONS_PER_FILE（默认 5）裁剪历史版本。
+        并按 MAX_VERSIONS_PER_FILE（默认 5，upload.max_versions_per_file 热调）
+        裁剪历史版本（upload.version_retention_days 时间窗内的版本不因数量
+        裁剪删除；0=不启用）。
+        门控：扩展名命中 upload.blocked_extensions 黑名单时 400；每用户活跃
+        （非终态）会话达到 upload.max_concurrent_uploads_per_user 上限时 429
+        （DB COUNT 计数，多实例共享）。
       requestBody:
         required: true
         content:
@@ -2097,6 +2111,8 @@ paths:
       description: >-
         校验哈希 → 病毒扫描（如启用）→ 落库为文件版本。终态幂等：available 重复调用
         返回 200；quarantined / failed 返回 409（code 分别为 QUARANTINED / FAILED）。
+        扩展名黑名单复检（会话期间 upload.blocked_extensions 可能变更）：命中时
+        400 且会话置 failed。
       parameters:
         - name: id
           in: path
@@ -2895,15 +2911,43 @@ paths:
       tags: [Teams]
       operationId: listTeamRoles
       summary: 列出自定义角色（仅 owner）
+      description: 返回团队自定义角色列表（含 member_count 引用统计与 permissions 勾选）。
       parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
-      responses: { '200': { description: 角色列表 }, '403': { $ref: '#/components/responses/Forbidden' } }
+      responses:
+        '200':
+          description: 角色列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TeamRoleList' }
+        '403': { $ref: '#/components/responses/Forbidden' }
     post:
       tags: [Teams]
       operationId: createTeamRole
       summary: 创建自定义角色（仅 owner）
       parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
-      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [name], properties: { name: { type: string }, permissions: { type: object } } } } } }
-      responses: { '201': { description: 角色已创建 }, '403': { $ref: '#/components/responses/Forbidden' } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, maxLength: 64 }
+                permissions: { $ref: '#/components/schemas/TeamRolePermissions' }
+      responses:
+        '201':
+          description: 角色已创建
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TeamRole' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: 同团队角色名已存在
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
 
   /teams/{id}/roles/{role_id}:
     patch:
@@ -2911,20 +2955,45 @@ paths:
       operationId: updateTeamRole
       summary: 更新自定义角色（仅 owner）
       parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }, { name: role_id, in: path, required: true, schema: { type: string, format: uuid } }]
-      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [name], properties: { name: { type: string }, permissions: { type: object } } } } } }
-      responses: { '204': { description: 已更新 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, maxLength: 64 }
+                permissions: { $ref: '#/components/schemas/TeamRolePermissions' }
+      responses:
+        '204': { description: 已更新 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
     delete:
       tags: [Teams]
       operationId: deleteTeamRole
       summary: 删除自定义角色（仅 owner）
+      description: 仍有成员引用该角色时返回 409（须先改派成员角色）。
       parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }, { name: role_id, in: path, required: true, schema: { type: string, format: uuid } }]
-      responses: { '204': { description: 已删除 } }
+      responses:
+        '204': { description: 已删除 }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 角色仍被成员引用
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
 
   /teams/{id}/members:
     post:
       tags: [Teams]
       operationId: addTeamMember
       summary: 添加成员（仅团队 owner）
+      description: >-
+        角色为系统角色（editor/viewer，owner 不可经本接口授予）或自定义角色
+        （role_id 非空时生效，须为本团队已有角色，role 归一为 custom）。
       requestBody:
         required: true
         content:
@@ -2935,7 +3004,9 @@ paths:
               properties:
                 user_id: { type: string, format: uuid }
                 role:
-                  { type: string, enum: [owner, editor, viewer], default: viewer }
+                  { type: string, enum: [editor, viewer], default: viewer, description: 系统角色；role_id 非空时忽略 }
+                role_id:
+                  { type: string, format: uuid, description: 自定义角色 ID（可选）；非空时成员绑定该自定义角色 }
       parameters:
         - name: id
           in: path
@@ -2979,6 +3050,43 @@ paths:
         '429': { $ref: '#/components/responses/RateLimited' }
 
   /teams/{id}/members/{uid}:
+    patch:
+      tags: [Teams]
+      operationId: updateTeamMemberRole
+      summary: 修改成员角色（仅团队 owner）
+      description: 系统角色（editor/viewer）或自定义角色（role_id）；owner 成员不可改（403）。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: uid
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+          description: 被修改成员的用户 ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                role:
+                  { type: string, enum: [editor, viewer], description: 系统角色；role_id 非空时忽略 }
+                role_id:
+                  { type: string, format: uuid, description: 自定义角色 ID；改回系统角色时省略 }
+      responses:
+        '200':
+          description: 已更新（返回成员记录）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TeamMember' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
     delete:
       tags: [Teams]
       operationId: removeTeamMember
@@ -3330,12 +3438,14 @@ paths:
       operationId: listAdminSettings
       summary: 列出全部系统设置（仅 admin）
       description: >-
-        返回全部内置键的当前值（未设置时为默认值）、类型、描述与默认值。
-        仅非密钥类运行时配置；密钥类（JWT/S3/SMTP 凭据等）一律走环境变量，
-        不经 system_settings 暴露。
+        返回全部内置键的当前值（未设置时为默认值）、类型、描述、默认值与
+        生效方式（effect：immediate/new_session/restart）。仅非密钥类运行时
+        配置；密钥类（JWT/S3/SMTP 凭据等）一律走环境变量，不经
+        system_settings 暴露——另附 secrets 只读状态探针（各密钥类 env
+        是否已配置，绝不回显值）。
       responses:
         '200':
-          description: 设置列表
+          description: 设置列表与凭据配置状态
           content:
             application/json:
               schema:
@@ -3344,8 +3454,100 @@ paths:
                   settings:
                     type: array
                     items: { $ref: '#/components/schemas/Setting' }
+                  secrets:
+                    type: object
+                    description: 密钥类配置的只读状态（env 非空 = true）；不回显值
+                    additionalProperties:
+                      type: boolean
+                    example:
+                      jwt_secret: true
+                      smtp_password: false
+                      s3_secret_key: false
+                      onlyoffice_jwt_secret: false
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /admin/quarantine:
+    get:
+      tags: [Admin]
+      operationId: listQuarantine
+      summary: 隔离区列表（仅 admin）
+      description: >-
+        列出 object_blobs 中 status=quarantined 的内容对象：sha256/大小/
+        MIME/引用计数/隔离时间，及经 file_versions join 得到的引用文件名
+        （同内容多版本引用取最新；孤儿 blob 为 null）。limit 缺省 100。
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1 }
+      responses:
+        '200':
+          description: 隔离 blob 列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/QuarantineItem' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /admin/quarantine/{sha256}/action:
+    post:
+      tags: [Admin]
+      operationId: quarantineAction
+      summary: 处置隔离 blob（仅 admin）
+      description: >-
+        对隔离中的 blob 执行处置动作，全部动作写审计
+        （quarantine.rescan / quarantine.release / quarantine.delete）：
+        rescan——重新扫描对象内容，通过置 available、未通过维持 quarantined
+        （响应附处置后状态）；release——管理员判定误报时解除隔离
+        （quarantined → available），须显式 confirm=true，缺省或 false 一律
+        400（CONFIRM_REQUIRED）；delete——解除全部版本引用并物理删除对象
+        与行（current 指向被删版本的文件重指向剩余最新版本，无剩余则置空；
+        物理删除复用 purge blob 的「标 deleting → 行锁复核删对象删行」
+        两步语义，被复活/仍被引用时绝不删除）。
+      parameters:
+        - name: sha256
+          in: path
+          required: true
+          schema: { type: string }
+          description: 隔离 blob 的 sha256（列表接口返回的 sha256）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action:
+                  type: string
+                  enum: [rescan, release, delete]
+                confirm:
+                  type: boolean
+                  description: release 动作的显式确认（须 true；其余动作忽略）
+      responses:
+        '200':
+          description: rescan / release 处置结果（附处置后状态）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sha256: { type: string }
+                  status: { type: string, description: available 或 quarantined（rescan 未通过） }
+        '204': { description: delete 处置完成（对象与引用已删除） }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
         '429': { $ref: '#/components/responses/RateLimited' }
 
   /admin/settings/{key}:
@@ -3417,21 +3619,98 @@ paths:
       tags: [Admin]
       operationId: adminBackupStatus
       summary: 备份状态（仅 admin）
-      description: 扫描 BACKUP_DIR 中最近的备份清单，不执行命令。
+      description: >-
+        读取 BACKUP_DIR 下最近的 manifest.json（v2 目录布局 docflow-backup-<ts>/，
+        兼容 v1 顶层散落清单），返回结构化状态：enabled（BACKUP_DIR 是否配置）、
+        last_backup（最近备份的组件/对象存储模式/总大小/时间）、verified（读取
+        备份目录内 verify.json 校验标记；从未校验为 null）、files（清单内每文件
+        sha256/size）。只读文件，不执行任何命令；目录缺失或从未备份时
+        last_backup=null、files=[]。
       responses:
-        '200': {description: 备份状态, content: {application/json: {schema: {type: object}}}}
+        '200':
+          description: 备份状态
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [enabled, files]
+                properties:
+                  enabled: { type: boolean, description: BACKUP_DIR 是否已配置 }
+                  last_backup:
+                    type: [object, 'null']
+                    properties:
+                      name: { type: string, description: 备份目录名（v2）或清单文件名（v1） }
+                      manifest: { type: string, description: manifest.json 路径 }
+                      timestamp: { type: string, description: 备份时间（ISO-8601，v2 清单携带） }
+                      modified_at: { type: string, format: date-time }
+                      size: { type: integer, format: int64, description: 清单条目大小合计（字节） }
+                      components:
+                        type: array
+                        items: { type: string }
+                        description: 备份组件（postgres / object-store / env）
+                      object_store:
+                        type: string
+                        enum: [local, external]
+                        description: external=S3 等外部对象存储（未打包，由运维层负责备份/版本化）
+                      encryption: { type: string, description: 固定 ops-layer——脚本不加密，由运维层加密（LUKS/KMS 等） }
+                  verified:
+                    type: [boolean, 'null']
+                    description: 最近备份是否通过校验；null=从未校验
+                  verified_at: { type: string, description: 最近一次校验时间（verify.json 标记，ISO-8601） }
+                  files:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        path: { type: string }
+                        type: { type: string, description: postgres_dump / object / env }
+                        sha256: { type: string }
+                        size: { type: integer, format: int64 }
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+  /admin/backups/verify:
+    post:
+      tags: [Admin]
+      operationId: adminBackupVerify
+      summary: 只读校验最近备份
+      description: >-
+        对 BACKUP_DIR 下最近备份重算每文件 sha256 并与 manifest 比对（含
+        postgres 组件存在性检查）；只读备份文件，不执行脚本、不触达数据库、
+        不执行恢复。结果尽力写回备份目录 verify.json 标记（目录只读时忽略，
+        status 端点保持「未验证」），并写审计 backup.verify（成功/失败均记录）
+        与指标 docflow_backup_verification_total{result=success|failed}；
+        校验通过时刷新 docflow_backup_last_success_timestamp。
+      responses:
+        '200':
+          description: 校验通过
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BackupVerifyResult' }
+        '422':
+          description: 校验未通过（明细在 errors；响应体同 BackupVerifyResult，verified=false）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BackupVerifyResult' }
+        '400': { description: 未配置 BACKUP_DIR }
+        '404': { description: 备份目录下没有任何 manifest }
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
   /admin/backups/run:
     post:
       tags: [Admin]
       operationId: adminBackupRun
       summary: 请求备份（安全禁用）
-      description: 服务端永不执行系统命令，固定返回 501。
+      description: >-
+        服务端永不执行系统命令，固定返回 501：备份由 scripts/backup.sh 或
+        scripts/backup.ps1 在部署机执行（支持 --verify 校验），服务进程不
+        持有备份加密密钥。
       responses:
-        '501': {description: 必须由受控运维脚本执行}
+        '501': {description: 必须由受控运维脚本执行, content: {application/json: {schema: {type: object, properties: {error: {type: string}, code: {type: string, description: BACKUP_MANUAL_ONLY}, command: {type: string}}}}}}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
+        '429': {$ref: '#/components/responses/RateLimited'}
 
   /admin/audit-logs:
     get:
@@ -3764,17 +4043,46 @@ components:
         key:
           type: string
           enum:
-            [upload.max_versions_per_file, upload.max_file_size,
-             upload.default_quota, share.default_expiry_hours, retention.trash_days]
+            [upload.max_versions_per_file, upload.version_retention_days,
+             upload.blocked_extensions, upload.max_file_size,
+             upload.default_quota, upload.max_concurrent_uploads_per_user,
+             share.default_expiry_hours, share.default_watermark,
+             share.watermark_text, share.public_enabled,
+             retention.trash_days, retention.access_events_days,
+             security.rate_limit_per_minute, security.login_max_retries,
+             security.login_lock_minutes, security.scan_quarantine_policy,
+             batch.max_items, folder.max_depth, audit.retention_days,
+             backup.enabled, backup.retention_days,
+             backup.encryption_required, backup.last_verify]
         value: { description: 当前生效值（未设置时为默认值） }
         type: { type: string, enum: [bool, int, string] }
         description: { type: string }
         default: { description: 内置默认值 }
+        effect:
+          type: string
+          enum: [immediate, new_session, restart]
+          description: 变更生效方式（立即 / 新会话 / 需重启），按各键真实消费路径标注
         updated_at: { type: string, format: date-time }
         updated_by:
           type: [string, 'null']
           format: uuid
           description: 最近更新者；从未设置过时缺省
+    QuarantineItem:
+      type: object
+      description: 隔离 blob 条目（GET /admin/quarantine）；文件名经 file_versions join 取最新引用
+      properties:
+        sha256: { type: string }
+        size: { type: integer, format: int64 }
+        mime_type: { type: string }
+        ref_count: { type: integer, format: int64 }
+        file_id:
+          type: [string, 'null']
+          format: uuid
+          description: 引用该 blob 的最新文件 ID；孤儿隔离 blob 为 null
+        file_name:
+          type: [string, 'null']
+          description: 引用文件名；孤儿隔离 blob 为 null
+        created_at: { type: string, format: date-time }
     AdminStats:
       type: object
       description: 基础统计（GET /admin/stats），各核心表行数
@@ -3784,6 +4092,21 @@ components:
         uploads: { type: integer, format: int64, description: upload_sessions 行数 }
         sessions: { type: integer, format: int64 }
         shares: { type: integer, format: int64 }
+    BackupVerifyResult:
+      type: object
+      description: >-
+        备份校验结果（POST /admin/backups/verify；200=通过、422=未通过，
+        响应体结构一致）。校验为只读 sha256 复核，不执行脚本与恢复。
+      properties:
+        manifest: { type: string, description: 被校验的 manifest.json 路径 }
+        backup: { type: string, description: 备份目录路径 }
+        timestamp: { type: string, description: 备份时间（ISO-8601，v2 清单携带） }
+        files: { type: integer, description: 清单内文件数 }
+        verified: { type: boolean, description: 是否全部通过（sha256/size 一致且含 postgres 组件） }
+        errors:
+          type: array
+          items: { type: string }
+          description: 失败明细（缺文件 / sha256 或 size 不符 / 缺 postgres dump 等）
     Me:
       type: object
       description: >-
@@ -4387,10 +4710,49 @@ components:
           items: { $ref: '#/components/schemas/Team' }
     TeamMember:
       type: object
+      description: >-
+        团队成员：role 为系统角色（owner/editor/viewer）或 custom（自定义角色，
+        此时附 role_id 与 role_name）。权限继承 = 团队成员身份：团队内全部
+        文件/目录适用同一权限集（设计 6.5.3 最小落地，无路径级覆盖）。
       properties:
         user_id: { type: string, format: uuid }
-        role: { type: string, enum: [owner, editor, viewer] }
+        role: { type: string, enum: [owner, editor, viewer, custom] }
+        role_id:
+          { type: string, format: uuid, description: 自定义角色 ID；系统角色时缺省 }
+        role_name:
+          { type: string, description: 自定义角色名（role=custom 时返回） }
         created_at: { type: string, format: date-time }
+    TeamRolePermissions:
+      type: object
+      description: >-
+        角色细粒度权限（设计 6.5.2）：布尔勾选 read/write/delete/share/admin；
+        deny 数组中列出的权限显式拒绝且优先于 allow（勾选 true 也无效）。
+        系统角色映射：owner 全 true；editor 读/写/分享；viewer 仅读。
+      properties:
+        read: { type: boolean }
+        write: { type: boolean }
+        delete: { type: boolean }
+        share: { type: boolean }
+        admin: { type: boolean }
+        deny:
+          type: array
+          items: { type: string, enum: [read, write, delete, share, admin] }
+    TeamRole:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        team_id: { type: string, format: uuid }
+        name: { type: string, maxLength: 64 }
+        permissions: { $ref: '#/components/schemas/TeamRolePermissions' }
+        member_count:
+          { type: integer, description: 引用该角色的成员数（删除角色引用检查用） }
+        created_at: { type: string, format: date-time }
+    TeamRoleList:
+      type: object
+      properties:
+        roles:
+          type: array
+          items: { $ref: '#/components/schemas/TeamRole' }
     TeamMemberList:
       type: object
       properties:
@@ -4438,7 +4800,7 @@ components:
       properties:
         event_type:
           type: string
-          enum: [upload.completed, upload.quarantined, share.accessed, file.updated, quota.warning]
+          enum: [upload.completed, upload.quarantined, share.accessed, file.updated, file.version.deleted, quota.warning]
         enabled: { type: boolean }
     NotificationPreferenceList:
       type: object

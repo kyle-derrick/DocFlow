@@ -47,7 +47,7 @@ import {
 } from '../api'
 import { formatTime } from '../components/FileBrowser'
 import { THEME_ACCENTS, ThemeAccent, ThemeMode, ThemePreference, loadTheme, saveTheme } from '../theme'
-import { saveLocale } from '../i18n'
+import { MessageKey, saveLocale, t, useLocale } from '../i18n'
 
 /** 通知事件类型的中文标签与说明（顺序即设置页展示顺序）。 */
 const NOTIFICATION_TYPE_META: Array<{ type: NotificationEventType; label: string; desc: string }> = [
@@ -55,6 +55,7 @@ const NOTIFICATION_TYPE_META: Array<{ type: NotificationEventType; label: string
   { type: 'upload.quarantined', label: '上传隔离提醒', desc: '我的上传未通过安全扫描被隔离' },
   { type: 'share.accessed', label: '分享被下载', desc: '我的公开/私有分享文件被下载' },
   { type: 'file.updated', label: '团队文件更新', desc: '团队文件被其他成员更新新版本' },
+  { type: 'file.version.deleted', label: '文件版本被删除', desc: '我的团队文件历史版本被其他成员删除（当前版本不受影响）' },
   { type: 'quota.warning', label: '配额用量警告', desc: '存储用量超过配额的 80%（上传成功后触发）' },
 ]
 
@@ -68,6 +69,8 @@ function formatBytes(n: number): string {
 
 /** 个人资料卡片（C21a）：档案字段编辑 + 存储用量/配额展示。 */
 function ProfilePanel({ onError, onNotice }: { onError: (msg: string) => void; onNotice: (msg: string) => void }) {
+  const locale = useLocale()
+  const msg = (key: MessageKey) => t(locale, key)
   const [me, setMe] = useState<MeData | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
@@ -94,7 +97,7 @@ function ProfilePanel({ onError, onNotice }: { onError: (msg: string) => void; o
       setTimezone(data.profile.timezone)
       onError('')
     } catch (err) {
-      onError(err instanceof Error ? err.message : '个人资料加载失败')
+      onError(err instanceof Error ? err.message : msg('profileLoadFailed'))
     } finally {
       setLoading(false)
     }
@@ -125,9 +128,9 @@ function ProfilePanel({ onError, onNotice }: { onError: (msg: string) => void; o
         saveLocale(language)
         window.dispatchEvent(new Event('docflow:locale'))
       }
-      onNotice('个人资料已保存')
+      onNotice(msg('profileSaved'))
     } catch (err) {
-      onError(err instanceof Error ? err.message : '保存失败')
+      onError(err instanceof Error ? err.message : msg('saveFailed'))
     } finally {
       setBusy(false)
     }
@@ -136,8 +139,8 @@ function ProfilePanel({ onError, onNotice }: { onError: (msg: string) => void; o
   if (loading) {
     return (
       <div className="panel setting-group">
-        <h3>个人资料</h3>
-        <div className="hint">加载中…</div>
+        <h3>{msg('profileTitle')}</h3>
+        <div className="hint">{msg('loading')}</div>
       </div>
     )
   }
@@ -217,6 +220,8 @@ function uaSummary(ua: string): string {
 
 /** 登录会话卡片。 */
 function SessionsPanel({ onError, onNotice }: { onError: (msg: string) => void; onNotice: (msg: string) => void }) {
+  const locale = useLocale()
+  const msg = (key: MessageKey) => t(locale, key)
   const navigate = useNavigate()
   const [sessions, setSessions] = useState<SessionItem[]>([])
   const [loading, setLoading] = useState(true)
@@ -229,7 +234,7 @@ function SessionsPanel({ onError, onNotice }: { onError: (msg: string) => void; 
       setSessions(await listSessions())
       onError('')
     } catch (err) {
-      onError(err instanceof Error ? err.message : '会话列表加载失败')
+      onError(err instanceof Error ? err.message : msg('sessionsLoadFailed'))
     } finally {
       setLoading(false)
     }
@@ -271,14 +276,14 @@ function SessionsPanel({ onError, onNotice }: { onError: (msg: string) => void; 
 
   return (
     <div className="panel setting-group">
-      <h3>登录会话</h3>
+      <h3>{msg('sessionsTitle')}</h3>
       <div className="setting-desc muted" style={{ marginBottom: 12 }}>
         当前登录的全部活跃设备/浏览器。撤销全部时会包含当前会话，随后需重新登录。
       </div>
       {loading ? (
-        <div className="hint">加载中…</div>
+        <div className="hint">{msg('loading')}</div>
       ) : sessions.length === 0 ? (
-        <div className="empty">暂无活跃会话</div>
+        <div className="empty">{msg('noSessions')}</div>
       ) : (
         sessions.map((s) => (
           <div key={s.id} className="setting-row">
@@ -322,6 +327,8 @@ const EXPIRY_OPTIONS: Array<{ value: number; label: string }> = [
 
 /** 个人访问令牌卡片：创建对话框（一次性明文+复制）、列表与撤销。 */
 function TokensPanel({ onError, onNotice }: { onError: (msg: string) => void; onNotice: (msg: string) => void }) {
+  const locale = useLocale()
+  const msg = (key: MessageKey) => t(locale, key)
   const [tokens, setTokens] = useState<ApiTokenItem[]>([])
   const [loading, setLoading] = useState(true)
   const [showCreate, setShowCreate] = useState(false)
@@ -342,7 +349,7 @@ function TokensPanel({ onError, onNotice }: { onError: (msg: string) => void; on
       setTokens(await listTokens())
       onError('')
     } catch (err) {
-      onError(err instanceof Error ? err.message : '令牌列表加载失败')
+      onError(err instanceof Error ? err.message : msg('patLoadFailed'))
     } finally {
       setLoading(false)
     }
@@ -367,7 +374,7 @@ function TokensPanel({ onError, onNotice }: { onError: (msg: string) => void; on
       onNotice(`已创建令牌「${created.name}」，请立即复制一次性明文`)
       await load()
     } catch (err) {
-      onError(err instanceof Error ? err.message : '创建令牌失败')
+      onError(err instanceof Error ? err.message : msg('patCreateFailed'))
     } finally {
       setBusy(false)
     }
@@ -405,7 +412,7 @@ function TokensPanel({ onError, onNotice }: { onError: (msg: string) => void; on
 
   return (
     <div className="panel setting-group">
-      <h3>个人访问令牌</h3>
+      <h3>{msg('patTitle')}</h3>
       <div className="setting-desc muted" style={{ marginBottom: 12 }}>
         供脚本/CI 等以 Bearer dfpat_… 直接调用 API；令牌仅创建时可见一次，撤销立即失效。
       </div>
@@ -454,9 +461,9 @@ function TokensPanel({ onError, onNotice }: { onError: (msg: string) => void; on
         </form>
       )}
       {loading ? (
-        <div className="hint">加载中…</div>
+        <div className="hint">{msg('loading')}</div>
       ) : tokens.length === 0 ? (
-        <div className="empty">暂无令牌</div>
+        <div className="empty">{msg('noTokens')}</div>
       ) : (
         tokens.map((t) => (
           <div key={t.id} className="setting-row">
@@ -519,6 +526,8 @@ async function copyText(text: string): Promise<boolean> {
  * - 已启用：状态（启用时间）+ 禁用（密码确认对话框）。
  */
 function TotpPanel({ onError, onNotice }: { onError: (msg: string) => void; onNotice: (msg: string) => void }) {
+  const locale = useLocale()
+  const msg = (key: MessageKey) => t(locale, key)
   const [status, setStatus] = useState<TotpStatus | null>(null)
   const [loading, setLoading] = useState(true)
   /** setup 阶段数据（secret/otpauth_url）；null 表示不在 setup 流程中。 */
@@ -542,7 +551,7 @@ function TotpPanel({ onError, onNotice }: { onError: (msg: string) => void; onNo
     } catch (err) {
       // 旧后端（无 TOTP 端点）404：视为未启用而非报错。
       if (err instanceof ApiError && err.status === 404) setStatus({ enabled: false, confirmed_at: null })
-      else onError(err instanceof Error ? err.message : '两步验证状态加载失败')
+      else onError(err instanceof Error ? err.message : msg('totpLoadFailed'))
     } finally {
       setLoading(false)
     }
@@ -617,12 +626,12 @@ function TotpPanel({ onError, onNotice }: { onError: (msg: string) => void; onNo
 
   return (
     <div className="panel setting-group">
-      <h3>两步验证</h3>
+      <h3>{msg('totpTitle')}</h3>
       <div className="setting-desc muted" style={{ marginBottom: 12 }}>
         登录时在密码之外要求认证器（TOTP）6 位验证码；丢失认证器可用一次性恢复码登录。
       </div>
       {loading ? (
-        <div className="hint">加载中…</div>
+        <div className="hint">{msg('loading')}</div>
       ) : (
         <div className="setting-row">
           <div className="setting-main">
@@ -780,6 +789,8 @@ const THEME_MODES: Array<{ value: ThemeMode; label: string }> = [
 
 /** 外观卡片（v1.1）：accent 色五选一 + 明暗模式（含跟随系统），本地即时生效。 */
 function AppearancePanel() {
+  const locale = useLocale()
+  const msg = (key: MessageKey) => t(locale, key)
   const [accent, setAccent] = useState<ThemeAccent>(() => loadTheme().accent)
   const [mode, setMode] = useState<ThemeMode>(() => loadTheme().mode)
 
@@ -792,7 +803,7 @@ function AppearancePanel() {
 
   return (
     <div className="panel setting-group">
-      <h3>外观</h3>
+      <h3>{msg('appearance')}</h3>
       <div className="setting-desc muted" style={{ marginBottom: 12 }}>
         主题色影响按钮、链接与强调元素；明暗模式即时生效，偏好仅保存在本浏览器。
       </div>
@@ -852,6 +863,8 @@ function deliverySummary(w: WebhookItem): string {
 
 /** Webhook 卡片（v1.1）：注册回调 URL 接收通知事件推送（HMAC 签名）。 */
 function WebhooksPanel({ onError, onNotice }: { onError: (msg: string) => void; onNotice: (msg: string) => void }) {
+  const locale = useLocale()
+  const msg = (key: MessageKey) => t(locale, key)
   const [hooks, setHooks] = useState<WebhookItem[]>([])
   const [loading, setLoading] = useState(true)
   const [showCreate, setShowCreate] = useState(false)
@@ -870,7 +883,7 @@ function WebhooksPanel({ onError, onNotice }: { onError: (msg: string) => void; 
       setHooks(await listWebhooks())
       onError('')
     } catch (err) {
-      onError(err instanceof Error ? err.message : 'Webhook 列表加载失败')
+      onError(err instanceof Error ? err.message : msg('webhookLoadFailed'))
     } finally {
       setLoading(false)
     }
@@ -899,7 +912,7 @@ function WebhooksPanel({ onError, onNotice }: { onError: (msg: string) => void; 
       onNotice('Webhook 已创建，请立即复制一次性 secret（接收方验签用）')
       await load()
     } catch (err) {
-      onError(err instanceof Error ? err.message : '创建 Webhook 失败')
+      onError(err instanceof Error ? err.message : msg('webhookCreateFailed'))
     } finally {
       setBusy(false)
     }
@@ -947,7 +960,7 @@ function WebhooksPanel({ onError, onNotice }: { onError: (msg: string) => void; 
 
   return (
     <div className="panel setting-group">
-      <h3>Webhook</h3>
+      <h3>{msg('webhookTitle')}</h3>
       <div className="setting-desc muted" style={{ marginBottom: 12 }}>
         事件发生时向回调 URL POST JSON（X-DocFlow-Signature 头含 HMAC-SHA256 签名，以创建时下发的一次性
         secret 验签）；受「通知偏好」同一开关控制。连续 10 次投递失败将自动停用。
@@ -1015,9 +1028,9 @@ function WebhooksPanel({ onError, onNotice }: { onError: (msg: string) => void; 
         </form>
       )}
       {loading ? (
-        <div className="hint">加载中…</div>
+        <div className="hint">{msg('loading')}</div>
       ) : hooks.length === 0 ? (
-        <div className="empty">暂无 Webhook</div>
+        <div className="empty">{msg('noWebhooks')}</div>
       ) : (
         hooks.map((w) => (
           <div key={w.id} className="setting-row">
@@ -1076,6 +1089,8 @@ function WebhooksPanel({ onError, onNotice }: { onError: (msg: string) => void; 
 
 /** 通知偏好卡片：各事件类型开关（无记录 = 默认开启；关闭后不再生成该类通知）。 */
 function NotificationsPanel({ onError, onNotice }: { onError: (msg: string) => void; onNotice: (msg: string) => void }) {
+  const locale = useLocale()
+  const msg = (key: MessageKey) => t(locale, key)
   const [prefs, setPrefs] = useState<Record<string, boolean>>({})
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState<string | null>(null)
@@ -1089,7 +1104,7 @@ function NotificationsPanel({ onError, onNotice }: { onError: (msg: string) => v
       setPrefs(next)
       onError('')
     } catch (err) {
-      onError(err instanceof Error ? err.message : '通知偏好加载失败')
+      onError(err instanceof Error ? err.message : msg('notifPrefsLoadFailed'))
     } finally {
       setLoading(false)
     }
@@ -1108,7 +1123,7 @@ function NotificationsPanel({ onError, onNotice }: { onError: (msg: string) => v
       setPrefs((prev) => ({ ...prev, [updated.event_type]: updated.enabled }))
       onNotice(`已${updated.enabled ? '开启' : '关闭'}「${NOTIFICATION_TYPE_META.find((m) => m.type === updated.event_type)?.label ?? updated.event_type}」通知`)
     } catch (err) {
-      onError(err instanceof Error ? err.message : '通知偏好更新失败')
+      onError(err instanceof Error ? err.message : msg('notifPrefsUpdateFailed'))
     } finally {
       setSaving(null)
     }
@@ -1116,12 +1131,12 @@ function NotificationsPanel({ onError, onNotice }: { onError: (msg: string) => v
 
   return (
     <div className="panel setting-group">
-      <h3>通知偏好</h3>
+      <h3>{msg('notifPrefsTitle')}</h3>
       <div className="setting-desc muted" style={{ marginBottom: 12 }}>
         站内通知的事件类型开关；关闭后对应事件不再生成通知（默认全部开启）。
       </div>
       {loading ? (
-        <div className="hint">加载中…</div>
+        <div className="hint">{msg('loading')}</div>
       ) : (
         NOTIFICATION_TYPE_META.map((meta) => (
           <div key={meta.type} className="setting-row">
@@ -1148,12 +1163,14 @@ function NotificationsPanel({ onError, onNotice }: { onError: (msg: string) => v
 }
 
 export default function SettingsPage() {
+  const locale = useLocale()
+  const msg = (key: MessageKey) => t(locale, key)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   return (
     <div className="page">
       <div className="page-head">
-        <h2>设置</h2>
+        <h2>{msg('settings')}</h2>
       </div>
       {notice && <div className="banner ok">{notice}</div>}
       {error && <div className="banner error">{error}</div>}

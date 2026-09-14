@@ -32,6 +32,12 @@ var (
 	// ErrInProgress 会话正在被另一方补完（CAS 状态迁移竞争失败且对方仍在
 	// verifying/scanning 阶段）；调用方可稍后重试或轮询终态。
 	ErrInProgress = errors.New("upload completion already in progress")
+	// ErrTooManyUploads 每用户活跃（非终态）上传会话达到
+	// upload.max_concurrent_uploads_per_user 上限（HTTP 429）。
+	ErrTooManyUploads = errors.New("too many concurrent uploads")
+	// ErrBlockedExtension 文件扩展名命中 upload.blocked_extensions 黑名单
+	//（HTTP 400；建会话与 Complete 双侧校验）。
+	ErrBlockedExtension = errors.New("file extension is not allowed")
 )
 
 // DefaultPatchMaxBytes 单次 PATCH 请求体的默认上限（64MiB）：
@@ -57,6 +63,15 @@ type stateMarker interface {
 	MarkScanning(id uuid.UUID) (bool, error)
 	// MarkAvailable 同时落库终态 storage_key（tmp → objects/* 的迁移结果）。
 	MarkAvailable(id uuid.UUID, storageKey string, completedAt time.Time) (bool, error)
+}
+
+// activeSessionCounter 为 sessionStore 的可选能力：统计用户当前活跃
+// （非终态：uploading/verifying/scanning 且未过期）的会话数，用于
+// upload.max_concurrent_uploads_per_user 门控。生产实现为 GormStore 的
+// DB COUNT（多实例部署下各实例共享同一计数来源，简单可靠）；内存实现
+// 供单测。未实现该能力（或未注入 maxConcurrentProvider）时不做门控。
+type activeSessionCounter interface {
+	CountActiveByUser(user uuid.UUID, now time.Time) (int64, error)
 }
 
 type MemoryStore struct {
@@ -152,6 +167,25 @@ func (s *MemoryStore) MarkAvailable(id uuid.UUID, storageKey string, completedAt
 	return true, nil
 }
 
+// CountActiveByUser 统计该用户活跃（uploading/verifying/scanning 且未过期）会话数。
+func (s *MemoryStore) CountActiveByUser(user uuid.UUID, now time.Time) (int64, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var n int64
+	for _, v := range s.items {
+		if v.UserID != user {
+			continue
+		}
+		switch v.Status {
+		case StatusUploading, StatusVerifying, StatusScanning:
+			if v.ExpiresAt.After(now) {
+				n++
+			}
+		}
+	}
+	return n, nil
+}
+
 type Service struct {
 	store          sessionStore
 	storage        Storage
@@ -181,6 +215,13 @@ type Service struct {
 	// maxSizeProvider 单文件大小上限热读取（system_settings 的
 	// upload.max_file_size，main 注入）；nil 或返回非正值时回退 maxSize。
 	maxSizeProvider func() int64
+	// maxConcurrentProvider 每用户并发上传会话上限热读取（system_settings
+	// 的 upload.max_concurrent_uploads_per_user，main 注入）；nil 或返回
+	// 非正值时不做门控（保持既有行为）。
+	maxConcurrentProvider func() int
+	// blockedExtensionsProvider 扩展名黑名单热读取（system_settings 的
+	// upload.blocked_extensions，main 注入，逗号分隔）；nil 或空列表不拦截。
+	blockedExtensionsProvider func() []string
 	// quotaCheck 建会话时的存储配额校验回调（C3，main 注入
 	// files.Store.CheckUploadQuota）：超限返回 files.ErrQuotaExceeded，
 	// HTTP 层映射 403 QUOTA_EXCEEDED。
@@ -227,6 +268,73 @@ func (s *Service) SetMaxSizeProvider(fn func() int64) {
 	if fn != nil {
 		s.maxSizeProvider = fn
 	}
+}
+
+// SetMaxConcurrentUploadsProvider 注入每用户并发上传会话上限的热读取
+// （幂等）：建会话时按 store 的 CountActiveByUser（DB COUNT，多实例共享
+// 同一计数）校验，达到上限返回 ErrTooManyUploads（HTTP 429）。
+// nil 或返回非正值时保持不门控。
+func (s *Service) SetMaxConcurrentUploadsProvider(fn func() int) {
+	if fn != nil {
+		s.maxConcurrentProvider = fn
+	}
+}
+
+// SetBlockedExtensionsProvider 注入扩展名黑名单的热读取（幂等）：
+// 建会话与 Complete 双侧校验文件扩展名（最后一个点后部分，大小写不敏感），
+// 命中返回 ErrBlockedExtension（HTTP 400）。nil 或空列表不拦截。
+func (s *Service) SetBlockedExtensionsProvider(fn func() []string) {
+	if fn != nil {
+		s.blockedExtensionsProvider = fn
+	}
+}
+
+// extensionBlocked 判定文件名扩展名是否命中当前黑名单（无点/空扩展名
+// 不拦截；条目大小写不敏感、自动去除空白与可选的前导点）。
+func (s *Service) extensionBlocked(name string) bool {
+	if s.blockedExtensionsProvider == nil {
+		return false
+	}
+	dot := strings.LastIndex(name, ".")
+	if dot < 0 || dot == len(name)-1 {
+		return false
+	}
+	ext := strings.ToLower(name[dot+1:])
+	if ext == "" {
+		return false
+	}
+	for _, raw := range s.blockedExtensionsProvider() {
+		e := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(raw), "."))
+		if e != "" && e == ext {
+			return true
+		}
+	}
+	return false
+}
+
+// checkConcurrentUploads 建会话前的每用户活跃会话数门控；计数来源为
+// store 的可选 CountActiveByUser 能力（DB COUNT），不具备该能力或未注入
+// 上限时直接放行。计数瞬时略欠精确（Save 前统计），门控语义为软上限。
+func (s *Service) checkConcurrentUploads(user uuid.UUID) error {
+	limit := 0
+	if s.maxConcurrentProvider != nil {
+		limit = s.maxConcurrentProvider()
+	}
+	if limit <= 0 {
+		return nil
+	}
+	counter, ok := s.store.(activeSessionCounter)
+	if !ok {
+		return nil
+	}
+	count, err := counter.CountActiveByUser(user, time.Now())
+	if err != nil {
+		return err
+	}
+	if count >= int64(limit) {
+		return ErrTooManyUploads
+	}
+	return nil
 }
 
 // effectiveMaxSize 返回当前生效的单文件大小上限：provider 热读取优先，
@@ -363,6 +471,16 @@ func (s *Service) start(user, parent uuid.UUID, name string, size int64, expecte
 }
 
 func (s *Service) createSession(user, parent uuid.UUID, name string, size int64, expected string, targetFileID *uuid.UUID) (UploadSession, error) {
+	// 扩展名黑名单（upload.blocked_extensions 热读取）：新文件与覆盖新版本
+	//（沿用目标文件现有名称）双侧拦截；无点/空扩展名不拦截。
+	if s.extensionBlocked(name) {
+		return UploadSession{}, ErrBlockedExtension
+	}
+	// 每用户并发上传会话上限（upload.max_concurrent_uploads_per_user 热读取，
+	// DB COUNT 计数）：达到上限拒绝建会话（HTTP 429）。
+	if err := s.checkConcurrentUploads(user); err != nil {
+		return UploadSession{}, err
+	}
 	if targetFileID == nil {
 		n, e := files.NormalizeName(name)
 		if e != nil {
@@ -551,6 +669,12 @@ func (s *Service) Complete(id uuid.UUID) (UploadSession, error) {
 		v.Status = StatusFailed
 		_ = s.store.Update(v)
 		return v, ErrChecksum
+	}
+	// 扩展名黑名单复检（会话期间黑名单可能变更；400 由 HTTP 层映射）。
+	if s.extensionBlocked(v.Name) {
+		v.Status = StatusFailed
+		_ = s.store.Update(v)
+		return v, ErrBlockedExtension
 	}
 	// verifying → scanning 条件迁移：中途被 janitor 置 failed 等情况下中止。
 	if hasMarker {

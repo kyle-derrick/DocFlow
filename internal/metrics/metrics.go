@@ -1,7 +1,7 @@
 // Package metrics 提供 DocFlow 的 Prometheus 指标（设计文档 13.3 / 16.6）：
 // HTTP 请求计数与耗时、上传会话与 Complete 各阶段耗时、病毒扫描结果、
-// ONLYOFFICE 回调计数，以及 GET /metrics 抓取端点（promhttp，默认 registry
-// 自带 go_* 与 process_* 进程指标）。
+// ONLYOFFICE 回调计数、备份校验计数与最近成功时间戳，以及 GET /metrics
+// 抓取端点（promhttp，默认 registry 自带 go_* 与 process_* 进程指标）。
 //
 // 高基数约束：所有 route 标签一律使用 gin 路由模板（c.FullPath()，如
 // /api/v1/files/:id），未匹配任何路由的请求（404）归一为 "unknown"；
@@ -55,6 +55,10 @@ const (
 	// 队列任务处理结果（docflow_queue_processed_total 的 status）。
 	QueueStatusSuccess = "success"
 	QueueStatusFailed  = "failed"
+
+	// 备份校验结果（docflow_backup_verification_total 的 result）。
+	BackupResultSuccess = "success"
+	BackupResultFailed  = "failed"
 )
 
 var (
@@ -99,6 +103,16 @@ var (
 		Name: "docflow_queue_processed_total",
 		Help: "后台任务队列处理结果计数。type 为任务类型，status 为 success / failed。",
 	}, []string{"type", "status"})
+
+	backupVerificationTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "docflow_backup_verification_total",
+		Help: "备份校验计数（POST /admin/backups/verify 对最近备份的只读 sha256 复核）。result 为 success / failed。",
+	}, []string{"result"})
+
+	backupLastSuccessTimestamp = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "docflow_backup_last_success_timestamp",
+		Help: "最近一次备份校验成功的 Unix 时间戳（秒）；从未成功校验时为 0。",
+	})
 )
 
 // Handler 返回 /metrics 端点的 http.Handler（promhttp 默认 registry，
@@ -163,4 +177,13 @@ func IncQueueEnqueued(taskType, driver string) {
 // status 取 QueueStatusSuccess / QueueStatusFailed）。
 func IncQueueProcessed(taskType, status string) {
 	queueProcessedTotal.WithLabelValues(taskType, status).Inc()
+}
+
+// IncBackupVerification 记录一次备份校验结果（result 取 BackupResultSuccess /
+// BackupResultFailed）。
+func IncBackupVerification(result string) { backupVerificationTotal.WithLabelValues(result).Inc() }
+
+// SetBackupLastSuccessTimestamp 记录最近一次备份校验成功的时间（Unix 秒）。
+func SetBackupLastSuccessTimestamp(ts time.Time) {
+	backupLastSuccessTimestamp.Set(float64(ts.Unix()))
 }

@@ -5,6 +5,7 @@ import {
   FileItem,
   Team,
   UUID_RE,
+  copyFile,
   createFolder,
   createShare,
   deleteFile,
@@ -222,6 +223,8 @@ export default function FilesPage() {
         createFolderFn={createFolder}
         uploadFn={uploadFile}
         rootTargetLabel="我的文件（根目录）"
+        viewTabs
+        copyFn={(fileId, parentId) => copyFile(fileId, parentId)}
         rowActions={(item) => (
           <>
             {item.type === 'file' && (

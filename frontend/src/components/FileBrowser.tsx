@@ -20,7 +20,9 @@ import {
   addFileTag,
   batchMoveFiles,
   batchTrashFiles,
+  createShare,
   createTag,
+  downloadBatchFiles,
   downloadFile,
   drawioStatus,
   fetchPreview,
@@ -34,7 +36,7 @@ import {
   summarizeBatchResults,
 } from '../api'
 import { useHotkeys } from '../useHotkeys'
-import { t, useLocale } from '../i18n'
+import { MessageKey, formatMessage, t, useLocale } from '../i18n'
 
 export function formatTime(iso: string): string {
   return new Date(iso).toLocaleString('zh-CN', { hour12: false })
@@ -147,6 +149,10 @@ export interface FileBrowserProps {
   reloadKey?: number
   /** 提供时批量移动对话框含「根目录」选项（个人空间；空目标即个人根）。 */
   rootTargetLabel?: string
+  /** 提供时顶部显示视图切换（全部 / 收藏 / 最近，复用 ?starred= 与 ?recent= 参数）。 */
+  viewTabs?: boolean
+  /** 提供时文件行显示「复制」（parentId 为目标目录 UUID；留空目标由本组件解析为源目录）。 */
+  copyFn?: (fileId: string, parentId: string) => Promise<unknown>
 }
 
 export default function FileBrowser({
@@ -161,9 +167,11 @@ export default function FileBrowser({
   emptyHint,
   reloadKey,
   rootTargetLabel,
+  viewTabs,
+  copyFn,
 }: FileBrowserProps) {
   const locale = useLocale()
-  const msg = (key: keyof typeof import('../i18n').messages['zh-CN']) => t(locale, key)
+  const msg = (key: MessageKey) => t(locale, key)
   const doDownload = downloadFn ?? downloadFile
   const doPreview = previewFn ?? fetchPreview
   const navigate = useNavigate()
@@ -173,13 +181,14 @@ export default function FileBrowser({
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
-  // 顶栏筛选与服务端排序（标签/收藏激活时进入跨目录检索模式）。
+  // 顶栏筛选与服务端排序（标签/收藏激活时进入跨目录检索模式；最近访问为独立视图）。
   const [tags, setTags] = useState<Tag[]>([])
   const [tagFilter, setTagFilter] = useState('')
   const [starredFilter, setStarredFilter] = useState('')
+  const [recentView, setRecentView] = useState(false)
   const [sortKey, setSortKey] = useState<'name' | 'updated_at' | 'size'>('name')
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc')
-  const searchMode = tagFilter !== '' || starredFilter !== ''
+  const searchMode = tagFilter !== '' || starredFilter !== '' || recentView
 
   // 多选与批量操作。
   const [selected, setSelected] = useState<Set<string>>(new Set())
@@ -190,6 +199,24 @@ export default function FileBrowser({
   const [moveTarget, setMoveTarget] = useState('')
   const [moveManual, setMoveManual] = useState('')
   const [moveError, setMoveError] = useState('')
+
+  // 批量分享：逐个创建公开分享后弹出链接列表。
+  const [batchShareBusy, setBatchShareBusy] = useState(false)
+  const [shareLinks, setShareLinks] = useState<Array<{ name: string; url: string }>>([])
+  const [shareListOpen, setShareListOpen] = useState(false)
+  const [copiedShareIdx, setCopiedShareIdx] = useState(-1)
+
+  // 批量打标签：从已有标签中选择一个应用到全部选中项。
+  const [batchTagOpen, setBatchTagOpen] = useState(false)
+  const [batchTagId, setBatchTagId] = useState('')
+  const [batchTagBusy, setBatchTagBusy] = useState(false)
+  const [batchTagError, setBatchTagError] = useState('')
+
+  // 行内复制：目标目录 UUID 输入，留空复制到源目录。
+  const [copyTarget, setCopyTarget] = useState<FileItem | null>(null)
+  const [copyParent, setCopyParent] = useState('')
+  const [copyBusy, setCopyBusy] = useState(false)
+  const [copyError, setCopyError] = useState('')
 
   // 行内标签管理。
   const [tagModalTarget, setTagModalTarget] = useState<FileItem | null>(null)
@@ -244,6 +271,7 @@ export default function FileBrowser({
   const currentOpts = (): FileQueryOptions => ({
     tagId: tagFilter || null,
     starred: starredFilter === '' ? undefined : starredFilter === 'true',
+    recent: recentView,
     sort: sortKey,
     order: sortOrder,
   })
@@ -266,14 +294,14 @@ export default function FileBrowser({
       const opts = currentOpts()
       const { items: list, folderId } = await listItems(searchMode ? null : parentId, opts)
       // name 排序保持「目录优先 + 名称」的本地归并（服务端 name 为纯字典序）；
-      // 其余排序键直接采用服务端顺序。
-      setItems(sortKey === 'name' ? sortItems(list) : list)
+      // 其余排序键与最近访问视图（last_access_at 倒序）直接采用服务端顺序。
+      setItems(sortKey === 'name' && !opts.recent ? sortItems(list) : list)
       if (folderId) {
         // 团队根目录：列表响应回填真实目录 ID，供上传/建目录使用。
         setCrumbs((prev) => prev.map((c, i) => (i === prev.length - 1 ? { ...c, folderId } : c)))
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : '加载失败')
+      setError(err instanceof Error ? err.message : msg('loadFailed'))
       setItems([])
     } finally {
       setLoading(false)
@@ -285,7 +313,7 @@ export default function FileBrowser({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // 筛选/排序变化时重新查询当前目录（跳过首挂载，避免与初始 load 重复）。
+  // 筛选/排序/视图变化时重新查询当前目录（跳过首挂载，避免与初始 load 重复）。
   const mounted = useRef(false)
   useEffect(() => {
     if (!mounted.current) {
@@ -294,7 +322,7 @@ export default function FileBrowser({
     }
     void load(currentParent)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tagFilter, starredFilter, sortKey, sortOrder])
+  }, [tagFilter, starredFilter, recentView, sortKey, sortOrder])
 
   useEffect(() => {
     if (reloadKey) void load(currentParent)
@@ -316,6 +344,16 @@ export default function FileBrowser({
   const clearFilters = () => {
     setTagFilter('')
     setStarredFilter('')
+    setRecentView(false)
+  }
+
+  // 视图切换（全部 / 收藏 / 最近）：与下方标签、收藏筛选联动——收藏视图即
+  // starred=true；最近视图走 ?recent=true（后端忽略其余过滤）；其余清空。
+  const activeView: 'all' | 'starred' | 'recent' = recentView ? 'recent' : starredFilter === 'true' ? 'starred' : 'all'
+  const setView = (view: 'all' | 'starred' | 'recent') => {
+    setRecentView(view === 'recent')
+    setTagFilter('')
+    setStarredFilter(view === 'starred' ? 'true' : '')
   }
 
   const toggleSelect = (id: string) => {
@@ -390,16 +428,175 @@ export default function FileBrowser({
 
   const handleBatchTrash = async () => {
     if (selectedIds.length === 0) return
-    if (!window.confirm(`确定将所选 ${selectedIds.length} 项移入回收站？`)) return
+    if (!window.confirm(formatMessage(msg('batchTrashConfirm'), { n: selectedIds.length }))) return
     setBatchBusy(true)
     setBatchNotice('')
     try {
       const results = await batchTrashFiles(selectedIds)
       finishBatch(results)
     } catch (err) {
-      setBatchError(writeErrorText(err, '删除失败'))
+      setBatchError(writeErrorText(err, msg('deleteFailed')))
     } finally {
       setBatchBusy(false)
+    }
+  }
+
+  // ---- 批量下载（zip 流） ----
+
+  const handleBatchDownload = async () => {
+    if (selectedIds.length === 0) return
+    setBatchBusy(true)
+    setBatchError('')
+    setBatchNotice('')
+    try {
+      await downloadBatchFiles(selectedIds)
+    } catch (err) {
+      setBatchError(err instanceof Error ? err.message : msg('downloadFailed'))
+    } finally {
+      setBatchBusy(false)
+    }
+  }
+
+  // ---- 批量分享（逐个创建公开分享，完成后弹链接列表） ----
+
+  const handleBatchShare = async () => {
+    const targets = items.filter((it) => selected.has(it.id) && it.type === 'file')
+    if (targets.length === 0) {
+      setBatchError(msg('batchShareEmpty'))
+      return
+    }
+    setBatchShareBusy(true)
+    setBatchError('')
+    setBatchNotice('')
+    const links: Array<{ name: string; url: string }> = []
+    let failed = 0
+    for (const f of targets) {
+      try {
+        const created = await createShare({ fileId: f.id, permission: 'download', visibility: 'public' })
+        if (created.token) links.push({ name: f.name, url: `${window.location.origin}/s/${created.token}` })
+        else failed++
+      } catch {
+        failed++
+      }
+    }
+    setBatchShareBusy(false)
+    if (failed > 0) setBatchError(formatMessage(msg('batchSharePartial'), { ok: links.length, fail: failed }))
+    else setBatchNotice(formatMessage(msg('batchShareDone'), { n: links.length }))
+    if (links.length > 0) {
+      setShareLinks(links)
+      setCopiedShareIdx(-1)
+      setShareListOpen(true)
+    }
+  }
+
+  const copyShareLink = async (url: string, index: number) => {
+    try {
+      await navigator.clipboard.writeText(url)
+      setCopiedShareIdx(index)
+    } catch {
+      setBatchError(msg('clipboardCopyFailed'))
+    }
+  }
+
+  // ---- 批量打标签（对每个选中项打同一已有标签） ----
+
+  const openBatchTagDialog = () => {
+    if (tags.length === 0) {
+      setBatchError(msg('noTagsHint'))
+      return
+    }
+    setBatchTagId(tags[0]?.id ?? '')
+    setBatchTagError('')
+    setBatchTagOpen(true)
+  }
+
+  const handleBatchTag = async (e: FormEvent) => {
+    e.preventDefault()
+    if (!batchTagId || selectedIds.length === 0) return
+    setBatchTagBusy(true)
+    setBatchTagError('')
+    let ok = 0
+    let fail = 0
+    for (const id of selectedIds) {
+      try {
+        await addFileTag(id, batchTagId)
+        ok++
+      } catch {
+        fail++
+      }
+    }
+    setBatchTagBusy(false)
+    if (fail > 0) {
+      setBatchTagError(formatMessage(msg('batchTagPartial'), { ok, fail }))
+      return
+    }
+    setBatchTagOpen(false)
+    setBatchError('')
+    setBatchNotice(formatMessage(msg('batchTagOk'), { n: ok }))
+  }
+
+  // ---- 批量收藏 / 取消收藏（循环 PATCH starred） ----
+
+  const selectedItems = items.filter((it) => selected.has(it.id))
+  const allSelectedStarred = selectedItems.length > 0 && selectedItems.every((it) => it.is_starred)
+
+  const handleBatchStar = async () => {
+    if (selectedIds.length === 0) return
+    const target = !allSelectedStarred
+    setBatchBusy(true)
+    setBatchError('')
+    setBatchNotice('')
+    let fail = 0
+    for (const id of selectedIds) {
+      try {
+        await setFileStarred(id, target)
+      } catch {
+        fail++
+      }
+    }
+    setBatchBusy(false)
+    if (fail > 0) {
+      setBatchError(formatMessage(msg('batchStarFailed'), { fail }))
+      return
+    }
+    setBatchNotice(formatMessage(target ? msg('batchStarOk') : msg('batchUnstarOk'), { n: selectedIds.length }))
+    void load(currentParent)
+  }
+
+  // ---- 行内复制（目标目录 UUID 可选，留空复制到源目录） ----
+
+  const openCopyDialog = (item: FileItem) => {
+    setCopyTarget(item)
+    setCopyParent('')
+    setCopyError('')
+  }
+
+  const handleCopy = async (e: FormEvent) => {
+    e.preventDefault()
+    if (!copyTarget || !copyFn) return
+    const manual = copyParent.trim()
+    if (manual && !/^[0-9a-fA-F-]{36}$/.test(manual)) {
+      setCopyError(msg('uuidInvalid'))
+      return
+    }
+    const parent = manual || copyTarget.parent_id || ''
+    if (!parent) {
+      setCopyError(msg('uuidInvalid'))
+      return
+    }
+    setCopyBusy(true)
+    setCopyError('')
+    try {
+      await copyFn(copyTarget.id, parent)
+      setCopyTarget(null)
+      setCopyParent('')
+      setBatchError('')
+      setBatchNotice(msg('copyOk'))
+      await load(currentParent)
+    } catch (err) {
+      setCopyError(writeErrorText(err, msg('fileCopyFailed')))
+    } finally {
+      setCopyBusy(false)
     }
   }
 
@@ -606,6 +803,18 @@ export default function FileBrowser({
         closePreview()
         return
       }
+      if (shareListOpen) {
+        setShareListOpen(false)
+        return
+      }
+      if (batchTagOpen) {
+        setBatchTagOpen(false)
+        return
+      }
+      if (copyTarget) {
+        setCopyTarget(null)
+        return
+      }
       if (tagModalTarget) {
         setTagModalTarget(null)
         return
@@ -652,42 +861,58 @@ export default function FileBrowser({
         </div>
       </div>
 
-      {/* 顶栏筛选：标签 / 收藏 / 排序（标签或收藏激活时为跨目录检索模式） */}
+      {/* 顶栏筛选：视图切换（全部/收藏/最近）+ 标签 / 收藏 / 排序（跨目录检索或最近访问模式） */}
       <div className="filter-bar">
+        {viewTabs && (
+          <div className="seg-group view-tabs" role="tablist">
+            {(['all', 'starred', 'recent'] as const).map((view) => (
+              <button
+                key={view}
+                type="button"
+                role="tab"
+                aria-selected={activeView === view}
+                className={`seg${activeView === view ? ' active' : ''}`}
+                onClick={() => setView(view)}
+              >
+                {view === 'all' ? msg('viewAll') : view === 'starred' ? msg('viewStarred') : msg('viewRecent')}
+              </button>
+            ))}
+          </div>
+        )}
         <label className="filter-item">
-          <span>标签</span>
-          <select data-hotkey="filter" value={tagFilter} onChange={(e) => setTagFilter(e.target.value)}>
-            <option value="">全部</option>
+          <span>{msg('tag')}</span>
+          <select data-hotkey="filter" value={tagFilter} onChange={(e) => { setTagFilter(e.target.value); setRecentView(false) }}>
+            <option value="">{msg('all')}</option>
             {tags.map((t) => (
               <option key={t.id} value={t.id}>#{t.name}</option>
             ))}
           </select>
         </label>
         <label className="filter-item">
-          <span>收藏</span>
-          <select value={starredFilter} onChange={(e) => setStarredFilter(e.target.value)}>
-            <option value="">全部</option>
-            <option value="true">仅收藏</option>
-            <option value="false">未收藏</option>
+          <span>{msg('viewStarred')}</span>
+          <select value={starredFilter} onChange={(e) => { setStarredFilter(e.target.value); setRecentView(false) }}>
+            <option value="">{msg('all')}</option>
+            <option value="true">{msg('starredOnly')}</option>
+            <option value="false">{msg('starredNo')}</option>
           </select>
         </label>
         <label className="filter-item">
-          <span>排序</span>
+          <span>{msg('sort')}</span>
           <select value={sortKey} onChange={(e) => setSortKey(e.target.value as 'name' | 'updated_at' | 'size')}>
-            <option value="name">名称</option>
-            <option value="updated_at">修改时间</option>
-            <option value="size">大小</option>
+            <option value="name">{msg('sortOrderName')}</option>
+            <option value="updated_at">{msg('sortOrderUpdated')}</option>
+            <option value="size">{msg('sortOrderSize')}</option>
           </select>
         </label>
         <label className="filter-item">
-          <span>方向</span>
+          <span>{msg('direction')}</span>
           <select value={sortOrder} onChange={(e) => setSortOrder(e.target.value as 'asc' | 'desc')}>
-            <option value="asc">升序</option>
-            <option value="desc">降序</option>
+            <option value="asc">{msg('orderAsc')}</option>
+            <option value="desc">{msg('orderDesc')}</option>
           </select>
         </label>
         {searchMode && (
-          <button className="btn ghost small" onClick={clearFilters}>清除筛选</button>
+          <button className="btn ghost small" onClick={clearFilters}>{msg('clearFilters')}</button>
         )}
       </div>
 
@@ -708,16 +933,30 @@ export default function FileBrowser({
       )}
       {searchMode && (
         <div className="hint search-mode-hint">
-          检索模式：结果跨越全部个人与团队目录（标签/收藏过滤）。
+          {recentView ? msg('recentHint') : msg('searchModeHint')}
         </div>
       )}
 
       {selected.size > 0 && (
         <div className="batch-bar">
-          <span>已选 {selected.size} 项</span>
-          <button className="btn small" disabled={batchBusy} onClick={openMoveDialog}>移动到…</button>
-          <button className="btn small danger" disabled={batchBusy} onClick={() => void handleBatchTrash()}>删除</button>
-          <button className="btn ghost small" onClick={() => setSelected(new Set())}>取消选择</button>
+          <span>{formatMessage(msg('selectedCount'), { n: selected.size })}</span>
+          <button className="btn small" disabled={batchBusy || batchShareBusy} onClick={openMoveDialog}>{msg('batchMove')}</button>
+          <button className="btn small" disabled={batchBusy || batchShareBusy} onClick={() => void handleBatchDownload()}>
+            {msg('batchDownload')}
+          </button>
+          <button className="btn small" disabled={batchBusy || batchShareBusy} onClick={() => void handleBatchShare()}>
+            {batchShareBusy ? msg('loading') : msg('batchShare')}
+          </button>
+          <button className="btn small" disabled={batchBusy || batchShareBusy} onClick={openBatchTagDialog}>
+            {msg('batchTag')}
+          </button>
+          <button className="btn small" disabled={batchBusy || batchShareBusy} onClick={() => void handleBatchStar()}>
+            {batchBusy ? msg('loading') : allSelectedStarred ? msg('batchUnstar') : msg('batchStar')}
+          </button>
+          <button className="btn small danger" disabled={batchBusy || batchShareBusy} onClick={() => void handleBatchTrash()}>
+            {msg('delete')}
+          </button>
+          <button className="btn ghost small" onClick={() => setSelected(new Set())}>{msg('clearSelection')}</button>
         </div>
       )}
       {batchNotice && <div className="banner ok">{batchNotice}</div>}
@@ -738,12 +977,12 @@ export default function FileBrowser({
                   type="checkbox"
                   checked={allSelected}
                   onChange={toggleSelectAll}
-                  aria-label="全选"
+                  aria-label={msg('selectAll')}
                 />
               </th>
-              <th>名称</th>
-              <th>修改时间</th>
-              <th className="col-actions">操作</th>
+              <th>{msg('name')}</th>
+              <th>{msg('sortOrderUpdated')}</th>
+              <th className="col-actions">{msg('actions')}</th>
             </tr>
           </thead>
           <tbody>
@@ -754,7 +993,7 @@ export default function FileBrowser({
                     type="checkbox"
                     checked={selected.has(item.id)}
                     onChange={() => toggleSelect(item.id)}
-                    aria-label={`选择 ${item.name}`}
+                    aria-label={`${msg('selectItem')} ${item.name}`}
                   />
                 </td>
                 <td>
@@ -784,7 +1023,10 @@ export default function FileBrowser({
                 </td>
                 <td className="muted">{formatTime(item.updated_at)}</td>
                 <td className="col-actions">
-                  <button className="btn small" onClick={() => void openTagModal(item)}>标签</button>
+                  <button className="btn small" onClick={() => void openTagModal(item)}>{msg('tag')}</button>
+                  {item.type === 'file' && copyFn && (
+                    <button className="btn small" onClick={() => openCopyDialog(item)}>{msg('copy')}</button>
+                  )}
                   {item.type === 'file' && ooEnabled && isOfficeFile(item.name) && (
                     <button className="btn small" title="ONLYOFFICE 在线编辑" onClick={() => navigate(`/edit/${item.id}`)}>
                       编辑
@@ -863,6 +1105,76 @@ export default function FileBrowser({
               <button type="button" className="btn" onClick={() => setMoveOpen(false)}>取消</button>
               <button type="submit" className="btn primary" disabled={batchBusy || selected.size === 0}>
                 {batchBusy ? '移动中…' : '移动'}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
+
+      {shareListOpen && shareLinks.length > 0 && (
+        <Modal wide title={msg('batchShareTitle')} onClose={() => setShareListOpen(false)}>
+          <p className="hint">{msg('batchShareLinks')}</p>
+          <div className="share-link-list">
+            {shareLinks.map((link, index) => (
+              <div key={link.url} className="share-link-item">
+                <span className="share-link-name muted">{link.name}</span>
+                <div className="share-link">
+                  <input readOnly value={link.url} onFocus={(e) => e.currentTarget.select()} />
+                  <button
+                    className="btn small"
+                    onClick={() => void copyShareLink(link.url, index)}
+                  >
+                    {copiedShareIdx === index ? msg('copied') : msg('copyLink')}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="modal-actions">
+            <button className="btn" onClick={() => setShareListOpen(false)}>{msg('close')}</button>
+          </div>
+        </Modal>
+      )}
+
+      {batchTagOpen && (
+        <Modal title={formatMessage(msg('batchTagTitle'), { n: selected.size })} onClose={() => setBatchTagOpen(false)}>
+          <form onSubmit={handleBatchTag}>
+            <label className="field">
+              <span>{msg('tag')}</span>
+              <select autoFocus value={batchTagId} onChange={(e) => setBatchTagId(e.target.value)}>
+                {tags.map((t) => (
+                  <option key={t.id} value={t.id}>#{t.name}</option>
+                ))}
+              </select>
+            </label>
+            {batchTagError && <div className="error-text">{batchTagError}</div>}
+            <div className="modal-actions">
+              <button type="button" className="btn" onClick={() => setBatchTagOpen(false)}>{msg('cancel')}</button>
+              <button type="submit" className="btn primary" disabled={batchTagBusy || !batchTagId}>
+                {batchTagBusy ? msg('loading') : msg('apply')}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
+
+      {copyTarget && copyFn && (
+        <Modal title={formatMessage(msg('copyTitle'), { name: copyTarget.name })} onClose={() => setCopyTarget(null)}>
+          <form onSubmit={handleCopy}>
+            <label className="field">
+              <span>{msg('copyTargetLabel')}</span>
+              <input
+                autoFocus
+                value={copyParent}
+                onChange={(e) => setCopyParent(e.target.value)}
+                placeholder="3f0c9c2e-…"
+              />
+            </label>
+            {copyError && <div className="error-text">{copyError}</div>}
+            <div className="modal-actions">
+              <button type="button" className="btn" onClick={() => setCopyTarget(null)}>{msg('cancel')}</button>
+              <button type="submit" className="btn primary" disabled={copyBusy}>
+                {copyBusy ? msg('loading') : msg('copy')}
               </button>
             </div>
           </form>

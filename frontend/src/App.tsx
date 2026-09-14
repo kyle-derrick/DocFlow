@@ -497,13 +497,13 @@ function TopBar() {
     <header className="topbar">
       <span className="brand">DocFlow</span>
       <nav className="nav">
-        <Link to="/dashboard" className={location.pathname === '/dashboard' ? 'active' : ''}>概览</Link>
-        <Link to="/" className={location.pathname === '/' ? 'active' : ''}>文件</Link>
-        <Link to="/teams" className={location.pathname.startsWith('/teams') ? 'active' : ''}>团队</Link>
-        <Link to="/shared" className={location.pathname === '/shared' ? 'active' : ''}>分享</Link>
-        <Link to="/trash" className={location.pathname === '/trash' ? 'active' : ''}>回收站</Link>
-        {admin && <Link to="/admin" className={location.pathname === '/admin' ? 'active' : ''}>管理</Link>}
-        <Link to="/settings" className={location.pathname === '/settings' ? 'active' : ''}>设置</Link>
+        <Link to="/dashboard" className={location.pathname === '/dashboard' ? 'active' : ''}>{msg('overview')}</Link>
+        <Link to="/" className={location.pathname === '/' ? 'active' : ''}>{msg('files')}</Link>
+        <Link to="/teams" className={location.pathname.startsWith('/teams') ? 'active' : ''}>{msg('teams')}</Link>
+        <Link to="/shared" className={location.pathname === '/shared' ? 'active' : ''}>{msg('shared')}</Link>
+        <Link to="/trash" className={location.pathname === '/trash' ? 'active' : ''}>{msg('trash')}</Link>
+        {admin && <Link to="/admin" className={location.pathname === '/admin' ? 'active' : ''}>{msg('admin')}</Link>}
+        <Link to="/settings" className={location.pathname === '/settings' ? 'active' : ''}>{msg('settings')}</Link>
       </nav>
       <TopBarSearch />
       <OfflineBadge />

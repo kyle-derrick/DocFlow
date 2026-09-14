@@ -19,8 +19,10 @@ var (
 // 生产实现为 gormTrashRepo（在事务内执行），测试可用内存实现
 // 验证恢复冲突与彻底删除的引用计数语义。
 type trashRepo interface {
-	// GetAny 返回 owner 名下的文件行（不论是否软删除）；不存在返回 ErrNotFound。
-	GetAny(owner, id uuid.UUID) (File, error)
+	// GetAny 返回文件行（不论归属与是否软删除）；不存在返回 ErrNotFound。
+	// 用户授权由调用方经 authorize 回调在事务内完成（个人 owner / 团队
+	// CanWrite·CanDelete，见 Store.Restore/Purge）。
+	GetAny(id uuid.UUID) (File, error)
 	// ParentAlive 判断父目录是否存在且未软删除。
 	ParentAlive(parent uuid.UUID) (bool, error)
 	// HasActiveSibling 判断同一父目录下是否存在同名活跃文件（排除 exclude）。
@@ -69,9 +71,13 @@ type BlobRef struct {
 
 // restoreLogic 恢复软删除文件：
 // 原父目录已被删除或名称冲突时返回对应错误，不静默改名/移动。
-func restoreLogic(r trashRepo, owner, id uuid.UUID) (File, error) {
-	f, err := r.GetAny(owner, id)
+// authorize 在行锁内复核用户对该文件的权限（个人 owner / 团队 CanWrite）。
+func restoreLogic(r trashRepo, id uuid.UUID, authorize func(File) error) (File, error) {
+	f, err := r.GetAny(id)
 	if err != nil {
+		return File{}, err
+	}
+	if err := authorize(f); err != nil {
 		return File{}, err
 	}
 	if f.DeletedAt == nil {
@@ -107,11 +113,15 @@ func restoreLogic(r trashRepo, owner, id uuid.UUID) (File, error) {
 // 处理其全部后代、删除 file_versions 引用并递减 object_blobs 引用计数；
 // 引用计数归零的 blob 标记 deleting 交由调用方删除物理对象，
 // 仍被引用的对象只递减计数、绝不删除。根目录不可删除。
+// authorize 在行锁内复核用户对该文件的权限（个人 owner / 团队 CanDelete）。
 // 返回被删文件、待物理删除的 blob 与关联网页包的对象前缀
 // （webpkg/<public_id>，供事务提交后清理，见 Store.Purge）。
-func purgeLogic(r trashRepo, owner, id uuid.UUID) (purged []File, deleting []ObjectBlob, webpkgPrefixes []string, err error) {
-	f, err := r.GetAny(owner, id)
+func purgeLogic(r trashRepo, id uuid.UUID, authorize func(File) error) (purged []File, deleting []ObjectBlob, webpkgPrefixes []string, err error) {
+	f, err := r.GetAny(id)
 	if err != nil {
+		return nil, nil, nil, err
+	}
+	if err := authorize(f); err != nil {
 		return nil, nil, nil, err
 	}
 	if f.DeletedAt == nil {
@@ -211,11 +221,13 @@ func (s *Store) ListTrash(owner uuid.UUID, limit int) ([]File, error) {
 }
 
 // Restore 恢复软删除文件；冲突时返回 ErrParentDeleted/ErrConflict（409），不静默改名。
-func (s *Store) Restore(owner, id uuid.UUID) (File, error) {
+// 权限：个人文件 owner；团队文件 CanWrite（含自定义角色，authorizeFileWrite）。
+func (s *Store) Restore(user, id uuid.UUID) (File, error) {
+	authorize := func(f File) error { return authorizeFileWrite(f, user, s.teamWriter) }
 	var f File
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		var e error
-		f, e = restoreLogic(&gormTrashRepo{tx: tx}, owner, id)
+		f, e = restoreLogic(&gormTrashRepo{tx: tx}, id, authorize)
 		return e
 	})
 	if err != nil {
@@ -225,15 +237,26 @@ func (s *Store) Restore(owner, id uuid.UUID) (File, error) {
 }
 
 // Purge 彻底删除（硬删除）软删除文件及其全部后代，并按引用计数处理 object_blobs。
+// 权限：个人文件 owner；团队文件 CanDelete（authorizeTeamDelete，含自定义角色）。
 // 返回被删除的文件与引用计数归零（待物理删除）的 blob。
 // 事务提交后经注入的 webpkg 清理回调（SetWebpkgCleaner）删除关联网页包的
 // webpkg/<public_id>/ 前缀对象（best-effort）；HTTP purge 与 janitor sweepTrash
-// 均经本方法，两路清理统一生效。
-func (s *Store) Purge(owner, id uuid.UUID) (purged []File, deleting []ObjectBlob, err error) {
+// 均经本方法，两路清理统一生效（janitor 走不做用户判定的 PurgeSystem）。
+func (s *Store) Purge(user, id uuid.UUID) (purged []File, deleting []ObjectBlob, err error) {
+	authorize := func(f File) error { return authorizeTeamDelete(f, user, s.teamDeleter) }
+	return s.purgeWithAuthorize(id, authorize)
+}
+
+// PurgeSystem 系统级彻底删除（janitor 回收站超期清理）：不做用户权限判定。
+func (s *Store) PurgeSystem(id uuid.UUID) (purged []File, deleting []ObjectBlob, err error) {
+	return s.purgeWithAuthorize(id, func(File) error { return nil })
+}
+
+func (s *Store) purgeWithAuthorize(id uuid.UUID, authorize func(File) error) (purged []File, deleting []ObjectBlob, err error) {
 	var webpkgPrefixes []string
 	err = s.db.Transaction(func(tx *gorm.DB) error {
 		var e error
-		purged, deleting, webpkgPrefixes, e = purgeLogic(&gormTrashRepo{tx: tx}, owner, id)
+		purged, deleting, webpkgPrefixes, e = purgeLogic(&gormTrashRepo{tx: tx}, id, authorize)
 		return e
 	})
 	if err != nil {

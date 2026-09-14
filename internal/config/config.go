@@ -108,6 +108,9 @@ type Config struct {
 	WebpkgRateLimitPerMinute int
 	// QueueDriver 选择后台任务队列驱动（QUEUE_DRIVER）：inprocess（默认，
 	// 进程内 goroutine，零依赖）| redis（asynq，多实例横向扩展）。
+	// WebSocket 站内通知的跨实例广播（realtime.RedisBroadcaster，
+	// docflow:notify Pub/Sub）复用同一开关与 Redis 连接参数：redis 时
+	// 启用跨实例扇出，inprocess 时 Noop（单实例纯本地分发）。
 	QueueDriver string
 	// RedisAddr 为 Redis 地址 host:port（默认 localhost:6379，
 	// QUEUE_DRIVER=redis 时使用）。

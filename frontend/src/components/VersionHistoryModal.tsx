@@ -264,7 +264,8 @@ export default function VersionHistoryModal({ file, onClose, onChanged }: Props)
           </div>
           {!textLike && versions.length > 0 && <p className="hint version-hint">该文件不是文本类型，暂不支持版本对比。</p>}
           <p className="hint version-hint">
-            上传新版本将保留历史（按系统设置的上限裁剪）；回滚仅移动「当前版本」指针，不修改任何历史版本内容。
+            上传新版本将保留历史（按系统设置组合裁剪：最新 N 个 ∪ 保留时间窗内，当前版本恒不可删）；
+            回滚仅移动「当前版本」指针，不修改任何历史版本内容。
           </p>
 
           {notice && <div className="banner ok">{notice}</div>}

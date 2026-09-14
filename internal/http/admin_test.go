@@ -18,6 +18,9 @@ type fakeSettingsService struct {
 	setErr  error
 	lastKey string
 	lastVal any
+	// intKeys / intErr 支撑 GetInt（batch.max_items 热读取路径的测试）。
+	intKeys map[string]int
+	intErr  map[string]error
 }
 
 func (f *fakeSettingsService) GetAll() ([]settings.SettingView, error) { return f.views, nil }
@@ -28,6 +31,13 @@ func (f *fakeSettingsService) Set(key string, value any, actor uuid.UUID) (any, 
 		return nil, f.setErr
 	}
 	return value, nil
+}
+
+func (f *fakeSettingsService) GetInt(key string) (int, error) {
+	if err, ok := f.intErr[key]; ok {
+		return 0, err
+	}
+	return f.intKeys[key], nil
 }
 
 type fakeStatsSource struct {
@@ -56,7 +66,7 @@ func TestListAdminSettings(t *testing.T) {
 		t.Fatalf("status = %d, want 200 (body: %s)", w.Code, w.Body.String())
 	}
 	body := w.Body.String()
-	for _, want := range []string{`"key":"upload.max_file_size"`, `"value":1073741824`, `"type":"int"`, `"description"`} {
+	for _, want := range []string{`"key":"upload.max_file_size"`, `"value":1073741824`, `"type":"int"`, `"description"`, `"effect"`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("body %s must contain %s", body, want)
 		}
@@ -67,6 +77,32 @@ func TestListAdminSettings(t *testing.T) {
 	h.listAdminSettings(c)
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("unconfigured status = %d, want 500", w.Code)
+	}
+}
+
+// TestListAdminSettingsSecrets 凭据状态（G6）：响应附 secrets 只读探针
+// （env 非空 = configured），不回显任何密钥值。
+func TestListAdminSettingsSecrets(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	t.Setenv("JWT_SECRET", "unit-test-jwt-secret-0123456789abcdef")
+	t.Setenv("SMTP_PASS", "")
+	t.Setenv("S3_SECRET_KEY", "")
+	t.Setenv("ONLYOFFICE_JWT_SECRET", "")
+	h := &Handler{settings: &fakeSettingsService{views: []settings.SettingView{}}}
+	c, w := adminContext(http.MethodGet, "/api/v1/admin/settings", "")
+	h.listAdminSettings(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+	body := w.Body.String()
+	for _, want := range []string{`"secrets"`, `"jwt_secret":true`, `"smtp_password":false`, `"s3_secret_key":false`, `"onlyoffice_jwt_secret":false`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("body %s must contain %s", body, want)
+		}
+	}
+	// 绝不回显密钥值。
+	if strings.Contains(body, "unit-test-jwt-secret-0123456789abcdef") {
+		t.Fatal("secrets must never echo values")
 	}
 }
 

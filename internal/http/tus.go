@@ -154,6 +154,12 @@ func (h *Handler) tusCreate(c *gin.Context) {
 			tusError(c, http.StatusNotFound, "file not found")
 		case errors.Is(err, upload.ErrHash), errors.Is(err, files.ErrInvalidName), errors.Is(err, files.ErrInvalidTarget):
 			tusError(c, http.StatusBadRequest, err.Error())
+		case errors.Is(err, upload.ErrBlockedExtension):
+			// 扩展名黑名单（upload.blocked_extensions）：400。
+			tusError(c, http.StatusBadRequest, err.Error())
+		case errors.Is(err, upload.ErrTooManyUploads):
+			// 每用户并发上传会话上限（upload.max_concurrent_uploads_per_user）：429。
+			tusError(c, http.StatusTooManyRequests, err.Error())
 		default:
 			tusError(c, http.StatusInternalServerError, "unable to create upload")
 		}

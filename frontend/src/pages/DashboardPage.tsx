@@ -6,6 +6,7 @@ import { useNavigate } from 'react-router-dom'
 import { DashboardData, getDashboard } from '../api'
 import { HOTKEY_DOCS } from '../components/HotkeysHelp'
 import { formatTime } from '../components/FileBrowser'
+import { MessageKey, t, useLocale } from '../i18n'
 
 /** 字节数人类可读格式（B/KB/MB/GB/TB，一位小数）。 */
 function formatBytes(n: number): string {
@@ -21,26 +22,28 @@ function formatBytes(n: number): string {
 }
 
 /** 个人统计卡片配置（值可为数字或字节数格式化）。 */
-const PERSONAL_CARDS: Array<{ key: keyof Pick<DashboardData, 'files' | 'storage_bytes' | 'team_files' | 'shares' | 'uploads_7d'>; label: string; bytes?: boolean }> = [
-  { key: 'files', label: '我的文件' },
-  { key: 'storage_bytes', label: '存储占用', bytes: true },
-  { key: 'team_files', label: '团队空间文件' },
-  { key: 'shares', label: '有效分享' },
-  { key: 'uploads_7d', label: '近 7 天上传' },
+const PERSONAL_CARDS: Array<{ key: keyof Pick<DashboardData, 'files' | 'storage_bytes' | 'team_files' | 'shares' | 'uploads_7d'>; labelKey: MessageKey; bytes?: boolean }> = [
+  { key: 'files', labelKey: 'statMyFiles' },
+  { key: 'storage_bytes', labelKey: 'statStorage', bytes: true },
+  { key: 'team_files', labelKey: 'statTeamFiles' },
+  { key: 'shares', labelKey: 'statShares' },
+  { key: 'uploads_7d', labelKey: 'statUploads7d' },
 ]
 
 /** admin 全局统计卡片配置（复用 /admin/stats 字段）。 */
-const ADMIN_CARDS: Array<{ key: keyof NonNullable<DashboardData['admin']>; label: string }> = [
-  { key: 'users', label: '用户' },
-  { key: 'files', label: '文件' },
-  { key: 'uploads', label: '上传会话' },
-  { key: 'sessions', label: '登录会话' },
-  { key: 'shares', label: '分享' },
-  { key: 'tokens', label: 'API 令牌' },
+const ADMIN_CARDS: Array<{ key: keyof NonNullable<DashboardData['admin']>; labelKey: MessageKey }> = [
+  { key: 'users', labelKey: 'statUsers' },
+  { key: 'files', labelKey: 'statFiles' },
+  { key: 'uploads', labelKey: 'statUploads' },
+  { key: 'sessions', labelKey: 'statSessions' },
+  { key: 'shares', labelKey: 'statShares' },
+  { key: 'tokens', labelKey: 'statTokens' },
 ]
 
 export default function DashboardPage() {
   const navigate = useNavigate()
+  const locale = useLocale()
+  const msg = (key: MessageKey) => t(locale, key)
   const [data, setData] = useState<DashboardData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -52,7 +55,7 @@ export default function DashboardPage() {
         if (alive) setData(d)
       })
       .catch((err) => {
-        if (alive) setError(err instanceof Error ? err.message : '加载失败')
+        if (alive) setError(err instanceof Error ? err.message : msg('loadFailed'))
       })
       .finally(() => {
         if (alive) setLoading(false)
@@ -60,51 +63,52 @@ export default function DashboardPage() {
     return () => {
       alive = false
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   return (
     <div className="page">
       <div className="page-head">
-        <h2>概览</h2>
+        <h2>{msg('overview')}</h2>
       </div>
       {error && <div className="banner error">{error}</div>}
-      {loading && <div className="hint">加载中…</div>}
+      {loading && <div className="hint">{msg('loading')}</div>}
 
       {!loading && data && (
         <>
-          <h3 className="dash-section-title">个人统计</h3>
+          <h3 className="dash-section-title">{msg('personalStats')}</h3>
           <div className="stats-grid">
-            {PERSONAL_CARDS.map(({ key, label, bytes }) => (
+            {PERSONAL_CARDS.map(({ key, labelKey, bytes }) => (
               <div key={key} className="stat-card accent">
                 <div className="stat-value">{bytes ? formatBytes(data[key]) : data[key]}</div>
-                <div className="stat-label">{label}</div>
+                <div className="stat-label">{msg(labelKey)}</div>
               </div>
             ))}
           </div>
 
           {data.admin && (
             <>
-              <h3 className="dash-section-title">全局统计（管理员）</h3>
+              <h3 className="dash-section-title">{msg('globalStats')}</h3>
               <div className="stats-grid">
-                {ADMIN_CARDS.map(({ key, label }) => (
+                {ADMIN_CARDS.map(({ key, labelKey }) => (
                   <div key={key} className="stat-card">
                     <div className="stat-value">{data.admin?.[key] ?? 0}</div>
-                    <div className="stat-label">{label}</div>
+                    <div className="stat-label">{msg(labelKey)}</div>
                   </div>
                 ))}
               </div>
             </>
           )}
 
-          <h3 className="dash-section-title">最近文件</h3>
+          <h3 className="dash-section-title">{msg('recentFiles')}</h3>
           <div className="panel">
             {data.recent_files.length === 0 ? (
-              <div className="empty">还没有文件，去文件页上传或新建</div>
+              <div className="empty">{msg('dashEmpty')}</div>
             ) : (
               <ul className="dash-recent">
                 {data.recent_files.map((f) => (
                   <li key={f.id}>
-                    <button className="dash-recent-item" onClick={() => navigate('/')} title="前往文件页">
+                    <button className="dash-recent-item" onClick={() => navigate('/')} title={msg('goFiles')}>
                       <span className="icon">📄</span>
                       <span className="dash-recent-name">{f.name}</span>
                       <span className="muted">{formatTime(f.updated_at)}</span>
@@ -116,10 +120,7 @@ export default function DashboardPage() {
           </div>
 
           <div className="panel">
-            <h3>快捷键</h3>
-            <div className="setting-desc muted" style={{ marginBottom: 10 }}>
-              常用导航与操作；按 <kbd>?</kbd> 查看全部。
-            </div>
+            <h3>{msg('hotkeys')}</h3>
             <div className="hotkey-group">
               {HOTKEY_DOCS[0].items.slice(0, 4).map((item) => (
                 <div key={item.desc} className="hotkey-row">

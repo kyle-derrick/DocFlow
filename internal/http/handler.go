@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -79,7 +80,12 @@ const authSensitiveRateLimitPerMin = 10
 // 的独立按 IP+token 限流（每分钟 5 次，防无认证暴力猜测分享密码）。
 const shareVerifyRateLimitPerMin = 5
 
+type ReadinessChecker interface {
+	Check(context.Context) (map[string]string, bool)
+}
+
 type Handler struct {
+	readiness       ReadinessChecker
 	auth            *auth.Service
 	users           userDirectory
 	files           *files.Store
@@ -96,6 +102,9 @@ type Handler struct {
 	stats      statsSource
 	auditQuery auditQuerySource
 	roles      auth.RoleLookup
+	// quarantine 为隔离区管理服务（SetQuarantineService 注入）；nil 时
+	// 隔离区端点 503（生产恒注入）。
+	quarantine quarantineService
 	// dashboard 为个人仪表盘聚合源（SetDashboardSource 注入）；nil 时
 	// GET /api/v1/dashboard 返回 500（生产恒注入）。
 	dashboard dashboardSource
@@ -196,6 +205,8 @@ func (h *Handler) SetAuditRecorder(recorder audit.Recorder) {
 // SetMetricsEnabled 控制 GET /metrics 端点（METRICS_ENABLED，默认 true）。
 // 端点无认证：生产环境应由反向代理（Caddy）或网络层限制访问。
 func (h *Handler) SetMetricsEnabled(enabled bool) { h.metricsDisabled = !enabled }
+
+func (h *Handler) SetReadinessChecker(checker ReadinessChecker) { h.readiness = checker }
 func (h *Handler) SetRealtimeHub(hub *realtime.Hub, origins []string, environment string) {
 	h.realtime = hub
 	h.allowedOrigins = origins
@@ -275,7 +286,20 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	// route 标签取 gin 路由模板，未匹配路由（404）归一为 unknown。
 	r.Use(metrics.GinMiddleware())
 	r.GET("/health", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "ok"}) })
-	r.GET("/ready", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "ready"}) })
+	r.GET("/ready", func(c *gin.Context) {
+		if h.readiness == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "not_ready", "checks": gin.H{"readiness": "not_configured"}})
+			return
+		}
+		checks, ready := h.readiness.Check(c.Request.Context())
+		status := "ready"
+		code := http.StatusOK
+		if !ready {
+			status = "not_ready"
+			code = http.StatusServiceUnavailable
+		}
+		c.JSON(code, gin.H{"status": status, "checks": checks})
+	})
 	// Prometheus 指标端点：挂根路由（不在 /api/v1 下），无认证。
 	// 生产环境务必由 Caddy/反向代理或网络层限制访问；契约测试按基础设施
 	// 路由豁免（openapi_test.go isExcludedRoute），不入 docs/openapi.yaml。
@@ -418,6 +442,7 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	api.DELETE("/teams/:id/roles/:role_id", h.deleteRole)
 	api.POST("/teams/:id/members", h.addTeamMember)
 	api.GET("/teams/:id/members", h.listTeamMembers)
+	api.PATCH("/teams/:id/members/:uid", h.updateTeamMember)
 	api.DELETE("/teams/:id/members/:uid", h.removeTeamMember)
 	api.GET("/teams/:id/files", h.listTeamFiles)
 	api.POST("/teams/:id/folders", h.createTeamFolder)
@@ -445,11 +470,16 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	admin := api.Group("/admin", auth.RequireRole(auth.RoleAdmin, h.roles))
 	admin.GET("/settings", h.listAdminSettings)
 	admin.PUT("/settings/:key", h.updateAdminSetting)
+	// 隔离区管理（G6，仅 admin）：隔离 blob 列表与 rescan/release/delete 处置
+	//（release 须显式 confirm=true；全部动作写审计）。
+	admin.GET("/quarantine", h.listQuarantine)
+	admin.POST("/quarantine/:sha256/action", h.quarantineAction)
 	admin.GET("/stats", h.adminStats)
 	admin.GET("/audit-logs", h.adminAudit)
 	admin.GET("/audit-logs/export.csv", h.adminAuditCSV)
 	admin.GET("/backups/status", h.adminBackupStatus)
 	admin.POST("/backups/run", h.adminBackupRun)
+	admin.POST("/backups/verify", h.adminBackupVerify)
 	// 用户管理（C6，设计 6.2.1/9.1.1）：列表（q 前缀检索+分页）、禁用/启用/
 	// 改配额/改角色（禁用立即撤销全部会话；不可禁用自己）与重置密码。
 	// 设计 DELETE /users/:id 以软禁用替代（数据完整性取舍，见 admin_users.go）。
@@ -849,10 +879,14 @@ func (h *Handler) fileError(c *gin.Context, err error) bool {
 	switch {
 	case errors.Is(err, files.ErrInvalidName):
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid name"})
+	case errors.Is(err, files.ErrFolderDepth):
+		// 目录深度超限（folder.max_depth，建目录/移动校验）。
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "code": "FOLDER_DEPTH_LIMIT"})
 	case errors.Is(err, files.ErrConflict):
 		c.JSON(http.StatusConflict, gin.H{"error": "name conflict"})
 	case errors.Is(err, files.ErrForbidden):
-		c.JSON(http.StatusForbidden, gin.H{"error": "no permission to write this folder"})
+		// 团队文件写/删/恢复越权（CanWrite/CanDelete 判定，含自定义角色）。
+		c.JSON(http.StatusForbidden, gin.H{"error": "no permission for this operation"})
 	case errors.Is(err, files.ErrRoot):
 		c.JSON(http.StatusForbidden, gin.H{"error": "root folder cannot be changed"})
 	case errors.Is(err, files.ErrNotFound):

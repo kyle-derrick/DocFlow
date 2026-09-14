@@ -9,15 +9,22 @@ import {
   AdminStats,
   AdminUser,
   ApiError,
+  BackupStatus,
+  BackupVerifyResult,
   Invitation,
+  QuarantineAction,
+  QuarantineItem,
   SettingItem,
   SettingType,
   SettingValue,
   adminCreateInvitation,
   adminDownloadAuditCSV,
   adminGetBackupStatus,
+  adminVerifyBackup,
   adminGetSettings,
   adminListAuditLogs,
+  adminListQuarantine,
+  adminQuarantineAction,
   adminRunBackup,
   adminGetStats,
   adminListInvitations,
@@ -29,6 +36,7 @@ import {
   currentUserId,
 } from '../api'
 import { formatTime } from '../components/FileBrowser'
+import { MessageKey, t, useLocale } from '../i18n'
 
 /** 设置键前缀 → 分组标题（未知前缀回退原样）。 */
 const groupTitles: Record<string, string> = {
@@ -47,6 +55,21 @@ const typeText: Record<SettingType, string> = {
   int: '整数',
   string: '文本',
 }
+
+/** 设置生效方式徽章文案（effect 字段）。 */
+const effectText: Record<string, string> = {
+  immediate: '立即生效',
+  new_session: '新会话生效',
+  restart: '需重启生效',
+}
+
+/** 凭据状态卡的语义键 → 环境变量名展示（值绝不回显，仅展示配置状态）。 */
+const secretLabels: Array<{ key: string; env: string; label: string }> = [
+  { key: 'jwt_secret', env: 'JWT_SECRET', label: 'JWT 签名密钥' },
+  { key: 'smtp_password', env: 'SMTP_PASS', label: 'SMTP 密码' },
+  { key: 's3_secret_key', env: 'S3_SECRET_KEY', label: 'S3 密钥' },
+  { key: 'onlyoffice_jwt_secret', env: 'ONLYOFFICE_JWT_SECRET', label: 'ONLYOFFICE JWT 密钥' },
+]
 
 const statCards: Array<{ key: keyof AdminStats; label: string }> = [
   { key: 'users', label: '用户' },
@@ -72,6 +95,8 @@ const invitationStatusText: Record<Invitation['status'], string> = {
 
 /** 邀请管理卡片：创建（一次性注册链接展示/复制）、列表状态与撤销。 */
 function InvitationsPanel({ onError, onNotice }: { onError: (msg: string) => void; onNotice: (msg: string) => void }) {
+  const locale = useLocale()
+  const msg = (key: MessageKey) => t(locale, key)
   const [invitations, setInvitations] = useState<Invitation[]>([])
   const [email, setEmail] = useState('')
   const [role, setRole] = useState<'user' | 'admin'>('user')
@@ -85,7 +110,7 @@ function InvitationsPanel({ onError, onNotice }: { onError: (msg: string) => voi
     try {
       setInvitations(await adminListInvitations())
     } catch (err) {
-      onError(err instanceof Error ? err.message : '邀请列表加载失败')
+      onError(err instanceof Error ? err.message : msg('invitesLoadFailed'))
     }
   }
 
@@ -114,7 +139,7 @@ function InvitationsPanel({ onError, onNotice }: { onError: (msg: string) => voi
       }
       await load()
     } catch (err) {
-      onError(err instanceof Error ? err.message : '创建邀请失败')
+      onError(err instanceof Error ? err.message : msg('inviteCreateFailed'))
     } finally {
       setBusy(false)
     }
@@ -147,7 +172,7 @@ function InvitationsPanel({ onError, onNotice }: { onError: (msg: string) => voi
 
   return (
     <div className="panel setting-group">
-      <h3>邀请管理</h3>
+      <h3>{msg('invitesTitle')}</h3>
       {oneTimeLink && (
         <div className="share-link" style={{ marginBottom: 12 }}>
           <input type="text" readOnly value={oneTimeLink} onFocus={(e) => e.currentTarget.select()} />
@@ -180,7 +205,7 @@ function InvitationsPanel({ onError, onNotice }: { onError: (msg: string) => voi
         </button>
       </form>
       {invitations.length === 0 ? (
-        <div className="empty">暂无邀请记录</div>
+        <div className="empty">{msg('noInvites')}</div>
       ) : (
         invitations.map((inv) => (
           <div key={inv.id} className="setting-row">
@@ -235,6 +260,8 @@ function quotaToGib(quota: number): string {
 
 /** 用户管理卡片（C6）：检索/分页列表 + 禁用启用/改配额/改角色/重置密码。 */
 function UsersPanel({ onError, onNotice }: { onError: (msg: string) => void; onNotice: (msg: string) => void }) {
+  const locale = useLocale()
+  const msg = (key: MessageKey) => t(locale, key)
   const [users, setUsers] = useState<AdminUser[]>([])
   const [total, setTotal] = useState(0)
   const [offset, setOffset] = useState(0)
@@ -259,7 +286,7 @@ function UsersPanel({ onError, onNotice }: { onError: (msg: string) => void; onN
       setOffset(nextOffset)
       onError('')
     } catch (err) {
-      onError(err instanceof Error ? err.message : '用户列表加载失败')
+      onError(err instanceof Error ? err.message : msg('usersLoadFailed'))
     } finally {
       setLoading(false)
     }
@@ -326,7 +353,7 @@ function UsersPanel({ onError, onNotice }: { onError: (msg: string) => void; onN
 
   return (
     <div className="panel setting-group">
-      <h3>用户管理</h3>
+      <h3>{msg('usersTitle')}</h3>
       <div className="setting-desc muted" style={{ marginBottom: 12 }}>
         检索（用户名/邮箱前缀）与分页浏览全部用户；禁用账号立即撤销其全部登录会话，
         启用同时解除登录失败锁定。账号不支持删除——以禁用替代（保留其名下文件与审计记录）。
@@ -355,9 +382,9 @@ function UsersPanel({ onError, onNotice }: { onError: (msg: string) => void; onN
         )}
       </form>
       {loading ? (
-        <div className="hint">加载中…</div>
+        <div className="hint">{msg('loading')}</div>
       ) : users.length === 0 ? (
-        <div className="empty">没有匹配的用户</div>
+        <div className="empty">{msg('noUsers')}</div>
       ) : (
         users.map((user) => {
           const isSelf = user.id === selfId
@@ -486,24 +513,293 @@ function UsersPanel({ onError, onNotice }: { onError: (msg: string) => void; onN
 }
 
 function AuditPanel({ onError }: { onError: (msg: string) => void }) {
+  const locale = useLocale()
+  const msg = (key: MessageKey) => t(locale, key)
   const [action, setAction] = useState('')
   const [userId, setUserId] = useState('')
   const [data, setData] = useState<{ items: import('../api').AuditEntry[]; next_cursor: string; total: number } | null>(null)
-  const load = async (cursor = '') => { try { setData(await adminListAuditLogs(action, userId, cursor)) } catch (e) { onError(e instanceof Error ? e.message : '审计日志加载失败') } }
+  const load = async (cursor = '') => { try { setData(await adminListAuditLogs(action, userId, cursor)) } catch (e) { onError(e instanceof Error ? e.message : msg('auditLoadFailed')) } }
   useEffect(() => { void load() }, [])
-  return <div className="panel setting-group"><h3>审计日志</h3><form className="team-create-row" onSubmit={(e) => { e.preventDefault(); void load() }}><input placeholder="操作类型" value={action} onChange={(e) => setAction(e.target.value)} /><input placeholder="用户 UUID" value={userId} onChange={(e) => setUserId(e.target.value)} /><button className="btn primary">筛选</button><button type="button" className="btn" onClick={() => void adminDownloadAuditCSV(action)}>下载 CSV</button></form>{data && <><div className="setting-meta muted">共 {data.total} 条</div><div className="table-scroll"><table><thead><tr><th>时间</th><th>操作</th><th>资源</th><th>状态</th></tr></thead><tbody>{data.items.map((e) => <tr key={e.id}><td>{formatTime(e.created_at)}</td><td>{e.action}</td><td>{e.resource_type} {e.resource_id}</td><td>{e.status}</td></tr>)}</tbody></table></div>{data.next_cursor && <button className="btn small" onClick={() => void load(data.next_cursor)}>下一页</button>}</>}</div>
+  return <div className="panel setting-group"><h3>{msg('auditTitle')}</h3><form className="team-create-row" onSubmit={(e) => { e.preventDefault(); void load() }}><input placeholder="操作类型" value={action} onChange={(e) => setAction(e.target.value)} /><input placeholder="用户 UUID" value={userId} onChange={(e) => setUserId(e.target.value)} /><button className="btn primary">筛选</button><button type="button" className="btn" onClick={() => void adminDownloadAuditCSV(action)}>下载 CSV</button></form>{data && <><div className="setting-meta muted">共 {data.total} 条</div><div className="table-scroll"><table><thead><tr><th>{msg('time')}</th><th>{msg('actionCol')}</th><th>资源</th><th>{msg('status')}</th></tr></thead><tbody>{data.items.map((e) => <tr key={e.id}><td>{formatTime(e.created_at)}</td><td>{e.action}</td><td>{e.resource_type} {e.resource_id}</td><td>{e.status}</td></tr>)}</tbody></table></div>{data.next_cursor && <button className="btn small" onClick={() => void load(data.next_cursor)}>下一页</button>}</>}</div>
 }
 
+/** 字节数的人类可读表示（备份文件/总大小展示）。 */
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`
+  const units = ['KiB', 'MiB', 'GiB', 'TiB']
+  let v = n
+  let i = -1
+  do {
+    v /= 1024
+    i++
+  } while (v >= 1024 && i < units.length - 1)
+  return `${Math.round(v * 100) / 100} ${units[i]}`
+}
+
+/** 备份管理卡片：最近备份状态（时间/是否验证/文件清单）与只读校验；
+ * 执行保留 501 说明——服务进程不执行外部命令，由 scripts/backup.sh|ps1
+ * 在部署机上完成（加密由运维层负责，如 LUKS/KMS）。
+ */
 function BackupPanel({ onError, onNotice }: { onError: (msg: string) => void; onNotice: (msg: string) => void }) {
-  const [status, setStatus] = useState<import('../api').BackupStatus | null>(null)
-  useEffect(() => { void adminGetBackupStatus().then(setStatus).catch((e) => onError(e instanceof Error ? e.message : '备份状态加载失败')) }, [])
-  const run = async () => { try { await adminRunBackup() } catch (e) { onNotice(e instanceof ApiError && e.status === 501 ? '为避免服务进程执行系统命令，备份请通过 scripts/backup.sh 或 backup.ps1 在受控环境运行' : (e instanceof Error ? e.message : '备份执行失败')) } }
-  return <div className="panel setting-group"><h3>备份</h3><p className="setting-desc muted">服务端不会执行命令；状态仅扫描 BACKUP_DIR 中最近的清单。请在受控运维环境运行备份脚本。</p>{status?.latest ? <div className="setting-meta">最近备份：{status.latest.name} · {formatTime(status.latest.modified_at)}</div> : <div className="setting-meta muted">{status?.configured ? '未发现备份' : '未配置 BACKUP_DIR'}</div>}<button className="btn" onClick={() => void run()}>运行备份（安全说明）</button></div>
+  const locale = useLocale()
+  const msg = (key: MessageKey) => t(locale, key)
+  const [status, setStatus] = useState<BackupStatus | null>(null)
+  const [verifying, setVerifying] = useState(false)
+  const [verifyResult, setVerifyResult] = useState<BackupVerifyResult | null>(null)
+  const load = async () => {
+    try {
+      setStatus(await adminGetBackupStatus())
+    } catch (e) {
+      onError(e instanceof Error ? e.message : msg('backupLoadFailed'))
+    }
+  }
+  useEffect(() => { void load() }, [])
+  const run = async () => {
+    try {
+      await adminRunBackup()
+    } catch (e) {
+      onNotice(
+        e instanceof ApiError && e.status === 501
+          ? '服务进程不会执行外部命令或接触密钥：请在部署机上运行 scripts/backup.sh 或 scripts/backup.ps1（支持 --verify 校验）'
+          : e instanceof Error
+            ? e.message
+            : '备份执行失败',
+      )
+    }
+  }
+  const verify = async () => {
+    if (verifying) return
+    setVerifying(true)
+    setVerifyResult(null)
+    try {
+      const r = await adminVerifyBackup()
+      setVerifyResult(r)
+      if (r.verified) onNotice(`校验通过：最近备份 ${r.files} 个文件 sha256 复核一致`)
+      else onError(`校验未通过（${r.files} 个文件）：${r.errors?.join('；') ?? '未知错误'}`)
+      // 校验标记写回备份目录后刷新状态（verified 徽章随之更新；目录只读时保持「未验证」）。
+      await load()
+    } catch (e) {
+      onError(e instanceof Error ? e.message : '备份校验失败')
+    } finally {
+      setVerifying(false)
+    }
+  }
+  const verifiedBadge = () => {
+    if (!status || status.verified === null || status.verified === undefined) return <span className="badge">未验证</span>
+    return status.verified ? <span className="badge available">已验证</span> : <span className="badge failed">校验未通过</span>
+  }
+  return (
+    <div className="panel setting-group">
+      <h3>{msg('backupTitle')}</h3>
+      <div className="setting-desc muted" style={{ marginBottom: 12 }}>
+        备份由 scripts/backup.sh 或 scripts/backup.ps1 在部署机执行（PostgreSQL + 对象存储目录 + 脱敏 .env 导出，
+        manifest 含每文件 sha256/size）；服务进程不执行命令，此处仅展示状态与只读校验（sha256 复核，不执行恢复）。
+        备份产物不加密，请由运维层对备份存储加密（如 LUKS / 云 KMS）。
+      </div>
+      {!status ? (
+        <div className="empty">备份状态加载中…</div>
+      ) : !status.enabled ? (
+        <div className="empty">未配置 BACKUP_DIR</div>
+      ) : !status.last_backup ? (
+        <div className="empty">已配置 BACKUP_DIR，尚未发现备份</div>
+      ) : (
+        <>
+          <div className="setting-row">
+            <div className="setting-main">
+              <div className="setting-key">
+                {status.last_backup.name} {verifiedBadge()}
+              </div>
+              <div className="setting-meta muted">
+                备份时间 {formatTime(status.last_backup.timestamp || status.last_backup.modified_at)} · 总大小 {formatBytes(status.last_backup.size)}
+                {status.verified_at && ` · 最近校验 ${formatTime(status.verified_at)}`}
+              </div>
+              <div className="setting-desc muted">
+                组件 {(status.last_backup.components ?? []).join(' / ') || '未知'} · 对象存储{' '}
+                {status.last_backup.object_store === 'external' ? '外部托管（未打包，运维层负责）' : status.last_backup.object_store || '未知'}
+              </div>
+            </div>
+          </div>
+          <div className="table-scroll" style={{ marginBottom: 12 }}>
+            <table>
+              <thead>
+                <tr><th>文件</th><th>类型</th><th>大小</th><th>sha256</th></tr>
+              </thead>
+              <tbody>
+                {status.files.map((f) => (
+                  <tr key={f.path}>
+                    <td>{f.path}</td>
+                    <td>{f.type}</td>
+                    <td>{formatBytes(f.size)}</td>
+                    <td title={f.sha256}>{f.sha256.slice(0, 16)}…</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+      {verifyResult && !verifyResult.verified && (
+        <div className="setting-desc" style={{ marginBottom: 12 }}>
+          {verifyResult.errors?.map((err) => (
+            <div key={err} className="error-text">{err}</div>
+          ))}
+        </div>
+      )}
+      <div className="setting-control">
+        <button className="btn" onClick={() => void run()}>运行备份（安全说明）</button>
+        <button className="btn primary" disabled={verifying || !status?.enabled} onClick={() => void verify()}>
+          {verifying ? '校验中…' : '校验最近备份'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/** 凭据状态卡片（G6）：各密钥类 env 的已配置/未配置徽章（只读探针，不回显值）。 */
+function SecretsPanel({ secrets }: { secrets: Record<string, boolean> }) {
+  if (!secrets || Object.keys(secrets).length === 0) return null
+  return (
+    <div className="panel setting-group">
+      <h3>凭据状态</h3>
+      <div className="setting-desc muted" style={{ marginBottom: 12 }}>
+        密钥类凭据一律走环境变量（不入 system_settings）；此处仅展示各环境变量
+        是否已配置（值不回显）。未配置的密钥在对应功能启用时将不可用。
+      </div>
+      {secretLabels.map(({ key, env, label }) => {
+        const configured = Boolean(secrets[key])
+        return (
+          <div key={key} className="setting-row">
+            <div className="setting-main">
+              <div className="setting-key">
+                {label} <code className="setting-desc muted">{env}</code>
+              </div>
+            </div>
+            <div className="setting-control">
+              <span className={configured ? 'badge available' : 'badge failed'}>
+                {configured ? '已配置' : '未配置'}
+              </span>
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+/** 隔离区卡片（G6）：隔离 blob 列表 + rescan/release/delete 处置。
+ * release 须显式勾选确认（服务端校验 confirm=true）；delete 为不可逆删除
+ * （解除引用并删对象）。全部动作服务端写审计。
+ */
+function QuarantinePanel({ onError, onNotice }: { onError: (msg: string) => void; onNotice: (msg: string) => void }) {
+  const [items, setItems] = useState<QuarantineItem[] | null>(null)
+  const [busy, setBusy] = useState<string | null>(null)
+  const [confirmRelease, setConfirmRelease] = useState(false)
+
+  const load = async () => {
+    try {
+      setItems(await adminListQuarantine())
+    } catch (err) {
+      onError(err instanceof Error ? err.message : '隔离区加载失败')
+    }
+  }
+
+  useEffect(() => {
+    void load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const act = async (item: QuarantineItem, action: QuarantineAction) => {
+    if (busy !== null) return
+    if (action === 'release' && !confirmRelease) {
+      onError('解除隔离前请先勾选「我确认该内容为误报」')
+      return
+    }
+    if (action === 'release' && !window.confirm(`确认解除隔离「${item.file_name ?? item.sha256.slice(0, 12)}」？该内容将立即恢复为可下载状态。`)) return
+    if (action === 'delete' && !window.confirm(`确认删除隔离对象「${item.file_name ?? item.sha256.slice(0, 12)}」？将解除全部版本引用并物理删除，不可恢复。`)) return
+    setBusy(item.sha256 + action)
+    onError('')
+    try {
+      const result = await adminQuarantineAction(item.sha256, action, { confirm: confirmRelease })
+      if (action === 'rescan') {
+        onNotice(result?.status === 'available' ? '重扫通过：对象已恢复可用' : '重扫未通过：对象仍处于隔离状态')
+      } else if (action === 'release') {
+        onNotice('已解除隔离（quarantine.release 已审计）')
+        setConfirmRelease(false)
+      } else {
+        onNotice('已删除隔离对象（quarantine.delete 已审计）')
+      }
+      await load()
+    } catch (err) {
+      onError(err instanceof Error ? err.message : '操作失败')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  return (
+    <div className="panel setting-group">
+      <h3>隔离区</h3>
+      <div className="setting-desc muted" style={{ marginBottom: 12 }}>
+        安全扫描未通过的内容对象（object_blobs status=quarantined）：重扫（重新入
+        扫描，通过恢复可用）、解除隔离（需勾选确认，误报场景）、删除（解除全部版本
+        引用并物理删除，不可恢复）。全部操作均记录审计。
+      </div>
+      {items === null ? (
+        <div className="empty">隔离区加载中…</div>
+      ) : items.length === 0 ? (
+        <div className="empty">当前没有隔离中的内容对象</div>
+      ) : (
+        <div className="table-scroll">
+          <table>
+            <thead>
+              <tr><th>文件 / SHA-256</th><th>大小</th><th>引用</th><th>隔离时间</th><th className="col-actions">操作</th></tr>
+            </thead>
+            <tbody>
+              {items.map((item) => (
+                <tr key={item.sha256}>
+                  <td>
+                    <div>{item.file_name ?? <span className="muted">（无引用文件）</span>}</div>
+                    <div className="setting-desc muted" title={item.sha256}>{item.sha256.slice(0, 16)}… · {item.mime_type}</div>
+                  </td>
+                  <td className="muted">{formatBytes(item.size)}</td>
+                  <td className="muted">{item.ref_count}</td>
+                  <td className="muted">{formatTime(item.created_at)}</td>
+                  <td className="col-actions">
+                    <button className="btn small" disabled={busy !== null} onClick={() => void act(item, 'rescan')}>
+                      {busy === item.sha256 + 'rescan' ? '重扫中…' : '重扫'}
+                    </button>
+                    <button
+                      className="btn small"
+                      disabled={busy !== null || !confirmRelease}
+                      title={confirmRelease ? '解除隔离（须确认）' : '先勾选下方确认框'}
+                      onClick={() => void act(item, 'release')}
+                    >
+                      {busy === item.sha256 + 'release' ? '解除中…' : '解除隔离'}
+                    </button>
+                    <button className="btn small danger" disabled={busy !== null} onClick={() => void act(item, 'delete')}>
+                      {busy === item.sha256 + 'delete' ? '删除中…' : '删除'}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <label className="setting-bool" style={{ marginTop: 8 }}>
+        <input type="checkbox" checked={confirmRelease} onChange={(e) => setConfirmRelease(e.target.checked)} />
+        <span>我确认该内容为误报，解除隔离后允许下载</span>
+      </label>
+    </div>
+  )
 }
 
 export default function AdminPage() {
+  const locale = useLocale()
+  const msg = (key: MessageKey) => t(locale, key)
   const [stats, setStats] = useState<AdminStats | null>(null)
   const [settings, setSettings] = useState<SettingItem[]>([])
+  const [secrets, setSecrets] = useState<Record<string, boolean>>({})
   const [loading, setLoading] = useState(true)
   const [forbidden, setForbidden] = useState(false)
   const [error, setError] = useState('')
@@ -519,8 +815,9 @@ export default function AdminPage() {
     setLoading(true)
     setError('')
     try {
-      const [list, st] = await Promise.all([adminGetSettings(), adminGetStats()])
-      setSettings(list)
+      const [result, st] = await Promise.all([adminGetSettings(), adminGetStats()])
+      setSettings(result.settings ?? [])
+      setSecrets(result.secrets ?? {})
       setStats(st)
       setForbidden(false)
     } catch (err) {
@@ -528,7 +825,7 @@ export default function AdminPage() {
         setForbidden(true)
         setError('')
       } else {
-        setError(err instanceof Error ? err.message : '加载失败')
+        setError(err instanceof Error ? err.message : msg('loadFailed'))
       }
     } finally {
       setLoading(false)
@@ -582,7 +879,9 @@ export default function AdminPage() {
       setNotice(`已保存 ${item.key}（当前值：${String(normalized)}）`)
       // 保存成功后刷新设置列表（含 updated_at/updated_by 与服务端归一化结果）。
       try {
-        setSettings(await adminGetSettings())
+        const refreshed = await adminGetSettings()
+        setSettings(refreshed.settings ?? [])
+        setSecrets(refreshed.secrets ?? {})
       } catch {
         // 列表刷新失败不打断，保留本地已保存状态
       }
@@ -598,11 +897,11 @@ export default function AdminPage() {
     return (
       <div className="page">
         <div className="page-head">
-          <h2>管理设置</h2>
+          <h2>{msg('adminTitle')}</h2>
         </div>
         <div className="admin-forbidden">
-          <h3>无访问权限</h3>
-          <p>该页面仅系统管理员（admin 角色）可访问。</p>
+          <h3>{msg('adminForbiddenTitle')}</h3>
+          <p>{msg('adminForbiddenBody')}</p>
         </div>
       </div>
     )
@@ -611,13 +910,13 @@ export default function AdminPage() {
   return (
     <div className="page">
       <div className="page-head">
-        <h2>管理设置</h2>
-        <button className="btn ghost" onClick={() => { setNotice(''); void load() }}>刷新</button>
+        <h2>{msg('adminTitle')}</h2>
+        <button className="btn ghost" onClick={() => { setNotice(''); void load() }}>{msg('refresh')}</button>
       </div>
 
       {notice && <div className="banner ok">{notice}</div>}
       {error && <div className="banner error">{error}</div>}
-      {loading && <div className="hint">加载中…</div>}
+      {loading && <div className="hint">{msg('loading')}</div>}
 
       {!loading && stats && (
         <div className="stats-grid">
@@ -639,6 +938,8 @@ export default function AdminPage() {
 
       {!loading && !forbidden && <AuditPanel onError={(msg) => { setError(msg); setNotice('') }} />}
       {!loading && !forbidden && <BackupPanel onError={(msg) => { setError(msg); setNotice('') }} onNotice={(msg) => { setNotice(msg); setError('') }} />}
+      {!loading && !forbidden && <QuarantinePanel onError={(msg) => { setError(msg); setNotice('') }} onNotice={(msg) => { setNotice(msg); setError('') }} />}
+      {!loading && !forbidden && <SecretsPanel secrets={secrets} />}
 
       {!loading && !forbidden && (
         <InvitationsPanel
@@ -655,7 +956,14 @@ export default function AdminPage() {
             return (
               <div key={item.key} className="setting-row">
                 <div className="setting-main">
-                  <div className="setting-key">{item.key}</div>
+                  <div className="setting-key">
+                    {item.key}
+                    {item.effect && (
+                      <span className="badge" style={{ marginLeft: 8 }} title="变更生效方式">
+                        {effectText[item.effect] ?? item.effect}
+                      </span>
+                    )}
+                  </div>
                   <div className="setting-desc muted">{item.description}</div>
                   <div className="setting-meta muted">
                     类型 {typeText[item.type]} · 默认值 {formatSettingValue(item.default)}

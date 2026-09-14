@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -18,6 +19,8 @@ func resetDocflowMetrics() {
 	uploadProcessingDuration.Reset()
 	scanResultsTotal.Reset()
 	onlyofficeCallbacksTotal.Reset()
+	backupVerificationTotal.Reset()
+	backupLastSuccessTimestamp.Set(0)
 }
 
 // scrape 经 promhttp 抓取 /metrics 文本（与生产端点同链路）。
@@ -82,6 +85,28 @@ func TestGinMiddlewareCountsByRouteTemplate(t *testing.T) {
 		`docflow_http_requests_total{method="GET",route="unknown",status="404"} 1`,
 		`docflow_http_request_duration_seconds_count{method="GET",route="/api/v1/files/:id"} 1`,
 		`docflow_http_request_duration_seconds_count{method="GET",route="unknown"} 1`,
+	}
+	for _, line := range wantLines {
+		if !strings.Contains(body, line) {
+			t.Errorf("/metrics 输出缺少行 %q", line)
+		}
+	}
+}
+
+// 备份校验指标：IncBackupVerification 按 result 计数；
+// SetBackupLastSuccessTimestamp 记录最近一次校验成功时间（Unix 秒，gauge）。
+func TestBackupMetricsExported(t *testing.T) {
+	resetDocflowMetrics()
+	IncBackupVerification(BackupResultSuccess)
+	IncBackupVerification(BackupResultSuccess)
+	IncBackupVerification(BackupResultFailed)
+	SetBackupLastSuccessTimestamp(time.Unix(1757890800, 0).UTC())
+
+	body := scrape(t)
+	wantLines := []string{
+		`docflow_backup_verification_total{result="success"} 2`,
+		`docflow_backup_verification_total{result="failed"} 1`,
+		`docflow_backup_last_success_timestamp 1.7578908e+09`,
 	}
 	for _, line := range wantLines {
 		if !strings.Contains(body, line) {

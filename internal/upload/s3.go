@@ -120,6 +120,11 @@ func s3SortedPartKeys(key string, names []string) []string {
 	return parts
 }
 
+func (s *S3Storage) HeadBucket(ctx context.Context) error {
+	_, err := s.api.ListObjects(ctx, "")
+	return err
+}
+
 func (s *S3Storage) Put(key string, r io.Reader) error {
 	if err := s3ValidateKey(key); err != nil {
 		return err
@@ -332,6 +337,11 @@ type awsS3 struct {
 	client   *s3.Client
 	uploader *manager.Uploader
 	bucket   string
+}
+
+func (a *awsS3) HeadBucket(ctx context.Context) error {
+	_, err := a.client.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: &a.bucket})
+	return err
 }
 
 func (a *awsS3) GetObject(ctx context.Context, key string) (io.ReadCloser, error) {

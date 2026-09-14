@@ -1,6 +1,7 @@
 package http
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/docflow/docflow/internal/auth"
+	"github.com/docflow/docflow/internal/settings"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
@@ -139,7 +141,8 @@ func TestBatchIdempotencyUserIsolation(t *testing.T) {
 	}
 }
 
-// TestParseBatchIDs 覆盖批量 ID 解析：空/超限/非法拒绝，重复去重保序。
+// TestParseBatchIDs 覆盖批量 ID 解析：空/超限/非法拒绝，重复去重保序；
+// 上限经 batch.max_items 热读取（fakeSettingsService），读取失败回退 100。
 func TestParseBatchIDs(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	id := "11111111-1111-1111-1111-111111111112"
@@ -149,22 +152,37 @@ func TestParseBatchIDs(t *testing.T) {
 		c.Request = httptest.NewRequest(http.MethodPost, "/batch/x", nil)
 		return c
 	}
+	h := &Handler{}
 
-	if _, ok := parseBatchIDs(newCtx(), nil); ok {
+	if _, ok := h.parseBatchIDs(newCtx(), nil); ok {
 		t.Fatal("empty ids must be rejected")
 	}
-	if _, ok := parseBatchIDs(newCtx(), []string{"not-a-uuid"}); ok {
+	if _, ok := h.parseBatchIDs(newCtx(), []string{"not-a-uuid"}); ok {
 		t.Fatal("invalid uuid must be rejected")
 	}
 	tooMany := make([]string, batchMaxItems+1)
 	for i := range tooMany {
 		tooMany[i] = id
 	}
-	if _, ok := parseBatchIDs(newCtx(), tooMany); ok {
+	if _, ok := h.parseBatchIDs(newCtx(), tooMany); ok {
 		t.Fatal("over-limit ids must be rejected")
 	}
-	ids, ok := parseBatchIDs(newCtx(), []string{id, id, "  " + id + "  "})
+	ids, ok := h.parseBatchIDs(newCtx(), []string{id, id, "  " + id + "  "})
 	if !ok || len(ids) != 1 {
 		t.Fatalf("dedupe: ids = %v (len %d), ok = %v; want 1 unique id", ids, len(ids), ok)
+	}
+
+	// settings 注入后上限热读取生效：batch.max_items=2 时 3 项拒绝、2 项通过。
+	h = &Handler{settings: &fakeSettingsService{intKeys: map[string]int{settings.KeyBatchMaxItems: 2}}}
+	if _, ok := h.parseBatchIDs(newCtx(), []string{id, id, id}); ok {
+		t.Fatal("over configurable limit must be rejected")
+	}
+	if ids, ok := h.parseBatchIDs(newCtx(), []string{id, id}); !ok || len(ids) != 1 {
+		t.Fatalf("within configurable limit: ids = %v ok = %v", ids, ok)
+	}
+	// GetInt 读取失败（未设置键返回错误）回退默认 100。
+	h = &Handler{settings: &fakeSettingsService{intErr: map[string]error{settings.KeyBatchMaxItems: errors.New("db down")}}}
+	if n := h.batchLimit(); n != batchMaxItems {
+		t.Fatalf("fallback limit = %d, want %d", n, batchMaxItems)
 	}
 }
