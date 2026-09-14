@@ -1,5 +1,7 @@
-// 账户设置页（/settings）：外观、通知偏好、两步验证、Webhook、登录会话与
-// 个人访问令牌（PAT）卡片。
+// 账户设置页（/settings）：个人资料、外观、通知偏好、两步验证、Webhook、
+// 登录会话与个人访问令牌（PAT）卡片。
+// - 个人资料（C21a）：昵称/部门/职位/电话/简介/语言/时区编辑（PATCH /me），
+//   附存储用量/配额展示（软删文件计入已用）。
 // - 登录会话：活跃会话列表（IP/UA/最后活跃）、撤销单个、「撤销全部并登出」
 //   ——服务端撤销全部时含当前会话，成功后前端清空令牌并跳转登录页。
 // - 个人访问令牌：创建对话框（名称/有效期）→ 一次性明文展示+复制，
@@ -15,7 +17,9 @@ import { useNavigate } from 'react-router-dom'
 import {
   ApiError,
   ApiTokenItem,
+  MeData,
   NotificationEventType,
+  PROFILE_LANGUAGES,
   SessionItem,
   TotpSetup,
   TotpStatus,
@@ -26,6 +30,7 @@ import {
   createWebhook,
   deleteWebhook,
   disableTotp,
+  getMe,
   getTotpStatus,
   listNotificationPreferences,
   listSessions,
@@ -35,11 +40,14 @@ import {
   revokeAllSessions,
   revokeSession,
   revokeToken,
+  updateMe,
+  updateToken,
   updateNotificationPreference,
   updateWebhook,
 } from '../api'
 import { formatTime } from '../components/FileBrowser'
 import { THEME_ACCENTS, ThemeAccent, ThemeMode, ThemePreference, loadTheme, saveTheme } from '../theme'
+import { saveLocale } from '../i18n'
 
 /** 通知事件类型的中文标签与说明（顺序即设置页展示顺序）。 */
 const NOTIFICATION_TYPE_META: Array<{ type: NotificationEventType; label: string; desc: string }> = [
@@ -47,7 +55,159 @@ const NOTIFICATION_TYPE_META: Array<{ type: NotificationEventType; label: string
   { type: 'upload.quarantined', label: '上传隔离提醒', desc: '我的上传未通过安全扫描被隔离' },
   { type: 'share.accessed', label: '分享被下载', desc: '我的公开/私有分享文件被下载' },
   { type: 'file.updated', label: '团队文件更新', desc: '团队文件被其他成员更新新版本' },
+  { type: 'quota.warning', label: '配额用量警告', desc: '存储用量超过配额的 80%（上传成功后触发）' },
 ]
+
+/** 字节数的人类可读格式化（GiB/MiB/KB，配额展示用）。 */
+function formatBytes(n: number): string {
+  if (n >= 1 << 30) return `${(n / (1 << 30)).toFixed(2)} GiB`
+  if (n >= 1 << 20) return `${(n / (1 << 20)).toFixed(2)} MiB`
+  if (n >= 1 << 10) return `${(n / (1 << 10)).toFixed(2)} KiB`
+  return `${n} B`
+}
+
+/** 个人资料卡片（C21a）：档案字段编辑 + 存储用量/配额展示。 */
+function ProfilePanel({ onError, onNotice }: { onError: (msg: string) => void; onNotice: (msg: string) => void }) {
+  const [me, setMe] = useState<MeData | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+  // 表单草稿（文本字段 null → ''；language/timezone 恒有值）。
+  const [nickname, setNickname] = useState('')
+  const [department, setDepartment] = useState('')
+  const [position, setPosition] = useState('')
+  const [phone, setPhone] = useState('')
+  const [bio, setBio] = useState('')
+  const [language, setLanguage] = useState('zh-CN')
+  const [timezone, setTimezone] = useState('Asia/Shanghai')
+
+  const load = async () => {
+    setLoading(true)
+    try {
+      const data = await getMe()
+      setMe(data)
+      setNickname(data.profile.nickname ?? '')
+      setDepartment(data.profile.department ?? '')
+      setPosition(data.profile.position ?? '')
+      setPhone(data.profile.phone ?? '')
+      setBio(data.profile.bio ?? '')
+      setLanguage(data.profile.language)
+      setTimezone(data.profile.timezone)
+      onError('')
+    } catch (err) {
+      onError(err instanceof Error ? err.message : '个人资料加载失败')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault()
+    if (busy) return
+    setBusy(true)
+    onError('')
+    try {
+      const updated = await updateMe({
+        nickname,
+        department,
+        position,
+        phone,
+        bio,
+        language,
+        timezone: timezone.trim(),
+      })
+      setMe(updated)
+      if (language === 'zh-CN' || language === 'en-US') {
+        saveLocale(language)
+        window.dispatchEvent(new Event('docflow:locale'))
+      }
+      onNotice('个人资料已保存')
+    } catch (err) {
+      onError(err instanceof Error ? err.message : '保存失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="panel setting-group">
+        <h3>个人资料</h3>
+        <div className="hint">加载中…</div>
+      </div>
+    )
+  }
+
+  const used = me?.storage.used ?? 0
+  const quota = me?.storage.quota ?? 0
+  const percent = quota > 0 ? Math.min(100, Math.round((used * 100) / quota)) : 0
+
+  return (
+    <div className="panel setting-group">
+      <h3>个人资料</h3>
+      <div className="setting-desc muted" style={{ marginBottom: 12 }}>
+        昵称、部门、职位、电话与简介仅用于展示；语言与时区为界面偏好。
+        存储用量含回收站（软删除）文件——彻底删除后才释放配额。
+      </div>
+      <div className="setting-row">
+        <div className="setting-main">
+          <div className="setting-key">
+            {me?.profile.nickname || me?.username || '用户'}
+            <span className="badge" style={{ marginLeft: 8 }}>{me?.username}</span>
+          </div>
+          <div className="setting-desc muted">
+            {me?.email} · 注册于 {me ? formatTime(me.created_at) : ''}
+          </div>
+          <div className="setting-desc muted">
+            存储用量 {formatBytes(used)} / {formatBytes(quota)}（{percent}%）
+            {percent >= 80 && ' · 接近配额上限，可清理回收站释放空间'}
+          </div>
+        </div>
+      </div>
+      <form className="team-create-row" style={{ marginTop: 12 }} onSubmit={(e) => void submit(e)}>
+        <label className="field">
+          <span>昵称（≤64 字符）</span>
+          <input type="text" maxLength={64} value={nickname} onChange={(e) => setNickname(e.target.value)} placeholder="展示名称" />
+        </label>
+        <label className="field">
+          <span>部门（≤128 字符）</span>
+          <input type="text" maxLength={128} value={department} onChange={(e) => setDepartment(e.target.value)} placeholder="如：工程部" />
+        </label>
+        <label className="field">
+          <span>职位（≤128 字符）</span>
+          <input type="text" maxLength={128} value={position} onChange={(e) => setPosition(e.target.value)} placeholder="如：工程师" />
+        </label>
+        <label className="field">
+          <span>电话（≤32 字符）</span>
+          <input type="text" maxLength={32} value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="13800000000" />
+        </label>
+        <label className="field">
+          <span>语言</span>
+          <select value={language} onChange={(e) => setLanguage(e.target.value)}>
+            {PROFILE_LANGUAGES.map((l) => (
+              <option key={l.value} value={l.value}>{l.label}</option>
+            ))}
+          </select>
+        </label>
+        <label className="field">
+          <span>时区（IANA 名称）</span>
+          <input type="text" maxLength={64} required value={timezone} onChange={(e) => setTimezone(e.target.value)} placeholder="Asia/Shanghai" />
+        </label>
+        <label className="field">
+          <span>简介（≤512 字符）</span>
+          <textarea rows={3} maxLength={512} value={bio} onChange={(e) => setBio(e.target.value)} placeholder="个人简介" />
+        </label>
+        <button className="btn primary" type="submit" disabled={busy || timezone.trim() === ''}>
+          {busy ? '保存中…' : '保存资料'}
+        </button>
+      </form>
+    </div>
+  )
+}
 
 /** 会话行的 UA 简述（截断展示，完整值经 title 提示）。 */
 function uaSummary(ua: string): string {
@@ -169,6 +329,9 @@ function TokensPanel({ onError, onNotice }: { onError: (msg: string) => void; on
   const [expiry, setExpiry] = useState(30)
   const [busy, setBusy] = useState(false)
   const [revoking, setRevoking] = useState<string | null>(null)
+  const [editing, setEditing] = useState<string | null>(null)
+  const [editName, setEditName] = useState('')
+  const [editScopes, setEditScopes] = useState<string[]>([])
   /** 最近一次创建的一次性明文（仅展示一次，保存在内存）。 */
   const [oneTimeToken, setOneTimeToken] = useState('')
   const [copied, setCopied] = useState(false)
@@ -218,6 +381,11 @@ function TokensPanel({ onError, onNotice }: { onError: (msg: string) => void; on
       // 剪贴板不可用（如非安全上下文）：保留输入框展示，由用户手动复制。
       setCopied(false)
     }
+  }
+
+  const saveEdit = async (id: string) => {
+    try { const updated = await updateToken(id, { name: editName, scopes: editScopes }); setTokens((prev) => prev.map((t) => t.id === id ? updated : t)); setEditing(null); onNotice('令牌已更新') }
+    catch (err) { onError(err instanceof Error ? err.message : '更新令牌失败') }
   }
 
   const revoke = async (id: string) => {
@@ -293,7 +461,12 @@ function TokensPanel({ onError, onNotice }: { onError: (msg: string) => void; on
         tokens.map((t) => (
           <div key={t.id} className="setting-row">
             <div className="setting-main">
-              <div className="setting-key">{t.name}</div>
+              {editing === t.id ? (
+                <div className="team-create-row">
+                  <input value={editName} onChange={(e) => setEditName(e.target.value)} />
+                  {['files:read', 'files:write'].map((scope) => <label key={scope} className="check-item"><input type="checkbox" checked={editScopes.includes(scope)} onChange={(e) => setEditScopes(e.target.checked ? [...editScopes, scope] : editScopes.filter((s) => s !== scope))} /> {scope}</label>)}
+                </div>
+              ) : <div className="setting-key">{t.name}</div>}
               <div className="setting-meta muted">
                 {t.prefix}… · 创建于 {formatTime(t.created_at)}
                 {t.last_used_at ? ` · 最近使用 ${formatTime(t.last_used_at)}` : ' · 未使用'}
@@ -301,6 +474,7 @@ function TokensPanel({ onError, onNotice }: { onError: (msg: string) => void; on
               </div>
             </div>
             <div className="setting-control">
+              {editing === t.id ? <><button className="btn small primary" onClick={() => void saveEdit(t.id)}>保存</button><button className="btn small" onClick={() => setEditing(null)}>取消</button></> : <button className="btn small" onClick={() => { setEditing(t.id); setEditName(t.name); setEditScopes(t.scopes ?? []) }}>修改</button>}
               {t.expires_at && new Date(t.expires_at).getTime() < Date.now() ? (
                 <span className="badge failed">已过期</span>
               ) : (
@@ -983,6 +1157,10 @@ export default function SettingsPage() {
       </div>
       {notice && <div className="banner ok">{notice}</div>}
       {error && <div className="banner error">{error}</div>}
+      <ProfilePanel
+        onError={(msg) => { setError(msg); setNotice('') }}
+        onNotice={(msg) => { setNotice(msg); setError('') }}
+      />
       <AppearancePanel />
       <NotificationsPanel
         onError={(msg) => { setError(msg); setNotice('') }}

@@ -37,10 +37,25 @@ var (
 // 内置键（唯一可设置的键集合；新增键须在此登记定义）。
 // site.name 已移除：无任何消费方（前端标题等为静态配置），保留即死设置。
 const (
-	KeyUploadMaxVersionsPerFile = "upload.max_versions_per_file"
-	KeyUploadMaxFileSize        = "upload.max_file_size"
-	KeyShareDefaultExpiryHours  = "share.default_expiry_hours"
-	KeyRetentionTrashDays       = "retention.trash_days"
+	KeyUploadMaxVersionsPerFile  = "upload.max_versions_per_file"
+	KeyUploadMaxFileSize         = "upload.max_file_size"
+	KeyUploadDefaultQuota        = "upload.default_quota"
+	KeyShareDefaultExpiryHours   = "share.default_expiry_hours"
+	KeyShareDefaultWatermark     = "share.default_watermark"
+	KeyShareWatermarkText        = "share.watermark_text"
+	KeyRetentionTrashDays        = "retention.trash_days"
+	KeyRetentionAccessEventsDays = "retention.access_events_days"
+	KeyRateLimitPerMinute        = "security.rate_limit_per_minute"
+	KeyLoginMaxRetries           = "security.login_max_retries"
+	KeyLoginLockMinutes          = "security.login_lock_minutes"
+	KeyMaxConcurrentUploads      = "upload.max_concurrent_uploads_per_user"
+	KeyBatchMaxItems             = "batch.max_items"
+	KeyFolderMaxDepth            = "folder.max_depth"
+	KeySharePublicEnabled        = "share.public_enabled"
+	KeyScanQuarantinePolicy      = "security.scan_quarantine_policy"
+	KeyBackupEnabled             = "backup.enabled"
+	KeyBackupRetentionDays       = "backup.retention_days"
+	KeyAuditRetentionDays        = "audit.retention_days"
 )
 
 // Definition 是一个内置键的元数据：类型、默认值、取值范围与描述。
@@ -61,8 +76,23 @@ func intPtr(v int64) *int64 { return &v }
 var Definitions = []Definition{
 	{Key: KeyUploadMaxVersionsPerFile, Type: TypeInt, Default: int64(5), Min: intPtr(1), Max: intPtr(1000), Description: "每文件保留的版本数上限（覆盖上传后按版本号裁剪历史版本）"},
 	{Key: KeyUploadMaxFileSize, Type: TypeInt, Default: int64(1 << 30), Min: intPtr(1), Max: intPtr(1 << 40), Description: "单文件上传大小上限（字节）"},
+	{Key: KeyUploadDefaultQuota, Type: TypeInt, Default: int64(10 << 30), Min: intPtr(1), Max: intPtr(1 << 50), Description: "新用户开户默认存储配额（字节，默认 10GiB）；仅对新创建用户生效，存量用户经管理端单独调整"},
 	{Key: KeyShareDefaultExpiryHours, Type: TypeInt, Default: int64(168), Min: intPtr(1), Max: intPtr(8760), Description: "公开分享默认有效期（小时）"},
+	{Key: KeyShareDefaultWatermark, Type: TypeBool, Default: true, Description: "新分享默认启用水印（创建请求未显式指定 watermark_enabled 时采用）"},
+	{Key: KeyShareWatermarkText, Type: TypeString, Default: "{date} {name}", Description: "水印默认模板，支持 {email}/{date}/{name} 占位符（公开访问无登录身份，{email} 渲染为脱敏 IP 前缀）"},
 	{Key: KeyRetentionTrashDays, Type: TypeInt, Default: int64(30), Min: intPtr(1), Max: intPtr(3650), Description: "回收站保留天数：软删除超过该天数后由后台清理任务彻底删除"},
+	{Key: KeyRetentionAccessEventsDays, Type: TypeInt, Default: int64(90), Min: intPtr(1), Max: intPtr(3650), Description: "文件访问事件保留天数：超过该天数后由后台清理任务删除"},
+	{Key: KeyRateLimitPerMinute, Type: TypeInt, Default: int64(120), Min: intPtr(0), Max: intPtr(100000), Description: "认证 API 每分钟请求上限"},
+	{Key: KeyLoginMaxRetries, Type: TypeInt, Default: int64(5), Min: intPtr(1), Max: intPtr(100), Description: "连续登录失败锁定阈值"},
+	{Key: KeyLoginLockMinutes, Type: TypeInt, Default: int64(15), Min: intPtr(1), Max: intPtr(10080), Description: "登录失败锁定时长（分钟）"},
+	{Key: KeyMaxConcurrentUploads, Type: TypeInt, Default: int64(3), Min: intPtr(1), Max: intPtr(100), Description: "每用户并发上传会话上限"},
+	{Key: KeyBatchMaxItems, Type: TypeInt, Default: int64(100), Min: intPtr(1), Max: intPtr(1000), Description: "批量操作单次最大项目数"},
+	{Key: KeyFolderMaxDepth, Type: TypeInt, Default: int64(100), Min: intPtr(1), Max: intPtr(1000), Description: "目录最大深度"},
+	{Key: KeySharePublicEnabled, Type: TypeBool, Default: true, Description: "是否允许创建公开分享"},
+	{Key: KeyScanQuarantinePolicy, Type: TypeString, Default: "quarantine", Description: "扫描失败处理策略：quarantine 或 reject"},
+	{Key: KeyBackupEnabled, Type: TypeBool, Default: false, Description: "是否启用备份任务"},
+	{Key: KeyBackupRetentionDays, Type: TypeInt, Default: int64(30), Min: intPtr(1), Max: intPtr(3650), Description: "备份保留天数"},
+	{Key: KeyAuditRetentionDays, Type: TypeInt, Default: int64(90), Min: intPtr(1), Max: intPtr(3650), Description: "审计日志保留天数"},
 }
 
 // DefinitionByKey 返回键定义；未知键返回 ErrUnknownKey。
@@ -282,4 +312,32 @@ func (s *Store) GetInt(key string) (int, error) {
 		return 0, fmt.Errorf("settings key %s is not int", key)
 	}
 	return int(n), nil
+}
+
+// GetBool 返回 bool 类型键的当前值（热读取）；未知键或值非法返回错误，
+// 由调用方决定回退。
+func (s *Store) GetBool(key string) (bool, error) {
+	value, err := s.Get(key)
+	if err != nil {
+		return false, err
+	}
+	b, ok := value.(bool)
+	if !ok {
+		return false, fmt.Errorf("settings key %s is not bool", key)
+	}
+	return b, nil
+}
+
+// GetString 返回 string 类型键的当前值（热读取）；未知键或值非法返回错误，
+// 由调用方决定回退。
+func (s *Store) GetString(key string) (string, error) {
+	value, err := s.Get(key)
+	if err != nil {
+		return "", err
+	}
+	str, ok := value.(string)
+	if !ok {
+		return "", fmt.Errorf("settings key %s is not string", key)
+	}
+	return str, nil
 }

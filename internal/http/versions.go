@@ -80,6 +80,30 @@ func (h *Handler) fileVersionContent(c *gin.Context) {
 	c.DataFromReader(http.StatusOK, blob.Size, blob.MimeType, reader, nil)
 }
 
+func (h *Handler) deleteFileVersion(c *gin.Context) {
+	id, ok := parseID(c, c.Param("id"))
+	if !ok {
+		return
+	}
+	versionID, ok := parseID(c, c.Param("versionId"))
+	if !ok {
+		return
+	}
+	err := h.files.DeleteVersion(userID(c), id, versionID)
+	if errors.Is(err, files.ErrCurrentVersion) {
+		c.JSON(http.StatusConflict, gin.H{"error": "current version cannot be deleted"})
+		return
+	}
+	if errors.Is(err, files.ErrNotFileVersion) {
+		c.JSON(http.StatusConflict, gin.H{"error": "version does not belong to this file", "code": "NOT_FILE_VERSION"})
+		return
+	}
+	if h.fileError(c, err) {
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
 // restoreFileVersion POST /api/v1/files/:id/versions/:versionId/restore
 // 将 current_version 指向既有版本（回滚，版本内容不可变）。
 // 权限：个人文件 owner、团队文件 CanWrite；仅允许指向该文件的版本。

@@ -17,6 +17,102 @@ type teamRequest struct {
 	Description string `json:"description"`
 }
 
+func (h *Handler) updateTeam(c *gin.Context) {
+	id, ok := parseID(c, c.Param("id"))
+	if !ok {
+		return
+	}
+	var req teamRequest
+	if c.ShouldBindJSON(&req) != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	if teamError(c, h.teams.Update(userID(c), id, req.Name, req.Description)) {
+		return
+	}
+	t, err := h.teams.Get(id)
+	if teamError(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, teamJSON(t))
+}
+func (h *Handler) deleteTeam(c *gin.Context) {
+	id, ok := parseID(c, c.Param("id"))
+	if !ok {
+		return
+	}
+	if teamError(c, h.teams.Delete(userID(c), id)) {
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+type roleRequest struct {
+	Name        string         `json:"name"`
+	Permissions map[string]any `json:"permissions"`
+}
+
+func (h *Handler) listRoles(c *gin.Context) {
+	id, ok := parseID(c, c.Param("id"))
+	if !ok {
+		return
+	}
+	roles, err := h.teams.Roles(userID(c), id)
+	if teamError(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"roles": roles})
+}
+func (h *Handler) createRole(c *gin.Context) {
+	id, ok := parseID(c, c.Param("id"))
+	if !ok {
+		return
+	}
+	var req roleRequest
+	if c.ShouldBindJSON(&req) != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	r, err := h.teams.CreateRole(userID(c), id, req.Name, req.Permissions)
+	if teamError(c, err) {
+		return
+	}
+	c.JSON(http.StatusCreated, r)
+}
+func (h *Handler) updateRole(c *gin.Context) {
+	tid, ok := parseID(c, c.Param("id"))
+	if !ok {
+		return
+	}
+	rid, ok := parseID(c, c.Param("role_id"))
+	if !ok {
+		return
+	}
+	var req roleRequest
+	if c.ShouldBindJSON(&req) != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	if teamError(c, h.teams.UpdateRole(userID(c), tid, rid, req.Name, req.Permissions)) {
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+func (h *Handler) deleteRole(c *gin.Context) {
+	tid, ok := parseID(c, c.Param("id"))
+	if !ok {
+		return
+	}
+	rid, ok := parseID(c, c.Param("role_id"))
+	if !ok {
+		return
+	}
+	if teamError(c, h.teams.DeleteRole(userID(c), tid, rid)) {
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
 // teamJSON 序列化团队安全字段（不暴露 owner_id 之外的内部信息）。
 func teamJSON(t team.Team) gin.H {
 	return gin.H{"id": t.ID, "name": t.Name, "description": t.Description, "owner_id": t.OwnerID, "created_at": t.CreatedAt}

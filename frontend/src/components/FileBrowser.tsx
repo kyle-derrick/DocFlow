@@ -34,6 +34,7 @@ import {
   summarizeBatchResults,
 } from '../api'
 import { useHotkeys } from '../useHotkeys'
+import { t, useLocale } from '../i18n'
 
 export function formatTime(iso: string): string {
   return new Date(iso).toLocaleString('zh-CN', { hour12: false })
@@ -161,6 +162,8 @@ export default function FileBrowser({
   reloadKey,
   rootTargetLabel,
 }: FileBrowserProps) {
+  const locale = useLocale()
+  const msg = (key: keyof typeof import('../i18n').messages['zh-CN']) => t(locale, key)
   const doDownload = downloadFn ?? downloadFile
   const doPreview = previewFn ?? fetchPreview
   const navigate = useNavigate()
@@ -631,7 +634,7 @@ export default function FileBrowser({
           )}
           {uploadFn && drawioEnabled && !searchMode && (
             <button className="btn" disabled={diagramCreating} onClick={() => void handleCreateDiagram()}>
-              {diagramCreating ? '创建图表中…' : '✎ 新建图表'}
+              {diagramCreating ? (locale === 'zh-CN' ? '创建图表中…' : 'Creating…') : locale === 'zh-CN' ? '✎ 新建图表' : '✎ New diagram'}
             </button>
           )}
           {uploadFn && !searchMode && (
@@ -721,9 +724,9 @@ export default function FileBrowser({
       {batchError && <div className="banner error">{batchError}</div>}
 
       {error && <div className="banner error">{error}</div>}
-      {loading && <div className="hint">加载中…</div>}
+      {loading && <div className="hint">{msg('loading')}</div>}
       {!loading && items.length === 0 && !error && (
-        <div className="empty">{searchMode ? '没有匹配的文件' : emptyHint ?? '此目录为空，上传文件或新建文件夹开始使用'}</div>
+        <div className="empty">{searchMode ? msg('noMatch') : emptyHint ?? (locale === 'zh-CN' ? '此目录为空，上传文件或新建文件夹开始使用' : 'This folder is empty. Upload a file or create a folder to get started.')}</div>
       )}
 
       {items.length > 0 && (

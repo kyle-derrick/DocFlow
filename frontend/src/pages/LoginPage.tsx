@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { ApiError, OIDC_LOGIN_PATH, TOTP_REQUIRED_CODE, getOIDCStatus, login, loginTotp } from '../api'
+import { messages, saveLocale, t, useLocale } from '../i18n'
 
 /**
  * 输入分流：6 位纯数字按 TOTP 码提交，其余（含连字符/长度不符）按恢复码
@@ -13,7 +14,14 @@ function splitTotpInput(raw: string): { code: string; recoveryCode: string } {
 
 export default function LoginPage() {
   const navigate = useNavigate()
-  const [email, setEmail] = useState('')
+  const locale = useLocale()
+  const msg = (key: keyof typeof messages['zh-CN']) => t(locale, key)
+  const switchLocale = () => {
+    const next = locale === 'zh-CN' ? 'en-US' : 'zh-CN'
+    saveLocale(next)
+    window.dispatchEvent(new Event('docflow:locale'))
+  }
+  const [identifier, setIdentifier] = useState('')
   const [password, setPassword] = useState('')
   const [totpInput, setTotpInput] = useState('')
   const [totpRequired, setTotpRequired] = useState(false)
@@ -39,15 +47,15 @@ export default function LoginPage() {
     setError('')
     try {
       if (!totpRequired) {
-        await login(email, password)
+        await login(identifier, password)
       } else {
         const { code, recoveryCode } = splitTotpInput(totpInput)
-        await loginTotp(email, password, code, recoveryCode)
+        await loginTotp(identifier, password, code, recoveryCode)
       }
       navigate('/', { replace: true })
     } catch (err) {
       if (err instanceof ApiError && err.code === TOTP_REQUIRED_CODE) {
-        // 密码已验证通过，展开两步验证输入（email/password 保留在表单态）。
+        // 密码已验证通过，展开两步验证输入（identifier/password 保留在表单态）。
         setTotpRequired(true)
         setError('')
         return
@@ -62,15 +70,18 @@ export default function LoginPage() {
     <div className="login-wrap">
       <form className="login-card" onSubmit={submit}>
         <h1 className="login-title">DocFlow</h1>
-        <p className="hint">登录以访问你的文件</p>
+        <button type="button" className="btn ghost" onClick={switchLocale}>{msg('switchLanguage')}</button>
+        <p className="hint">{locale === 'zh-CN' ? '登录以访问你的文件' : 'Log in to access your files'}</p>
         <label className="field">
-          <span>邮箱</span>
+          <span>邮箱或用户名</span>
           <input
-            type="email"
+            type="text"
             required
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            placeholder="you@example.com"
+            autoCapitalize="none"
+            spellCheck={false}
+            value={identifier}
+            onChange={(e) => setIdentifier(e.target.value)}
+            placeholder="you@example.com 或 username"
             autoComplete="username"
           />
         </label>
@@ -106,7 +117,7 @@ export default function LoginPage() {
         )}
         {error && <div className="error-text">{error}</div>}
         <button className="btn primary block" type="submit" disabled={busy}>
-          {busy ? '登录中…' : totpRequired ? '验证并登录' : '登录'}
+          {busy ? `${msg('login')}…` : totpRequired ? (locale === 'zh-CN' ? '验证并登录' : 'Verify and log in') : msg('login')}
         </button>
         {ssoEnabled && (
           <>

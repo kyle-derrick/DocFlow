@@ -3,6 +3,7 @@ package files
 import (
 	"errors"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/google/uuid"
@@ -17,6 +18,7 @@ var (
 	ErrNotFound    = errors.New("file not found")
 	ErrRoot        = errors.New("root cannot be changed")
 	ErrNoVersion   = errors.New("file has no current version")
+	ErrFolderCopy  = errors.New("folders cannot be copied")
 	// ErrForbidden 表示用户对团队目录无写权限（如 viewer 或非成员）。
 	ErrForbidden = errors.New("no permission to write this folder")
 )
@@ -199,6 +201,10 @@ func (s *Store) Get(user, id uuid.UUID) (File, error) {
 	}
 	if err := authorizeFileAccess(f, user, s.teamReader); err != nil {
 		return File{}, err
+	}
+	now := time.Now().UTC()
+	if err := s.db.Model(&File{}).Where("id = ?", id).UpdateColumn("last_access_at", now).Error; err == nil {
+		f.LastAccessAt = &now
 	}
 	return f, nil
 }
@@ -532,6 +538,67 @@ func (s *Store) CreateUploadedFile(owner, parent uuid.UUID, name, storageKey str
 		return uuid.Nil, false, err
 	}
 	return created, newBlob, nil
+}
+
+func (s *Store) Copy(user, id, parent uuid.UUID, name string) (File, error) {
+	source, err := s.Get(user, id)
+	if err != nil {
+		return File{}, err
+	}
+	if source.Type == "folder" {
+		return File{}, ErrFolderCopy
+	}
+	parentFile, err := authorizeParentFolder(s, user, parent, s.teamWriter)
+	if err != nil {
+		return File{}, err
+	}
+	if name == "" {
+		name = source.Name + " copy"
+	}
+	n, err := NormalizeName(name)
+	if err != nil {
+		return File{}, err
+	}
+	if source.CurrentVersionID == nil {
+		return File{}, ErrNoVersion
+	}
+	var copied File
+	err = s.db.Transaction(func(tx *gorm.DB) error {
+		var version FileVersion
+		if err := tx.Where("id = ?", *source.CurrentVersionID).First(&version).Error; err != nil {
+			return err
+		}
+		var blob ObjectBlob
+		if err := tx.Where("id = ?", version.ObjectBlobID).First(&blob).Error; err != nil {
+			return err
+		}
+		copied = File{ID: uuid.New(), Name: n, ParentID: &parent, OwnerID: user, Type: "file", ScopeType: parentFile.ScopeType, TeamID: parentFile.TeamID}
+		if err := tx.Create(&copied).Error; err != nil {
+			if strings.Contains(strings.ToLower(err.Error()), "unique") {
+				return ErrConflict
+			}
+			return err
+		}
+		if err := tx.Model(&ObjectBlob{}).Where("id = ?", blob.ID).UpdateColumn("ref_count", gorm.Expr("ref_count + 1")).Error; err != nil {
+			return err
+		}
+		newVersion := FileVersion{ID: uuid.New(), FileID: copied.ID, Version: 1, ObjectBlobID: blob.ID, ContentSHA256: version.ContentSHA256, Size: version.Size, Comment: version.Comment, UserID: user}
+		if err := tx.Create(&newVersion).Error; err != nil {
+			return err
+		}
+		copied.CurrentVersionID = &newVersion.ID
+		return tx.Model(&copied).Update("current_version_id", newVersion.ID).Error
+	})
+	return copied, err
+}
+
+func (s *Store) Recent(owner uuid.UUID, limit int) ([]File, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	var out []File
+	err := s.db.Where("owner_id = ? AND deleted_at IS NULL AND last_access_at IS NOT NULL", owner).Order("last_access_at DESC, id DESC").Limit(limit).Find(&out).Error
+	return out, err
 }
 
 func (s *Store) Delete(owner, id uuid.UUID) error {

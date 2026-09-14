@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/docflow/docflow/internal/files"
+	"github.com/docflow/docflow/internal/share"
 	"github.com/docflow/docflow/internal/upload"
 	"github.com/gin-gonic/gin"
 )
@@ -136,18 +137,31 @@ func (h *Handler) previewFile(c *gin.Context) {
 // publicSharePreview GET /api/v1/public/shares/:token/preview：公开内联预览。
 // view 与 download 权限均可预览（ResolveForPreview：校验有效期与对象可用性，
 // 不消耗分享 download_count）；类型白名单通过后原子递增 files.view_count，
-// 安全头与认证端点一致。网页包联动同认证预览（ready 包改返 webpkg JSON）。
+// 安全头与认证端点一致。密码保护分享须先经 /verify 取得会话 cookie
+// （未通过时 401 PASSWORD_REQUIRED）。网页包联动同认证预览（ready 包改返
+// webpkg JSON）。预览成功（view_count 递增）时写入访问事件（action=preview）。
 func (h *Handler) publicSharePreview(c *gin.Context) {
-	r, err := h.shares.ResolveForPreview(c.Param("token"))
+	token := c.Param("token")
+	pre, err := h.shares.Resolve(token)
 	if publicShareError(c, err) {
 		return
 	}
-	if h.tryWebpkgPreview(c, r.File, r.Blob, func() error {
-		return h.shares.IncrementPreviewView(r)
-	}) {
+	if !h.shareSessionAllowed(c, token, pre.Share) {
 		return
 	}
-	h.servePreviewBlob(c, r.File.Name, r.Blob, func() error {
-		return h.shares.IncrementPreviewView(r)
-	})
+	r, err := h.shares.ResolveForPreview(token)
+	if publicShareError(c, err) {
+		return
+	}
+	record := func() error {
+		if err := h.shares.IncrementPreviewView(r); err != nil {
+			return err
+		}
+		h.recordPublicAccessEvent(c, r, share.ActionPreview)
+		return nil
+	}
+	if h.tryWebpkgPreview(c, r.File, r.Blob, record) {
+		return
+	}
+	h.servePreviewBlob(c, r.File.Name, r.Blob, record)
 }

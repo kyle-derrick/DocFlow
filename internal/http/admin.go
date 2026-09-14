@@ -3,6 +3,10 @@ package http
 import (
 	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/docflow/docflow/internal/auth"
 	"github.com/docflow/docflow/internal/settings"
@@ -125,6 +129,45 @@ func (h *Handler) updateAdminSetting(c *gin.Context) {
 }
 
 // adminStats GET /api/v1/admin/stats 返回基础统计计数。
+type backupStatus struct {
+	Configured bool        `json:"configured"`
+	Latest     *backupFile `json:"latest,omitempty"`
+}
+
+type backupFile struct {
+	Name     string    `json:"name"`
+	Size     int64     `json:"size"`
+	Modified time.Time `json:"modified_at"`
+	Manifest string    `json:"manifest"`
+}
+
+func (h *Handler) adminBackupStatus(c *gin.Context) {
+	dir := h.backupDir
+	if dir == "" {
+		dir = strings.TrimSpace(os.Getenv("BACKUP_DIR"))
+	}
+	result := backupStatus{Configured: dir != ""}
+	if dir != "" {
+		if entries, err := os.ReadDir(dir); err == nil {
+			for _, entry := range entries {
+				if entry.IsDir() || !strings.HasPrefix(entry.Name(), "docflow-") || !strings.HasSuffix(entry.Name(), ".sql") {
+					continue
+				}
+				info, err := entry.Info()
+				if err != nil || result.Latest != nil && !info.ModTime().After(result.Latest.Modified) {
+					continue
+				}
+				result.Latest = &backupFile{Name: entry.Name(), Size: info.Size(), Modified: info.ModTime(), Manifest: filepath.Join(dir, entry.Name()+".sha256")}
+			}
+		}
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+func (h *Handler) adminBackupRun(c *gin.Context) {
+	c.JSON(http.StatusNotImplemented, gin.H{"error": "backup execution is disabled; run scripts/backup.sh or scripts/backup.ps1 under controlled operations", "code": "BACKUP_MANUAL_ONLY"})
+}
+
 func (h *Handler) adminStats(c *gin.Context) {
 	if h.stats == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "stats source is not configured"})

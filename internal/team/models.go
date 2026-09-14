@@ -17,11 +17,20 @@ const (
 
 // Team 对应 teams 表（migrations/008_teams_shares.sql）。
 type Team struct {
-	ID          uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
-	Name        string    `gorm:"size:100;uniqueIndex;not null" json:"name"`
-	Description string    `json:"description"`
-	OwnerID     uuid.UUID `gorm:"type:uuid;not null;index" json:"-"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID          uuid.UUID  `gorm:"type:uuid;primaryKey" json:"id"`
+	Name        string     `gorm:"size:100;uniqueIndex;not null" json:"name"`
+	Description string     `json:"description"`
+	OwnerID     uuid.UUID  `gorm:"type:uuid;not null;index" json:"-"`
+	CreatedAt   time.Time  `json:"created_at"`
+	DeletedAt   *time.Time `json:"deleted_at,omitempty"`
+}
+
+type Role struct {
+	ID          uuid.UUID      `gorm:"type:uuid;primaryKey" json:"id"`
+	TeamID      uuid.UUID      `gorm:"type:uuid;not null;index" json:"team_id"`
+	Name        string         `gorm:"size:64;not null" json:"name"`
+	Permissions map[string]any `gorm:"serializer:json;type:jsonb" json:"permissions"`
+	CreatedAt   time.Time      `json:"created_at"`
 }
 
 // Member 对应 team_members 表，复合主键 (team_id, user_id)。

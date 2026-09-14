@@ -10,6 +10,7 @@ import {
   UploadPhase,
   VersionStatus,
   fetchVersionText,
+  deleteFileVersion,
   getFileMeta,
   isTextLike,
   listFileVersions,
@@ -120,6 +121,14 @@ export default function VersionHistoryModal({ file, onClose, onChanged }: Props)
   }
 
   const versionLabel = (v: FileVersionDetail) => `v${v.version}${v.id === currentId ? '（当前）' : ''}`
+
+  const handleDelete = async (v: FileVersionDetail) => {
+    if (!window.confirm(`确定删除「${file.name}」版本 v${v.version}？此操作不可撤销。`)) return
+    setBusyId(v.id); setError(''); setNotice('')
+    try { await deleteFileVersion(file.id, v.id); setNotice(`已删除版本 v${v.version}`); await load(); onChanged() }
+    catch (err) { setError(writeErrorText(err, '删除版本失败')) }
+    finally { setBusyId(null) }
+  }
 
   const handleRestore = async (v: FileVersionDetail) => {
     if (!window.confirm(`确定将「${file.name}」回滚到版本 v${v.version}？当前版本将指向该历史版本。`)) return
@@ -292,13 +301,18 @@ export default function VersionHistoryModal({ file, onClose, onChanged }: Props)
                         {current ? (
                           <span className="muted">—</span>
                         ) : (
-                          <button
-                            className="btn small"
-                            disabled={busyId !== null}
-                            onClick={() => void handleRestore(v)}
-                          >
-                            {busyId === v.id ? '回滚中…' : '回滚到此版本'}
-                          </button>
+                          <>
+                            <button
+                              className="btn small"
+                              disabled={busyId !== null}
+                              onClick={() => void handleRestore(v)}
+                            >
+                              {busyId === v.id ? '处理中…' : '回滚到此版本'}
+                            </button>
+                            <button className="btn small danger" disabled={busyId !== null} onClick={() => void handleDelete(v)}>
+                              {busyId === v.id ? '删除中…' : '删除'}
+                            </button>
+                          </>
                         )}
                       </td>
                     </tr>

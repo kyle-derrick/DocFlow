@@ -113,6 +113,23 @@ func publicLimiter(l *RateLimiter) gin.HandlerFunc {
 	}
 }
 
+// shareVerifyLimiter 为公开分享密码校验端点提供按 IP+token 的独立限流
+// （每分钟 5 次，shareVerifyRateLimitPerMin）：token 参与哈希（不存明文），
+// 不同分享的尝试互不挤占，防单 IP 对单个分享暴力猜密码。
+func shareVerifyLimiter(l *RateLimiter) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		token := c.Param("token")
+		sum := sha256.Sum256([]byte(strings.ToLower(token)))
+		key := c.ClientIP() + "|s|" + hex.EncodeToString(sum[:8])
+		if ok, retry := l.Allow(key); !ok {
+			c.Header("Retry-After", strconv.Itoa(int(retry.Seconds())+1))
+			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": "rate limit exceeded"})
+			return
+		}
+		c.Next()
+	}
+}
+
 // loginLimiter 为登录接口提供更严格限流（按 IP+邮箱前缀哈希）。
 // 预读 body 计算 key 后重置 Body，登录 handler 可再次绑定 JSON。
 func loginLimiter(l *RateLimiter) gin.HandlerFunc {

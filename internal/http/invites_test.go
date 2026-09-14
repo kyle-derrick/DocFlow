@@ -44,9 +44,27 @@ func (f *fakeAccount) seed(u auth.User, password string) {
 	f.names[u.Username] = u.ID
 }
 
-// FindActiveByEmail 覆盖 fakeUserDirectory 默认实现。
+// FindActiveByEmail 覆盖 fakeUserDirectory 默认实现（auth.Credentials 路径）。
 func (f *fakeAccount) FindActiveByEmail(email string) (auth.User, error) {
 	id, ok := f.emails[auth.NormalizeEmail(email)]
+	if !ok {
+		return auth.User{}, auth.ErrUserNotFound
+	}
+	return f.accounts[id], nil
+}
+
+// FindActiveByIdentifier 覆盖 fakeUserDirectory 默认实现（login/login/totp）：
+// 含 @ 按归一邮箱、否则按用户名匹配 active 账号。
+func (f *fakeAccount) FindActiveByIdentifier(identifier string) (auth.User, error) {
+	ident := strings.TrimSpace(identifier)
+	if strings.Contains(ident, "@") {
+		id, ok := f.emails[auth.NormalizeEmail(ident)]
+		if !ok {
+			return auth.User{}, auth.ErrUserNotFound
+		}
+		return f.accounts[id], nil
+	}
+	id, ok := f.names[ident]
 	if !ok {
 		return auth.User{}, auth.ErrUserNotFound
 	}

@@ -29,9 +29,19 @@ type memRepo struct {
 	notifications map[uuid.UUID]fakeNotification
 	// searchDocs 模拟 file_search_docs 行（file_id -> 名称占位）。
 	searchDocs map[uuid.UUID]string
-	failErr    error
+	// accessEvents / shareSessions 模拟 file_access_events 与
+	// share_access_sessions 行（C8 统计 / 密码保护会话）。
+	accessEvents  []fakeAccessEvent
+	shareSessions map[uuid.UUID]time.Time // 会话 ID -> expires_at
+	failErr       error
 	// recheckHook 在 DeleteBlobRechecked 复核前调用，模拟「先复活后清理」竞速。
 	recheckHook func(id uuid.UUID)
+}
+
+// fakeAccessEvent 模拟 file_access_events 行的清理相关字段。
+type fakeAccessEvent struct {
+	id        int64
+	createdAt time.Time
 }
 
 // fakeAuthSession 模拟 auth sessions 表行的清理相关字段。
@@ -55,7 +65,7 @@ type fakeNotification struct {
 }
 
 func newMemRepo() *memRepo {
-	return &memRepo{sessions: make(map[uuid.UUID]upload.UploadSession), blobs: make(map[uuid.UUID]files.ObjectBlob), files: make(map[uuid.UUID]files.File), authSessions: make(map[uuid.UUID]fakeAuthSession), apiTokens: make(map[uuid.UUID]fakeAPIToken), notifications: make(map[uuid.UUID]fakeNotification), searchDocs: make(map[uuid.UUID]string)}
+	return &memRepo{sessions: make(map[uuid.UUID]upload.UploadSession), blobs: make(map[uuid.UUID]files.ObjectBlob), files: make(map[uuid.UUID]files.File), authSessions: make(map[uuid.UUID]fakeAuthSession), apiTokens: make(map[uuid.UUID]fakeAPIToken), notifications: make(map[uuid.UUID]fakeNotification), searchDocs: make(map[uuid.UUID]string), shareSessions: make(map[uuid.UUID]time.Time)}
 }
 
 func (m *memRepo) ExpiredActiveSessions(now time.Time, limit int) ([]upload.UploadSession, error) {
@@ -245,6 +255,38 @@ func (m *memRepo) DeleteOrphanSearchDocs() (int64, error) {
 	return n, nil
 }
 
+// DeleteOldAccessEvents 的内存等价物：created_at 早于 now-retain 的行删除。
+func (m *memRepo) DeleteOldAccessEvents(now time.Time, retain time.Duration) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cutoff := now.Add(-retain)
+	kept := m.accessEvents[:0]
+	var n int64
+	for _, e := range m.accessEvents {
+		if e.createdAt.Before(cutoff) {
+			n++
+			continue
+		}
+		kept = append(kept, e)
+	}
+	m.accessEvents = kept
+	return n, nil
+}
+
+// DeleteExpiredShareSessions 的内存等价物：expires_at 早于 now 的行删除。
+func (m *memRepo) DeleteExpiredShareSessions(now time.Time) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var n int64
+	for id, expiresAt := range m.shareSessions {
+		if expiresAt.Before(now) {
+			delete(m.shareSessions, id)
+			n++
+		}
+	}
+	return n, nil
+}
+
 // fakePurger 实现 Purger：记录调用并模拟硬删除（含返回待物理删除的 blob）。
 type fakePurger struct {
 	repo     *memRepo
@@ -295,17 +337,19 @@ func (s *fakeStorage) deletedKeys() []string {
 	return append([]string(nil), s.deleted...)
 }
 
-// fakeSettings 实现 SettingsProvider。
+// fakeSettings 实现 SettingsProvider（trash_days 与 access_events_days 共用
+// 同一返回值，便于按场景注入）。
 type fakeSettings struct {
 	days int
 	err  error
 }
 
 func (f *fakeSettings) GetInt(key string) (int, error) {
-	if key != settings.KeyRetentionTrashDays {
-		return 0, errors.New("unexpected key")
+	switch key {
+	case settings.KeyRetentionTrashDays, settings.KeyRetentionAccessEventsDays:
+		return f.days, f.err
 	}
-	return f.days, f.err
+	return 0, errors.New("unexpected key")
 }
 
 // memAudit 记录审计条目。
@@ -726,6 +770,70 @@ func TestSweepSearchOrphans(t *testing.T) {
 	// 幂等：再次执行无新增删除（经直接调用复核返回值）。
 	if n, err := repo.DeleteOrphanSearchDocs(); err != nil || n != 0 {
 		t.Fatalf("second sweep = (%d, %v), want (0, nil)", n, err)
+	}
+	if keys := storage.deletedKeys(); len(keys) != 0 {
+		t.Fatalf("physical deletes = %v, want none", keys)
+	}
+}
+
+// ---- 访问事件与分享会话清理 ----
+
+// 访问事件：超过 retention.access_events_days（默认 90 天，settings 可调）
+// 的行删除，未超期保留；纯行删除不触碰存储对象。
+func TestSweepAccessEvents(t *testing.T) {
+	repo := newMemRepo()
+	storage := &fakeStorage{}
+	repo.accessEvents = []fakeAccessEvent{
+		{id: 1, createdAt: testNow.Add(-91 * 24 * time.Hour)}, // 超默认 90 天：删
+		{id: 2, createdAt: testNow.Add(-10 * 24 * time.Hour)}, // 未超期：留
+		{id: 3, createdAt: testNow.Add(-time.Hour)},           // 新鲜：留
+	}
+
+	j := newTestJanitor(repo, &fakePurger{}, storage, nil, audit.NopRecorder{})
+	j.RunOnce()
+
+	if len(repo.accessEvents) != 2 {
+		t.Fatalf("access events after sweep = %d, want 2 (recent kept)", len(repo.accessEvents))
+	}
+	if repo.accessEvents[0].id != 2 || repo.accessEvents[1].id != 3 {
+		t.Fatalf("kept events = %v, want ids [2 3]", repo.accessEvents)
+	}
+	if keys := storage.deletedKeys(); len(keys) != 0 {
+		t.Fatalf("physical deletes = %v, want none", keys)
+	}
+}
+
+// settings 配置 7 天保留时：8 天前的事件删、6 天前的留（热读取生效）。
+func TestSweepAccessEventsSettingsRetention(t *testing.T) {
+	repo := newMemRepo()
+	repo.accessEvents = []fakeAccessEvent{
+		{id: 1, createdAt: testNow.Add(-8 * 24 * time.Hour)},
+		{id: 2, createdAt: testNow.Add(-6 * 24 * time.Hour)},
+	}
+	j := newTestJanitor(repo, &fakePurger{}, &fakeStorage{}, &fakeSettings{days: 7}, audit.NopRecorder{})
+	j.RunOnce()
+	if len(repo.accessEvents) != 1 || repo.accessEvents[0].id != 2 {
+		t.Fatalf("access events after sweep = %v, want only id 2 (7d retention)", repo.accessEvents)
+	}
+}
+
+// 公开分享访问会话：已过期的行删除、未过期的保留；纯行删除不触碰存储对象。
+func TestSweepShareSessions(t *testing.T) {
+	repo := newMemRepo()
+	storage := &fakeStorage{}
+	expired := uuid.New()
+	stillValid := uuid.New()
+	repo.shareSessions[expired] = testNow.Add(-time.Minute)
+	repo.shareSessions[stillValid] = testNow.Add(30 * time.Minute)
+
+	j := newTestJanitor(repo, &fakePurger{}, storage, nil, audit.NopRecorder{})
+	j.RunOnce()
+
+	if _, ok := repo.shareSessions[expired]; ok {
+		t.Fatal("expired share session must be removed")
+	}
+	if _, ok := repo.shareSessions[stillValid]; !ok {
+		t.Fatal("still-valid share session must be kept")
 	}
 	if keys := storage.deletedKeys(); len(keys) != 0 {
 		t.Fatalf("physical deletes = %v, want none", keys)

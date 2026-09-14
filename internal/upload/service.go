@@ -181,6 +181,14 @@ type Service struct {
 	// maxSizeProvider 单文件大小上限热读取（system_settings 的
 	// upload.max_file_size，main 注入）；nil 或返回非正值时回退 maxSize。
 	maxSizeProvider func() int64
+	// quotaCheck 建会话时的存储配额校验回调（C3，main 注入
+	// files.Store.CheckUploadQuota）：超限返回 files.ErrQuotaExceeded，
+	// HTTP 层映射 403 QUOTA_EXCEEDED。
+	quotaCheck func(uuid.UUID, int64) error
+	// quotaWarn 上传成功落库后（新文件/覆盖新版本两路径）回调一次
+	//（user/name/fileID），供配额用量警告通知（quota.warning）注入；
+	// 回调内部错误由注入方自理，不影响会话终态。
+	quotaWarn func(uuid.UUID, string, uuid.UUID)
 	// sessionLocksMu 保护 sessionLocks；per-session 互斥在进程内串行化
 	// 同一会话的 Append/Complete（双保险之一，跨进程由 store 侧 CAS 兜底）。
 	sessionLocksMu sync.Mutex
@@ -293,6 +301,22 @@ func (s *Service) SetVersionTarget(validate func(uuid.UUID, uuid.UUID) (files.Fi
 // 读失败回退构造值。
 func (s *Service) MaxSize() int64 { return s.effectiveMaxSize() }
 
+// SetQuotaCheck 注入存储配额校验回调（幂等）：Start/StartReplace 建会话时
+// 调用（user+size）；返回错误（含 files.ErrQuotaExceeded）即拒绝创建。
+func (s *Service) SetQuotaCheck(fn func(uuid.UUID, int64) error) {
+	if fn != nil {
+		s.quotaCheck = fn
+	}
+}
+
+// SetQuotaWarnDispatcher 注入配额用量警告回调（幂等）：Complete 的两条成功
+// 落库路径（新文件/覆盖新版本）各回调一次；是否达到警告阈值由注入方判定。
+func (s *Service) SetQuotaWarnDispatcher(fn func(uuid.UUID, string, uuid.UUID)) {
+	if fn != nil {
+		s.quotaWarn = fn
+	}
+}
+
 // SetMetadata 持久化 tus 原始 Upload-Metadata 头，供 HEAD 请求回显。
 func (s *Service) SetMetadata(id uuid.UUID, metadata string) error {
 	v, e := s.store.Get(id)
@@ -353,6 +377,13 @@ func (s *Service) createSession(user, parent uuid.UUID, name string, size int64,
 	}
 	if size < 0 || size > s.effectiveMaxSize() {
 		return UploadSession{}, ErrSize
+	}
+	// 存储配额校验（C3）：软删文件计入已用（files.UsedStorage 口径），
+	// 超限拒绝建会话（HTTP 403 QUOTA_EXCEEDED）。
+	if s.quotaCheck != nil {
+		if err := s.quotaCheck(user, size); err != nil {
+			return UploadSession{}, err
+		}
 	}
 	expected = strings.TrimSpace(expected)
 	if expected != "" {
@@ -574,6 +605,9 @@ func (s *Service) Complete(id uuid.UUID) (UploadSession, error) {
 	}
 	v.StorageKey = finalKey
 	sum := fmt.Sprintf("%x", h.Sum(nil))
+	// completedFileID 为本次成功落库的文件 ID（新文件或覆盖目标），
+	// 供配额用量警告回调（quotaWarn）引用。
+	completedFileID := uuid.Nil
 	if v.TargetFileID != nil {
 		// 覆盖为新版本：向目标文件追加版本并按保留策略裁剪，不创建新 File。
 		if s.replaceFile == nil {
@@ -594,6 +628,7 @@ func (s *Service) Complete(id uuid.UUID) (UploadSession, error) {
 		}
 		// 完成路径通知属主（覆盖新版本成功，资源为目标文件）。
 		s.notifyOwner(v, "upload.completed", "上传完成："+v.Name, "文件「"+v.Name+"」已作为新版本写入，校验与安全扫描通过。", *v.TargetFileID)
+		completedFileID = *v.TargetFileID
 		if s.fileComplete != nil {
 			s.fileComplete(*v.TargetFileID)
 		}
@@ -611,9 +646,15 @@ func (s *Service) Complete(id uuid.UUID) (UploadSession, error) {
 		}
 		// 完成路径通知属主（新文件创建成功，资源为新建文件）。
 		s.notifyOwner(v, "upload.completed", "上传完成："+v.Name, "文件「"+v.Name+"」已完成校验与安全扫描，可以下载或预览。", fileID)
+		completedFileID = fileID
 		if s.fileComplete != nil {
 			s.fileComplete(fileID)
 		}
+	}
+	// 配额用量警告回调（C3）：上传成功后由注入方判定是否超过阈值（>80%）
+	// 并发 quota.warning 通知；回调失败不影响会话终态。
+	if s.quotaWarn != nil {
+		s.quotaWarn(v.UserID, v.Name, completedFileID)
 	}
 	now := time.Now()
 	v.Status = StatusAvailable

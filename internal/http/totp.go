@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/docflow/docflow/internal/audit"
 	"github.com/docflow/docflow/internal/auth"
@@ -21,16 +22,28 @@ import (
 // token（见 handler.go login）；第二段重新验证密码后才校验码并发放会话。
 
 type loginTOTPRequest struct {
+	// Identifier 为登录标识（C21a）：email 或 username，优先于 Email。
+	Identifier string `json:"identifier"`
+	// Email 为旧字段（兼容保留）：identifier 缺省时回退使用。
 	Email        string `json:"email"`
 	Password     string `json:"password"`
 	Code         string `json:"code"`
 	RecoveryCode string `json:"recovery_code"`
 }
 
-// loginTOTP POST /api/v1/auth/login/totp {email,password,code|recovery_code}：
+// loginIdentifier 解析登录标识：identifier 优先，缺省回退旧 email 字段。
+func (r loginTOTPRequest) loginIdentifier() string {
+	if id := strings.TrimSpace(r.Identifier); id != "" {
+		return id
+	}
+	return strings.TrimSpace(r.Email)
+}
+
+// loginTOTP POST /api/v1/auth/login/totp {identifier,password,code|recovery_code}：
 // 密码 + TOTP 码/恢复码双因子通过后发放 token（响应同 login；恢复码命中即
-// 消耗，一次性）。密码错误与 login 同响应（401 invalid credentials，防枚举）；
-// 码错误 401 invalid totp code。
+// 消耗，一次性）。密码错误与 login 同响应（401 invalid credentials，防枚举，
+// 且同样计入 C9 失败锁定）；码错误 401 invalid totp code（不计失败——限流
+// 已约束爆破，避免攻击者以错误码恶意锁定他人账号）。
 func (h *Handler) loginTOTP(c *gin.Context) {
 	var request loginTOTPRequest
 	if c.ShouldBindJSON(&request) != nil {
@@ -41,17 +54,24 @@ func (h *Handler) loginTOTP(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "code or recovery_code is required"})
 		return
 	}
+	identifier := request.loginIdentifier()
 	reject := func() {
-		h.recordAudit(c, audit.Entry{UserID: nil, Action: audit.ActionLoginFailure, ResourceType: audit.ResourceSession, Status: audit.StatusFailure, Metadata: `{"email":"` + sanitizeAuditToken(request.Email) + `","stage":"totp"}`})
+		h.recordAudit(c, audit.Entry{UserID: nil, Action: audit.ActionLoginFailure, ResourceType: audit.ResourceSession, Status: audit.StatusFailure, Metadata: `{"identifier":"` + sanitizeAuditToken(identifier) + `","stage":"totp"}`})
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 	}
-	user, err := h.users.FindActiveByEmail(request.Email)
+	user, err := h.users.FindActiveByIdentifier(identifier)
 	if err != nil {
 		_ = compareDummyPassword(request.Password)
 		reject()
 		return
 	}
+	// 锁定检查（C9）：锁定期间一律 423，不计新失败。
+	if auth.IsLocked(user.LockedUntil, time.Now()) {
+		lockedResponse(c)
+		return
+	}
 	if h.auth.VerifyPassword(user.PasswordHash, request.Password) != nil {
+		h.recordLoginFailure(user.ID)
 		reject()
 		return
 	}
@@ -61,7 +81,7 @@ func (h *Handler) loginTOTP(c *gin.Context) {
 			// 用户未启用（或已禁用）：按凭据失败统一响应，不泄露启用状态。
 			reject()
 		case errors.Is(err, auth.ErrTOTPInvalidCode):
-			h.recordAudit(c, audit.Entry{UserID: &user.ID, Action: audit.ActionLoginFailure, ResourceType: audit.ResourceSession, Status: audit.StatusFailure, Metadata: `{"email":"` + sanitizeAuditToken(request.Email) + `","stage":"totp"}`})
+			h.recordAudit(c, audit.Entry{UserID: &user.ID, Action: audit.ActionLoginFailure, ResourceType: audit.ResourceSession, Status: audit.StatusFailure, Metadata: `{"identifier":"` + sanitizeAuditToken(identifier) + `","stage":"totp"}`})
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid totp code"})
 		default:
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to verify second factor"})
@@ -78,6 +98,8 @@ func (h *Handler) loginTOTP(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "session creation failed"})
 		return
 	}
+	// 成功登录清零失败计数并解除锁定（C9）。
+	_ = h.users.ClearLoginFailures(user.ID)
 	h.setRefreshCookie(c, refresh)
 	h.recordAudit(c, audit.Entry{UserID: &user.ID, Action: audit.ActionLoginSuccess, ResourceType: audit.ResourceSession, ResourceID: user.ID.String(), Status: audit.StatusSuccess, Metadata: `{"stage":"totp"}`})
 	c.JSON(http.StatusOK, gin.H{"access_token": access, "token_type": "Bearer"})

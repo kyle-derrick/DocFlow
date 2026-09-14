@@ -22,6 +22,7 @@ type WebhookEnqueuer func(userID uuid.UUID, eventType, title, body string, resou
 // MailNotifier 为通知落库后的邮件出站回调：按 userID 查邮箱并投递纯文本
 // 副本（由 main 装配）。错误由回调内部处理（记日志）。
 type MailNotifier func(userID uuid.UUID, eventType, title, body string)
+type RealtimeSink func(Notification)
 
 // Service 实现 Dispatcher，并暴露通知/偏好的本人维度查询（HTTP 层使用）。
 // 出站渠道（webhook/邮件）经 SetWebhookEnqueuer/SetMailNotifier 注入，
@@ -33,6 +34,7 @@ type Service struct {
 	// 出站渠道回调（nil 停用对应渠道）；仅在读路径全部成功后触发。
 	webhookEnqueuer WebhookEnqueuer
 	mailNotifier    MailNotifier
+	realtimeSink    RealtimeSink
 }
 
 var _ Dispatcher = (*Service)(nil)
@@ -53,6 +55,7 @@ func (s *Service) SetWebhookEnqueuer(fn WebhookEnqueuer) { s.webhookEnqueuer = f
 
 // SetMailNotifier 注入邮件通知回调（幂等；nil 停用渠道）。
 func (s *Service) SetMailNotifier(fn MailNotifier) { s.mailNotifier = fn }
+func (s *Service) SetRealtimeSink(fn RealtimeSink) { s.realtimeSink = fn }
 
 // enabled 判定偏好：读取失败按默认开关处理（保守不丢通知）。
 func (s *Service) enabled(user uuid.UUID, eventType string) bool {
@@ -77,6 +80,9 @@ func (s *Service) Notify(userID uuid.UUID, eventType, title, body string, resour
 	}
 	if err := s.store.Create(n); err != nil {
 		return err
+	}
+	if s.realtimeSink != nil {
+		s.realtimeSink(n)
 	}
 	if s.mailNotifier != nil {
 		s.mailNotifier(userID, eventType, title, body)

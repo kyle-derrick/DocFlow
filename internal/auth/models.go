@@ -19,6 +19,11 @@ const (
 	StatusLocked   = "locked"
 )
 
+// DefaultStorageQuota 新用户默认存储配额（10 GiB，字节），与 migration 024
+// 的 storage_quota 列默认值一致；开户默认可经 system_settings 的
+// upload.default_quota 热覆盖（UserStore.SetDefaultQuotaProvider）。
+const DefaultStorageQuota int64 = 10 << 30
+
 type User struct {
 	ID           uuid.UUID `gorm:"type:uuid;primaryKey"`
 	Username     string    `gorm:"uniqueIndex;not null"`
@@ -29,6 +34,23 @@ type User struct {
 	Role      string `gorm:"size:16;not null;default:user"`
 	CreatedAt time.Time
 	UpdatedAt time.Time
+	// StorageQuota 个人空间存储配额（字节，migration 024）；软删文件计入已用。
+	StorageQuota int64 `gorm:"not null;default:10737418240"`
+	StorageUsed  int64 `gorm:"not null;default:0"`
+	// FailedLoginCount / LockedUntil 为连续登录失败锁定（C9）：达到
+	// LOGIN_MAX_RETRIES 后置 LockedUntil=now+锁定时长并清零计数，成功登录
+	// 清零；锁定判定按时间比较，status 列不改写。
+	FailedLoginCount int        `gorm:"not null;default:0"`
+	LockedUntil      *time.Time `gorm:"type:timestamptz"`
+	// 档案字段（C21a，migration 024）：可空文本列用 *string（空串在写入侧
+	// 归一为 NULL）；头像不落库（avatar_text 由前端按首字母计算）。
+	Nickname   *string `gorm:"size:64"`
+	Department *string `gorm:"size:128"`
+	Position   *string `gorm:"size:128"`
+	Phone      *string `gorm:"size:32"`
+	Bio        *string `gorm:"size:512"`
+	Language   string  `gorm:"size:8;not null;default:zh-CN"`
+	Timezone   string  `gorm:"size:64;not null;default:Asia/Shanghai"`
 }
 
 type Session struct {
@@ -65,6 +87,7 @@ type APIToken struct {
 	ID        uuid.UUID `gorm:"type:uuid;primaryKey"`
 	UserID    uuid.UUID `gorm:"type:uuid;not null;index"`
 	Name      string    `gorm:"size:100;not null"`
+	Scopes    []string  `gorm:"serializer:json;type:jsonb" json:"scopes"`
 	TokenHash string    `gorm:"size:64;uniqueIndex;not null"`
 	Prefix    string    `gorm:"size:14;not null;index"`
 	// LastUsedAt 由认证路径 best-effort 更新（TouchLastUsed）。

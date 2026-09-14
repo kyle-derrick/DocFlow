@@ -11,6 +11,30 @@ import (
 )
 
 const UserIDContextKey = "user_id"
+const PATScopesContextKey = "pat_scopes"
+
+func RequireScope(scope string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if kind, _ := c.Get(AuthKindContextKey); kind == AuthKindPAT {
+			values, exists := c.Get(PATScopesContextKey)
+			if exists {
+				allowed := false
+				for _, value := range values.([]string) {
+					if value == scope {
+						allowed = true
+						break
+					}
+				}
+				if !allowed {
+					c.JSON(http.StatusForbidden, gin.H{"error": "missing scope"})
+					c.Abort()
+					return
+				}
+			}
+		}
+		c.Next()
+	}
+}
 
 // auth_kind 上下文标记：区分本次请求的 Bearer 凭证类型。
 // PAT 无 session/refresh 语义，依赖方（如 refresh 流程）可据此区分。
@@ -24,6 +48,9 @@ const (
 // VerifyPersonalAccessToken）；未注入（nil）时 dfpat_ 前缀凭证一律 401。
 type AccessTokenVerifier interface {
 	VerifyPersonalAccessToken(token string) (uuid.UUID, error)
+}
+type ScopedAccessTokenVerifier interface {
+	VerifyPersonalAccessTokenWithScopes(token string) (uuid.UUID, []string, error)
 }
 
 var _ AccessTokenVerifier = (*Service)(nil)
@@ -95,13 +122,23 @@ func RequireAccessToken(secret string, pat AccessTokenVerifier) gin.HandlerFunc 
 				c.Abort()
 				return
 			}
-			id, err := pat.VerifyPersonalAccessToken(parts[1])
+			var id uuid.UUID
+			var scopes []string
+			var err error
+			if scoped, ok := pat.(ScopedAccessTokenVerifier); ok {
+				id, scopes, err = scoped.VerifyPersonalAccessTokenWithScopes(parts[1])
+			} else {
+				id, err = pat.VerifyPersonalAccessToken(parts[1])
+			}
 			if err != nil {
 				c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 				c.Abort()
 				return
 			}
 			c.Set(UserIDContextKey, id)
+			if scopes != nil {
+				c.Set(PATScopesContextKey, scopes)
+			}
 			c.Set(AuthKindContextKey, AuthKindPAT)
 			c.Next()
 			return

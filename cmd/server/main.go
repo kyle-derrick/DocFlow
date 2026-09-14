@@ -27,6 +27,7 @@ import (
 	"github.com/docflow/docflow/internal/notify"
 	"github.com/docflow/docflow/internal/oidc"
 	"github.com/docflow/docflow/internal/onlyoffice"
+	"github.com/docflow/docflow/internal/realtime"
 	"github.com/docflow/docflow/internal/search"
 	"github.com/docflow/docflow/internal/settings"
 	"github.com/docflow/docflow/internal/share"
@@ -80,9 +81,20 @@ func main() {
 		return teamStore.UserInAnyTeam(userID, []uuid.UUID{teamID})
 	})
 	userStore := auth.NewUserStore(db)
+	// 新用户开户默认配额（C3）：system_settings 的 upload.default_quota 热读取
+	//（邀请注册 / OIDC 自动开户共用 CreateUser 回填；读失败回退 10GiB 常量）。
+	userStore.SetDefaultQuotaProvider(func() int64 {
+		n, err := settingsStore.GetInt(settings.KeyUploadDefaultQuota)
+		if err != nil || n < 1 {
+			return auth.DefaultStorageQuota
+		}
+		return int64(n)
+	})
 	// 站内通知与通知偏好（migration 017）：Dispatcher 检查偏好
 	//（无记录=默认开启）后落库；HTTP 通知端点与各业务回调共用。
 	notifyService := notify.NewService(notify.NewGormStore(db), notify.NewGormPreferenceRepo(db))
+	realtimeHub := realtime.NewHub()
+	notifyService.SetRealtimeSink(func(n notify.Notification) { realtimeHub.Broadcast(n.UserID, n) })
 	// 团队文件版本更新通知（file.updated）：AddVersion 事务提交后回调
 	//（files.dispatchVersionAdded 已过滤——仅 scope_type=team 且 actor≠owner）；
 	// 异步通知团队全部成员（文件 owner 除外，避免噪音）该文件有新版本。
@@ -141,6 +153,11 @@ func main() {
 	// 站内通知接线（upload.completed / upload.quarantined）：完成路径
 	//（新文件/覆盖新版本成功）与隔离终态通知属主，标题含文件名。
 	uploadService.SetNotifyDispatcher(notifyDispatch(notifyService, "upload"))
+	// 存储配额（C3，设计 3.2.1/6.3.1/6.12.4）：建会话时校验（已用含软删文件，
+	// 超限 403 QUOTA_EXCEEDED）；上传成功后用量 >80% 发 quota.warning 站内
+	// 通知（异步、每次超过都发——不做阈值去重，取舍见设计 6.12.4）。
+	uploadService.SetQuotaCheck(fileStore.CheckUploadQuota)
+	uploadService.SetQuotaWarnDispatcher(quotaWarnDispatcher(userStore, fileStore, notifyService))
 	// 网页包（zip）安全预览：上传完成（文件落库）后自动尝试解包
 	//（WEBPKG_ENABLED；失败置 blocked，不影响文件本身可用性），解包对象
 	// 存于 webpkg/<public_id>/ 前缀，经 /content/<public_id>/<path> 提供。
@@ -237,6 +254,24 @@ func main() {
 		}
 		return n
 	})
+	// 水印默认值热读取：创建请求未显式指定 watermark_enabled / watermark_text
+	// 时采用 share.default_watermark / share.watermark_text；未设置/读失败
+	// 回退内置默认（开启 + "{date} {name}"）。
+	shareService.SetPublicEnabledProvider(func() bool {
+		v, err := settingsStore.GetBool(settings.KeySharePublicEnabled)
+		return err != nil || v
+	})
+	shareService.SetWatermarkDefaultsProvider(func() (bool, string) {
+		enabled := true
+		if v, err := settingsStore.GetBool(settings.KeyShareDefaultWatermark); err == nil {
+			enabled = v
+		}
+		text := share.DefaultWatermarkTemplate
+		if v, err := settingsStore.GetString(settings.KeyShareWatermarkText); err == nil && v != "" {
+			text = v
+		}
+		return enabled, text
+	})
 	service := auth.NewService(auth.NewGormSessionStore(db), cfg.JWTSecret, cfg.AccessTokenTTL, cfg.RefreshTokenTTL)
 	// 密码管理：改密/重置所需的凭据读写与一次性重置令牌存储
 	//（password_reset_tokens，migration 014）。
@@ -306,6 +341,10 @@ func main() {
 	}
 	handler := httpapi.NewHandler(service, userStore, fileStore, shareService, teamService, uploadService, storage, cfg.CookieSecure, cfg.CookieDomain, cfg.RefreshTokenTTL)
 	handler.SetAuditRecorder(auditStore)
+	handler.SetAuditQuerySource(auditStore)
+	handler.SetRealtimeHub(realtimeHub, cfg.AllowedOrigins, cfg.Environment)
+	handler.SetWSSecret(cfg.JWTSecret)
+	handler.SetBackupDir(cfg.BackupDir)
 	// 标签与收藏：Tag CRUD / 文件打去标签 / is_starred / 列表过滤
 	//（文件读授权复用 fileStore.Get 的 authorizeFileAccess 语义）。
 	handler.SetTagging(tagging.NewService(tagging.NewGormRepo(db), fileStore))
@@ -321,6 +360,9 @@ func main() {
 	handler.SetSettingsService(settingsStore)
 	handler.SetStatsSource(httpapi.NewAdminStats(db))
 	handler.SetRoleLookup(userStore)
+	// C9 登录失败锁定策略与 C10 refresh/logout 同源严格校验（CSRF_STRICT）。
+	handler.SetLoginLockout(cfg.LoginMaxRetries, cfg.LoginLockDuration)
+	handler.SetCSRFStrict(cfg.CSRFStrict)
 	// 个人仪表盘概览统计（v1.1）：文件聚合复用 fileStore，分享/上传计数直查 DB。
 	handler.SetDashboardSource(httpapi.NewDashboardSource(fileStore, db))
 	// 邀请制注册与邮件通道（POST /api/v1/admin/invitations、/api/v1/auth/register、
@@ -439,4 +481,53 @@ func notifyDispatch(dispatcher notify.Dispatcher, source string) func(uuid.UUID,
 			log.Printf("[notify] %s event %s for user %s: %v", source, eventType, userID, err)
 		}
 	}
+}
+
+// quotaWarnPercent 为配额用量警告阈值（用量百分比 ≥ 该值时通知，C3）。
+const quotaWarnPercent = 80
+
+// quotaWarnDispatcher 构造上传成功后的配额用量警告回调（异步执行）：
+// 读取已用（软删计入）与配额，达到阈值（默认 80%）即发 quota.warning 站内
+// 通知；每次超过都发（不做阈值去重——多实例部署下内存去重不可靠，且上传
+// 频次受配额约束，通知量可控）。查询/投递失败仅记日志。
+func quotaWarnDispatcher(users *auth.UserStore, fileStore *files.Store, notifier notify.Dispatcher) func(uuid.UUID, string, uuid.UUID) {
+	return func(userID uuid.UUID, fileName string, fileID uuid.UUID) {
+		go func() {
+			quota, err := users.StorageQuota(userID)
+			if err != nil {
+				log.Printf("[notify] quota.warning: read quota for user %s: %v", userID, err)
+				return
+			}
+			if quota <= 0 {
+				return
+			}
+			used, err := fileStore.UsedStorage(userID)
+			if err != nil {
+				log.Printf("[notify] quota.warning: read usage for user %s: %v", userID, err)
+				return
+			}
+			percent := used * 100 / quota
+			if percent < quotaWarnPercent {
+				return
+			}
+			title := fmt.Sprintf("存储用量已达 %d%%", percent)
+			body := fmt.Sprintf("文件「%s」上传后，你的存储用量为 %s / %s（约 %d%%）。超出配额后将无法继续上传；可清理回收站（彻底删除后才释放配额）或联系管理员调整配额。", fileName, humanBytes(used), humanBytes(quota), percent)
+			if err := notifier.Notify(userID, notify.EventQuotaWarning, title, body, fileID); err != nil {
+				log.Printf("[notify] quota.warning for user %s: %v", userID, err)
+			}
+		}()
+	}
+}
+
+// humanBytes 把字节数格式化为人类可读的 GiB/MiB 文案（通知正文用）。
+func humanBytes(n int64) string {
+	const gib = 1 << 30
+	if n >= gib {
+		return fmt.Sprintf("%.2f GiB", float64(n)/float64(gib))
+	}
+	const mib = 1 << 20
+	if n >= mib {
+		return fmt.Sprintf("%.2f MiB", float64(n)/float64(mib))
+	}
+	return fmt.Sprintf("%d B", n)
 }

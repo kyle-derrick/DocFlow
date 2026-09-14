@@ -8,6 +8,7 @@ import (
 	"github.com/docflow/docflow/internal/audit"
 	"github.com/docflow/docflow/internal/auth"
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 // 本文件实现会话管理（多端登录）与个人访问令牌（PAT）端点：
@@ -78,8 +79,9 @@ func (h *Handler) revokeAllSessions(c *gin.Context) {
 }
 
 type createTokenRequest struct {
-	Name          string `json:"name"`
-	ExpiresInDays int    `json:"expires_in_days"`
+	Name          string   `json:"name"`
+	ExpiresInDays int      `json:"expires_in_days"`
+	Scopes        []string `json:"scopes"`
 }
 
 func tokenJSON(t auth.APIToken) gin.H {
@@ -104,7 +106,7 @@ func (h *Handler) createToken(c *gin.Context) {
 		return
 	}
 	uid := userID(c)
-	token, plaintext, err := h.auth.NewPersonalAccessToken(uid, request.Name, request.ExpiresInDays)
+	token, plaintext, err := h.auth.NewPersonalAccessTokenWithScopes(uid, request.Name, request.ExpiresInDays, request.Scopes)
 	switch {
 	case err == nil:
 	case errors.Is(err, auth.ErrNotConfigured):
@@ -148,6 +150,42 @@ func (h *Handler) listTokens(c *gin.Context) {
 		out = append(out, tokenJSON(tokens[i]))
 	}
 	c.JSON(http.StatusOK, gin.H{"tokens": out})
+}
+
+type updateTokenRequest struct {
+	Name   *string   `json:"name"`
+	Scopes *[]string `json:"scopes"`
+}
+
+func (h *Handler) updateToken(c *gin.Context) {
+	id, ok := parseID(c, c.Param("id"))
+	if !ok {
+		return
+	}
+	var req updateTokenRequest
+	if c.ShouldBindJSON(&req) != nil || (req.Name == nil && req.Scopes == nil) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	uid := userID(c)
+	t, err := h.auth.UpdatePersonalAccessToken(uid, id, req.Name, req.Scopes)
+	if errors.Is(err, auth.ErrInvalidTokenName) || errors.Is(err, auth.ErrInvalidTokenScopes) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, auth.ErrNotConfigured) {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "personal access tokens are not configured"})
+		return
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "token not found"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to update token"})
+		return
+	}
+	c.JSON(http.StatusOK, tokenJSON(t))
 }
 
 // revokeToken DELETE /api/v1/tokens/:id：撤销自己的 PAT（立即失效）。

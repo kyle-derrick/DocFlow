@@ -17,6 +17,7 @@ var (
 	// ErrBlobUnavailable 同 sha256 的 blob 处于不可复用状态（如 quarantined），
 	// 且 sha256 唯一约束阻止新建行，上传须失败。
 	ErrBlobUnavailable = errors.New("blob content is unavailable")
+	ErrCurrentVersion  = errors.New("current version cannot be deleted")
 )
 
 // defaultMaxVersions 每文件默认保留的版本数上限（可经 SetMaxVersions / MAX_VERSIONS_PER_FILE 覆盖）。
@@ -67,6 +68,31 @@ type versionsRepo interface {
 	DecrementBlobRef(id uuid.UUID) error
 	// MarkBlobDeletingIfZero 在引用计数已归零时置 status=deleting，返回是否生效。
 	MarkBlobDeletingIfZero(id uuid.UUID) (bool, error)
+}
+
+func deleteVersionLogic(r versionsRepo, fileID, versionID uuid.UUID) error {
+	f, err := r.GetFileForUpdate(fileID)
+	if err != nil {
+		return err
+	}
+	v, err := r.GetVersion(versionID)
+	if err != nil {
+		return err
+	}
+	if v.FileID != fileID {
+		return ErrNotFileVersion
+	}
+	if f.CurrentVersionID != nil && *f.CurrentVersionID == versionID {
+		return ErrCurrentVersion
+	}
+	if err := r.DeleteVersion(versionID); err != nil {
+		return err
+	}
+	if err := r.DecrementBlobRef(v.ObjectBlobID); err != nil {
+		return err
+	}
+	_, err = r.MarkBlobDeletingIfZero(v.ObjectBlobID)
+	return err
 }
 
 // addVersionLogic 向文件追加新版本（事务内的纯逻辑）：
@@ -421,6 +447,21 @@ func (s *Store) ListVersions(user, fileID uuid.UUID) ([]VersionDetail, error) {
 // SetCurrentVersion 将文件 current_version 指向 versionID（版本回滚）。
 // 权限：个人文件 owner、团队文件 CanWrite（authorizeFileWrite）；
 // 仅允许指向该文件的版本（ErrNotFileVersion）。返回更新后的文件（供 ETag）与新当前版本。
+// DeleteVersion 删除非 current 历史版本，并递减 blob 引用；零引用仅标记 deleting，由 janitor 物理回收。
+func (s *Store) DeleteVersion(user, fileID, versionID uuid.UUID) error {
+	var f File
+	if err := s.db.Where("id = ? AND deleted_at IS NULL", fileID).First(&f).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if err := authorizeFileWrite(f, user, s.teamWriter); err != nil {
+		return err
+	}
+	return s.db.Transaction(func(tx *gorm.DB) error { return deleteVersionLogic(&gormVersionsRepo{tx: tx}, fileID, versionID) })
+}
+
 func (s *Store) SetCurrentVersion(user, fileID, versionID uuid.UUID) (File, FileVersion, error) {
 	var f File
 	if err := s.db.Where("id = ? AND deleted_at IS NULL", fileID).First(&f).Error; err != nil {

@@ -34,7 +34,9 @@ type File struct {
 	DownloadCount    int64
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
+	LastAccessAt     *time.Time `gorm:"column:last_access_at"`
 	DeletedAt        *time.Time
+	ThumbnailURL     *string `gorm:"-" json:"thumbnail_url,omitempty"`
 }
 
 type FileVersion struct {

@@ -17,6 +17,7 @@ import {
   refreshSession,
   searchFiles,
   SESSION_EXPIRED_EVENT,
+  websocketToken,
 } from './api'
 import { Modal, formatTime } from './components/FileBrowser'
 import HotkeysHelp from './components/HotkeysHelp'
@@ -38,6 +39,7 @@ import EditorPage from './pages/EditorPage'
 import DrawioPage from './pages/DrawioPage'
 import SettingsPage from './pages/SettingsPage'
 import DashboardPage from './pages/DashboardPage'
+import { messages, saveLocale, t, useLocale } from './i18n'
 
 /** 铃铛未读数轮询间隔（毫秒）。 */
 const NOTIFICATION_POLL_INTERVAL = 15_000
@@ -60,6 +62,9 @@ function NotificationBell() {
   // 未读数轮询：加载即拉取，此后每 15s 刷新；面板打开时由 loadPanel 拉取。
   useEffect(() => {
     let alive = true
+    let socket: WebSocket | null = null
+    let fallbackTimer: number | null = null
+    let connected = false
     const refresh = () => {
       void listNotifications({ limit: NOTIFICATION_PANEL_LIMIT })
         .then((r) => {
@@ -73,10 +78,26 @@ function NotificationBell() {
         })
     }
     refresh()
-    const timer = setInterval(refresh, NOTIFICATION_POLL_INTERVAL)
+    try {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+      const token = websocketToken()
+       const wsURL = `${protocol}//${window.location.host}/api/v1/ws/notifications${token ? `?access_token=${encodeURIComponent(token)}` : ''}`
+      socket = new WebSocket(wsURL)
+      socket.onopen = () => { connected = true }
+      socket.onmessage = () => { refresh() }
+      socket.onerror = () => { connected = false }
+      socket.onclose = () => {
+        connected = false
+        if (alive && fallbackTimer === null) fallbackTimer = window.setInterval(refresh, NOTIFICATION_POLL_INTERVAL)
+      }
+    } catch {
+      fallbackTimer = window.setInterval(refresh, NOTIFICATION_POLL_INTERVAL)
+    }
     return () => {
       alive = false
-      clearInterval(timer)
+      socket?.close()
+      if (fallbackTimer !== null) window.clearInterval(fallbackTimer)
+      void connected
     }
   }, [])
 
@@ -449,6 +470,13 @@ function GlobalHotkeys() {
 function TopBar() {
   const navigate = useNavigate()
   const location = useLocation()
+  const locale = useLocale()
+  const msg = (key: keyof typeof messages['zh-CN']) => t(locale, key)
+  const switchLocale = () => {
+    const next = locale === 'zh-CN' ? 'en-US' : 'zh-CN'
+    saveLocale(next)
+    window.dispatchEvent(new Event('docflow:locale'))
+  }
   // admin 探测：JWT 无 role 声明，降级为请求 /admin/stats（200/403）判定，
   // 结果按会话缓存（登录/登出后失效）；非 admin 隐藏「管理」入口。
   const [admin, setAdmin] = useState(false)
@@ -480,7 +508,8 @@ function TopBar() {
       <TopBarSearch />
       <OfflineBadge />
       <NotificationBell />
-      <button className="btn ghost" onClick={handleLogout}>退出登录</button>
+      <button className="btn ghost" onClick={switchLocale} aria-label={msg('language')}>{msg('switchLanguage')}</button>
+      <button className="btn ghost" onClick={handleLogout}>{msg('logout')}</button>
     </header>
   )
 }

@@ -1275,6 +1275,61 @@ body {
   font-size: 18px;
 }
 
+/* 密码保护与水印（设计 6.6.2） */
+
+.password-card .password-input {
+  width: 100%;
+  margin: 16px 0 4px;
+}
+
+/* 全屏水印覆盖层：repeat 斜排文字，不拦截任何交互（pointer-events:none）。 */
+.watermark-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  flex-wrap: wrap;
+  align-content: space-around;
+  justify-content: space-around;
+  gap: 48px 64px;
+  padding: 24px;
+  pointer-events: none;
+  user-select: none;
+  overflow: hidden;
+}
+
+.watermark-item {
+  color: rgba(128, 128, 128, 0.16);
+  font-size: 14px;
+  white-space: nowrap;
+  transform: rotate(-24deg);
+}
+
+/* 我的分享：统计展开行 */
+.share-stats-row > td {
+  background: var(--bg);
+  padding: 12px 16px;
+}
+
+.share-stats-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-bottom: 10px;
+  font-size: 13px;
+}
+
+.share-stats-table {
+  margin: 0;
+}
+
+.share-stats-ua {
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ---------- 管理设置页 ---------- */
 
 .stats-grid {

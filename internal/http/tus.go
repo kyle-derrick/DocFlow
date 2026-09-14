@@ -146,6 +146,9 @@ func (h *Handler) tusCreate(c *gin.Context) {
 		case errors.Is(err, files.ErrForbidden), errors.Is(err, upload.ErrTargetUnavailable):
 			// 团队目录写权限不足（viewer/非成员）或版本覆盖能力未接线。
 			tusError(c, http.StatusForbidden, err.Error())
+		case errors.Is(err, files.ErrQuotaExceeded):
+			// 存储配额超限（C3）：tus 协议无 JSON code 载荷，以固定文案区分。
+			tusError(c, http.StatusForbidden, "storage quota exceeded")
 		case errors.Is(err, files.ErrNotFound):
 			// 目标文件不存在（或个人文件非 owner）：404 不泄露存在性。
 			tusError(c, http.StatusNotFound, "file not found")

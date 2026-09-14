@@ -1,12 +1,14 @@
-import { useEffect, useState } from 'react'
+import { FormEvent, useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import {
   ApiError,
+  PASSWORD_REQUIRED_CODE,
   PublicShareInfo,
   fetchPublicPreviewText,
   fetchPublicWebpkgPreview,
   getPublicShare,
   previewKind,
+  verifyPublicShare,
 } from '../api'
 
 function formatSize(size: number): string {
@@ -18,6 +20,7 @@ function formatSize(size: number): string {
 
 type LoadState =
   | { status: 'loading' }
+  | { status: 'password' }
   | { status: 'ok'; info: PublicShareInfo }
   | { status: 'gone' }
   | { status: 'error'; message: string }
@@ -34,35 +37,116 @@ function ErrorCard({ title, detail }: { title: string; detail?: string }) {
   )
 }
 
-/** 公开分享页（无需登录）：文件元信息 + 下载 + 按类型的内联预览（含网页包）。 */
+/** 水印覆盖层：repeat 斜排文字（服务端渲染的模板结果 + 「DocFlow」），
+ * pointer-events:none 不拦截任何交互。 */
+function WatermarkOverlay({ text }: { text: string }) {
+  const line = `${text} · DocFlow`
+  const items = Array.from({ length: 24 }, (_, i) => i)
+  return (
+    <div className="watermark-overlay" aria-hidden="true">
+      {items.map((i) => (
+        <span key={i} className="watermark-item">{line}</span>
+      ))}
+    </div>
+  )
+}
+
+/** 密码解锁卡片：公开分享受密码保护时的输入表单。 */
+function PasswordCard({ busy, error, onSubmit }: {
+  busy: boolean
+  error: string
+  onSubmit: (password: string) => void
+}) {
+  const [password, setPassword] = useState('')
+  const submit = (e: FormEvent) => {
+    e.preventDefault()
+    if (password) onSubmit(password)
+  }
+  return (
+    <div className="share-error">
+      <form className="share-error-card password-card" onSubmit={submit}>
+        <h1 className="share-title">🔒</h1>
+        <h2>该分享受密码保护</h2>
+        <p className="hint">请输入分享者提供的访问密码</p>
+        <input
+          className="password-input"
+          type="password"
+          autoFocus
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          placeholder="访问密码"
+        />
+        {error && <div className="error-text">{error}</div>}
+        <div className="modal-actions">
+          <button type="submit" className="btn primary" disabled={busy || !password}>
+            {busy ? '校验中…' : '解锁'}
+          </button>
+        </div>
+      </form>
+    </div>
+  )
+}
+
+/** 公开分享页（无需登录）：文件元信息 + 下载 + 按类型的内联预览（含网页包）；
+ * 密码保护分享先解锁（HttpOnly 会话 cookie），水印开启时叠加全屏覆盖层。 */
 export default function SharePage() {
   const { token = '' } = useParams()
   const [state, setState] = useState<LoadState>({ status: 'loading' })
   const [text, setText] = useState<string | null>(null)
   const [textError, setTextError] = useState('')
   const [webpkgUrl, setWebpkgUrl] = useState<string | null>(null)
+  const [passwordBusy, setPasswordBusy] = useState(false)
+  const [passwordError, setPasswordError] = useState('')
 
-  useEffect(() => {
-    let cancelled = false
+  const load = (cancelled: () => boolean) => {
     setState({ status: 'loading' })
     setText(null)
     setTextError('')
     getPublicShare(token)
       .then((info) => {
-        if (!cancelled) setState({ status: 'ok', info })
+        if (!cancelled()) setState({ status: 'ok', info })
       })
       .catch((err) => {
-        if (cancelled) return
+        if (cancelled()) return
+        if (err instanceof ApiError && err.code === PASSWORD_REQUIRED_CODE) {
+          setState({ status: 'password' })
+          return
+        }
         if (err instanceof ApiError && (err.status === 404 || err.status === 410)) {
           setState({ status: 'gone' })
         } else {
           setState({ status: 'error', message: err instanceof Error ? err.message : '加载失败' })
         }
       })
+  }
+
+  useEffect(() => {
+    let cancelled = false
+    setPasswordError('')
+    load(() => cancelled)
     return () => {
       cancelled = true
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token])
+
+  const handleVerify = async (password: string) => {
+    setPasswordBusy(true)
+    setPasswordError('')
+    let cancelled = false
+    try {
+      await verifyPublicShare(token, password)
+      // 解锁成功：会话 cookie 已下发，重新拉取元信息。
+      load(() => cancelled)
+    } catch (err) {
+      if (!cancelled) {
+        setPasswordError(err instanceof ApiError && err.status === 401 ? '密码错误，请重试' : err instanceof Error ? err.message : '校验失败')
+      }
+      setPasswordBusy(false)
+      return
+    }
+    setPasswordBusy(false)
+  }
 
   const okState = state.status === 'ok' ? state : null
 
@@ -119,6 +203,9 @@ export default function SharePage() {
       </div>
     )
   }
+  if (state.status === 'password') {
+    return <PasswordCard busy={passwordBusy} error={passwordError} onSubmit={(pwd) => void handleVerify(pwd)} />
+  }
   if (state.status === 'gone') {
     return (
       <ErrorCard title="链接不存在或已失效" detail="该分享可能已过期、被撤销或达到下载上限" />
@@ -133,9 +220,11 @@ export default function SharePage() {
 
   const previewUrl = `/api/v1/public/shares/${encodeURIComponent(token)}/preview`
   const downloadUrl = `/api/v1/public/shares/${encodeURIComponent(token)}/download`
+  const showWatermark = info.watermark_enabled && !!info.watermark_text
 
   return (
     <div className="share-page">
+      {showWatermark && <WatermarkOverlay text={info.watermark_text as string} />}
       <header className="share-head">
         <span className="brand">DocFlow</span>
       </header>

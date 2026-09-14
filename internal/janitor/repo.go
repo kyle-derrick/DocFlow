@@ -102,3 +102,24 @@ func (g *GormRepo) DeleteOrphanSearchDocs() (int64, error) {
 	result := g.db.Exec("DELETE FROM file_search_docs WHERE file_id NOT IN (SELECT id FROM files)")
 	return result.RowsAffected, result.Error
 }
+
+// DeleteOldAccessEvents 删除 created_at 早于 now-retain 的文件访问事件行
+// （file_access_events，表在 internal/share 域，此处原生 SQL 不引模型），
+// 返回删除行数。
+func (g *GormRepo) DeleteOldAccessEvents(now time.Time, retain time.Duration) (int64, error) {
+	cutoff := now.Add(-retain)
+	result := g.db.Exec("DELETE FROM file_access_events WHERE created_at < ?", cutoff)
+	return result.RowsAffected, result.Error
+}
+
+// DeleteExpiredShareSessions 删除已过期（expires_at < now）的公开分享访问
+// 会话行（share_access_sessions，原生 SQL），返回删除行数。
+func (g *GormRepo) DeleteOldAuditLogs(now time.Time, retain time.Duration) (int64, error) {
+	result := g.db.Exec("DELETE FROM audit_logs WHERE created_at < ?", now.Add(-retain))
+	return result.RowsAffected, result.Error
+}
+
+func (g *GormRepo) DeleteExpiredShareSessions(now time.Time) (int64, error) {
+	result := g.db.Exec("DELETE FROM share_access_sessions WHERE expires_at < ?", now)
+	return result.RowsAffected, result.Error
+}

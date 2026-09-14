@@ -1,4 +1,4 @@
-.PHONY: run test fmt seed migrate e2e build-frontend up-minimal up-full down
+.PHONY: run test fmt seed migrate e2e build-frontend up-minimal up-full down backup backup-windows
 
 run:
 	go run ./cmd/server
@@ -55,3 +55,9 @@ up-full:
 # 停止全部 profile 的服务并移除容器（数据卷保留；需清数据再接 -v）。
 down:
 	docker compose --profile minimal --profile full --profile antivirus down
+
+backup:
+	sh scripts/backup.sh
+
+backup-windows:
+	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/backup.ps1

@@ -1,6 +1,7 @@
 package share
 
 import (
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -17,6 +18,9 @@ type MemoryStore struct {
 	public     map[uuid.UUID]bool
 	shareUsers map[uuid.UUID]map[uuid.UUID]time.Time // share_id -> user_id -> created_at
 	shareTeams map[uuid.UUID]map[uuid.UUID]time.Time // share_id -> team_id -> created_at
+	sessions   map[string]AccessSession              // session_hash -> 会话
+	events     []AccessEvent                         // created_at 升序追加
+	eventSeq   int64
 	// membership 注入的团队成员判定（测试用）：user 是否属于 team；
 	// nil 时 share_teams 命中不可达（与未注入 membership 的 Service 一致）。
 	membership func(userID, teamID uuid.UUID) bool
@@ -28,6 +32,7 @@ func NewMemoryStore() *MemoryStore {
 		public:     make(map[uuid.UUID]bool),
 		shareUsers: make(map[uuid.UUID]map[uuid.UUID]time.Time),
 		shareTeams: make(map[uuid.UUID]map[uuid.UUID]time.Time),
+		sessions:   make(map[string]AccessSession),
 	}
 }
 
@@ -247,4 +252,101 @@ func (m *MemoryStore) ListShareTeamIDs(shareID uuid.UUID) ([]uuid.UUID, error) {
 		out = append(out, id)
 	}
 	return out, nil
+}
+
+func (m *MemoryStore) CreateSession(v AccessSession) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sessions[v.SessionHash] = v
+	return nil
+}
+
+func (m *MemoryStore) GetSessionByHash(hash string) (AccessSession, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	v, ok := m.sessions[hash]
+	if !ok {
+		return AccessSession{}, ErrNotFound
+	}
+	return v, nil
+}
+
+// UpdateFields 与 GormStore 语义一致：nil 值清空对应可空列；未知列名报错。
+func (m *MemoryStore) UpdateFields(id uuid.UUID, fields map[string]any) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	v, ok := m.items[id]
+	if !ok {
+		return ErrNotFound
+	}
+	for key, val := range fields {
+		switch key {
+		case "expires_at":
+			if t, ok := val.(*time.Time); ok {
+				v.ExpiresAt = t
+			} else {
+				v.ExpiresAt = nil
+			}
+		case "max_downloads":
+			if n, ok := val.(int); ok {
+				x := n
+				v.MaxDownloads = &x
+			} else {
+				v.MaxDownloads = nil
+			}
+		case "watermark_enabled":
+			b, ok := val.(bool)
+			if !ok {
+				return fmt.Errorf("watermark_enabled: unexpected type %T", val)
+			}
+			v.WatermarkEnabled = b
+		case "watermark_text":
+			if t, ok := val.(string); ok && t != "" {
+				v.WatermarkText = &t
+			} else {
+				v.WatermarkText = nil
+			}
+		default:
+			return fmt.Errorf("share field %q is not updatable", key)
+		}
+	}
+	m.items[id] = v
+	return nil
+}
+
+func (m *MemoryStore) RecordAccessEvent(e AccessEvent) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.eventSeq++
+	e.ID = m.eventSeq
+	m.events = append(m.events, e)
+	return nil
+}
+
+// ShareAccessStats 与 GormStore 语义一致：总数、distinct ip_hash 与最近
+// 20 条（created_at 倒序；同刻按插入序号倒序）。
+func (m *MemoryStore) ShareAccessStats(shareID uuid.UUID) (AccessStats, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var stats AccessStats
+	visitors := make(map[string]struct{})
+	for _, e := range m.events {
+		if e.ShareID != shareID {
+			continue
+		}
+		stats.TotalAccess++
+		visitors[e.IPHash] = struct{}{}
+	}
+	stats.UniqueVisitors = int64(len(visitors))
+	total := stats.TotalAccess
+	start := total - recentAccessEventsLimit
+	if start < 0 {
+		start = 0
+	}
+	recent := make([]AccessEvent, 0, total-start)
+	for i := total - 1; i >= start; i-- {
+		recent = append(recent, m.events[i])
+	}
+	stats.Recent = recent
+	return stats, nil
 }

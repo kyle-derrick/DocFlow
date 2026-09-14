@@ -12,6 +12,10 @@ export function hasAccessToken(): boolean {
   return accessToken !== null
 }
 
+export function websocketToken(): string | null {
+  return accessToken
+}
+
 /** 会话过期事件：refresh 失败时广播，App 监听后跳转 /login。 */
 export const SESSION_EXPIRED_EVENT = 'docflow:session-expired'
 
@@ -30,11 +34,27 @@ export class ApiError extends Error {
 let refreshing: Promise<boolean> | null = null
 
 /** 用 HttpOnly refresh cookie 换新 access token；并发调用共享同一次请求。 */
+function csrfToken(): string | null {
+  const match = document.cookie.match(/(?:^|; )docflow_csrf=([^;]*)/)
+  return match ? decodeURIComponent(match[1]) : null
+}
+
+function withCSRF(init: RequestInit): RequestInit {
+  const method = (init.method ?? 'GET').toUpperCase()
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+    const headers = new Headers(init.headers)
+    const token = csrfToken()
+    if (token) headers.set('X-CSRF-Token', token)
+    return { ...init, headers }
+  }
+  return init
+}
+
 export async function refreshSession(): Promise<boolean> {
   if (refreshing) return refreshing
   const p = (async (): Promise<boolean> => {
     try {
-      const res = await fetch('/api/v1/auth/refresh', { method: 'POST', credentials: 'same-origin' })
+      const res = await fetch('/api/v1/auth/refresh', withCSRF({ method: 'POST', credentials: 'same-origin' }))
       if (!res.ok) return false
       const data = (await res.json()) as { access_token?: string }
       accessToken = data.access_token ?? null
@@ -52,6 +72,7 @@ export async function refreshSession(): Promise<boolean> {
 }
 
 async function rawFetch(path: string, init: RequestInit): Promise<Response> {
+  init = withCSRF(init)
   const headers = new Headers(init.headers)
   if (accessToken) headers.set('Authorization', `Bearer ${accessToken}`)
   return fetch(path, { ...init, headers, credentials: 'same-origin' })
@@ -105,6 +126,18 @@ async function parseBody(res: Response): Promise<unknown> {
 /** JSON API 请求：统一把 {error, code} 转成 ApiError 抛出。 */
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const res = await authFetch(path, init)
+  const data = await parseBody(res)
+  if (!res.ok) {
+    const obj = data as { error?: string; message?: string; code?: string } | null
+    throw new ApiError(res.status, obj?.error || obj?.message || `请求失败（${res.status}）`, obj?.code)
+  }
+  return data as T
+}
+
+/** 匿名公开请求：不带 Authorization、不做 401 自动刷新（公开分享页专用，
+ * 避免未登录访客的 401（如 PASSWORD_REQUIRED）触发会话过期跳转）。 */
+export async function publicApi<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const res = await fetch(path, { ...init, credentials: 'same-origin' })
   const data = await parseBody(res)
   if (!res.ok) {
     const obj = data as { error?: string; message?: string; code?: string } | null
@@ -245,6 +278,18 @@ export async function batchRestoreFiles(fileIds: string[]): Promise<BatchItemRes
   return data.results ?? []
 }
 
+/** 删除单个历史版本（current 版本由服务端拒绝）。 */
+export async function deleteFileVersion(fileId: string, versionId: string): Promise<void> {
+  await api(`/api/v1/files/${fileId}/versions/${versionId}`, { method: 'DELETE' })
+}
+
+/** 批量下载 ZIP 由服务端流式生成。 */
+export async function downloadBatchFiles(fileIds: string[]): Promise<void> {
+  const res = await authFetch('/api/v1/files/batch/download', idemInit({ file_ids: fileIds }))
+  if (!res.ok) throw new ApiError(res.status, '批量下载失败')
+  saveBlob(await res.blob(), 'docflow-files.zip')
+}
+
 /** 批量结果的简短摘要文案（成功 N 项 / 失败码统计）。 */
 export function summarizeBatchResults(results: BatchItemResult[]): string {
   const okCount = results.filter((r) => r.ok).length
@@ -314,6 +359,12 @@ export interface ShareItem {
   visibility?: 'public' | 'private'
   /** 关联文件名（列表响应返回；文件已删除或旧后端时为空/缺省）。 */
   file_name?: string | null
+  /** 是否受密码保护（明文与哈希均不回传）。 */
+  has_password?: boolean
+  /** 水印开关（旧后端缺省时按 true 处理）。 */
+  watermark_enabled?: boolean
+  /** 自定义水印模板；null/缺省表示使用系统默认模板。 */
+  watermark_text?: string | null
 }
 
 export interface CreatedShare extends ShareItem {
@@ -335,19 +386,20 @@ function applyLoginToken(token: string): void {
   adminProbe = null
 }
 
-export async function login(email: string, password: string): Promise<void> {
-  const data = await api<{ access_token: string }>('/api/v1/auth/login', jsonInit('POST', { email, password }))
+export async function login(identifier: string, password: string): Promise<void> {
+  const data = await api<{ access_token: string }>('/api/v1/auth/login', jsonInit('POST', { identifier, password }))
   applyLoginToken(data.access_token)
 }
 
 /**
  * 两步验证登录第二段：code 为 6 位 TOTP 码；recoveryCode 为一次性恢复码
  *（二选一，均为空时服务端 400）。成功后 access_token 入内存（同 login）。
+ * identifier 为登录标识（email 或 username）。
  */
-export async function loginTotp(email: string, password: string, code: string, recoveryCode = ''): Promise<void> {
+export async function loginTotp(identifier: string, password: string, code: string, recoveryCode = ''): Promise<void> {
   const data = await api<{ access_token: string }>(
     '/api/v1/auth/login/totp',
-    jsonInit('POST', { email, password, code, recovery_code: recoveryCode }),
+    jsonInit('POST', { identifier, password, code, recovery_code: recoveryCode }),
   )
   applyLoginToken(data.access_token)
 }
@@ -401,6 +453,7 @@ export async function revokeAllSessions(): Promise<void> {
 export interface ApiTokenItem {
   id: string
   name: string
+  scopes: string[]
   /** 明文前 14 字符（dfpat_ + 8 字符），UI 展示用。 */
   prefix: string
   last_used_at: string | null
@@ -426,6 +479,10 @@ export async function createToken(name: string, expiresInDays: number): Promise<
 }
 
 /** 撤销自己的 PAT（立即失效；非属主/不存在/已撤销 404）。 */
+export async function updateToken(id: string, body: { name?: string; scopes?: string[] }): Promise<ApiTokenItem> {
+  return api<ApiTokenItem>(`/api/v1/tokens/${id}`, jsonInit('PATCH', body))
+}
+
 export async function revokeToken(id: string): Promise<void> {
   await api(`/api/v1/tokens/${id}`, { method: 'DELETE' })
 }
@@ -496,8 +553,13 @@ export const OIDC_LOGIN_PATH = '/api/v1/auth/oidc/login'
 
 // ---------- 站内通知与通知偏好 ----------
 
-/** 通知事件类型（v1.0 范围）。 */
-export type NotificationEventType = 'upload.completed' | 'upload.quarantined' | 'share.accessed' | 'file.updated'
+/** 通知事件类型（v1.0 范围 + v1.1 配额警告）。 */
+export type NotificationEventType =
+  | 'upload.completed'
+  | 'upload.quarantined'
+  | 'share.accessed'
+  | 'file.updated'
+  | 'quota.warning'
 
 /** 通知条目（GET /notifications）。 */
 export interface NotificationItem {
@@ -816,11 +878,26 @@ export interface PublicShareInfo {
   expires_at: string | null
   max_downloads: number | null
   download_count: number
+  /** 水印开关；关闭时 watermark_text 为 null。 */
+  watermark_enabled: boolean
+  /** 按访问者渲染后的水印文案（占位符已替换）。 */
+  watermark_text: string | null
 }
 
-/** 公开分享元数据（无认证）。 */
+/** 分享密码保护错误码：公开接口 401 且 code=PASSWORD_REQUIRED 时展示密码表单。 */
+export const PASSWORD_REQUIRED_CODE = 'PASSWORD_REQUIRED'
+
+/** 公开分享元数据（无认证；401 PASSWORD_REQUIRED 经 ApiError.code 抛出）。 */
 export async function getPublicShare(token: string): Promise<PublicShareInfo> {
-  return api<PublicShareInfo>(`/api/v1/public/shares/${encodeURIComponent(token)}`)
+  return publicApi<PublicShareInfo>(`/api/v1/public/shares/${encodeURIComponent(token)}`)
+}
+
+/** 校验公开分享密码：成功后服务端经 HttpOnly cookie 下发 1 小时访问会话。 */
+export async function verifyPublicShare(token: string, password: string): Promise<void> {
+  await publicApi<{ ok: boolean }>(
+    `/api/v1/public/shares/${encodeURIComponent(token)}/verify`,
+    jsonInit('POST', { password }),
+  )
 }
 
 /** 公开文本预览：直接抓取 /preview 响应体（text/plain、application/json）。 */
@@ -860,6 +937,12 @@ export interface CreateShareOptions {
   userIds?: string[]
   /** 私有分享：授权的团队列表（public 时必须为空）。 */
   teamIds?: string[]
+  /** 公开分享访问密码（4-64 字符；明文仅本次请求，服务端存加盐哈希）。 */
+  password?: string
+  /** 水印开关；缺省用系统设置 share.default_watermark。 */
+  watermarkEnabled?: boolean
+  /** 自定义水印模板；缺省用系统设置 share.watermark_text。 */
+  watermarkText?: string
 }
 
 /**
@@ -890,7 +973,11 @@ export async function createShare(opts: CreateShareOptions): Promise<CreatedShar
   if (opts.visibility === 'private') {
     if (opts.userIds?.length) body.user_ids = opts.userIds
     if (opts.teamIds?.length) body.team_ids = opts.teamIds
+  } else if (opts.password) {
+    body.password = opts.password
   }
+  if (opts.watermarkEnabled !== undefined) body.watermark_enabled = opts.watermarkEnabled
+  if (opts.watermarkText) body.watermark_text = opts.watermarkText
   const created = await api<CreatedShare>('/api/v1/shares', jsonInit('POST', body))
   rememberShareMeta(created.id, { token: created.token ?? undefined })
   return created
@@ -905,6 +992,51 @@ export async function listShares(): Promise<ShareItem[]> {
 /** 撤销分享（幂等，仅创建者）。 */
 export async function revokeShare(id: string): Promise<void> {
   await api(`/api/v1/shares/${id}`, { method: 'DELETE' })
+}
+
+// ---------- 分享详情与访问统计 ----------
+
+/** 最近访问记录条目（脱敏：IP 前缀 + UA 摘要，不含哈希）。 */
+export interface ShareAccessRecord {
+  time: string
+  action: 'download' | 'preview'
+  ip_prefix: string
+  user_agent: string
+}
+
+/** 分享访问统计聚合。 */
+export interface ShareStats {
+  total_access: number
+  unique_visitors: number
+  recent: ShareAccessRecord[]
+}
+
+/** GET /shares/{id} 响应：分享详情 + 访问统计（仅创建者）。 */
+export interface ShareDetail extends ShareItem {
+  stats: ShareStats
+}
+
+/** 分享详情与访问统计（仅创建者）。 */
+export async function getShareDetail(id: string): Promise<ShareDetail> {
+  return api<ShareDetail>(`/api/v1/shares/${id}`)
+}
+
+/** PATCH /shares/{id} 可更新字段；0 表示清除限制（永久 / 不限），空串恢复默认模板。 */
+export interface UpdateShareOptions {
+  expiresInHours?: number
+  maxDownloads?: number
+  watermarkEnabled?: boolean
+  watermarkText?: string
+}
+
+/** 修改分享（有效期/下载上限/水印；permission 等不可改），返回更新后的记录。 */
+export async function updateShare(id: string, opts: UpdateShareOptions): Promise<ShareItem> {
+  const body: Record<string, unknown> = {}
+  if (opts.expiresInHours !== undefined) body.expires_in = Math.round(opts.expiresInHours * 3600)
+  if (opts.maxDownloads !== undefined) body.max_downloads = opts.maxDownloads
+  if (opts.watermarkEnabled !== undefined) body.watermark_enabled = opts.watermarkEnabled
+  if (opts.watermarkText !== undefined) body.watermark_text = opts.watermarkText
+  return api<ShareItem>(`/api/v1/shares/${id}`, jsonInit('PATCH', body))
 }
 
 /** 单文件元数据（含当前版本摘要）；用于把分享记录的 file_id 解析为文件名，及版本历史的「当前版本」判定。 */
@@ -940,6 +1072,10 @@ export interface Team {
   owner_id: string
   created_at: string
 }
+export async function updateTeam(id: string, name: string, description: string): Promise<Team> {
+  return api<Team>(`/api/v1/teams/${id}`, jsonInit('PATCH', { name, description }))
+}
+export async function deleteTeam(id: string): Promise<void> { await api(`/api/v1/teams/${id}`, { method: 'DELETE' }) }
 
 export interface CreatedTeam extends Team {
   root_folder_id: string
@@ -1011,6 +1147,21 @@ export async function createTeamFolder(teamId: string, name: string, parentId: s
 
 export type UploadPhase = 'creating' | 'completing' | UploadStatus
 
+/** 存储配额超限错误码（POST /uploads 403；前端转为中文提示）。 */
+export const QUOTA_EXCEEDED_CODE = 'QUOTA_EXCEEDED'
+
+/** 建上传会话（新建/覆盖共用）：配额超限转为中文提示后抛出。 */
+async function startUploadSession(body: Record<string, unknown>): Promise<UploadSession> {
+  try {
+    return await api<UploadSession>('/api/v1/uploads', jsonInit('POST', body))
+  } catch (err) {
+    if (err instanceof ApiError && err.code === QUOTA_EXCEEDED_CODE) {
+      throw new ApiError(err.status, '存储配额已超出，无法上传；可清理回收站（彻底删除后才释放配额）或联系管理员调整配额', QUOTA_EXCEEDED_CODE)
+    }
+    throw err
+  }
+}
+
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
 /**
@@ -1067,7 +1218,7 @@ export async function uploadFile(
   onProgress: (phase: UploadPhase) => void,
 ): Promise<UploadSession> {
   onProgress('creating')
-  const session = await api<UploadSession>('/api/v1/uploads', jsonInit('POST', { name: file.name, size: file.size, parent_id: parentId ?? '' }))
+  const session = await startUploadSession({ name: file.name, size: file.size, parent_id: parentId ?? '' })
   return runUploadSession(session, file, onProgress)
 }
 
@@ -1081,7 +1232,7 @@ export async function uploadFileVersion(
   onProgress: (phase: UploadPhase) => void,
 ): Promise<UploadSession> {
   onProgress('creating')
-  const session = await api<UploadSession>('/api/v1/uploads', jsonInit('POST', { name: file.name, size: file.size, file_id: fileId }))
+  const session = await startUploadSession({ name: file.name, size: file.size, file_id: fileId })
   return runUploadSession(session, file, onProgress)
 }
 
@@ -1246,6 +1397,38 @@ export async function adminGetStats(): Promise<AdminStats> {
   return api<AdminStats>('/api/v1/admin/stats')
 }
 
+export interface AuditEntry {
+  id: number
+  user_id: string | null
+  action: string
+  resource_type: string
+  resource_id: string
+  status: string
+  created_at: string
+}
+export interface AuditListResult { items: AuditEntry[]; next_cursor: string; total: number }
+export async function adminListAuditLogs(action = '', userId = '', cursor = ''): Promise<AuditListResult> {
+  const params = new URLSearchParams()
+  if (action) params.set('action', action)
+  if (userId) params.set('user_id', userId)
+  if (cursor) params.set('cursor', cursor)
+  const query = params.toString()
+  return api<AuditListResult>(`/api/v1/admin/audit-logs${query ? `?${query}` : ''}`)
+}
+export async function adminDownloadAuditCSV(action = ''): Promise<void> {
+  const query = action ? `?action=${encodeURIComponent(action)}` : ''
+  const res = await authFetch(`/api/v1/admin/audit-logs/export.csv${query}`)
+  if (!res.ok) throw new ApiError(res.status, '审计日志导出失败')
+  saveBlob(await res.blob(), 'audit-logs.csv')
+}
+export interface BackupStatus { configured: boolean; latest?: { name: string; size: number; modified_at: string; manifest: string } }
+export async function adminGetBackupStatus(): Promise<BackupStatus> {
+  return api<BackupStatus>('/api/v1/admin/backups/status')
+}
+export async function adminRunBackup(): Promise<void> {
+  await api('/api/v1/admin/backups/run', { method: 'POST' })
+}
+
 // ---------- 仪表盘（v1.1） ----------
 
 /** 仪表盘最近文件条目（个人空间 updated_at 倒序前 5）。 */
@@ -1328,4 +1511,127 @@ export function isAdmin(): Promise<boolean> {
       .catch(() => false)
   }
   return adminProbe
+}
+
+// ---------- 个人档案与配额（/me） ----------
+
+/** 界面语言选项（与后端白名单一致）。 */
+export const PROFILE_LANGUAGES: Array<{ value: 'zh-CN' | 'en-US'; label: string }> = [
+  { value: 'zh-CN', label: '简体中文' },
+  { value: 'en-US', label: 'English' },
+]
+
+/** 用户档案字段（可空文本为 null；头像按 username/昵称首字母计算）。 */
+export interface UserProfile {
+  nickname: string | null
+  department: string | null
+  position: string | null
+  phone: string | null
+  bio: string | null
+  language: string
+  timezone: string
+}
+
+/** GET /me 响应：档案 + 存储用量/配额。 */
+export interface MeData {
+  id: string
+  username: string
+  email: string
+  role: 'user' | 'admin'
+  status: 'active' | 'disabled' | 'locked'
+  /** 存储用量（软删/回收站文件计入；字节）。 */
+  storage: { used: number; quota: number }
+  profile: UserProfile
+  created_at: string
+}
+
+/** 当前用户档案与存储用量。 */
+export async function getMe(): Promise<MeData> {
+  return api<MeData>('/api/v1/me')
+}
+
+/** PATCH /me 可更新字段（undefined 表示不更新；空串清空文本字段）。 */
+export interface UpdateMeOptions {
+  nickname?: string
+  department?: string
+  position?: string
+  phone?: string
+  bio?: string
+  language?: string
+  timezone?: string
+}
+
+/** 更新个人档案（language ∈ zh-CN|en-US）；返回更新后的完整 /me 视图。 */
+export async function updateMe(opts: UpdateMeOptions): Promise<MeData> {
+  const body: Record<string, unknown> = {}
+  for (const key of ['nickname', 'department', 'position', 'phone', 'bio', 'language', 'timezone'] as const) {
+    if (opts[key] !== undefined) body[key] = opts[key]
+  }
+  return api<MeData>('/api/v1/me', jsonInit('PATCH', body))
+}
+
+// ---------- 管理端用户管理（仅 admin） ----------
+
+/** 管理端用户条目（脱敏：不含密码哈希）。 */
+export interface AdminUser {
+  id: string
+  username: string
+  email: string
+  role: 'user' | 'admin'
+  status: 'active' | 'disabled' | 'locked'
+  storage_quota: number
+  failed_login_count: number
+  locked_until: string | null
+  profile: UserProfile
+  created_at: string
+  updated_at: string
+}
+
+/** GET /admin/users 分页响应。 */
+export interface AdminUserListResult {
+  users: AdminUser[]
+  total: number
+  limit: number
+  offset: number
+}
+
+/** 用户列表（q 为 username/email 前缀检索；分页）。 */
+export async function adminListUsers(q = '', limit = 50, offset = 0): Promise<AdminUserListResult> {
+  const params = new URLSearchParams()
+  if (q) params.set('q', q)
+  if (limit) params.set('limit', String(limit))
+  if (offset) params.set('offset', String(offset))
+  const query = params.toString()
+  return api<AdminUserListResult>(`/api/v1/admin/users${query ? `?${query}` : ''}`)
+}
+
+/** PATCH /admin/users/{id} 可更新字段。 */
+export interface AdminUpdateUserOptions {
+  /** active|disabled；禁用立即撤销其全部会话；不可禁用自己。 */
+  status?: 'active' | 'disabled'
+  /** 存储配额（字节）。 */
+  storageQuota?: number
+  role?: 'user' | 'admin'
+}
+
+/** 更新用户（禁用/启用/改配额/改角色）；返回更新后的条目。 */
+export async function adminGetUser(id: string): Promise<AdminUser> {
+  return api<AdminUser>(`/api/v1/admin/users/${id}`)
+}
+
+export async function adminDeleteUser(id: string): Promise<void> {
+  await api(`/api/v1/admin/users/${id}`, { method: 'DELETE' })
+}
+
+export async function adminUpdateUser(id: string, opts: AdminUpdateUserOptions): Promise<AdminUser> {
+  const body: Record<string, unknown> = {}
+  if (opts.status !== undefined) body.status = opts.status
+  if (opts.storageQuota !== undefined) body.storage_quota = opts.storageQuota
+  if (opts.role !== undefined) body.role = opts.role
+  return api<AdminUser>(`/api/v1/admin/users/${id}`, jsonInit('PATCH', body))
+}
+
+/** 重置用户密码（强度同自助改密；成功后其全部会话失效）。 */
+export async function adminResetUserPassword(id: string, newPassword: string): Promise<void> {
+  await api(`/api/v1/admin/users/${id}/reset-password`, jsonInit('POST', { new_password: newPassword }))
 }

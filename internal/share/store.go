@@ -180,3 +180,60 @@ func (s *GormStore) ListShareTeamIDs(shareID uuid.UUID) ([]uuid.UUID, error) {
 	}
 	return out, err
 }
+
+// CreateSession 写入公开访问会话（share_access_sessions，migration 022）。
+func (s *GormStore) CreateSession(v AccessSession) error {
+	return s.db.Create(&v).Error
+}
+
+// GetSessionByHash 按 session_hash 查会话；无命中返回 ErrNotFound。
+func (s *GormStore) GetSessionByHash(hash string) (AccessSession, error) {
+	var v AccessSession
+	err := s.db.Where("session_hash = ?", hash).First(&v).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return AccessSession{}, ErrNotFound
+	}
+	return v, err
+}
+
+// UpdateFields 按列名更新分享行（服务层已解析为最终值，nil → NULL）；
+// 行不存在返回 ErrNotFound。
+func (s *GormStore) UpdateFields(id uuid.UUID, fields map[string]any) error {
+	if len(fields) == 0 {
+		return nil
+	}
+	result := s.db.Model(&Share{}).Where("id = ?", id).Updates(fields)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// RecordAccessEvent 写入公开访问事件（file_access_events，migration 023）。
+func (s *GormStore) RecordAccessEvent(e AccessEvent) error {
+	return s.db.Create(&e).Error
+}
+
+// recentAccessEventsLimit 为 ShareAccessStats 最近事件条数上限（设计 6.6.3）。
+const recentAccessEventsLimit = 20
+
+// ShareAccessStats 聚合分享访问统计：事件总数、独立访客（distinct ip_hash）
+// 与最近 20 条事件（created_at 倒序）。
+func (s *GormStore) ShareAccessStats(shareID uuid.UUID) (AccessStats, error) {
+	var stats AccessStats
+	if err := s.db.Model(&AccessEvent{}).Where("share_id = ?", shareID).Count(&stats.TotalAccess).Error; err != nil {
+		return AccessStats{}, err
+	}
+	if err := s.db.Model(&AccessEvent{}).Select("COUNT(DISTINCT ip_hash)").
+		Where("share_id = ?", shareID).Scan(&stats.UniqueVisitors).Error; err != nil {
+		return AccessStats{}, err
+	}
+	if err := s.db.Where("share_id = ?", shareID).
+		Order("created_at DESC, id DESC").Limit(recentAccessEventsLimit).Find(&stats.Recent).Error; err != nil {
+		return AccessStats{}, err
+	}
+	return stats, nil
+}

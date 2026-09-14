@@ -52,7 +52,10 @@ var ErrInvalidAccessToken = errors.New("invalid access token")
 var (
 	ErrInvalidTokenName   = errors.New("token name must be 1-100 characters")
 	ErrInvalidTokenExpiry = errors.New("token expiry must be 0 (never) or 1-3650 days")
+	ErrInvalidTokenScopes = errors.New("invalid token scopes")
 )
+
+var AllowedPATScopes = map[string]bool{"files:read": true, "files:write": true}
 
 // SessionInfo 为创建会话时记录的请求环境（sessions.ip/user_agent，审计用途）。
 type SessionInfo struct {
@@ -65,6 +68,7 @@ type PATLookup struct {
 	ID        uuid.UUID
 	UserID    uuid.UUID
 	TokenHash string
+	Scopes    []string
 }
 
 type SessionStore interface {
@@ -88,6 +92,7 @@ type TokenStore interface {
 	List(owner uuid.UUID) ([]APIToken, error)
 	// Revoke 撤销属主令牌（仅未撤销时生效），返回是否生效。
 	Revoke(owner, id uuid.UUID, now time.Time) (bool, error)
+	Update(owner, id uuid.UUID, name *string, scopes *[]string) (APIToken, error)
 	// FindActiveByPrefix 按 prefix 定位未撤销且未过期的令牌，返回认证所需
 	// 最小字段（id/user_id/token_hash）。
 	FindActiveByPrefix(prefix string, now time.Time) (PATLookup, bool, error)
@@ -202,6 +207,10 @@ func (s *Service) RevokeAllSessions(userID uuid.UUID) error {
 // base64url）。name 去首尾空白后限 1-100 rune；expiresInDays 为 0 表示
 // 永久，否则 1-3650 天。
 func (s *Service) NewPersonalAccessToken(userID uuid.UUID, name string, expiresInDays int) (APIToken, string, error) {
+	return s.NewPersonalAccessTokenWithScopes(userID, name, expiresInDays, nil)
+}
+
+func (s *Service) NewPersonalAccessTokenWithScopes(userID uuid.UUID, name string, expiresInDays int, scopes []string) (APIToken, string, error) {
 	if s.tokens == nil {
 		return APIToken{}, "", ErrNotConfigured
 	}
@@ -223,6 +232,7 @@ func (s *Service) NewPersonalAccessToken(userID uuid.UUID, name string, expiresI
 		UserID:    userID,
 		Name:      trimmed,
 		TokenHash: hashToken(plaintext),
+		Scopes:    scopes,
 		Prefix:    plaintext[:patPrefixLen],
 		CreatedAt: now,
 	}
@@ -244,6 +254,29 @@ func (s *Service) ListPersonalAccessTokens(owner uuid.UUID) ([]APIToken, error) 
 	return s.tokens.List(owner)
 }
 
+func (s *Service) UpdatePersonalAccessToken(owner, id uuid.UUID, name *string, scopes *[]string) (APIToken, error) {
+	if s.tokens == nil {
+		return APIToken{}, ErrNotConfigured
+	}
+	if name != nil {
+		trimmed := strings.TrimSpace(*name)
+		if n := len([]rune(trimmed)); n < 1 || n > PATNameMax {
+			return APIToken{}, ErrInvalidTokenName
+		}
+		*name = trimmed
+	}
+	if scopes != nil {
+		seen := map[string]bool{}
+		for _, scope := range *scopes {
+			if !AllowedPATScopes[scope] || seen[scope] {
+				return APIToken{}, ErrInvalidTokenScopes
+			}
+			seen[scope] = true
+		}
+	}
+	return s.tokens.Update(owner, id, name, scopes)
+}
+
 // RevokePersonalAccessToken 撤销属主令牌；不存在、非属主或已撤销返回 false。
 func (s *Service) RevokePersonalAccessToken(owner, id uuid.UUID) (bool, error) {
 	if s.tokens == nil {
@@ -256,6 +289,25 @@ func (s *Service) RevokePersonalAccessToken(owner, id uuid.UUID) (bool, error) {
 // （store 侧条件过滤）→ 全量 SHA-256 常量时间比对 → 属主账号仍为 active。
 // 通过则 best-effort 触达 TouchLastUsed 并返回属主 user id；任何失败均
 // 返回 ErrInvalidAccessToken（fail closed，不区分原因以防探测）。
+func (s *Service) VerifyPersonalAccessTokenWithScopes(token string) (uuid.UUID, []string, error) {
+	if s.tokens == nil || s.creds == nil || len(token) <= patPrefixLen || !strings.HasPrefix(token, PATPrefix) {
+		return uuid.Nil, nil, ErrInvalidAccessToken
+	}
+	lookup, found, err := s.tokens.FindActiveByPrefix(token[:patPrefixLen], s.now().UTC())
+	if err != nil || !found {
+		return uuid.Nil, nil, ErrInvalidAccessToken
+	}
+	sum := sha256.Sum256([]byte(token))
+	if subtle.ConstantTimeCompare([]byte(hex.EncodeToString(sum[:])), []byte(lookup.TokenHash)) != 1 {
+		return uuid.Nil, nil, ErrInvalidAccessToken
+	}
+	user, err := s.creds.GetByID(lookup.UserID)
+	if err != nil || user.Status != StatusActive {
+		return uuid.Nil, nil, ErrInvalidAccessToken
+	}
+	s.tokens.TouchLastUsed(lookup.ID)
+	return lookup.UserID, lookup.Scopes, nil
+}
 func (s *Service) VerifyPersonalAccessToken(token string) (uuid.UUID, error) {
 	if s.tokens == nil || s.creds == nil || len(token) <= patPrefixLen || !strings.HasPrefix(token, PATPrefix) {
 		return uuid.Nil, ErrInvalidAccessToken
@@ -348,6 +400,29 @@ func (s *Service) ChangePassword(userID uuid.UUID, currentRefreshToken, oldPassw
 		exceptHash = HashRefreshToken(currentRefreshToken)
 	}
 	return s.store.RevokeAllForUser(user.ID, exceptHash, s.now().UTC())
+}
+
+// AdminResetPassword 管理员重置用户密码（C6）：强度校验（与自助改密同规则）
+// 后更新哈希并撤销该用户全部会话（无「当前会话」概念）。用户不存在返回
+// ErrUserNotFound（creds.GetByID 映射）。
+func (s *Service) AdminResetPassword(userID uuid.UUID, newPassword string) error {
+	if s.creds == nil {
+		return ErrNotConfigured
+	}
+	if _, err := s.creds.GetByID(userID); err != nil {
+		return err
+	}
+	if err := ValidatePasswordStrength(newPassword); err != nil {
+		return err
+	}
+	hash, err := HashPassword(newPassword)
+	if err != nil {
+		return err
+	}
+	if err := s.creds.UpdatePasswordHash(userID, hash); err != nil {
+		return err
+	}
+	return s.store.RevokeAllForUser(userID, "", s.now().UTC())
 }
 
 // RequestPasswordReset 为邮箱对应的活跃用户创建 30 分钟有效的一次性重置

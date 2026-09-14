@@ -29,7 +29,8 @@ const (
 	TaskTypeWebhookDelivery = "task:webhook-delivery"
 	// TaskTypeSearchIndex 文件全文索引构建（fileID 载荷；处理侧读当前版本
 	// blob 内容后 upsert file_search_docs，见 internal/search）。
-	TaskTypeSearchIndex = "task:search-index"
+	TaskTypeSearchIndex       = "task:search-index"
+	TaskTypeGenerateThumbnail = "task:generate-thumbnail"
 )
 
 // Enqueuer 后台任务入队接口：Web 侧（tus 自动完成、上传完成钩子、通知

@@ -45,6 +45,11 @@ const (
 	// OIDC 单点登录（v2）：自动开户（SSO 登录成功/失败沿用
 	// login_success/login_failure，metadata.stage=oidc）。
 	ActionOIDCProvision = "oidc.provision"
+	// 管理端用户管理（C6，设计 6.2.1/9.1.1）：更新（禁用/启用/改配额/改角色）
+	// 与重置密码；软禁用替代删除（数据完整性取舍）。
+	ActionFileCopy          = "file.copy"
+	ActionUserUpdate        = "user.update"
+	ActionUserResetPassword = "user.reset_password"
 )
 
 // resource_type 常量。

@@ -18,10 +18,12 @@ const (
 	EventShareAccessed = "share.accessed"
 	// EventFileUpdated 团队文件被他人更新新版本（发给团队其他成员；仅团队文件）。
 	EventFileUpdated = "file.updated"
+	// EventQuotaWarning 存储配额用量警告（上传成功后用量超过阈值 80%，C3）。
+	EventQuotaWarning = "quota.warning"
 )
 
 // EventTypes 全部事件类型（设置页展示顺序）。
-var EventTypes = []string{EventUploadCompleted, EventUploadQuarantined, EventShareAccessed, EventFileUpdated}
+var EventTypes = []string{EventUploadCompleted, EventUploadQuarantined, EventShareAccessed, EventFileUpdated, EventQuotaWarning}
 
 // ValidEventType 判定事件类型是否已知。
 func ValidEventType(eventType string) bool {
@@ -39,6 +41,7 @@ var defaultEnabled = map[string]bool{
 	EventUploadQuarantined: true,
 	EventShareAccessed:     true,
 	EventFileUpdated:       true,
+	EventQuotaWarning:      true,
 }
 
 // DefaultEnabled 返回事件类型的默认开关（未知类型默认开启，保守不丢通知）。

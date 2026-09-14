@@ -29,6 +29,12 @@ type Repo interface {
 	CanWrite(userID, teamID uuid.UUID) (bool, error)
 	// UserInAnyTeam 实时判定用户是否属于 teamIDs 中任一团队（供私有分享 share_teams 授权）。
 	UserInAnyTeam(userID uuid.UUID, teamIDs []uuid.UUID) (bool, error)
+	Update(teamID uuid.UUID, name string, description *string) error
+	Delete(teamID uuid.UUID) error
+	ListRoles(teamID uuid.UUID) ([]Role, error)
+	CreateRole(role Role) error
+	UpdateRole(teamID, roleID uuid.UUID, name string, permissions map[string]any) error
+	DeleteRole(teamID, roleID uuid.UUID) error
 }
 
 // GormStore 是 Repo 的 PostgreSQL 实现（teams/team_members 表见 migrations/008_teams_shares.sql）。
@@ -50,7 +56,7 @@ func (s *GormStore) CreateTeamWithRoot(t Team, owner Member, root files.File) er
 
 func (s *GormStore) Get(id uuid.UUID) (Team, error) {
 	var t Team
-	err := s.db.First(&t, "id = ?", id).Error
+	err := s.db.Where("id = ? AND deleted_at IS NULL", id).First(&t).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return Team{}, ErrNotFound
 	}
@@ -61,7 +67,7 @@ func (s *GormStore) ListForUser(userID uuid.UUID) ([]Team, error) {
 	var out []Team
 	// 创建团队时 owner 自动写入 team_members，成员关系即访问关系。
 	err := s.db.
-		Where("id IN (SELECT team_id FROM team_members WHERE user_id = ?)", userID).
+		Where("deleted_at IS NULL AND id IN (SELECT team_id FROM team_members WHERE user_id = ?)", userID).
 		Order("created_at DESC, id").Find(&out).Error
 	return out, err
 }
@@ -123,6 +129,48 @@ func (s *GormStore) UserInAnyTeam(userID uuid.UUID, teamIDs []uuid.UUID) (bool, 
 }
 
 // isUniqueViolation 识别唯一约束冲突（SQLSTATE 23505 或驱动错误文本）。
+func (s *GormStore) Update(teamID uuid.UUID, name string, description *string) error {
+	fields := map[string]any{"name": name}
+	if description != nil {
+		fields["description"] = *description
+	}
+	result := s.db.Model(&Team{}).Where("id = ? AND deleted_at IS NULL", teamID).Updates(fields)
+	if result.Error != nil && isUniqueViolation(result.Error) {
+		return ErrNameConflict
+	}
+	if result.Error == nil && result.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return result.Error
+}
+func (s *GormStore) Delete(teamID uuid.UUID) error {
+	result := s.db.Model(&Team{}).Where("id = ? AND deleted_at IS NULL", teamID).Update("deleted_at", gorm.Expr("CURRENT_TIMESTAMP"))
+	if result.Error == nil && result.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return result.Error
+}
+func (s *GormStore) ListRoles(teamID uuid.UUID) ([]Role, error) {
+	var out []Role
+	err := s.db.Where("team_id = ?", teamID).Order("created_at, id").Find(&out).Error
+	return out, err
+}
+func (s *GormStore) CreateRole(role Role) error { return s.db.Create(&role).Error }
+func (s *GormStore) UpdateRole(teamID, roleID uuid.UUID, name string, permissions map[string]any) error {
+	r := s.db.Model(&Role{}).Where("id = ? AND team_id = ?", roleID, teamID).Updates(map[string]any{"name": name, "permissions": permissions})
+	if r.Error == nil && r.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return r.Error
+}
+func (s *GormStore) DeleteRole(teamID, roleID uuid.UUID) error {
+	r := s.db.Where("id = ? AND team_id = ?", roleID, teamID).Delete(&Role{})
+	if r.Error == nil && r.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return r.Error
+}
+
 func isUniqueViolation(err error) bool {
 	if err == nil {
 		return false

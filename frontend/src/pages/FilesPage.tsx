@@ -1,4 +1,5 @@
-import { FormEvent, KeyboardEvent, useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
+import type { FormEvent, KeyboardEvent } from 'react'
 import {
   CreatedShare,
   FileItem,
@@ -11,13 +12,16 @@ import {
   listTeams,
   renameFile,
   uploadFile,
+  restoreFile,
 } from '../api'
 import FileBrowser, { Modal, formatTime } from '../components/FileBrowser'
 import VersionHistoryModal from '../components/VersionHistoryModal'
 import { useHotkeys } from '../useHotkeys'
+import { t, useLocale } from '../i18n'
 
 /** 个人空间：文件浏览复用 FileBrowser，本页仅保留重命名 / 删除 / 分享 / 版本历史对话框。 */
 export default function FilesPage() {
+  const locale = useLocale()
   const [reloadKey, setReloadKey] = useState(0)
   const refresh = () => setReloadKey((k) => k + 1)
 
@@ -27,12 +31,24 @@ export default function FilesPage() {
   const [renameValue, setRenameValue] = useState('')
   const [renameError, setRenameError] = useState('')
   const [deleteError, setDeleteError] = useState('')
+  const [recentlyDeletedId, setRecentlyDeletedId] = useState<string | null>(null)
+  const [undoSeconds, setUndoSeconds] = useState(0)
+  useEffect(() => {
+    if (!recentlyDeletedId) return
+    setUndoSeconds(5)
+    const timer = window.setInterval(() => setUndoSeconds((s) => Math.max(0, s - 1)), 1000)
+    const expiry = window.setTimeout(() => setRecentlyDeletedId(null), 5000)
+    return () => { window.clearInterval(timer); window.clearTimeout(expiry) }
+  }, [recentlyDeletedId])
 
   const [shareTarget, setShareTarget] = useState<FileItem | null>(null)
   const [shareVisibility, setShareVisibility] = useState<'public' | 'private'>('public')
   const [sharePermission, setSharePermission] = useState<'view' | 'download'>('download')
   const [shareHours, setShareHours] = useState('0')
   const [shareMax, setShareMax] = useState('')
+  const [sharePassword, setSharePassword] = useState('')
+  const [shareWatermark, setShareWatermark] = useState(true)
+  const [shareWatermarkText, setShareWatermarkText] = useState('')
   const [shareUsers, setShareUsers] = useState<string[]>([])
   const [shareUserInput, setShareUserInput] = useState('')
   const [shareTeams, setShareTeams] = useState<string[]>([])
@@ -65,13 +81,27 @@ export default function FilesPage() {
   }
 
   const handleDelete = async (item: FileItem) => {
-    if (!window.confirm(`确定删除「${item.name}」？可在回收站中恢复。`)) return
+    if (!window.confirm(locale === 'zh-CN' ? `确定删除「${item.name}」？可在回收站中恢复。` : `Delete “${item.name}”? You can restore it from the trash.`)) return
     setDeleteError('')
     try {
       await deleteFile(item.id)
+      setRecentlyDeletedId(item.id)
       refresh()
     } catch (err) {
       setDeleteError(err instanceof Error ? err.message : '删除失败')
+    }
+  }
+
+  const undoDelete = async () => {
+    if (!recentlyDeletedId) return
+    const id = recentlyDeletedId
+    setRecentlyDeletedId(null)
+    setUndoSeconds(0)
+    try {
+      await restoreFile(id)
+      refresh()
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : '恢复失败')
     }
   }
 
@@ -81,6 +111,9 @@ export default function FilesPage() {
     setSharePermission('download')
     setShareHours('0')
     setShareMax('')
+    setSharePassword('')
+    setShareWatermark(true)
+    setShareWatermarkText('')
     setShareUsers([])
     setShareUserInput('')
     setShareTeams([])
@@ -123,6 +156,9 @@ export default function FilesPage() {
         maxDownloads: max,
         userIds: shareVisibility === 'private' ? shareUsers : undefined,
         teamIds: shareVisibility === 'private' ? shareTeams : undefined,
+        password: shareVisibility === 'public' ? sharePassword.trim() : undefined,
+        watermarkEnabled: shareWatermark,
+        watermarkText: shareWatermarkText.trim() || undefined,
       })
       setShareResult(created)
     } catch (err) {
@@ -146,8 +182,11 @@ export default function FilesPage() {
   }
 
   const privateGrantCount = shareUsers.length + shareTeams.length
+  const sharePasswordLen = sharePassword.trim().length
   const submitDisabled =
-    shareBusy || (shareVisibility === 'private' && privateGrantCount === 0)
+    shareBusy ||
+    (shareVisibility === 'private' && privateGrantCount === 0) ||
+    (shareVisibility === 'public' && sharePasswordLen > 0 && (sharePasswordLen < 4 || sharePasswordLen > 64))
 
   // Escape 依次关本页对话框（版本历史→重命名→分享）；FileBrowser 的选择与
   // 内置弹窗由其自身 Escape 处理（见 FileBrowser）。
@@ -168,6 +207,12 @@ export default function FilesPage() {
   return (
     <div className="page">
       {deleteError && <div className="banner error">{deleteError}</div>}
+      {recentlyDeletedId && undoSeconds > 0 && (
+        <div className="banner ok">
+          {locale === 'zh-CN' ? `已删除，${undoSeconds} 秒内可撤销` : `Deleted. Undo within ${undoSeconds}s.`}
+          <button className="btn small" onClick={() => void undoDelete()}>{t(locale, 'undo')}</button>
+        </div>
+      )}
 
       <FileBrowser
         title="文件"
@@ -325,6 +370,36 @@ export default function FilesPage() {
                   placeholder="不限"
                 />
               </label>
+              {shareVisibility === 'public' && (
+                <label className="field">
+                  <span>访问密码（留空不设密码，4-64 字符）</span>
+                  <input
+                    type="password"
+                    value={sharePassword}
+                    onChange={(e) => setSharePassword(e.target.value)}
+                    placeholder="可选：访问者须输入密码"
+                    autoComplete="new-password"
+                  />
+                </label>
+              )}
+              <div className="field">
+                <span>水印</span>
+                <label className="check-item">
+                  <input
+                    type="checkbox"
+                    checked={shareWatermark}
+                    onChange={(e) => setShareWatermark(e.target.checked)}
+                  />
+                  <span>公开访问页叠加斜排水印（防截屏外传）</span>
+                </label>
+                {shareWatermark && (
+                  <input
+                    value={shareWatermarkText}
+                    onChange={(e) => setShareWatermarkText(e.target.value)}
+                    placeholder="默认模板：{date} {name}（占位符：{email} {date} {name}）"
+                  />
+                )}
+              </div>
               {shareError && <div className="error-text">{shareError}</div>}
               <div className="modal-actions">
                 <button type="button" className="btn" onClick={() => setShareTarget(null)}>取消</button>
@@ -340,6 +415,12 @@ export default function FilesPage() {
                 <input readOnly value={shareLink} onFocus={(e) => e.currentTarget.select()} />
                 <button className="btn primary" onClick={() => void copyLink()}>{copied ? '已复制 ✓' : '复制'}</button>
               </div>
+              {shareResult.has_password && (
+                <p className="hint">🔒 已启用密码保护：访问者须输入密码解锁（1 小时会话）。</p>
+              )}
+              {shareResult.watermark_enabled !== false && (
+                <p className="hint">水印已开启{shareResult.watermark_text ? `（模板：${shareResult.watermark_text}）` : ''}。</p>
+              )}
               {shareResult.expires_at && (
                 <p className="hint">过期时间：{formatTime(shareResult.expires_at)}</p>
               )}

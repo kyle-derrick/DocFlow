@@ -154,6 +154,22 @@ type Config struct {
 	// IdP 身份未关联既有用户且邮箱无匹配时自动创建 role=user 的随机密码
 	// 账号；false 时无匹配一律 403（引导联系管理员）。
 	OIDCAutoProvision bool
+	// AccessSalt 为分享访问事件 IP 哈希的静态盐（ACCESS_SALT）：
+	// file_access_events.ip_hash = SHA-256(AccessSalt || ip)，明文 IP 不落库。
+	// 未设置时由 JWT secret 派生（"docflow-access:" 前缀），避免额外必填项。
+	AccessSalt string
+	// LoginMaxRetries 为连续登录失败锁定阈值（LOGIN_MAX_RETRIES，默认 5）：
+	// 达到后账号锁定 LOGIN_LOCK_MINUTES（C9，设计 6.1.3/7.3）。
+	LoginMaxRetries int
+	// LoginLockDuration 为账号锁定时长（LOGIN_LOCK_MINUTES，默认 15 分钟）。
+	LoginLockDuration time.Duration
+	// CSRFStrict 控制 refresh/logout 的同源严格校验（CSRF_STRICT，默认 true，
+	// 设计 6.1.5）：true 时缺失 Origin/Referer 一律拒绝（浏览器 POST 均携带
+	// Origin）；false 时放行无两头请求，供 curl 等非浏览器客户端使用。
+	CSRFStrict     bool
+	AllowedOrigins []string
+	Environment    string
+	BackupDir      string
 }
 
 func Load() (Config, error) {
@@ -161,7 +177,7 @@ func Load() (Config, error) {
 	if e != nil {
 		return Config{}, e
 	}
-	r, e := durationEnv("REFRESH_TOKEN_TTL", 30*24*time.Hour)
+	r, e := durationEnv("REFRESH_TOKEN_TTL", 7*24*time.Hour)
 	if e != nil {
 		return Config{}, e
 	}
@@ -177,7 +193,7 @@ func Load() (Config, error) {
 	if e != nil {
 		return Config{}, e
 	}
-	max, e := int64Env("MAX_FILE_SIZE", 1<<30)
+	max, e := int64Env("MAX_FILE_SIZE", 2<<30)
 	if e != nil {
 		return Config{}, e
 	}
@@ -285,7 +301,19 @@ func Load() (Config, error) {
 	if e != nil {
 		return Config{}, e
 	}
-	c := Config{Port: stringEnv("PORT", "8080"), DatabaseURL: os.Getenv("DATABASE_URL"), JWTSecret: os.Getenv("JWT_SECRET"), AccessTokenTTL: a, RefreshTokenTTL: r, CookieSecure: secure, CookieDomain: os.Getenv("COOKIE_DOMAIN"), StorageRoot: stringEnv("STORAGE_ROOT", "./storage"), MaxFileSize: max, ScanEnabled: scan, UploadSessionTTL: ttl, TrustedProxies: listEnv("TRUSTED_PROXIES"), StorageDriver: stringEnv("STORAGE_DRIVER", "local"), S3Endpoint: os.Getenv("S3_ENDPOINT"), S3Bucket: os.Getenv("S3_BUCKET"), S3Region: stringEnv("S3_REGION", "us-east-1"), S3AccessKey: os.Getenv("S3_ACCESS_KEY"), S3SecretKey: os.Getenv("S3_SECRET_KEY"), S3PathStyle: pathStyle, ClamAVAddr: os.Getenv("CLAMAV_ADDR"), ClamAVTimeout: clamavTimeout, ClamAVRequired: clamavRequired, RateLimitPerMinute: rateLimit, LoginRateLimitPerMinute: loginRateLimit, PublicRateLimitPerMinute: publicRateLimit, MaxVersionsPerFile: maxVersions, JanitorEnabled: janitorEnabled, JanitorInterval: janitorInterval, OnlyOfficeEnabled: ooEnabled, OnlyOfficeServerURL: stringEnv("ONLYOFFICE_SERVER_URL", "http://onlyoffice:80"), OnlyOfficePublicURL: stringEnv("ONLYOFFICE_PUBLIC_URL", ""), OnlyOfficeJWTSecret: os.Getenv("ONLYOFFICE_JWT_SECRET"), OnlyOfficeDownloadURLBase: stringEnv("ONLYOFFICE_DOWNLOAD_URL_BASE", "http://backend:8080"), OnlyOfficeRateLimitPerMinute: ooRateLimit, MetricsEnabled: metricsEnabled, DrawioEnabled: drawioEnabled, DrawioServerURL: stringEnv("DRAWIO_SERVER_URL", "http://drawio:8080"), DrawioPublicURL: stringEnv("DRAWIO_PUBLIC_URL", ""), WebpkgEnabled: webpkgEnabled, WebpkgMaxEntries: webpkgMaxEntries, WebpkgMaxFileSize: webpkgMaxFileSize, WebpkgMaxTotalSize: webpkgMaxTotalSize, WebpkgMaxDepth: webpkgMaxDepth, WebpkgRateLimitPerMinute: webpkgRateLimit, QueueDriver: stringEnv("QUEUE_DRIVER", "inprocess"), RedisAddr: stringEnv("REDIS_ADDR", "localhost:6379"), RedisPassword: os.Getenv("REDIS_PASSWORD"), QueueConcurrency: queueConcurrency, PatchMaxBytes: patchMax, SMTPEnabled: smtpEnabled, SMTPHost: os.Getenv("SMTP_HOST"), SMTPPort: smtpPort, SMTPUser: os.Getenv("SMTP_USER"), SMTPPass: os.Getenv("SMTP_PASS"), SMTPFrom: os.Getenv("SMTP_FROM"), PublicBaseURL: stringEnv("PUBLIC_BASE_URL", ""), OIDCEnabled: oidcEnabled, OIDCIssuer: strings.TrimSuffix(stringEnv("OIDC_ISSUER", ""), "/"), OIDCClientID: os.Getenv("OIDC_CLIENT_ID"), OIDCClientSecret: os.Getenv("OIDC_CLIENT_SECRET"), OIDCRedirectURL: stringEnv("OIDC_REDIRECT_URL", ""), OIDCAutoProvision: oidcAutoProvision}
+	loginMaxRetries, e := intEnv("LOGIN_MAX_RETRIES", 5)
+	if e != nil {
+		return Config{}, e
+	}
+	loginLockMinutes, e := int64Env("LOGIN_LOCK_MINUTES", 15)
+	if e != nil {
+		return Config{}, e
+	}
+	csrfStrict, e := boolEnv("CSRF_STRICT", true)
+	if e != nil {
+		return Config{}, e
+	}
+	c := Config{Port: stringEnv("PORT", "8080"), DatabaseURL: os.Getenv("DATABASE_URL"), JWTSecret: os.Getenv("JWT_SECRET"), AccessTokenTTL: a, RefreshTokenTTL: r, CookieSecure: secure, CookieDomain: os.Getenv("COOKIE_DOMAIN"), StorageRoot: stringEnv("STORAGE_ROOT", "./storage"), MaxFileSize: max, ScanEnabled: scan, UploadSessionTTL: ttl, TrustedProxies: listEnv("TRUSTED_PROXIES"), StorageDriver: stringEnv("STORAGE_DRIVER", "local"), S3Endpoint: os.Getenv("S3_ENDPOINT"), S3Bucket: os.Getenv("S3_BUCKET"), S3Region: stringEnv("S3_REGION", "us-east-1"), S3AccessKey: os.Getenv("S3_ACCESS_KEY"), S3SecretKey: os.Getenv("S3_SECRET_KEY"), S3PathStyle: pathStyle, ClamAVAddr: os.Getenv("CLAMAV_ADDR"), ClamAVTimeout: clamavTimeout, ClamAVRequired: clamavRequired, RateLimitPerMinute: rateLimit, LoginRateLimitPerMinute: loginRateLimit, PublicRateLimitPerMinute: publicRateLimit, MaxVersionsPerFile: maxVersions, JanitorEnabled: janitorEnabled, JanitorInterval: janitorInterval, OnlyOfficeEnabled: ooEnabled, OnlyOfficeServerURL: stringEnv("ONLYOFFICE_SERVER_URL", "http://onlyoffice:80"), OnlyOfficePublicURL: stringEnv("ONLYOFFICE_PUBLIC_URL", ""), OnlyOfficeJWTSecret: os.Getenv("ONLYOFFICE_JWT_SECRET"), OnlyOfficeDownloadURLBase: stringEnv("ONLYOFFICE_DOWNLOAD_URL_BASE", "http://backend:8080"), OnlyOfficeRateLimitPerMinute: ooRateLimit, MetricsEnabled: metricsEnabled, DrawioEnabled: drawioEnabled, DrawioServerURL: stringEnv("DRAWIO_SERVER_URL", "http://drawio:8080"), DrawioPublicURL: stringEnv("DRAWIO_PUBLIC_URL", ""), WebpkgEnabled: webpkgEnabled, WebpkgMaxEntries: webpkgMaxEntries, WebpkgMaxFileSize: webpkgMaxFileSize, WebpkgMaxTotalSize: webpkgMaxTotalSize, WebpkgMaxDepth: webpkgMaxDepth, WebpkgRateLimitPerMinute: webpkgRateLimit, QueueDriver: stringEnv("QUEUE_DRIVER", "inprocess"), RedisAddr: stringEnv("REDIS_ADDR", "localhost:6379"), RedisPassword: os.Getenv("REDIS_PASSWORD"), QueueConcurrency: queueConcurrency, PatchMaxBytes: patchMax, SMTPEnabled: smtpEnabled, SMTPHost: os.Getenv("SMTP_HOST"), SMTPPort: smtpPort, SMTPUser: os.Getenv("SMTP_USER"), SMTPPass: os.Getenv("SMTP_PASS"), SMTPFrom: os.Getenv("SMTP_FROM"), PublicBaseURL: stringEnv("PUBLIC_BASE_URL", ""), OIDCEnabled: oidcEnabled, OIDCIssuer: strings.TrimSuffix(stringEnv("OIDC_ISSUER", ""), "/"), OIDCClientID: os.Getenv("OIDC_CLIENT_ID"), OIDCClientSecret: os.Getenv("OIDC_CLIENT_SECRET"), OIDCRedirectURL: stringEnv("OIDC_REDIRECT_URL", ""), OIDCAutoProvision: oidcAutoProvision, AccessSalt: os.Getenv("ACCESS_SALT"), LoginMaxRetries: loginMaxRetries, LoginLockDuration: time.Duration(loginLockMinutes) * time.Minute, CSRFStrict: csrfStrict, AllowedOrigins: listEnv("ALLOWED_ORIGINS"), Environment: stringEnv("APP_ENV", "development"), BackupDir: stringEnv("BACKUP_DIR", "")}
 	// OIDC 回调地址默认值：{PUBLIC_BASE_URL}/api/v1/auth/oidc/callback
 	//（两者均未设置时由 validateOIDC 报错——IdP 侧必须注册确切回调地址）。
 	if c.OIDCEnabled && c.OIDCRedirectURL == "" && c.PublicBaseURL != "" {
@@ -297,8 +325,19 @@ func Load() (Config, error) {
 	if len(c.JWTSecret) < 32 {
 		return Config{}, errors.New("JWT_SECRET must be at least 32 bytes")
 	}
+	// 访问事件 IP 哈希盐：ACCESS_SALT 未设置时由 JWT secret 派生
+	//（密钥类配置走环境变量，不额外入库）。
+	if c.AccessSalt == "" {
+		c.AccessSalt = "docflow-access:" + c.JWTSecret
+	}
 	if c.MaxVersionsPerFile < 1 {
 		return Config{}, errors.New("MAX_VERSIONS_PER_FILE must be >= 1")
+	}
+	if c.LoginMaxRetries < 1 {
+		return Config{}, errors.New("LOGIN_MAX_RETRIES must be >= 1")
+	}
+	if c.LoginLockDuration < time.Minute {
+		return Config{}, errors.New("LOGIN_LOCK_MINUTES must be >= 1")
 	}
 	if c.StorageDriver != "local" && c.StorageDriver != "s3" {
 		return Config{}, errors.New("STORAGE_DRIVER must be local or s3")

@@ -46,6 +46,14 @@ func uploadStartError(c *gin.Context, err error, tus bool) {
 		} else {
 			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
 		}
+	case errors.Is(err, files.ErrQuotaExceeded):
+		// 存储配额超限（C3，设计 6.12.4）：403 + 机器可读 code（tus 路径无
+		// code 载荷，按 tus 协议以错误文案区分）。
+		if tus {
+			tusError(c, http.StatusForbidden, err.Error())
+		} else {
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error(), "code": "QUOTA_EXCEEDED"})
+		}
 	case errors.Is(err, files.ErrNotFound):
 		// 目标文件不存在（或个人文件非 owner）：404 不泄露存在性。
 		if tus {

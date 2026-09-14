@@ -134,6 +134,83 @@ func (s *Service) ListMembers(actor, teamID uuid.UUID) ([]Member, error) {
 // Role 返回用户在团队中的角色（非成员为空串）。
 func (s *Service) Role(teamID, userID uuid.UUID) (string, error) { return s.repo.Role(teamID, userID) }
 
+func (s *Service) Update(actor, teamID uuid.UUID, name, description string) error {
+	t, err := s.repo.Get(teamID)
+	if err != nil {
+		return err
+	}
+	if t.OwnerID != actor {
+		return ErrForbidden
+	}
+	n, err := validateName(name)
+	if err != nil {
+		return err
+	}
+	return s.repo.Update(teamID, n, &description)
+}
+func (s *Service) Delete(actor, teamID uuid.UUID) error {
+	t, err := s.repo.Get(teamID)
+	if err != nil {
+		return err
+	}
+	if t.OwnerID != actor {
+		return ErrForbidden
+	}
+	return s.repo.Delete(teamID)
+}
+func (s *Service) Roles(actor, teamID uuid.UUID) ([]Role, error) {
+	t, err := s.repo.Get(teamID)
+	if err != nil {
+		return nil, err
+	}
+	if t.OwnerID != actor {
+		return nil, ErrForbidden
+	}
+	return s.repo.ListRoles(teamID)
+}
+func (s *Service) CreateRole(actor, teamID uuid.UUID, name string, permissions map[string]any) (Role, error) {
+	t, err := s.repo.Get(teamID)
+	if err != nil {
+		return Role{}, err
+	}
+	if t.OwnerID != actor {
+		return Role{}, ErrForbidden
+	}
+	name, err = validateName(name)
+	if err != nil {
+		return Role{}, err
+	}
+	r := Role{ID: uuid.New(), TeamID: teamID, Name: name, Permissions: permissions, CreatedAt: s.now()}
+	if err := s.repo.CreateRole(r); err != nil {
+		return Role{}, err
+	}
+	return r, nil
+}
+func (s *Service) UpdateRole(actor, teamID, roleID uuid.UUID, name string, permissions map[string]any) error {
+	t, err := s.repo.Get(teamID)
+	if err != nil {
+		return err
+	}
+	if t.OwnerID != actor {
+		return ErrForbidden
+	}
+	name, err = validateName(name)
+	if err != nil {
+		return err
+	}
+	return s.repo.UpdateRole(teamID, roleID, name, permissions)
+}
+func (s *Service) DeleteRole(actor, teamID, roleID uuid.UUID) error {
+	t, err := s.repo.Get(teamID)
+	if err != nil {
+		return err
+	}
+	if t.OwnerID != actor {
+		return ErrForbidden
+	}
+	return s.repo.DeleteRole(teamID, roleID)
+}
+
 // CanWrite 判定用户能否写入团队空间（owner/editor）。
 func (s *Service) CanWrite(userID, teamID uuid.UUID) (bool, error) {
 	return s.repo.CanWrite(userID, teamID)

@@ -1,16 +1,19 @@
 package http
 
 import (
+	"archive/zip"
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/docflow/docflow/internal/files"
+	"github.com/docflow/docflow/internal/upload"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
@@ -228,6 +231,45 @@ func (h *Handler) batchRestore(c *gin.Context) {
 	}
 	results := h.files.BatchRestore(userID(c), ids)
 	c.JSON(http.StatusOK, gin.H{"results": batchResultsJSON(results)})
+}
+
+func (h *Handler) batchDownload(c *gin.Context) {
+	var req batchIDsRequest
+	if c.ShouldBindJSON(&req) != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	ids, ok := parseBatchIDs(c, req.FileIDs)
+	if !ok {
+		return
+	}
+	c.Header("Content-Type", "application/zip")
+	c.Header("Content-Disposition", `attachment; filename="docflow-files.zip"`)
+	zw := zip.NewWriter(c.Writer)
+	for _, id := range ids {
+		f, err := h.files.Get(userID(c), id)
+		if err != nil || f.Type != "file" {
+			continue
+		}
+		_, blob, err := h.files.CurrentVersion(userID(c), id)
+		if err != nil || blob.Status != files.BlobStatusAvailable {
+			continue
+		}
+		reader, err := upload.ReadSection(h.storage, blob.StorageKey, 0, blob.Size)
+		if err != nil {
+			continue
+		}
+		name := filepath.Base(f.Name)
+		if name == "." || name == "\\" || name == "" {
+			name = id.String()
+		}
+		w, err := zw.Create(id.String() + "-" + name)
+		if err == nil {
+			_, _ = io.Copy(w, reader)
+		}
+		_ = reader.Close()
+	}
+	_ = zw.Close()
 }
 
 func batchResultsJSON(results []files.BatchItemResult) []gin.H {

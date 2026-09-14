@@ -17,6 +17,7 @@ import (
 	"github.com/docflow/docflow/internal/notify"
 	"github.com/docflow/docflow/internal/oidc"
 	"github.com/docflow/docflow/internal/onlyoffice"
+	"github.com/docflow/docflow/internal/realtime"
 	"github.com/docflow/docflow/internal/share"
 	"github.com/docflow/docflow/internal/tagging"
 	"github.com/docflow/docflow/internal/tasks"
@@ -29,14 +30,27 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// userDirectory 抽象用户目录查询（生产实现为 *auth.UserStore），
-// login 走 FindActiveByEmail，用户查找/邀请走 Lookup，分享者名走 Username，
-// refresh 轮换成功后经 Status 复查账号是否仍为 active。
+// userDirectory 抽象用户目录与账号管理查询（生产实现为 *auth.UserStore），
+// login 走 FindActiveByIdentifier（email 或 username，C21a），用户查找/邀请走
+// Lookup，分享者名走 Username，refresh 轮换成功后经 Status 复查账号是否仍
+// active（自动锁定派生为 locked，C9）；/me 与管理端用户管理走其余方法。
 type userDirectory interface {
-	FindActiveByEmail(email string) (auth.User, error)
+	FindActiveByIdentifier(identifier string) (auth.User, error)
 	Lookup(q string, limit int) ([]auth.User, error)
 	Username(id uuid.UUID) (string, error)
 	Status(id uuid.UUID) (string, error)
+	// GetByID 完整用户记录（/me、管理端；不存在返回 auth.ErrUserNotFound）。
+	GetByID(id uuid.UUID) (auth.User, error)
+	// RecordLoginFailure / ClearLoginFailures 为 C9 登录失败锁定计数。
+	RecordLoginFailure(id uuid.UUID, maxRetries int, lockFor time.Duration) error
+	ClearLoginFailures(id uuid.UUID) error
+	// UpdateProfile 为 C21a 档案更新（校验由调用方先行）。
+	UpdateProfile(id uuid.UUID, update auth.ProfileUpdate) error
+	// AdminListUsers / AdminUpdateUser 为 C6 管理端用户管理。
+	// AdminListUsers returns a paginated list of users and the total count.
+	AdminListUsers(q string, limit, offset int) ([]auth.User, int64, error)
+	// AdminUpdateUser applies administrative changes to a user account.
+	AdminUpdateUser(id uuid.UUID, update auth.AdminUserUpdate) error
 }
 
 var _ userDirectory = (*auth.UserStore)(nil)
@@ -57,9 +71,13 @@ var dummyPasswordHash = func() string {
 const authOpsRateLimitPerMin = 60
 
 // authSensitiveRateLimitPerMin 为注册/忘记密码/重置密码三个公开端点的独立
-// 按 IP 限流（每分钟 10 次，防无认证刷注册与重置邮件，复用 publicLimiter
-// 模式的独立实例，比公开分享接口更严）。
+// 按 IP 限流（每分钟 10 次，防无认证刷注册与重置邮件，复用 publicLimiter 模式
+// 的独立实例，比公开分享接口更严）。
 const authSensitiveRateLimitPerMin = 10
+
+// shareVerifyRateLimitPerMin 为公开分享密码校验端点（POST /public/shares/:token/verify）
+// 的独立按 IP+token 限流（每分钟 5 次，防无认证暴力猜测分享密码）。
+const shareVerifyRateLimitPerMin = 5
 
 type Handler struct {
 	auth            *auth.Service
@@ -74,9 +92,10 @@ type Handler struct {
 	refreshTokenTTL time.Duration
 	audit           audit.Recorder
 	// 管理端依赖（admin 组）：系统设置、统计与角色查询源。
-	settings settingsService
-	stats    statsSource
-	roles    auth.RoleLookup
+	settings   settingsService
+	stats      statsSource
+	auditQuery auditQuerySource
+	roles      auth.RoleLookup
 	// dashboard 为个人仪表盘聚合源（SetDashboardSource 注入）；nil 时
 	// GET /api/v1/dashboard 返回 500（生产恒注入）。
 	dashboard dashboardSource
@@ -117,7 +136,11 @@ type Handler struct {
 	search searchService
 	// notifications 为站内通知服务（SetNotifications 注入）：通知列表/已读
 	// 与通知偏好；未注入时通知端点返回 503（生产恒注入）。
-	notifications *notify.Service
+	notifications  *notify.Service
+	realtime       *realtime.Hub
+	allowedOrigins []string
+	environment    string
+	wsSecret       string
 	// webhooks 为 Webhook 通知渠道服务（SetWebhooks 注入）：注册/列举/
 	// 启停/删除（本人维度）；未注入时 webhook 端点返回 503（生产恒注入）。
 	webhooks *webhook.Service
@@ -130,10 +153,37 @@ type Handler struct {
 	// versionReader 为版本内容读取源（NewHandler 以 *files.Store 装配，
 	// 接口化便于单测注入内存实现）：GET /files/:id/versions/:versionId/content。
 	versionReader versionContentReader
+	// accessSalt 为公开访问事件 IP 哈希的静态盐（ACCESS_SALT，缺省由
+	// JWT secret 派生，见 config.Load / SetAccessSalt）：明文 IP 不落库。
+	accessSalt string
+	// usage 为个人空间存储占用查询源（C3 配额；NewHandler 以 *files.Store
+	// 装配，接口化便于单测注入内存实现）：GET/PATCH /me 的 storage.used。
+	usage storageUsage
+	// csrfStrict 控制 refresh/logout 同源严格校验（C10，CSRF_STRICT 默认
+	// true）：true 时缺失 Origin/Referer 一律 403，见 csrf.go。
+	csrfStrict bool
+	// loginMaxRetries / loginLockDuration 为 C9 连续登录失败锁定策略
+	//（LOGIN_MAX_RETRIES 默认 5 / LOGIN_LOCK_MINUTES 默认 15m）。
+	loginMaxRetries   int
+	loginLockDuration time.Duration
+	backupDir         string
 }
 
 func NewHandler(authService *auth.Service, users *auth.UserStore, fileStore *files.Store, shares *share.Service, teams *team.Service, uploads *upload.Service, storage upload.Storage, cookieSecure bool, cookieDomain string, refreshTokenTTL time.Duration) *Handler {
-	return &Handler{auth: authService, users: users, files: fileStore, shares: shares, teams: teams, uploads: uploads, storage: storage, cookieSecure: cookieSecure, cookieDomain: cookieDomain, refreshTokenTTL: refreshTokenTTL, audit: audit.NopRecorder{}, mailer: mail.NewNoopMailer(), idem: newIdemCache(idempotencyTTL), versionReader: fileStore}
+	return &Handler{auth: authService, users: users, files: fileStore, shares: shares, teams: teams, uploads: uploads, storage: storage, cookieSecure: cookieSecure, cookieDomain: cookieDomain, refreshTokenTTL: refreshTokenTTL, audit: audit.NopRecorder{}, mailer: mail.NewNoopMailer(), idem: newIdemCache(idempotencyTTL), versionReader: fileStore, usage: fileStore, csrfStrict: true, loginMaxRetries: 5, loginLockDuration: 15 * time.Minute}
+}
+
+// SetCSRFStrict 控制 refresh/logout 的同源严格校验（CSRF_STRICT，幂等；
+// 默认 true）。非浏览器客户端（curl）无法携带 Origin 时需显式置 false。
+func (h *Handler) SetCSRFStrict(strict bool) { h.csrfStrict = strict }
+
+// SetLoginLockout 注入 C9 登录失败锁定策略（LOGIN_MAX_RETRIES /
+// LOGIN_LOCK_MINUTES；maxRetries<1 或 lockFor<=0 时忽略，保持默认）。
+func (h *Handler) SetLoginLockout(maxRetries int, lockFor time.Duration) {
+	if maxRetries >= 1 && lockFor > 0 {
+		h.loginMaxRetries = maxRetries
+		h.loginLockDuration = lockFor
+	}
 }
 
 // SetAuditRecorder 注入审计写入器；nil 时保持 Nop。
@@ -146,6 +196,21 @@ func (h *Handler) SetAuditRecorder(recorder audit.Recorder) {
 // SetMetricsEnabled 控制 GET /metrics 端点（METRICS_ENABLED，默认 true）。
 // 端点无认证：生产环境应由反向代理（Caddy）或网络层限制访问。
 func (h *Handler) SetMetricsEnabled(enabled bool) { h.metricsDisabled = !enabled }
+func (h *Handler) SetRealtimeHub(hub *realtime.Hub, origins []string, environment string) {
+	h.realtime = hub
+	h.allowedOrigins = origins
+	h.environment = environment
+}
+func (h *Handler) SetWSSecret(secret string) { h.wsSecret = secret }
+func (h *Handler) SetBackupDir(dir string)   { h.backupDir = strings.TrimSpace(dir) }
+
+// SetAccessSalt 注入公开访问事件 IP 哈希的静态盐（ACCESS_SALT；缺省由
+// config 从 JWT secret 派生）。空值时回退固定占位盐（仅测试场景）。
+func (h *Handler) SetAccessSalt(salt string) {
+	if salt != "" {
+		h.accessSalt = salt
+	}
+}
 
 // SetWebpkg 注入网页包安全预览服务（幂等）；rateLimitPerMin 为 /content
 // 内容端点的独立按 IP 轻限流（WEBPKG_RATE_LIMIT_PER_MIN，默认 120）。
@@ -229,8 +294,12 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	// 两步验证登录第二段（公开）：与 /login 共享同一限流器实例与限流键
 	//（IP+邮箱前缀哈希，重放同样的密码+邮箱消耗同一桶）。
 	authGroup.POST("/login/totp", loginLimiterMW, h.loginTOTP)
-	authGroup.POST("/refresh", authOpsLimiterMW, h.refresh)
-	authGroup.POST("/logout", authOpsLimiterMW, h.logout)
+	// refresh/logout：cookie 认证端点，先过同源（CSRF）校验再进按 IP 轻限流
+	//（C10，设计 6.1.5；严格模式要求 Origin/Referer 存在且 host 一致，
+	// CSRF_STRICT=false 时放行无两头请求供非浏览器客户端使用）。
+	csrfMW := applyCSRF(h.csrfStrict)
+	authGroup.POST("/refresh", csrfMW, authOpsLimiterMW, h.refresh)
+	authGroup.POST("/logout", csrfMW, authOpsLimiterMW, h.logout)
 	// 邀请制注册（凭一次性邀请 token）与密码找回/重置：公开端点。
 	authGroup.POST("/register", authSensitiveLimiterMW, h.register)
 	authGroup.POST("/forgot-password", authSensitiveLimiterMW, h.forgotPassword)
@@ -249,7 +318,11 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	if h.auth != nil {
 		patVerifier = h.auth
 	}
-	api := r.Group("/api/v1", auth.RequireAccessToken(jwtSecret, patVerifier), apiLimiter(NewRateLimiter(rateLimit)))
+	api := r.Group("/api/v1", auth.RequireAccessToken(jwtSecret, patVerifier), apiLimiter(NewRateLimiter(rateLimit)), applyCSRF(h.csrfStrict))
+	// 个人档案与配额（C3/C21a）：GET /me 读档案+用量，PATCH /me 改档案
+	//（nickname/department/position/phone/bio/language/timezone）。
+	api.GET("/me", h.me)
+	api.PATCH("/me", h.updateMe)
 	// 修改密码（认证）：成功撤销其他会话并轮换当前会话。
 	api.POST("/auth/change-password", h.changePassword)
 	// 两步验证（TOTP，v2）：状态、开始设置、确认启用（返回一次性恢复码）
@@ -265,10 +338,12 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	// 个人访问令牌（PAT）：创建（明文仅返回一次）、列表、撤销。
 	api.POST("/tokens", h.createToken)
 	api.GET("/tokens", h.listTokens)
+	api.PATCH("/tokens/:id", h.updateToken)
 	api.DELETE("/tokens/:id", h.revokeToken)
 	// 站内通知与通知偏好（本人维度）：列表分页（created_at 游标）+未读数、
 	// 单条已读、全部已读、各事件类型开关与更新。
 	api.GET("/notifications", h.listNotifications)
+	r.GET("/api/v1/ws/notifications", h.wsNotifications)
 	api.POST("/notifications/:id/read", h.markNotificationRead)
 	api.POST("/notifications/read-all", h.markAllNotificationsRead)
 	api.GET("/notification-preferences", h.listNotificationPreferences)
@@ -279,7 +354,8 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	api.GET("/webhooks", h.listWebhooks)
 	api.PATCH("/webhooks/:id", h.updateWebhook)
 	api.DELETE("/webhooks/:id", h.deleteWebhook)
-	api.GET("/files", h.listFiles)
+	api.GET("/files", auth.RequireScope("files:read"), h.listFiles)
+	api.POST("/files/:id/copy", auth.RequireScope("files:write"), h.copyFile)
 	// 全文检索（文件名 + 文本内容）：高频读端点，不记录审计；
 	// 访问判定与 /files 检索模式一致（个人 owner + 团队在册成员）。
 	api.GET("/search", h.searchFiles)
@@ -294,9 +370,10 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	// 文件版本管理：版本列表与 current_version 回滚（新版本经上传链路 file_id 写入）。
 	api.GET("/files/:id/versions", h.listFileVersions)
 	api.GET("/files/:id/versions/:versionId/content", h.fileVersionContent)
+	api.DELETE("/files/:id/versions/:versionId", h.deleteFileVersion)
 	api.POST("/files/:id/versions/:versionId/restore", h.restoreFileVersion)
 	api.GET("/trash", h.listTrash)
-	api.POST("/files/:id/restore", h.restoreFile)
+	api.POST("/files/:id/restore", auth.RequireScope("files:write"), h.restoreFile)
 	api.DELETE("/trash/:id", h.purgeFile)
 	// 标签与收藏：标签 CRUD、文件打/去标签、行级星标切换
 	//（starred 切换读权限即可；files 列表的 tag/starred 过滤见 listFiles）。
@@ -311,6 +388,7 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	api.POST("/files/batch/move", h.idempotency, h.batchMove)
 	api.POST("/files/batch/trash", h.idempotency, h.batchTrash)
 	api.POST("/files/batch/restore", h.idempotency, h.batchRestore)
+	api.POST("/files/batch/download", h.idempotency, h.batchDownload)
 	api.POST("/uploads", h.createUpload)
 	api.PATCH("/uploads/:id", h.patchUpload)
 	api.POST("/uploads/:id/complete", h.completeUpload)
@@ -320,6 +398,8 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	api.POST("/shares", h.createShare)
 	api.GET("/shares", h.listShares)
 	api.GET("/shares/shared-with-me", h.listSharedWithMe)
+	api.GET("/shares/:id", h.getShare)
+	api.PATCH("/shares/:id", h.updateShare)
 	api.DELETE("/shares/:id", h.revokeShare)
 	// 私有分享访问入口（登录用户）：按显式授权访问分享文件。
 	api.GET("/shares/:id/files/:fid", h.shareFileInfo)
@@ -330,6 +410,12 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	// 团队与团队空间。
 	api.POST("/teams", h.createTeam)
 	api.GET("/teams", h.listTeams)
+	api.PATCH("/teams/:id", h.updateTeam)
+	api.DELETE("/teams/:id", h.deleteTeam)
+	api.GET("/teams/:id/roles", h.listRoles)
+	api.POST("/teams/:id/roles", h.createRole)
+	api.PATCH("/teams/:id/roles/:role_id", h.updateRole)
+	api.DELETE("/teams/:id/roles/:role_id", h.deleteRole)
 	api.POST("/teams/:id/members", h.addTeamMember)
 	api.GET("/teams/:id/members", h.listTeamMembers)
 	api.DELETE("/teams/:id/members/:uid", h.removeTeamMember)
@@ -360,20 +446,58 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	admin.GET("/settings", h.listAdminSettings)
 	admin.PUT("/settings/:key", h.updateAdminSetting)
 	admin.GET("/stats", h.adminStats)
+	admin.GET("/audit-logs", h.adminAudit)
+	admin.GET("/audit-logs/export.csv", h.adminAuditCSV)
+	admin.GET("/backups/status", h.adminBackupStatus)
+	admin.POST("/backups/run", h.adminBackupRun)
+	// 用户管理（C6，设计 6.2.1/9.1.1）：列表（q 前缀检索+分页）、禁用/启用/
+	// 改配额/改角色（禁用立即撤销全部会话；不可禁用自己）与重置密码。
+	// 设计 DELETE /users/:id 以软禁用替代（数据完整性取舍，见 admin_users.go）。
+	admin.GET("/users", h.adminListUsers)
+	admin.GET("/users/:id", h.adminGetUser)
+	admin.PATCH("/users/:id", h.adminUpdateUser)
+	admin.DELETE("/users/:id", h.adminDeleteUser)
+	admin.POST("/users/:id/reset-password", h.adminResetUserPassword)
 	// 邀请管理（仅 admin）：创建（返回一次性注册链接）、列表、撤销。
 	admin.POST("/invitations", h.createInvitation)
 	admin.GET("/invitations", h.listInvitations)
 	admin.DELETE("/invitations/:id", h.revokeInvitation)
 	// 公开分享接口：无认证、不设 cookie，单独按 IP 限流。
+	// 密码校验端点（verify）额外叠加独立按 IP+token 的更严限流（5/min），
+	// 防无认证暴力猜测分享密码。
 	public := r.Group("/api/v1/public", publicLimiter(NewRateLimiter(publicRateLimit)))
 	public.GET("/shares/:token", h.publicShareInfo)
 	public.GET("/shares/:token/download", h.publicShareDownload)
 	public.GET("/shares/:token/preview", h.publicSharePreview)
+	public.POST("/shares/:token/verify", shareVerifyLimiter(NewRateLimiter(shareVerifyRateLimitPerMin)), h.publicShareVerify)
 }
 
 type loginRequest struct {
+	// Identifier 为登录标识（C21a，设计 6.1.3）：email 或 username，优先于 Email。
+	Identifier string `json:"identifier"`
+	// Email 为旧字段（兼容保留）：identifier 缺省时回退使用。
 	Email    string `json:"email"`
 	Password string `json:"password"`
+}
+
+// loginIdentifier 解析登录标识：identifier 优先，缺省回退旧 email 字段。
+func (r loginRequest) loginIdentifier() string {
+	if id := strings.TrimSpace(r.Identifier); id != "" {
+		return id
+	}
+	return strings.TrimSpace(r.Email)
+}
+
+// lockedResponse 为锁定账号的统一应答（C9，设计 6.1.3/7.3）：423 +
+// code=ACCOUNT_LOCKED；不计新失败（调用方须在计数前检查）。
+func lockedResponse(c *gin.Context) {
+	c.JSON(http.StatusLocked, gin.H{"error": "account is locked due to repeated failed logins", "code": "ACCOUNT_LOCKED"})
+}
+
+// recordLoginFailure 记录一次登录失败（C9）：达到阈值即锁定；best-effort
+// （写库失败不影响统一 401 应答，防把 DB 故障当作凭据差异信号）。
+func (h *Handler) recordLoginFailure(id uuid.UUID) {
+	_ = h.users.RecordLoginFailure(id, h.loginMaxRetries, h.loginLockDuration)
 }
 
 func (h *Handler) login(c *gin.Context) {
@@ -382,20 +506,27 @@ func (h *Handler) login(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
 	}
+	identifier := request.loginIdentifier()
 	// 统一的失败应答与审计：两个分支均返回相同 401，耗时也须对齐。
 	reject := func() {
-		h.recordAudit(c, audit.Entry{UserID: nil, Action: audit.ActionLoginFailure, ResourceType: audit.ResourceSession, Status: audit.StatusFailure, Metadata: `{"email":"` + sanitizeAuditToken(request.Email) + `"}`})
+		h.recordAudit(c, audit.Entry{UserID: nil, Action: audit.ActionLoginFailure, ResourceType: audit.ResourceSession, Status: audit.StatusFailure, Metadata: `{"identifier":"` + sanitizeAuditToken(identifier) + `"}`})
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 	}
-	user, err := h.users.FindActiveByEmail(request.Email)
+	user, err := h.users.FindActiveByIdentifier(identifier)
 	if err != nil {
 		// 用户不存在（或非 active）：对包级 dummy 哈希执行等耗 bcrypt 比较，
-		// 消除与「密码错误」分支的时序差异，防止邮箱枚举。
+		// 消除与「密码错误」分支的时序差异，防止账号枚举。
 		_ = compareDummyPassword(request.Password)
 		reject()
 		return
 	}
+	// 锁定检查（C9）：锁定期间一律 423，不计新失败。
+	if auth.IsLocked(user.LockedUntil, time.Now()) {
+		lockedResponse(c)
+		return
+	}
 	if h.auth.VerifyPassword(user.PasswordHash, request.Password) != nil {
+		h.recordLoginFailure(user.ID)
 		reject()
 		return
 	}
@@ -421,7 +552,10 @@ func (h *Handler) login(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "session creation failed"})
 		return
 	}
+	// 成功登录清零失败计数并解除锁定（C9）。
+	_ = h.users.ClearLoginFailures(user.ID)
 	h.setRefreshCookie(c, refresh)
+	h.setCSRFCookie(c)
 	h.recordAudit(c, audit.Entry{UserID: &user.ID, Action: audit.ActionLoginSuccess, ResourceType: audit.ResourceSession, ResourceID: user.ID.String(), Status: audit.StatusSuccess})
 	c.JSON(http.StatusOK, gin.H{"access_token": access, "token_type": "Bearer"})
 }
@@ -474,11 +608,16 @@ func (h *Handler) refresh(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid refresh token"})
 		return
 	}
-	// 轮换成功后复查用户状态：账号被禁用/锁定/删除（或状态查询失败）时
-	// 立即撤销刚轮换出的新 refresh token（整个 session 失效）并 401。
-	if status, err := h.users.Status(session.UserID); err != nil || status != auth.StatusActive {
+	// 轮换成功后复查用户状态：账号被禁用/删除（或状态查询失败）时立即撤销
+	// 刚轮换出的新 refresh token（整个 session 失效）并 401；自动锁定
+	//（locked_until 未到期，C9）同样撤销并回 423 ACCOUNT_LOCKED。
+	if status, err := h.users.Status(session.UserID); err != nil || (status != auth.StatusActive && status != auth.StatusLocked) {
 		_ = h.auth.RevokeRefreshToken(replacement)
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid refresh token"})
+		return
+	} else if status == auth.StatusLocked {
+		_ = h.auth.RevokeRefreshToken(replacement)
+		lockedResponse(c)
 		return
 	}
 	access, err := h.auth.AccessToken(session.UserID)
@@ -487,6 +626,7 @@ func (h *Handler) refresh(c *gin.Context) {
 		return
 	}
 	h.setRefreshCookie(c, replacement)
+	h.setCSRFCookie(c)
 	c.JSON(http.StatusOK, gin.H{"access_token": access, "token_type": "Bearer"})
 }
 func (h *Handler) logout(c *gin.Context) {
@@ -571,7 +711,9 @@ func (h *Handler) listFiles(c *gin.Context) {
 	}
 	var out []files.File
 	var err error
-	if tagID != nil || starred != nil {
+	if c.Query("recent") == "true" {
+		out, err = h.files.Recent(owner, limit)
+	} else if tagID != nil || starred != nil {
 		out, err = h.files.SearchAccessible(owner, files.SearchOptions{TagID: tagID, Starred: starred, SortOptions: sortOpt, Limit: limit})
 	} else {
 		var parent uuid.UUID
@@ -630,6 +772,42 @@ func (h *Handler) createFolder(c *gin.Context) {
 		return
 	}
 	setETag(c, f)
+	c.JSON(http.StatusCreated, fileJSON(f))
+}
+
+type copyRequest struct {
+	ParentID string  `json:"parent_id"`
+	Name     *string `json:"name"`
+}
+
+func (h *Handler) copyFile(c *gin.Context) {
+	id, ok := parseID(c, c.Param("id"))
+	if !ok {
+		return
+	}
+	var req copyRequest
+	if c.ShouldBindJSON(&req) != nil || req.ParentID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	parent, ok := parseID(c, req.ParentID)
+	if !ok {
+		return
+	}
+	name := ""
+	if req.Name != nil {
+		name = *req.Name
+	}
+	uid := userID(c)
+	f, err := h.files.Copy(uid, id, parent, name)
+	if errors.Is(err, files.ErrFolderCopy) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "folders cannot be copied"})
+		return
+	}
+	if h.fileError(c, err) {
+		return
+	}
+	h.recordAudit(c, audit.Entry{UserID: &uid, Action: "file.copy", ResourceType: audit.ResourceFile, ResourceID: f.ID.String()})
 	c.JSON(http.StatusCreated, fileJSON(f))
 }
 

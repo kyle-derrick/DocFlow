@@ -65,6 +65,12 @@ type Repo interface {
 	//（file_search_docs，原生 SQL），返回删除行数。正常路径由外键
 	// ON DELETE CASCADE 级联承担，此为竞态/迁移遗留的兜底清理。
 	DeleteOrphanSearchDocs() (int64, error)
+	// DeleteOldAccessEvents 删除 created_at 早于阈值（now-retain）的文件
+	// 访问事件行（file_access_events，原生 SQL），返回删除行数。
+	DeleteOldAccessEvents(now time.Time, retain time.Duration) (int64, error)
+	// DeleteExpiredShareSessions 删除已过期（expires_at < now）的公开分享
+	// 访问会话行（share_access_sessions，原生 SQL），返回删除行数。
+	DeleteExpiredShareSessions(now time.Time) (int64, error)
 }
 
 // Purger 抽象回收站彻底删除能力；生产实现为 *files.Store。
@@ -100,6 +106,9 @@ const (
 	// notificationRetention 已读通知的清理阈值：已读时间早于 now-90d 的
 	// notifications 行删除（未读通知不受影响，避免丢失用户尚未处理的信息）。
 	notificationRetention = 90 * 24 * time.Hour
+	// defaultAccessEventsDays 文件访问事件的默认保留天数（settings
+	// retention.access_events_days 可调；读取失败时回退本值）。
+	defaultAccessEventsDays = 90
 	// defaultBatchLimit 单轮每类清理的批量上限，防止长事务。
 	defaultBatchLimit = 500
 )
@@ -179,6 +188,54 @@ func (j *Janitor) RunOnce() {
 	j.sweepDeletingBlobs()
 	j.sweepTrash()
 	j.sweepSearchOrphans()
+	j.sweepAccessEvents()
+	j.sweepShareSessions()
+	if repo, ok := j.repo.(interface {
+		DeleteOldAuditLogs(time.Time, time.Duration) (int64, error)
+	}); ok {
+		j.sweepAuditLogs(repo)
+	}
+}
+
+// accessEventsDays 热读取 retention.access_events_days；读取失败回退默认 90 天。
+func (j *Janitor) accessEventsDays() int {
+	if j.settings != nil {
+		if days, err := j.settings.GetInt(settings.KeyRetentionAccessEventsDays); err == nil && days >= 1 {
+			return days
+		} else if err != nil {
+			j.logf("janitor: read retention.access_events_days failed: %v (fallback %d days)", err, defaultAccessEventsDays)
+		}
+	}
+	return defaultAccessEventsDays
+}
+
+// sweepAccessEvents 清理超过保留期（retention.access_events_days，默认 90 天）
+// 的文件访问事件行（file_access_events）。纯行删除（统计聚合按窗口内数据），
+// 暂只记日志（同 sweepSessions 模式）。
+func (j *Janitor) sweepAccessEvents() {
+	days := j.accessEventsDays()
+	n, err := j.repo.DeleteOldAccessEvents(j.clock(), time.Duration(days)*24*time.Hour)
+	if err != nil {
+		j.logf("janitor: delete old access events: %v", err)
+		return
+	}
+	if n > 0 {
+		j.logf("janitor: removed %d access events older than %d days", n, days)
+	}
+}
+
+// sweepShareSessions 清理已过期的公开分享访问会话行（share_access_sessions）：
+// 密码校验会话有效期仅 1 小时，过期行由本 sweep 兜底回收，防表无限增长。
+// 纯行删除，暂只记日志。
+func (j *Janitor) sweepShareSessions() {
+	n, err := j.repo.DeleteExpiredShareSessions(j.clock())
+	if err != nil {
+		j.logf("janitor: delete expired share sessions: %v", err)
+		return
+	}
+	if n > 0 {
+		j.logf("janitor: removed %d expired share access sessions", n)
+	}
 }
 
 // sweepSearchOrphans 兜底清理孤儿全文索引行（file_search_docs 无对应

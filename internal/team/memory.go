@@ -3,6 +3,7 @@ package team
 import (
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -56,6 +57,44 @@ func (m *MemoryStore) CreateTeamWithRoot(t Team, owner Member, root files.File) 
 	return nil
 }
 
+func (m *MemoryStore) Update(teamID uuid.UUID, name string, description *string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t, ok := m.teams[teamID]
+	if !ok || t.DeletedAt != nil {
+		return ErrNotFound
+	}
+	if old, exists := m.teamName[name]; exists && old != teamID {
+		return ErrNameConflict
+	}
+	delete(m.teamName, t.Name)
+	t.Name = name
+	if description != nil {
+		t.Description = *description
+	}
+	m.teamName[name] = teamID
+	m.teams[teamID] = t
+	return nil
+}
+func (m *MemoryStore) Delete(teamID uuid.UUID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t, ok := m.teams[teamID]
+	if !ok || t.DeletedAt != nil {
+		return ErrNotFound
+	}
+	now := time.Now()
+	t.DeletedAt = &now
+	m.teams[teamID] = t
+	return nil
+}
+func (m *MemoryStore) ListRoles(teamID uuid.UUID) ([]Role, error) { return []Role{}, nil }
+func (m *MemoryStore) CreateRole(role Role) error                 { return nil }
+func (m *MemoryStore) UpdateRole(teamID, roleID uuid.UUID, name string, permissions map[string]any) error {
+	return nil
+}
+func (m *MemoryStore) DeleteRole(teamID, roleID uuid.UUID) error { return nil }
+
 func (m *MemoryStore) Get(id uuid.UUID) (Team, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -72,7 +111,7 @@ func (m *MemoryStore) ListForUser(userID uuid.UUID) ([]Team, error) {
 	var out []Team
 	for id := range m.members {
 		if _, ok := m.members[id][userID]; ok {
-			if t, found := m.teams[id]; found {
+			if t, found := m.teams[id]; found && t.DeletedAt == nil {
 				out = append(out, t)
 			}
 		}

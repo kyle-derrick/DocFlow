@@ -64,6 +64,21 @@ func (f *hFakeTokenStore) Revoke(owner, id uuid.UUID, now time.Time) (bool, erro
 	return false, nil
 }
 
+func (f *hFakeTokenStore) Update(owner, id uuid.UUID, name *string, scopes *[]string) (auth.APIToken, error) {
+	for i := range f.tokens {
+		if f.tokens[i].ID == id && f.tokens[i].UserID == owner && f.tokens[i].RevokedAt == nil {
+			if name != nil {
+				f.tokens[i].Name = *name
+			}
+			if scopes != nil {
+				f.tokens[i].Scopes = *scopes
+			}
+			return f.tokens[i], nil
+		}
+	}
+	return auth.APIToken{}, nil
+}
+
 func (f *hFakeTokenStore) FindActiveByPrefix(prefix string, now time.Time) (auth.PATLookup, bool, error) {
 	for i := range f.tokens {
 		t := &f.tokens[i]

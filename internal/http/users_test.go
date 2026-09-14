@@ -24,24 +24,102 @@ type fakeUserDirectory struct {
 	// status 为 Status 查询的返回值（默认返回 not found 错误）。
 	status    string
 	statusErr error
+	// identifier 命中的用户与错误（FindActiveByIdentifier 用）。
+	identifierUser auth.User
+	identifierErr  error
+	// 管理端 / 档案 / 锁定计数记录。
+	adminList    []auth.User
+	adminTotal   int64
+	updatedUsers map[uuid.UUID]auth.AdminUserUpdate
+	failures     map[uuid.UUID]int
+	cleared      map[uuid.UUID]bool
+	profiles     map[uuid.UUID]auth.ProfileUpdate
 }
 
-func (f *fakeUserDirectory) FindActiveByEmail(string) (auth.User, error) {
-	return auth.User{}, errors.New("not found")
+func (f *fakeUserDirectory) FindActiveByIdentifier(identifier string) (auth.User, error) {
+	if f.identifierErr != nil {
+		return auth.User{}, f.identifierErr
+	}
+	if f.identifierUser.ID == uuid.Nil {
+		return auth.User{}, errors.New("user not found")
+	}
+	return f.identifierUser, nil
+}
+
+// adminUpdateOf 返回某用户最近一次管理端更新（未更新过时 ok=false）。
+func (f *fakeUserDirectory) adminUpdateOf(id uuid.UUID) (auth.AdminUserUpdate, bool) {
+	if f.updatedUsers == nil {
+		return auth.AdminUserUpdate{}, false
+	}
+	u, ok := f.updatedUsers[id]
+	return u, ok
+}
+
+// failureCountOf 返回某用户累计记录的登录失败次数。
+func (f *fakeUserDirectory) failureCountOf(id uuid.UUID) int { return f.failures[id] }
+
+func (f *fakeUserDirectory) RecordLoginFailure(id uuid.UUID, maxRetries int, lockFor time.Duration) error {
+	if f.failures == nil {
+		f.failures = make(map[uuid.UUID]int)
+	}
+	f.failures[id]++
+	return nil
+}
+
+func (f *fakeUserDirectory) ClearLoginFailures(id uuid.UUID) error {
+	if f.cleared == nil {
+		f.cleared = make(map[uuid.UUID]bool)
+	}
+	f.cleared[id] = true
+	return nil
+}
+
+func (f *fakeUserDirectory) GetByID(id uuid.UUID) (auth.User, error) {
+	if f.identifierUser.ID == id {
+		return f.identifierUser, nil
+	}
+	return auth.User{}, auth.ErrUserNotFound
+}
+
+func (f *fakeUserDirectory) UpdateProfile(id uuid.UUID, update auth.ProfileUpdate) error {
+	if f.profiles == nil {
+		f.profiles = make(map[uuid.UUID]auth.ProfileUpdate)
+	}
+	f.profiles[id] = update
+	return nil
+}
+
+func (f *fakeUserDirectory) AdminListUsers(q string, limit, offset int) ([]auth.User, int64, error) {
+	if offset > 0 && offset < len(f.adminList) {
+		return f.adminList[offset:], f.adminTotal, nil
+	}
+	if offset >= len(f.adminList) {
+		return nil, f.adminTotal, nil
+	}
+	return f.adminList, f.adminTotal, nil
+}
+
+func (f *fakeUserDirectory) AdminUpdateUser(id uuid.UUID, update auth.AdminUserUpdate) error {
+	if f.updatedUsers == nil {
+		f.updatedUsers = make(map[uuid.UUID]auth.AdminUserUpdate)
+	}
+	if _, exists := f.updatedUsers[id]; !exists && f.identifierUser.ID != id && f.adminTotal == 0 {
+		return auth.ErrUserNotFound
+	}
+	f.updatedUsers[id] = update
+	return nil
 }
 
 func (f *fakeUserDirectory) Lookup(q string, limit int) ([]auth.User, error) {
 	f.lookupQ, f.lookupLimit = q, limit
 	return f.results, f.lookupErr
 }
-
 func (f *fakeUserDirectory) Username(id uuid.UUID) (string, error) {
 	if n, ok := f.names[id]; ok {
 		return n, nil
 	}
 	return "", errors.New("user not found")
 }
-
 func (f *fakeUserDirectory) Status(uuid.UUID) (string, error) {
 	if f.statusErr != nil {
 		return "", f.statusErr
@@ -295,21 +373,26 @@ func TestRefreshActiveUserSucceeds(t *testing.T) {
 	}
 }
 
-// 非 active（disabled/locked）或状态查询失败：401 且撤销刚轮换出的 session。
+// 非 active（disabled/查询失败）：401 且撤销刚轮换出的 session；自动锁定
+// （C9，locked_until 未到期派生 status=locked）：423 ACCOUNT_LOCKED 且同样撤销。
 func TestRefreshNonActiveUserSessionRevoked(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		users *fakeUserDirectory
+		name       string
+		users      *fakeUserDirectory
+		wantStatus int
 	}{
-		{name: "disabled", users: &fakeUserDirectory{status: auth.StatusDisabled}},
-		{name: "locked", users: &fakeUserDirectory{status: auth.StatusLocked}},
-		{name: "lookup-error", users: &fakeUserDirectory{statusErr: errors.New("db down")}},
+		{name: "disabled", users: &fakeUserDirectory{status: auth.StatusDisabled}, wantStatus: http.StatusUnauthorized},
+		{name: "locked", users: &fakeUserDirectory{status: auth.StatusLocked}, wantStatus: http.StatusLocked},
+		{name: "lookup-error", users: &fakeUserDirectory{statusErr: errors.New("db down")}, wantStatus: http.StatusUnauthorized},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, store, token := refreshTestHandler(t, tc.users)
 			w := postRefresh(h, token)
-			if w.Code != http.StatusUnauthorized {
-				t.Fatalf("status = %d, want 401", w.Code)
+			if w.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d", w.Code, tc.wantStatus)
+			}
+			if tc.wantStatus == http.StatusLocked && !strings.Contains(w.Body.String(), `"code":"ACCOUNT_LOCKED"`) {
+				t.Fatalf("locked body = %s, want ACCOUNT_LOCKED code", w.Body.String())
 			}
 			session, ok := store.revokedSession()
 			if !ok {
@@ -323,6 +406,7 @@ func TestRefreshNonActiveUserSessionRevoked(t *testing.T) {
 }
 
 // refresh/logout 共享独立按 IP 轻限流（60/min）：超出后 429（带 Retry-After）。
+// 同源校验（C10）：请求带与 Host 一致的 Origin（httptest 默认 Host=example.com）。
 func TestRefreshLogoutRateLimitedPerIP(t *testing.T) {
 	h := NewHandler(nil, nil, nil, nil, nil, nil, nil, false, "", 0)
 	router := gin.New()
@@ -330,6 +414,7 @@ func TestRefreshLogoutRateLimitedPerIP(t *testing.T) {
 	post := func(path string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, path, nil)
 		req.RemoteAddr = "203.0.113.9:1111"
+		req.Header.Set("Origin", "http://example.com")
 		w := httptest.NewRecorder()
 		router.ServeHTTP(w, req)
 		return w
@@ -353,6 +438,7 @@ func TestRefreshLogoutRateLimitedPerIP(t *testing.T) {
 	// 其他 IP 不受影响。
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
 	req.RemoteAddr = "203.0.113.10:1111"
+	req.Header.Set("Origin", "http://example.com")
 	w2 := httptest.NewRecorder()
 	router.ServeHTTP(w2, req)
 	if w2.Code != http.StatusNoContent {

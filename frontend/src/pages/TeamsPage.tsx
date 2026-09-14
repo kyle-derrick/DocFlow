@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Team, createTeam, currentUserId, listTeams } from '../api'
+import { Team, createTeam, currentUserId, deleteTeam, listTeams, updateTeam } from '../api'
 import { formatTime } from '../components/FileBrowser'
 
 /** 团队列表页：创建团队 + 我的团队卡片（点击进入团队空间）。 */
@@ -52,6 +52,16 @@ export default function TeamsPage() {
     }
   }
 
+  const rename = async (t: Team) => {
+    const next = window.prompt('团队名称', t.name)?.trim()
+    if (!next || next === t.name) return
+    try { await updateTeam(t.id, next, t.description); await load() } catch (err) { setError(err instanceof Error ? err.message : '更新团队失败') }
+  }
+  const remove = async (t: Team) => {
+    if (!window.confirm(`删除团队“${t.name}”？`)) return
+    try { await deleteTeam(t.id); await load() } catch (err) { setError(err instanceof Error ? err.message : '删除团队失败') }
+  }
+
   return (
     <div className="page">
       <div className="page-head">
@@ -83,14 +93,14 @@ export default function TeamsPage() {
         <div className="empty">还没有团队，创建一个开始协作吧</div>
       )}
 
-      {teams.length > 0 && (
+      {!loading && !error && teams.length > 0 && (
         <div className="team-grid">
           {teams.map((t) => (
             <button key={t.id} className="team-card" onClick={() => navigate(`/teams/${t.id}`)}>
               <div className="team-card-head">
                 <span className="icon">👥</span>
                 <span className="team-card-name">{t.name}</span>
-                {myId !== null && t.owner_id === myId && <span className="badge role-owner">我管理</span>}
+                {myId !== null && t.owner_id === myId && <><button className="btn ghost" onClick={(e) => { e.stopPropagation(); void rename(t) }}>重命名</button><button className="btn ghost" onClick={(e) => { e.stopPropagation(); void remove(t) }}>删除</button></>}
               </div>
               <p className="team-card-desc">{t.description || '暂无描述'}</p>
               <span className="muted team-card-time">创建于 {formatTime(t.created_at)}</span>
