@@ -60,7 +60,11 @@ services:
 
   # Go API：仅内网暴露 8080（无宿主端口映射，外部一律经 caddy）。
   backend:
-    build: .
+    build:
+      context: .
+      args:
+        # 国内网络构建加速（.env 里 GOPROXY=https://goproxy.cn）。
+        GOPROXY: ${GOPROXY:-}
     image: docflow/backend:1.0.0
     restart: unless-stopped
     environment:
@@ -94,6 +98,8 @@ services:
       CLAMAV_TIMEOUT: ${CLAMAV_TIMEOUT:-5m}
       CLAMAV_REQUIRED: ${CLAMAV_REQUIRED:-true}
       RATE_LIMIT_PER_MIN: ${RATE_LIMIT_PER_MIN:-120}
+      # 对外基地址（邮件/分享/OIDC 回调链接前缀）：生产设 https://<域名>。
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
       LOGIN_RATE_LIMIT_PER_MIN: ${LOGIN_RATE_LIMIT_PER_MIN:-10}
       PUBLIC_RATE_LIMIT_PER_MIN: ${PUBLIC_RATE_LIMIT_PER_MIN:-60}
       MAX_VERSIONS_PER_FILE: ${MAX_VERSIONS_PER_FILE:-5}
@@ -133,6 +139,23 @@ services:
       DRAWIO_ENABLED: ${DRAWIO_ENABLED:-false}
       DRAWIO_SERVER_URL: ${DRAWIO_SERVER_URL:-http://drawio:8080}
       DRAWIO_PUBLIC_URL: ${DRAWIO_PUBLIC_URL:-}
+      # OIDC 单点登录（默认 false）：启用需 .env 设 OIDC_ENABLED=true、
+      # OIDC_ISSUER（IdP 签发方基地址，如 https://sso.example.com/realms/x）
+      # 与 OIDC_CLIENT_ID/SECRET；回调默认 {PUBLIC_BASE_URL}/api/v1/auth/oidc/callback。
+      OIDC_ENABLED: ${OIDC_ENABLED:-false}
+      OIDC_ISSUER: ${OIDC_ISSUER:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      OIDC_REDIRECT_URL: ${OIDC_REDIRECT_URL:-}
+      OIDC_AUTO_PROVISION: ${OIDC_AUTO_PROVISION:-true}
+      # 邮件通道（默认 false = noop 仅日志输出链接）：启用需 .env 设
+      # SMTP_ENABLED=true、SMTP_HOST/SMTP_FROM 必填（认证与端口按需）。
+      SMTP_ENABLED: ${SMTP_ENABLED:-false}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_FROM: ${SMTP_FROM:-}
       # Prometheus 指标端点（默认启用，无认证）。/metrics 不经 Caddy 暴露
       #（Caddyfile 无该反代规则，未匹配路径返回 SPA 首页）；内网监控在
       # compose 网络内直连 backend:8080/metrics，无内网抓取可设 false 关闭。
@@ -168,17 +191,38 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+      seed:
+        condition: service_completed_successfully
     profiles: ["minimal", "full", "antivirus"]
 
   migrate:
     image: docflow/backend:1.0.0
     restart: "no"
-    command: ["/migrate", "-dir", "/migrations"]
+    # 镜像 ENTRYPOINT 为 /docflow，须用 entrypoint 覆盖（command 只覆盖 CMD）。
+    entrypoint: ["/migrate"]
+    command: ["-dir", "/migrations"]
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgres://docflow:change-me@postgres:5432/docflow?sslmode=disable}
     depends_on:
       postgres:
         condition: service_healthy
+    profiles: ["minimal", "full", "antivirus"]
+
+  # 首次部署引导管理员（幂等：已存在则跳过）。在 migrate 之后运行一次；
+  # 生产务必在 .env 覆盖 SEED_ADMIN_EMAIL/PASSWORD 并在首次登录后改密。
+  seed:
+    image: docflow/backend:1.0.0
+    restart: "no"
+    entrypoint: ["/seed"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgres://docflow:change-me@postgres:5432/docflow?sslmode=disable}
+      SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-admin@example.com}
+      SEED_ADMIN_USERNAME: ${SEED_ADMIN_USERNAME:-admin}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:?set SEED_ADMIN_PASSWORD in .env}
+      SEED_ADMIN_ROLE: ${SEED_ADMIN_ROLE:-admin}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     profiles: ["minimal", "full", "antivirus"]
 
   postgres:
@@ -279,16 +323,24 @@ services:
       start_period: 30s
     profiles: ["full"]
 
-  # SeaweedFS S3 兼容对象存储（storage profile，可与 full 叠加）。
+  # MinIO S3 兼容对象存储（storage profile，可与 full 叠加）。
   # local 是默认存储驱动，不会自动启用此服务；启用 S3 时配置 STORAGE_DRIVER=s3。
-  seaweedfs:
-    image: chrislusf/seaweedfs:3.80
-    command: server -s3 -dir=/data -master.volumeSizeLimitMB=1024
+  # 对应 .env：STORAGE_DRIVER=s3、S3_ENDPOINT=http://minio:9000、
+  # S3_BUCKET=docflow（需提前创建，见下）、S3_ACCESS_KEY/S3_SECRET_KEY 同
+  # MINIO_ROOT_USER/PASSWORD、S3_PATH_STYLE=true。
+  # 说明：曾用 chrislusf/seaweedfs:3.80，真实联动验证中其 S3 网关 DELETE
+  # 间歇性 500（含存在的 key），导致上传 complete 失败，故切换 MinIO。
+  minio:
+    image: minio/minio:RELEASE.2024-09-13T20-26-02Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-docflow}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-docflow-secret}
     restart: unless-stopped
     expose:
-      - "8333"
+      - "9000"
     volumes:
-      - seaweedfs_data:/data
+      - minio_data:/data
     profiles: ["storage"]
 
   # Meilisearch 全文搜索引擎（search profile，可与 full/antivirus 叠加）：
@@ -311,17 +363,7 @@ services:
     profiles: ["search"]
   #
   # 如需其他 S3 兼容对象存储（STORAGE_DRIVER=s3），可参考以下示例自行启用
-  #（本仓库默认不启用，仅作说明；MinIO 与 SeaweedFS 二选一即可）：
-  # minio:
-  #   image: minio/minio:RELEASE.2024-09-13T20-26-02Z
-  #   command: server /data --console-address ":9001"
-  #   environment:
-  #     MINIO_ROOT_USER: docflow
-  #     MINIO_ROOT_PASSWORD: change-me
-  #   volumes: [minio_data:/data]
-  #   # 对应 .env：STORAGE_DRIVER=s3、S3_ENDPOINT=http://minio:9000、
-  #   # S3_BUCKET=docflow、S3_ACCESS_KEY/S3_SECRET_KEY 同上、S3_PATH_STYLE=true
-  #
+  #（本仓库默认 MinIO，见上方 storage profile；SeaweedFS 等亦可，需自建 bucket）：
   # seaweedfs (S3 网关):
   #   image: chrislusf/seaweedfs:3.80
   #   command: server -s3 -dir=/data -master.volumeSizeLimitMB=1024
@@ -336,5 +378,5 @@ volumes:
   caddy_config:
   onlyoffice_data:
   onlyoffice_logs:
-  seaweedfs_data:
+  minio_data:
   meili_data:

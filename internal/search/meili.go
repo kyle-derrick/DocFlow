@@ -95,18 +95,25 @@ func (m *MeiliRepo) do(ctx context.Context, method, path string, body any) ([]by
 	return data, nil
 }
 
-// EnsureIndex 创建检索索引（主键 file_id）；已存在（Meilisearch 405
-// index_already_exists）幂等成功。启动时调用（main）。
+// EnsureIndex 创建检索索引（主键 file_id）并启用访问过滤字段；已存在
+// （Meilisearch 405 index_already_exists）幂等成功。启动时调用（main）。
+// filterableAttributes 必须显式设置：Meilisearch 默认索引无任何可过滤
+// 属性，search 带 filter 一律 invalid_search_filter（真实实例暴露；
+// 单测的假 HTTP 服务无法覆盖该服务端状态语义）。
 func (m *MeiliRepo) EnsureIndex(ctx context.Context) error {
 	_, err := m.do(ctx, http.MethodPost, "/indexes", map[string]string{"uid": MeiliIndexUID, "primaryKey": "file_id"})
 	if err != nil {
 		// 索引已存在：Meilisearch 返回 405（index_already_exists），幂等忽略。
-		if strings.Contains(err.Error(), "status 405") {
-			return nil
+		if !strings.Contains(err.Error(), "status 405") {
+			return err
 		}
-		return err
 	}
-	return nil
+	// 幂等重设过滤字段（重复设同值无副作用）；异步生效，首个文档入索引前
+	// 由启动顺序保证（EnsureIndex 先于任何 UpsertDoc）。注意 v1.8 的
+	// settings 子路由仅支持 PUT（PATCH 为更高版本行为，返回 405）。
+	_, err = m.do(ctx, http.MethodPut, "/indexes/"+MeiliIndexUID+"/settings/filterable-attributes",
+		[]string{"owner_id", "team_id"})
+	return err
 }
 
 // meiliDoc 为索引文档（字段见 MeiliRepo 注释；ID 类字段序列化为字符串）。

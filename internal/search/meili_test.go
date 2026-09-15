@@ -19,6 +19,7 @@ type fakeMeili struct {
 	mu             sync.Mutex
 	requests       []string // "METHOD path body"
 	ensureStatuses []int    // 每次 POST /indexes 依序取用；耗尽后 202
+	settingsStatus int      // PUT settings/filterable-attributes 状态码（0 视为 202）
 	searchResponse string
 	upsertBodies   []map[string]any
 	deletePaths    []string
@@ -50,6 +51,15 @@ func (f *fakeMeili) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.mu.Unlock()
 		w.WriteHeader(status)
 		_, _ = w.Write([]byte(`{"taskUid":1}`))
+	case r.URL.Path == "/indexes/docflow-files/settings/filterable-attributes" && r.Method == http.MethodPut:
+		f.mu.Lock()
+		status := f.settingsStatus
+		f.mu.Unlock()
+		if status == 0 {
+			status = 202
+		}
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(`{"taskUid":4}`))
 	case r.URL.Path == "/indexes/docflow-files/documents" && r.Method == http.MethodPost:
 		f.mu.Lock()
 		var docs []map[string]any
@@ -84,7 +94,8 @@ func newMeiliTestRepo(srvURL string, teams map[uuid.UUID][]uuid.UUID) *MeiliRepo
 }
 
 // TestMeiliEnsureIndexIdempotent 首次创建 202 成功；已存在 405 幂等忽略；
-// 其他状态码报错。
+// 其他状态码报错；建索引后必须 PUT filterable-attributes（真实 v1.8 默认
+// 无任何可过滤属性，search 带 filter 会报 invalid_search_filter）。
 func TestMeiliEnsureIndexIdempotent(t *testing.T) {
 	fake := newFakeMeili()
 	fake.ensureStatuses = []int{202, 405}
@@ -102,12 +113,28 @@ func TestMeiliEnsureIndexIdempotent(t *testing.T) {
 	if err := repo.EnsureIndex(context.Background()); err == nil {
 		t.Fatal("status 500: want error")
 	}
-	// 请求体：uid + primaryKey=file_id；带 Bearer Key。
+	// settings PUT 失败必须向上报错（不能静默跳过过滤字段设置）。
+	fake.ensureStatuses = []int{202}
+	fake.settingsStatus = 500
+	if err := repo.EnsureIndex(context.Background()); err == nil {
+		t.Fatal("settings 500: want error")
+	}
+	// 请求体：uid + primaryKey=file_id、过滤字段 owner_id/team_id；带 Bearer Key。
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
 	if len(fake.requests) < 2 || !strings.Contains(fake.requests[0], "POST /indexes?") ||
 		!strings.Contains(fake.requests[0], `"primaryKey":"file_id"`) {
 		t.Fatalf("ensure request = %v", fake.requests)
+	}
+	var putFound bool
+	for _, req := range fake.requests {
+		if strings.HasPrefix(req, "PUT /indexes/docflow-files/settings/filterable-attributes") &&
+			strings.Contains(req, `"owner_id"`) && strings.Contains(req, `"team_id"`) {
+			putFound = true
+		}
+	}
+	if !putFound {
+		t.Fatalf("filterable-attributes PUT not captured: %v", fake.requests)
 	}
 }
 

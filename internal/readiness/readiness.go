@@ -75,7 +75,10 @@ func tcpPing(ctx context.Context, addr string) error {
 		return err
 	}
 	defer conn.Close()
-	if _, err := conn.Write([]byte("PING\x00")); err != nil {
+	// zPING 为 clamd n-command 规范形态（0.95+ 全支持，响应以 \x00 结尾）；
+	// 旧式 PING\x00 在 clamd 1.5 返回 "PONG\n"（真实实例暴露），故响应
+	// 白名单兼容 \x00 / 裸 PONG / \n 三种。
+	if _, err := conn.Write([]byte("zPING\x00")); err != nil {
 		return err
 	}
 	buf := make([]byte, 16)
@@ -83,10 +86,11 @@ func tcpPing(ctx context.Context, addr string) error {
 	if err != nil {
 		return err
 	}
-	if string(buf[:n]) != "PONG\x00" && string(buf[:n]) != "PONG" {
-		return fmt.Errorf("unexpected clamav response")
+	switch string(buf[:n]) {
+	case "PONG\x00", "PONG", "PONG\n":
+		return nil
 	}
-	return nil
+	return fmt.Errorf("unexpected clamav response")
 }
 func httpHealth(ctx context.Context, base string) error {
 	if !strings.HasSuffix(base, "/healthcheck") {

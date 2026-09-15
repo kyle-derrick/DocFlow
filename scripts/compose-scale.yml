@@ -1,0 +1,28 @@
+# 验证专用叠加（docker compose -f docker-compose.yml -f scripts/compose-scale.yml）：
+# - backend 副本 2 + 宿主端口 18081/18082 直连两实例（Redis 跨实例 WS 广播验证）。
+# - mailpit：SMTP 收件箱（容器网络 1025 收信，宿主 18025 查看），配合 .env
+#   SMTP_ENABLED=true 验证邀请/重置邮件真实投递。均不并入生产编排。
+services:
+  backend:
+    ports:
+      - "18081-18082:8080"
+  mailpit:
+    image: axllent/mailpit:v1.21
+    restart: unless-stopped
+    expose:
+      - "1025"
+    ports:
+      - "18025:8025"
+    profiles: ["minimal", "full", "antivirus"]
+  # keycloak：OIDC IdP（宿主 18090，backend 经网关 172.18.0.1:18090 访问，
+  # issuer 两端一致）。验证专用，不并入生产编排。
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    command: ["start-dev", "--http-port=8080"]
+    restart: unless-stopped
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+    ports:
+      - "18090:8080"
+    profiles: ["minimal", "full", "antivirus"]

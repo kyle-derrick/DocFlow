@@ -808,12 +808,34 @@ func (s *Service) Complete(id uuid.UUID) (UploadSession, error) {
 	return v, nil
 }
 
-// detectContentType 按文件名扩展推断 Content-Type（小写扩展，未知回退
-// application/octet-stream）。此前落库恒为 octet-stream，文本/图片等
-// 可预览类型全部 415（运行时冒烟暴露）；MIME 嗅探按设计仅做展示与预览
-// 白名单判定，安全边界仍在扫描与下载侧。
+// builtinMimeTypes 为高频扩展的内置 MIME 兜底表：精简容器（如 alpine）
+// 无 /etc/mime.types 时 mime.TypeByExtension 恒返回空，可预览类型全部退化
+// 为 octet-stream（preview 415）——compose 栈运行时暴露；系统表仍优先。
+var builtinMimeTypes = map[string]string{
+	".txt": "text/plain", ".md": "text/markdown", ".csv": "text/csv",
+	".json": "application/json", ".xml": "text/xml", ".yaml": "text/yaml",
+	".yml": "text/yaml", ".html": "text/html", ".htm": "text/html",
+	".css": "text/css", ".js": "text/javascript",
+	".pdf": "application/pdf", ".zip": "application/zip",
+	".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+	".gif": "image/gif", ".svg": "image/svg+xml", ".webp": "image/webp",
+	".bmp": "image/bmp", ".ico": "image/x-icon",
+	".docx":   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+	".xlsx":   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+	".pptx":   "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+	".drawio": "application/xml", ".excalidraw": "application/json",
+}
+
+// detectContentType 按文件名扩展推断 Content-Type（小写扩展，系统 MIME 表
+// 优先、内置表兜底，未知回退 application/octet-stream）。此前落库恒为
+// octet-stream，文本/图片等可预览类型全部 415（运行时冒烟暴露）；MIME
+// 嗅探按设计仅做展示与预览白名单判定，安全边界仍在扫描与下载侧。
 func detectContentType(name string) string {
-	if t := mime.TypeByExtension(strings.ToLower(filepath.Ext(name))); t != "" {
+	ext := strings.ToLower(filepath.Ext(name))
+	if t := mime.TypeByExtension(ext); t != "" {
+		return t
+	}
+	if t, ok := builtinMimeTypes[ext]; ok {
 		return t
 	}
 	return "application/octet-stream"

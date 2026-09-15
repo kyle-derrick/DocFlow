@@ -2,6 +2,7 @@ package upload
 
 import (
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -17,6 +18,12 @@ func (s *GormStore) Get(id uuid.UUID) (UploadSession, error) {
 	err := s.db.First(&v, "id = ?", id).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return UploadSession{}, ErrNotFound
+	}
+	// expected_sha256 为 CHAR(64)：空串入库被 PostgreSQL 填充为 64 空格，
+	// 读出统一 TrimSpace，避免「未提供哈希」被误判为校验失败（运行时
+	// 冒烟暴露的 CHAR 填充陷阱，与 share.password_hash 同型）。
+	if err == nil {
+		v.ExpectedSHA256 = strings.TrimSpace(v.ExpectedSHA256)
 	}
 	return v, err
 }
