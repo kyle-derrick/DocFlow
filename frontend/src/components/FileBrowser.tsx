@@ -5,19 +5,24 @@
 // 适配不同后端端点；写操作 403 时统一提示「无写权限」。
 // v1.0 追加：多选 + 批量移动/删除（部分成功语义）、行内星标切换、
 // 行内标签管理（打/去标签、新建）、顶栏标签/收藏筛选与服务端排序。
+// v1.2 追加：列表/网格视图切换（设计 6.3.7；偏好持久化 localStorage，
+// Ctrl/Cmd+1、Ctrl/Cmd+2 快捷键见设计 6.16.1）。
 import { FormEvent, ReactNode, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   ApiError,
   BatchItemResult,
   EMPTY_DRAWIO_XML,
+  EMPTY_EXCALIDRAW_JSON,
   FileItem,
   FileQueryOptions,
+  FileWithVersion,
   PreviewContent,
   PreviewKind,
   Tag,
   UploadPhase,
   addFileTag,
+  aiSummarize,
   batchMoveFiles,
   batchTrashFiles,
   createShare,
@@ -27,6 +32,7 @@ import {
   drawioStatus,
   fetchPreview,
   isDrawioFile,
+  isExcalidrawFile,
   isOfficeFile,
   listFileTags,
   listTags,
@@ -37,6 +43,33 @@ import {
 } from '../api'
 import { useHotkeys } from '../useHotkeys'
 import { MessageKey, formatMessage, t, useLocale } from '../i18n'
+
+/** 文件浏览视图模式（设计 6.3.7）：list = 现有表格，grid = 卡片网格。 */
+export type ViewMode = 'list' | 'grid'
+
+/** 视图偏好持久化 key（个人空间与团队空间共用，见设计 6.3.7）。 */
+const VIEW_MODE_KEY = 'docflow.viewMode'
+
+function loadViewMode(): ViewMode {
+  return window.localStorage.getItem(VIEW_MODE_KEY) === 'grid' ? 'grid' : 'list'
+}
+
+function saveViewMode(mode: ViewMode): void {
+  // 隐私模式等 localStorage 不可用时静默跳过（偏好仅本次会话生效）。
+  try {
+    window.localStorage.setItem(VIEW_MODE_KEY, mode)
+  } catch {
+    /* ignore */
+  }
+}
+
+/** 字节数人类可读格式（网格卡片元信息；口径与版本历史一致）。 */
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
+}
 
 export function formatTime(iso: string): string {
   return new Date(iso).toLocaleString('zh-CN', { hour12: false })
@@ -153,6 +186,8 @@ export interface FileBrowserProps {
   viewTabs?: boolean
   /** 提供时文件行显示「复制」（parentId 为目标目录 UUID；留空目标由本组件解析为源目录）。 */
   copyFn?: (fileId: string, parentId: string) => Promise<unknown>
+  /** 文件元数据来源（GET /files/{id}）；提供时网格视图卡片惰性补齐文件大小。 */
+  fileMetaFn?: (fileId: string) => Promise<FileWithVersion | null>
 }
 
 export default function FileBrowser({
@@ -169,6 +204,7 @@ export default function FileBrowser({
   rootTargetLabel,
   viewTabs,
   copyFn,
+  fileMetaFn,
 }: FileBrowserProps) {
   const locale = useLocale()
   const msg = (key: MessageKey) => t(locale, key)
@@ -193,6 +229,54 @@ export default function FileBrowser({
   // 多选与批量操作。
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [batchBusy, setBatchBusy] = useState(false)
+
+  // 视图模式（设计 6.3.7）：list / grid，偏好持久化到 localStorage，
+  // 个人空间与团队空间共用同一偏好（状态在两视图间共享，选择互通）。
+  const [viewMode, setViewMode] = useState<ViewMode>(loadViewMode)
+
+  // 网格卡片的「⋯」操作菜单：当前展开的条目 ID（null = 关闭）。
+  const [cardMenuFor, setCardMenuFor] = useState<string | null>(null)
+
+  const changeViewMode = (mode: ViewMode) => {
+    setCardMenuFor(null)
+    setViewMode(mode)
+    saveViewMode(mode)
+  }
+
+  // 网格视图文件大小：列表接口不返回 size，经 fileMetaFn 惰性补齐（ref 缓存
+  // 避免重复请求；-1 占位表示已请求过/未知，不再重试）。
+  const sizeCache = useRef<Map<string, number>>(new Map())
+  const [, setSizesTick] = useState(0)
+  useEffect(() => {
+    if (viewMode !== 'grid' || !fileMetaFn) return
+    const targets = items.filter((it) => it.type === 'file' && !sizeCache.current.has(it.id))
+    if (targets.length === 0) return
+    targets.forEach((it) => sizeCache.current.set(it.id, -1))
+    void Promise.all(targets.map((it) => fileMetaFn(it.id))).then((metas) => {
+      let changed = false
+      metas.forEach((meta, i) => {
+        const size = meta?.current_version?.size ?? 0
+        if (size > 0) {
+          sizeCache.current.set(targets[i].id, size)
+          changed = true
+        }
+      })
+      if (changed) setSizesTick((n) => n + 1)
+    })
+  }, [viewMode, items, fileMetaFn])
+
+  // 卡片菜单点击外部关闭（点菜单按钮本身由其 onClick 处理开合切换）。
+  useEffect(() => {
+    if (cardMenuFor === null) return
+    const onDown = (e: MouseEvent) => {
+      const el = e.target as HTMLElement | null
+      if (el?.closest?.('.file-card-menu, .card-menu-btn')) return
+      setCardMenuFor(null)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [cardMenuFor])
+
   const [batchNotice, setBatchNotice] = useState('')
   const [batchError, setBatchError] = useState('')
   const [moveOpen, setMoveOpen] = useState(false)
@@ -260,6 +344,11 @@ export default function FileBrowser({
   const [previewUrl, setPreviewUrl] = useState('')
   const [previewText, setPreviewText] = useState('')
   const [previewError, setPreviewError] = useState('')
+
+  // AI 摘要（预览对话框内文本类文件）：按钮触发一次，结果就地展示。
+  const [aiState, setAiState] = useState<'idle' | 'loading' | 'done' | 'error'>('idle')
+  const [aiSummary, setAiSummary] = useState('')
+  const [aiError, setAiError] = useState('')
 
   const [uploads, setUploads] = useState<UploadRow[]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -705,6 +794,9 @@ export default function FileBrowser({
     setPreviewUrl('')
     setPreviewText('')
     setPreviewError('')
+    setAiState('idle')
+    setAiSummary('')
+    setAiError('')
     setPreviewTarget(null)
   }
 
@@ -716,6 +808,9 @@ export default function FileBrowser({
     setPreviewUrl('')
     setPreviewText('')
     setPreviewError('')
+    setAiState('idle')
+    setAiSummary('')
+    setAiError('')
     try {
       const content = await doPreview(item.id)
       setPreviewKindState(content.kind)
@@ -725,6 +820,24 @@ export default function FileBrowser({
       setPreviewError(err instanceof Error ? err.message : '预览加载失败')
     } finally {
       setPreviewLoading(false)
+    }
+  }
+
+  // AI 摘要：503 = 后端 AI 未启用，400 = 不支持该文件类型，其余透传错误。
+  const handleSummarize = async () => {
+    if (!previewTarget || aiState === 'loading') return
+    setAiState('loading')
+    setAiError('')
+    setAiSummary('')
+    try {
+      const r = await aiSummarize(previewTarget.id)
+      setAiSummary(r.summary ?? '')
+      setAiState('done')
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 503) setAiError(msg('aiSummaryDisabled'))
+      else if (err instanceof ApiError && err.status === 400) setAiError(msg('aiSummaryUnsupported'))
+      else setAiError(err instanceof Error ? err.message : msg('aiSummaryFailed'))
+      setAiState('error')
     }
   }
 
@@ -782,9 +895,47 @@ export default function FileBrowser({
     }
   }
 
+  // 新建白板：在当前目录上传「whiteboard-<timestamp>.excalidraw」初始空场景
+  // （普通文件上传，无需后端专用端点/集成配置，按钮恒可用），完成后按文件名
+  // 定位新文件并跳转编辑页。
+  const [whiteboardCreating, setWhiteboardCreating] = useState(false)
+  const handleCreateWhiteboard = async () => {
+    if (!uploadFn || whiteboardCreating) return
+    const name = `whiteboard-${Date.now()}.excalidraw`
+    const blob = new File([EMPTY_EXCALIDRAW_JSON], name, { type: 'application/json' })
+    setWhiteboardCreating(true)
+    setError('')
+    const key = ++uploadKey.current
+    setUploads((prev) => [...prev, { key, name, phase: 'creating' }])
+    try {
+      await uploadFn(blob, currentFolderId, (phase) => {
+        setUploads((prev) => prev.map((r) => (r.key === key ? { ...r, phase } : r)))
+      })
+      const { items: list } = await listItems(currentFolderId)
+      const created = list.find((it) => it.type === 'file' && it.name === name)
+      if (created) {
+        navigate(`/excalidraw/${created.id}`)
+      } else {
+        await load(currentParent)
+      }
+    } catch (err) {
+      setUploads((prev) =>
+        prev.map((r) =>
+          r.key === key ? { ...r, phase: 'error', error: writeErrorText(err, msg('whiteboardCreateFailed')) } : r,
+        ),
+      )
+    } finally {
+      setWhiteboardCreating(false)
+    }
+  }
+
   // 页面快捷键（v1.1）：n 新建文件夹 / u 上传 / Delete 删除选中 /
   // Escape 依次关弹窗（预览→标签→移动→新建文件夹），无弹窗时清空选择。
+  // v1.2（设计 6.16.1）：Ctrl/Cmd+1 列表视图、Ctrl/Cmd+2 网格视图
+  // （经 useHotkeys 的 'mod+' 白名单注册）。
   useHotkeys({
+    'mod+1': () => changeViewMode('list'),
+    'mod+2': () => changeViewMode('grid'),
     n: () => {
       if (createFolderFn && !searchMode) {
         setFolderOpen(true)
@@ -799,6 +950,10 @@ export default function FileBrowser({
       if (selected.size > 0 && !batchBusy) void handleBatchTrash()
     },
     Escape: () => {
+      if (cardMenuFor) {
+        setCardMenuFor(null)
+        return
+      }
       if (previewTarget) {
         closePreview()
         return
@@ -831,11 +986,61 @@ export default function FileBrowser({
     },
   })
 
+  // 条目操作按钮（列表行与网格卡片「⋯」菜单共用，语义一致）：
+  // 标签 / 复制 / office 编辑 / draw.io 图表 / 白板 / 下载 + 调用方 rowActions。
+  const itemActions = (item: FileItem) => (
+    <>
+      <button className="btn small" onClick={() => void openTagModal(item)}>{msg('tag')}</button>
+      {item.type === 'file' && copyFn && (
+        <button className="btn small" onClick={() => openCopyDialog(item)}>{msg('copy')}</button>
+      )}
+      {item.type === 'file' && ooEnabled && isOfficeFile(item.name) && (
+        <button className="btn small" title="ONLYOFFICE 在线编辑" onClick={() => navigate(`/edit/${item.id}`)}>
+          {locale === 'zh-CN' ? '编辑' : 'Edit'}
+        </button>
+      )}
+      {item.type === 'file' && drawioEnabled && isDrawioFile(item.name) && (
+        <button className="btn small" title="draw.io 图表编辑" onClick={() => navigate(`/drawio/${item.id}`)}>
+          {locale === 'zh-CN' ? '图表' : 'Diagram'}
+        </button>
+      )}
+      {item.type === 'file' && isExcalidrawFile(item.name) && (
+        <button className="btn small" title={msg('whiteboardEdit')} onClick={() => navigate(`/excalidraw/${item.id}`)}>
+          {msg('whiteboard')}
+        </button>
+      )}
+      {item.type === 'file' && (
+        <button className="btn small" onClick={() => void handleDownload(item)}>{msg('download')}</button>
+      )}
+      {rowActions?.(item)}
+    </>
+  )
+
   return (
     <div className="file-browser">
       <div className="page-head">
         <h2>{title}</h2>
         <div className="toolbar">
+          <div className="seg-group view-mode-toggle" role="group" aria-label={locale === 'zh-CN' ? '视图模式' : 'View mode'}>
+            <button
+              type="button"
+              className={`seg${viewMode === 'list' ? ' active' : ''}`}
+              title={msg('viewModeList')}
+              aria-pressed={viewMode === 'list'}
+              onClick={() => changeViewMode('list')}
+            >
+              ☰
+            </button>
+            <button
+              type="button"
+              className={`seg${viewMode === 'grid' ? ' active' : ''}`}
+              title={msg('viewModeGrid')}
+              aria-pressed={viewMode === 'grid'}
+              onClick={() => changeViewMode('grid')}
+            >
+              ▦
+            </button>
+          </div>
           {createFolderFn && !searchMode && (
             <button className="btn" onClick={() => { setFolderOpen(true); setFolderName(''); setFolderError('') }}>
               ＋ 新建文件夹
@@ -844,6 +1049,11 @@ export default function FileBrowser({
           {uploadFn && drawioEnabled && !searchMode && (
             <button className="btn" disabled={diagramCreating} onClick={() => void handleCreateDiagram()}>
               {diagramCreating ? (locale === 'zh-CN' ? '创建图表中…' : 'Creating…') : locale === 'zh-CN' ? '✎ 新建图表' : '✎ New diagram'}
+            </button>
+          )}
+          {uploadFn && !searchMode && (
+            <button className="btn" disabled={whiteboardCreating} onClick={() => void handleCreateWhiteboard()}>
+              {whiteboardCreating ? msg('whiteboardCreating') : msg('newWhiteboard')}
             </button>
           )}
           {uploadFn && !searchMode && (
@@ -968,7 +1178,7 @@ export default function FileBrowser({
         <div className="empty">{searchMode ? msg('noMatch') : emptyHint ?? (locale === 'zh-CN' ? '此目录为空，上传文件或新建文件夹开始使用' : 'This folder is empty. Upload a file or create a folder to get started.')}</div>
       )}
 
-      {items.length > 0 && (
+      {items.length > 0 && viewMode === 'list' && (
         <table className="file-table">
           <thead>
             <tr>
@@ -1022,30 +1232,72 @@ export default function FileBrowser({
                   )}
                 </td>
                 <td className="muted">{formatTime(item.updated_at)}</td>
-                <td className="col-actions">
-                  <button className="btn small" onClick={() => void openTagModal(item)}>{msg('tag')}</button>
-                  {item.type === 'file' && copyFn && (
-                    <button className="btn small" onClick={() => openCopyDialog(item)}>{msg('copy')}</button>
-                  )}
-                  {item.type === 'file' && ooEnabled && isOfficeFile(item.name) && (
-                    <button className="btn small" title="ONLYOFFICE 在线编辑" onClick={() => navigate(`/edit/${item.id}`)}>
-                      编辑
-                    </button>
-                  )}
-                  {item.type === 'file' && drawioEnabled && isDrawioFile(item.name) && (
-                    <button className="btn small" title="draw.io 图表编辑" onClick={() => navigate(`/drawio/${item.id}`)}>
-                      图表
-                    </button>
-                  )}
-                  {item.type === 'file' && (
-                    <button className="btn small" onClick={() => void handleDownload(item)}>下载</button>
-                  )}
-                  {rowActions?.(item)}
-                </td>
+                <td className="col-actions">{itemActions(item)}</td>
               </tr>
             ))}
           </tbody>
         </table>
+      )}
+
+      {/* 网格视图（设计 6.3.7）：卡片 = 图标/文件名/大小/时间；文件夹卡片点击
+          进入，文件卡片点击预览；右上「⋯」打开与列表行一致的操作菜单；
+          选择状态与列表视图共享（多选 + 批量工具条两视图通用）。 */}
+      {items.length > 0 && viewMode === 'grid' && (
+        <div className="file-grid">
+          {items.map((item) => {
+            const size = sizeCache.current.get(item.id) ?? 0
+            return (
+              <div key={item.id} className={`file-card${selected.has(item.id) ? ' selected' : ''}`}>
+                <div className="file-card-top">
+                  <input
+                    type="checkbox"
+                    checked={selected.has(item.id)}
+                    onChange={() => toggleSelect(item.id)}
+                    aria-label={`${msg('selectItem')} ${item.name}`}
+                  />
+                  <span className="file-card-top-actions">
+                    <button
+                      className="star-btn"
+                      title={item.is_starred ? '取消收藏' : '收藏'}
+                      onClick={() => void toggleStar(item)}
+                    >
+                      {item.is_starred ? '★' : '☆'}
+                    </button>
+                    <button
+                      className="btn ghost small card-menu-btn"
+                      title={msg('actions')}
+                      aria-haspopup="menu"
+                      aria-expanded={cardMenuFor === item.id}
+                      onClick={() => setCardMenuFor(cardMenuFor === item.id ? null : item.id)}
+                    >
+                      ⋯
+                    </button>
+                  </span>
+                </div>
+                <button
+                  className="file-card-body"
+                  title={item.type === 'file' ? msg('preview') : item.name}
+                  onClick={() => {
+                    if (item.type === 'folder') openFolder(item)
+                    else void openPreview(item)
+                  }}
+                >
+                  <span className="file-card-icon">{item.type === 'folder' ? '📁' : '📄'}</span>
+                  <span className="file-card-name" title={item.name}>{item.name}</span>
+                  <span className="file-card-meta muted">
+                    {size > 0 ? `${formatSize(size)} · ` : ''}
+                    {formatTime(item.updated_at)}
+                  </span>
+                </button>
+                {cardMenuFor === item.id && (
+                  <div className="file-card-menu" role="menu" onClickCapture={() => setCardMenuFor(null)}>
+                    {itemActions(item)}
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
       )}
 
       {uploads.length > 0 && (
@@ -1252,6 +1504,16 @@ export default function FileBrowser({
           ) : previewKindState === 'text' ? (
             <div className="preview-box">
               <pre className="preview-text">{previewText}</pre>
+              {/* AI 摘要：按需触发生成，结果/错误就地展示（503=未启用，400=类型不支持）。 */}
+              <div className="ai-summary">
+                <div className="preview-foot">
+                  <button className="btn" disabled={aiState === 'loading'} onClick={() => void handleSummarize()}>
+                    {aiState === 'loading' ? msg('aiSummaryLoading') : msg('aiSummary')}
+                  </button>
+                </div>
+                {aiState === 'done' && aiSummary && <div className="ai-summary-box">{aiSummary}</div>}
+                {aiState === 'error' && <div className="error-text">{aiError}</div>}
+              </div>
             </div>
           ) : null}
         </Modal>

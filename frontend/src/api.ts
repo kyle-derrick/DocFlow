@@ -344,7 +344,7 @@ export interface UploadSession {
   size: number
   offset: number
   status: UploadStatus
-  /** 覆盖为新版本会话的目标文件 ID（仅 file_id 创建的会话返回）。 */
+  /** 完成后的文件 ID（新文件 = 新建文件 id；版本会话 = 目标文件 id；仅 complete 后返回）。 */
   file_id?: string | null
   expires_at: string
   created_at: string
@@ -1441,6 +1441,63 @@ export function drawioStatus(): Promise<DrawioStatus> {
     }))
   }
   return drawioProbe
+}
+
+// ---------- Excalidraw 白板编辑器（前端内置，无需后端集成配置） ----------
+
+/** 仅 .excalidraw 扩展名进入白板编辑；编辑器由前端懒加载，按钮恒可用。 */
+export function isExcalidrawFile(name: string): boolean {
+  return name.toLowerCase().endsWith('.excalidraw')
+}
+
+/** 空白板初始场景（新建 .excalidraw 文件与空/损坏内容容错共用）。 */
+export const EMPTY_EXCALIDRAW_JSON = '{"type":"excalidraw","version":2,"elements":[],"appState":{}}'
+
+// ---------- AI 摘要（文本类文件） ----------
+
+/** POST /files/{id}/ai/summary 响应：生成的摘要文本。 */
+export interface AiSummaryResult {
+  summary: string
+}
+
+/**
+ * 生成文件 AI 摘要（仅文本类文件）：后端未配置 AI 时 503（AI_UNAVAILABLE），
+ * 非文本类 400；均以 ApiError 抛出，由调用方映射为提示文案。
+ */
+export async function aiSummarize(fileId: string): Promise<AiSummaryResult> {
+  return api<AiSummaryResult>(`/api/v1/files/${fileId}/ai/summary`, jsonInit('POST', {}))
+}
+
+// ---------- 路径级 ACL（团队空间文件夹） ----------
+
+/** ACL 主体类型：用户 / 团队 / 团队自定义角色。 */
+export type ACLSubjectType = 'user' | 'team' | 'role'
+
+/** 路径级 ACL 权限动作（read/write/delete/share，不含 admin）。 */
+export type ACLAction = 'read' | 'write' | 'delete' | 'share'
+
+/**
+ * 路径级 ACL 条目：主体（类型 + UUID）+ 效果（allow 授予 / deny 显式拒绝，
+ * deny 优先）+ 权限动作集合。保存为整体覆盖（PUT 全量条目）。
+ */
+export interface FolderACLEntry {
+  subject_type: ACLSubjectType
+  subject_id: string
+  effect: 'allow' | 'deny'
+  permissions: ACLAction[]
+}
+
+/** 查询文件夹路径级 ACL（仅团队 owner；无条目时为空数组）。 */
+export async function getFolderACL(folderId: string): Promise<FolderACLEntry[]> {
+  const data = await api<{ entries?: FolderACLEntry[] } | FolderACLEntry[]>(
+    `/api/v1/folders/${folderId}/acl`,
+  )
+  return Array.isArray(data) ? data : (data.entries ?? [])
+}
+
+/** 整体覆盖保存文件夹路径级 ACL（仅团队 owner；空数组即清空全部条目）。 */
+export async function putFolderACL(folderId: string, entries: FolderACLEntry[]): Promise<void> {
+  await api(`/api/v1/folders/${folderId}/acl`, jsonInit('PUT', { entries }))
 }
 
 // ---------- 管理端（仅 admin 角色） ----------

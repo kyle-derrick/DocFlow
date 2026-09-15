@@ -223,7 +223,7 @@ func (s *Store) ListTrash(owner uuid.UUID, limit int) ([]File, error) {
 // Restore 恢复软删除文件；冲突时返回 ErrParentDeleted/ErrConflict（409），不静默改名。
 // 权限：个人文件 owner；团队文件 CanWrite（含自定义角色，authorizeFileWrite）。
 func (s *Store) Restore(user, id uuid.UUID) (File, error) {
-	authorize := func(f File) error { return authorizeFileWrite(f, user, s.teamWriter) }
+	authorize := func(f File) error { return authorizeFileWrite(f, user, s.teamWriter, s.acl) }
 	var f File
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		var e error
@@ -243,7 +243,7 @@ func (s *Store) Restore(user, id uuid.UUID) (File, error) {
 // webpkg/<public_id>/ 前缀对象（best-effort）；HTTP purge 与 janitor sweepTrash
 // 均经本方法，两路清理统一生效（janitor 走不做用户判定的 PurgeSystem）。
 func (s *Store) Purge(user, id uuid.UUID) (purged []File, deleting []ObjectBlob, err error) {
-	authorize := func(f File) error { return authorizeTeamDelete(f, user, s.teamDeleter) }
+	authorize := func(f File) error { return authorizeTeamDelete(f, user, s.teamDeleter, s.acl) }
 	return s.purgeWithAuthorize(id, authorize)
 }
 

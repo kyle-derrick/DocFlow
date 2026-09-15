@@ -64,3 +64,7 @@ type Member struct {
 	RoleName  string     `gorm:"->" json:"role_name,omitempty"`
 	CreatedAt time.Time  `json:"created_at"`
 }
+
+// TableName 显式映射 team_members（gorm 默认复数化为 members，与
+// migrations/008 的表名不符——运行时才会暴露）。
+func (Member) TableName() string { return "team_members" }

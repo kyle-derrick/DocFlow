@@ -4,7 +4,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { DashboardData, getDashboard } from '../api'
-import { HOTKEY_DOCS } from '../components/HotkeysHelp'
+import { hotkeyDocs } from '../components/HotkeysHelp'
 import { formatTime } from '../components/FileBrowser'
 import { MessageKey, t, useLocale } from '../i18n'
 
@@ -122,7 +122,7 @@ export default function DashboardPage() {
           <div className="panel">
             <h3>{msg('hotkeys')}</h3>
             <div className="hotkey-group">
-              {HOTKEY_DOCS[0].items.slice(0, 4).map((item) => (
+              {hotkeyDocs(locale)[0].items.slice(0, 4).map((item) => (
                 <div key={item.desc} className="hotkey-row">
                   <span className="hotkey-desc">{item.desc}</span>
                   <span className="hotkey-keys">

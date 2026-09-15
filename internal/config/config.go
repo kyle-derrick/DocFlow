@@ -173,6 +173,26 @@ type Config struct {
 	AllowedOrigins []string
 	Environment    string
 	BackupDir      string
+	// AIEnabled 控制 AI 文件摘要集成（AI_ENABLED，默认 false）：false 时
+	// POST /files/:id/ai/summary 返回 503 AI_DISABLED（路由恒注册）。
+	AIEnabled bool
+	// AIBaseURL 为 OpenAI 兼容服务基地址（AI_BASE_URL，默认
+	// https://api.openai.com/v1，可指向任意兼容网关），启用时须为绝对
+	// http(s) URL。
+	AIBaseURL string
+	// AIAPIKey 为上游 API Key（AI_API_KEY，启用时必填；密钥只走环境变量）。
+	AIAPIKey string
+	// AIModel 为摘要模型（AI_MODEL，默认 gpt-4o-mini）。
+	AIModel string
+	// SearchDriver 选择全文检索引擎（SEARCH_DRIVER）：pg（默认，PostgreSQL
+	// 原生 ILIKE+tsvector）| meili（Meilisearch，v2 可选项）。
+	SearchDriver string
+	// MeiliURL 为 Meilisearch 基地址（MEILI_URL，meili 驱动时必填且须为
+	// 绝对 http(s) URL；启动时 EnsureIndex 失败即退出）。
+	MeiliURL string
+	// MeiliAPIKey 为 Meilisearch API Key（MEILI_API_KEY，可空——未设
+	// MASTER_KEY 的本地实例）。
+	MeiliAPIKey string
 }
 
 func Load() (Config, error) {
@@ -316,7 +336,11 @@ func Load() (Config, error) {
 	if e != nil {
 		return Config{}, e
 	}
-	c := Config{Port: stringEnv("PORT", "8080"), DatabaseURL: os.Getenv("DATABASE_URL"), JWTSecret: os.Getenv("JWT_SECRET"), AccessTokenTTL: a, RefreshTokenTTL: r, CookieSecure: secure, CookieDomain: os.Getenv("COOKIE_DOMAIN"), StorageRoot: stringEnv("STORAGE_ROOT", "./storage"), MaxFileSize: max, ScanEnabled: scan, UploadSessionTTL: ttl, TrustedProxies: listEnv("TRUSTED_PROXIES"), StorageDriver: stringEnv("STORAGE_DRIVER", "local"), S3Endpoint: os.Getenv("S3_ENDPOINT"), S3Bucket: os.Getenv("S3_BUCKET"), S3Region: stringEnv("S3_REGION", "us-east-1"), S3AccessKey: os.Getenv("S3_ACCESS_KEY"), S3SecretKey: os.Getenv("S3_SECRET_KEY"), S3PathStyle: pathStyle, ClamAVAddr: os.Getenv("CLAMAV_ADDR"), ClamAVTimeout: clamavTimeout, ClamAVRequired: clamavRequired, RateLimitPerMinute: rateLimit, LoginRateLimitPerMinute: loginRateLimit, PublicRateLimitPerMinute: publicRateLimit, MaxVersionsPerFile: maxVersions, JanitorEnabled: janitorEnabled, JanitorInterval: janitorInterval, OnlyOfficeEnabled: ooEnabled, OnlyOfficeServerURL: stringEnv("ONLYOFFICE_SERVER_URL", "http://onlyoffice:80"), OnlyOfficePublicURL: stringEnv("ONLYOFFICE_PUBLIC_URL", ""), OnlyOfficeJWTSecret: os.Getenv("ONLYOFFICE_JWT_SECRET"), OnlyOfficeDownloadURLBase: stringEnv("ONLYOFFICE_DOWNLOAD_URL_BASE", "http://backend:8080"), OnlyOfficeRateLimitPerMinute: ooRateLimit, MetricsEnabled: metricsEnabled, DrawioEnabled: drawioEnabled, DrawioServerURL: stringEnv("DRAWIO_SERVER_URL", "http://drawio:8080"), DrawioPublicURL: stringEnv("DRAWIO_PUBLIC_URL", ""), WebpkgEnabled: webpkgEnabled, WebpkgMaxEntries: webpkgMaxEntries, WebpkgMaxFileSize: webpkgMaxFileSize, WebpkgMaxTotalSize: webpkgMaxTotalSize, WebpkgMaxDepth: webpkgMaxDepth, WebpkgRateLimitPerMinute: webpkgRateLimit, QueueDriver: stringEnv("QUEUE_DRIVER", "inprocess"), RedisAddr: stringEnv("REDIS_ADDR", "localhost:6379"), RedisPassword: os.Getenv("REDIS_PASSWORD"), QueueConcurrency: queueConcurrency, PatchMaxBytes: patchMax, SMTPEnabled: smtpEnabled, SMTPHost: os.Getenv("SMTP_HOST"), SMTPPort: smtpPort, SMTPUser: os.Getenv("SMTP_USER"), SMTPPass: os.Getenv("SMTP_PASS"), SMTPFrom: os.Getenv("SMTP_FROM"), PublicBaseURL: stringEnv("PUBLIC_BASE_URL", ""), OIDCEnabled: oidcEnabled, OIDCIssuer: strings.TrimSuffix(stringEnv("OIDC_ISSUER", ""), "/"), OIDCClientID: os.Getenv("OIDC_CLIENT_ID"), OIDCClientSecret: os.Getenv("OIDC_CLIENT_SECRET"), OIDCRedirectURL: stringEnv("OIDC_REDIRECT_URL", ""), OIDCAutoProvision: oidcAutoProvision, AccessSalt: os.Getenv("ACCESS_SALT"), LoginMaxRetries: loginMaxRetries, LoginLockDuration: time.Duration(loginLockMinutes) * time.Minute, CSRFStrict: csrfStrict, AllowedOrigins: listEnv("ALLOWED_ORIGINS"), Environment: stringEnv("APP_ENV", "development"), BackupDir: stringEnv("BACKUP_DIR", "")}
+	aiEnabled, e := boolEnv("AI_ENABLED", false)
+	if e != nil {
+		return Config{}, e
+	}
+	c := Config{Port: stringEnv("PORT", "8080"), DatabaseURL: os.Getenv("DATABASE_URL"), JWTSecret: os.Getenv("JWT_SECRET"), AccessTokenTTL: a, RefreshTokenTTL: r, CookieSecure: secure, CookieDomain: os.Getenv("COOKIE_DOMAIN"), StorageRoot: stringEnv("STORAGE_ROOT", "./storage"), MaxFileSize: max, ScanEnabled: scan, UploadSessionTTL: ttl, TrustedProxies: listEnv("TRUSTED_PROXIES"), StorageDriver: stringEnv("STORAGE_DRIVER", "local"), S3Endpoint: os.Getenv("S3_ENDPOINT"), S3Bucket: os.Getenv("S3_BUCKET"), S3Region: stringEnv("S3_REGION", "us-east-1"), S3AccessKey: os.Getenv("S3_ACCESS_KEY"), S3SecretKey: os.Getenv("S3_SECRET_KEY"), S3PathStyle: pathStyle, ClamAVAddr: os.Getenv("CLAMAV_ADDR"), ClamAVTimeout: clamavTimeout, ClamAVRequired: clamavRequired, RateLimitPerMinute: rateLimit, LoginRateLimitPerMinute: loginRateLimit, PublicRateLimitPerMinute: publicRateLimit, MaxVersionsPerFile: maxVersions, JanitorEnabled: janitorEnabled, JanitorInterval: janitorInterval, OnlyOfficeEnabled: ooEnabled, OnlyOfficeServerURL: stringEnv("ONLYOFFICE_SERVER_URL", "http://onlyoffice:80"), OnlyOfficePublicURL: stringEnv("ONLYOFFICE_PUBLIC_URL", ""), OnlyOfficeJWTSecret: os.Getenv("ONLYOFFICE_JWT_SECRET"), OnlyOfficeDownloadURLBase: stringEnv("ONLYOFFICE_DOWNLOAD_URL_BASE", "http://backend:8080"), OnlyOfficeRateLimitPerMinute: ooRateLimit, MetricsEnabled: metricsEnabled, DrawioEnabled: drawioEnabled, DrawioServerURL: stringEnv("DRAWIO_SERVER_URL", "http://drawio:8080"), DrawioPublicURL: stringEnv("DRAWIO_PUBLIC_URL", ""), WebpkgEnabled: webpkgEnabled, WebpkgMaxEntries: webpkgMaxEntries, WebpkgMaxFileSize: webpkgMaxFileSize, WebpkgMaxTotalSize: webpkgMaxTotalSize, WebpkgMaxDepth: webpkgMaxDepth, WebpkgRateLimitPerMinute: webpkgRateLimit, QueueDriver: stringEnv("QUEUE_DRIVER", "inprocess"), RedisAddr: stringEnv("REDIS_ADDR", "localhost:6379"), RedisPassword: os.Getenv("REDIS_PASSWORD"), QueueConcurrency: queueConcurrency, PatchMaxBytes: patchMax, SMTPEnabled: smtpEnabled, SMTPHost: os.Getenv("SMTP_HOST"), SMTPPort: smtpPort, SMTPUser: os.Getenv("SMTP_USER"), SMTPPass: os.Getenv("SMTP_PASS"), SMTPFrom: os.Getenv("SMTP_FROM"), PublicBaseURL: stringEnv("PUBLIC_BASE_URL", ""), OIDCEnabled: oidcEnabled, OIDCIssuer: strings.TrimSuffix(stringEnv("OIDC_ISSUER", ""), "/"), OIDCClientID: os.Getenv("OIDC_CLIENT_ID"), OIDCClientSecret: os.Getenv("OIDC_CLIENT_SECRET"), OIDCRedirectURL: stringEnv("OIDC_REDIRECT_URL", ""), OIDCAutoProvision: oidcAutoProvision, AccessSalt: os.Getenv("ACCESS_SALT"), LoginMaxRetries: loginMaxRetries, LoginLockDuration: time.Duration(loginLockMinutes) * time.Minute, CSRFStrict: csrfStrict, AllowedOrigins: listEnv("ALLOWED_ORIGINS"), Environment: stringEnv("APP_ENV", "development"), BackupDir: stringEnv("BACKUP_DIR", ""), AIEnabled: aiEnabled, AIBaseURL: stringEnv("AI_BASE_URL", "https://api.openai.com/v1"), AIAPIKey: os.Getenv("AI_API_KEY"), AIModel: stringEnv("AI_MODEL", "gpt-4o-mini"), SearchDriver: stringEnv("SEARCH_DRIVER", "pg"), MeiliURL: stringEnv("MEILI_URL", ""), MeiliAPIKey: os.Getenv("MEILI_API_KEY")}
 	// OIDC 回调地址默认值：{PUBLIC_BASE_URL}/api/v1/auth/oidc/callback
 	//（两者均未设置时由 validateOIDC 报错——IdP 侧必须注册确切回调地址）。
 	if c.OIDCEnabled && c.OIDCRedirectURL == "" && c.PublicBaseURL != "" {
@@ -369,7 +393,40 @@ func Load() (Config, error) {
 	if e := validateOIDC(c); e != nil {
 		return Config{}, e
 	}
+	if e := validateAI(c); e != nil {
+		return Config{}, e
+	}
+	if e := validateSearch(c); e != nil {
+		return Config{}, e
+	}
 	return c, nil
+}
+
+// validateAI 校验 AI 摘要配置：启用时 API_KEY 必填、BASE_URL（含默认值）
+// 须为绝对 http(s) URL。
+func validateAI(c Config) error {
+	if !c.AIEnabled {
+		return nil
+	}
+	if c.AIAPIKey == "" {
+		return errors.New("AI_API_KEY is required when AI_ENABLED")
+	}
+	return checkAbsoluteHTTPURL(c.AIBaseURL, "AI_BASE_URL")
+}
+
+// validateSearch 校验全文检索引擎配置：驱动取值 pg|meili；meili 时
+// MEILI_URL 必填且须为绝对 http(s) URL（启动时 EnsureIndex 校验连通性）。
+func validateSearch(c Config) error {
+	if c.SearchDriver != "pg" && c.SearchDriver != "meili" {
+		return errors.New("SEARCH_DRIVER must be pg or meili")
+	}
+	if c.SearchDriver == "meili" {
+		if c.MeiliURL == "" {
+			return errors.New("MEILI_URL is required when SEARCH_DRIVER=meili")
+		}
+		return checkAbsoluteHTTPURL(c.MeiliURL, "MEILI_URL")
+	}
+	return nil
 }
 
 // validateOIDC 校验 OIDC 单点登录配置：启用时 ISSUER 须为绝对 http(s) URL、

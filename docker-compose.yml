@@ -10,15 +10,17 @@
 #   full       minimal + redis + onlyoffice + drawio       —— make up-full
 #   antivirus  minimal + clamav（可与 full 叠加）          —— docker compose
 #              --profile full --profile antivirus up -d
-# 三个 profile 均含核心三件套（caddy/backend/postgres），可单独或叠加启动。
+#   search     minimal + meilisearch（可与 full 叠加）     —— 全文搜索引擎可选项
+# 三个核心 profile（minimal/full/antivirus）均含核心三件套（caddy/backend/
+# postgres），可单独或叠加启动；search profile 需 .env 联动 SEARCH_DRIVER=meili
+#（否则 backend 仍用 pg 引擎，meilisearch 服务不被使用）。
 #
 # 本地开发不经本文件的 caddy：后端 `make run` 直接监听宿主 :8080，前端
 # `cd frontend && npm run dev`（vite 将 /api 代理到 localhost:8080）。
-# 本机无 postgres 时可临时起一个并挂载迁移目录：
+# 本机无 postgres 时可临时起一个：
 #   docker run -d --name docflow-pg -p 5432:5432 \
 #     -e POSTGRES_DB=docflow -e POSTGRES_USER=docflow \
-#     -e POSTGRES_PASSWORD=change-me \
-#     -v "$PWD/migrations:/docker-entrypoint-initdb.d:ro" postgres:16-alpine
+#     -e POSTGRES_PASSWORD=change-me postgres:16-alpine
 services:
   # 统一入口：TLS 终止 + 前端静态产物 + API/内容/ONLYOFFICE 反代。
   # 构建上下文为 ./frontend（多阶段构建，产物并入本镜像），配置挂载
@@ -44,6 +46,9 @@ services:
       # 默认 discard 端口，/drawio/* 502 属预期）；make up-full 注入
       # drawio:8080。
       DRAWIO_UPSTREAM: ${DRAWIO_UPSTREAM:-127.0.0.1:9}
+      # 独立内容 origin；默认 content.localhost 仅用于本地验证。
+      CONTENT_DOMAIN: ${CONTENT_DOMAIN:-content.localhost}
+      CONTENT_UPSTREAM: ${CONTENT_UPSTREAM:-backend:8080}
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
@@ -62,11 +67,10 @@ services:
       DATABASE_URL: ${DATABASE_URL:-postgres://docflow:change-me@postgres:5432/docflow?sslmode=disable}
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
       PORT: 8080
-      # 默认 true（后端 config 同款默认，生产 HTTPS）；本地经 http 访问
-      # 需在 .env 显式设 false，否则浏览器不会回传 refresh cookie。
+      # 生产 HTTPS 默认 true；本地 HTTP 访问需在 .env 显式设 false。
       COOKIE_SECURE: ${COOKIE_SECURE:-true}
       ACCESS_TOKEN_TTL: ${ACCESS_TOKEN_TTL:-15m}
-      REFRESH_TOKEN_TTL: ${REFRESH_TOKEN_TTL:-720h}
+      REFRESH_TOKEN_TTL: ${REFRESH_TOKEN_TTL:-168h}
       STORAGE_DRIVER: ${STORAGE_DRIVER:-local}
       STORAGE_ROOT: /data/storage
       S3_ENDPOINT: ${S3_ENDPOINT:-}
@@ -140,6 +144,18 @@ services:
       WEBPKG_MAX_TOTAL_SIZE: ${WEBPKG_MAX_TOTAL_SIZE:-268435456}
       WEBPKG_MAX_DEPTH: ${WEBPKG_MAX_DEPTH:-10}
       WEBPKG_RATE_LIMIT_PER_MIN: ${WEBPKG_RATE_LIMIT_PER_MIN:-120}
+      # 全文检索引擎（SEARCH_DRIVER=pg|meili，默认 pg）：meili 时启动
+      # EnsureIndex 校验连通性（失败即退出），需 --profile search 启动
+      # meilisearch 服务（MEILI_URL 默认指向 compose 服务名）。
+      SEARCH_DRIVER: ${SEARCH_DRIVER:-pg}
+      MEILI_URL: ${MEILI_URL:-http://meilisearch:7700}
+      MEILI_API_KEY: ${MEILI_API_KEY:-}
+      # AI 文件摘要（默认关闭）：启用需 .env 设 AI_ENABLED=true 与 AI_API_KEY
+      #（BASE_URL/MODEL 可指向任意 OpenAI 兼容网关与模型）。
+      AI_ENABLED: ${AI_ENABLED:-false}
+      AI_BASE_URL: ${AI_BASE_URL:-https://api.openai.com/v1}
+      AI_API_KEY: ${AI_API_KEY:-}
+      AI_MODEL: ${AI_MODEL:-gpt-4o-mini}
     expose:
       - "8080"
     healthcheck:
@@ -149,6 +165,17 @@ services:
       retries: 3
     volumes:
       - backend_storage:/data/storage
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    profiles: ["minimal", "full", "antivirus"]
+
+  migrate:
+    image: docflow/backend:1.0.0
+    restart: "no"
+    command: ["/migrate", "-dir", "/migrations"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgres://docflow:change-me@postgres:5432/docflow?sslmode=disable}
     depends_on:
       postgres:
         condition: service_healthy
@@ -161,14 +188,10 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-docflow}
       POSTGRES_USER: ${POSTGRES_USER:-docflow}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
-    # 迁移执行方式（利弊）：migrations 挂到 docker-entrypoint-initdb.d 仅在
-    # 数据卷首次初始化（空卷）时按文件名序执行——开箱即用，但镜像/脚本升级
-    # 新增的迁移不会自动执行，且重复 up 不会重放；生产更稳妥的是显式迁移
-    # 执行（psql / migrate 等对 backend 镜像内 /migrations 跑版本化迁移）。
-    # 本次保留挂载以便全新环境零额外步骤启动。
+    # 保留 initdb 挂载仅为全新空卷兼容兜底；增量迁移由 migrate 服务每次启动执行，
+    # 因此已有数据库升级不依赖 postgres entrypoint。
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
     profiles: ["minimal", "full", "antivirus"]
@@ -248,9 +271,46 @@ services:
     restart: unless-stopped
     expose:
       - "8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
     profiles: ["full"]
+
+  # SeaweedFS S3 兼容对象存储（storage profile，可与 full 叠加）。
+  # local 是默认存储驱动，不会自动启用此服务；启用 S3 时配置 STORAGE_DRIVER=s3。
+  seaweedfs:
+    image: chrislusf/seaweedfs:3.80
+    command: server -s3 -dir=/data -master.volumeSizeLimitMB=1024
+    restart: unless-stopped
+    expose:
+      - "8333"
+    volumes:
+      - seaweedfs_data:/data
+    profiles: ["storage"]
+
+  # Meilisearch 全文搜索引擎（search profile，可与 full/antivirus 叠加）：
+  # docker compose --profile search up -d 启动。对应 .env 联动：
+  # SEARCH_DRIVER=meili、MEILI_URL=http://meilisearch:7700；启用 MASTER_KEY
+  # 时 MEILI_API_KEY 取同值（可空 = 无认证实例，仅内网暴露）。
+  # backend 启动即创建索引 docflow-files（主键 file_id），不可达时拒绝启动；
+  # 不声明 depends_on，保持按需启用（pg 驱动时不拖入本服务）。
+  # 端口仅 compose 内网（不映射宿主 7700）。
+  meilisearch:
+    image: getmeili/meilisearch:v1.8.3
+    restart: unless-stopped
+    environment:
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-}
+      MEILI_NO_ANALYTICS: "true"
+    expose:
+      - "7700"
+    volumes:
+      - meili_data:/meili_data
+    profiles: ["search"]
   #
-  # 如需 S3 兼容对象存储（STORAGE_DRIVER=s3），可参考以下示例自行启用
+  # 如需其他 S3 兼容对象存储（STORAGE_DRIVER=s3），可参考以下示例自行启用
   #（本仓库默认不启用，仅作说明；MinIO 与 SeaweedFS 二选一即可）：
   # minio:
   #   image: minio/minio:RELEASE.2024-09-13T20-26-02Z
@@ -276,3 +336,5 @@ volumes:
   caddy_config:
   onlyoffice_data:
   onlyoffice_logs:
+  seaweedfs_data:
+  meili_data:

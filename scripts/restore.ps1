@@ -8,4 +8,4 @@ if ($env:BACKUP_FILE.EndsWith('.age')) { if (-not (Get-Command age -ErrorAction 
 Expand-Archive $archive $work -Force
 & psql $env:DATABASE_URL -f (Join-Path $work 'postgres.sql')
 if (($env:STORAGE_DRIVER ?? 'local') -eq 'local') { Expand-Archive (Join-Path $work 'objects.zip') (Split-Path ($env:STORAGE_ROOT ?? './storage')) -Force } else { if (-not (Get-Command aws -ErrorAction SilentlyContinue)) { throw 'aws-cli is required' }; & aws s3 sync (Join-Path $work 'objects') "s3://$($env:S3_BUCKET)" }
-& go run ./cmd/backup-verify -dir $work -database-url $env:DATABASE_URL
+& go run ./cmd/backup-verify -dir $work

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -624,6 +626,11 @@ func (s *Service) Complete(id uuid.UUID) (UploadSession, error) {
 	// 终态幂等：available/failed/quarantined 直接返回当前状态，不重复处理。
 	switch v.Status {
 	case StatusAvailable:
+		// 幂等重入恢复回显（版本会话可从 TargetFileID 还原；新文件场景
+		// 无法从会话行反查文件 id，属已知限制）。
+		if v.TargetFileID != nil {
+			v.FileID = *v.TargetFileID
+		}
 		return v, nil
 	case StatusQuarantined:
 		return v, ErrRejected
@@ -739,7 +746,7 @@ func (s *Service) Complete(id uuid.UUID) (UploadSession, error) {
 			_ = s.store.Update(v)
 			return v, ErrTargetUnavailable
 		}
-		newBlob, re := s.replaceFile(v.UserID, *v.TargetFileID, v.StorageKey, sum, v.Size, "application/octet-stream")
+		newBlob, re := s.replaceFile(v.UserID, *v.TargetFileID, v.StorageKey, sum, v.Size, detectContentType(v.Name))
 		if re != nil {
 			v.Status = StatusFailed
 			_ = s.store.Update(v)
@@ -753,11 +760,12 @@ func (s *Service) Complete(id uuid.UUID) (UploadSession, error) {
 		// 完成路径通知属主（覆盖新版本成功，资源为目标文件）。
 		s.notifyOwner(v, "upload.completed", "上传完成："+v.Name, "文件「"+v.Name+"」已作为新版本写入，校验与安全扫描通过。", *v.TargetFileID)
 		completedFileID = *v.TargetFileID
+		v.FileID = *v.TargetFileID
 		if s.fileComplete != nil {
 			s.fileComplete(*v.TargetFileID)
 		}
 	} else if s.createFile != nil {
-		fileID, newBlob, ce := s.createFile(v.UserID, v.ParentID, v.Name, v.StorageKey, v.Size, sum, "application/octet-stream")
+		fileID, newBlob, ce := s.createFile(v.UserID, v.ParentID, v.Name, v.StorageKey, v.Size, sum, detectContentType(v.Name))
 		if ce != nil {
 			v.Status = StatusFailed
 			_ = s.store.Update(v)
@@ -771,6 +779,7 @@ func (s *Service) Complete(id uuid.UUID) (UploadSession, error) {
 		// 完成路径通知属主（新文件创建成功，资源为新建文件）。
 		s.notifyOwner(v, "upload.completed", "上传完成："+v.Name, "文件「"+v.Name+"」已完成校验与安全扫描，可以下载或预览。", fileID)
 		completedFileID = fileID
+		v.FileID = fileID
 		if s.fileComplete != nil {
 			s.fileComplete(fileID)
 		}
@@ -797,6 +806,17 @@ func (s *Service) Complete(id uuid.UUID) (UploadSession, error) {
 		return v, e
 	}
 	return v, nil
+}
+
+// detectContentType 按文件名扩展推断 Content-Type（小写扩展，未知回退
+// application/octet-stream）。此前落库恒为 octet-stream，文本/图片等
+// 可预览类型全部 415（运行时冒烟暴露）；MIME 嗅探按设计仅做展示与预览
+// 白名单判定，安全边界仍在扫描与下载侧。
+func detectContentType(name string) string {
+	if t := mime.TypeByExtension(strings.ToLower(filepath.Ext(name))); t != "" {
+		return t
+	}
+	return "application/octet-stream"
 }
 
 // resolveCompletionRace 在 CAS 状态迁移竞争失败后重读会话并映射语义：

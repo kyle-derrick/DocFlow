@@ -169,6 +169,11 @@ func NewGormAPITokenStore(db *gorm.DB) *GormAPITokenStore {
 }
 
 func (s *GormAPITokenStore) Create(token APIToken) error {
+	// scopes 列 NOT NULL（migration 026）：nil 切片经 serializer:json 落
+	// NULL 触发 23502，未指定 scopes（全权限兼容语义）统一落空数组。
+	if token.Scopes == nil {
+		token.Scopes = []string{}
+	}
 	return s.db.Create(&token).Error
 }
 

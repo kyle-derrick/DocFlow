@@ -1,8 +1,10 @@
 import { FormEvent, useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import {
+  ACLAction,
   FileItem,
   FileQueryOptions,
+  FolderACLEntry,
   RolePermissions,
   Team,
   TeamMember,
@@ -13,16 +15,18 @@ import {
   createTeamRole,
   currentUserId,
   deleteTeamRole,
+  getFolderACL,
   listTeamFiles,
   listTeamMembers,
   listTeamRoles,
   listTeams,
+  putFolderACL,
   removeTeamMember,
   updateTeamMemberRole,
   updateTeamRole,
   uploadFile,
 } from '../api'
-import FileBrowser, { DirListing, formatTime } from '../components/FileBrowser'
+import FileBrowser, { DirListing, Modal, formatTime } from '../components/FileBrowser'
 import VersionHistoryModal from '../components/VersionHistoryModal'
 import { MessageKey, formatMessage, t, useLocale } from '../i18n'
 
@@ -36,6 +40,16 @@ const PERM_LABEL_KEYS: Record<string, MessageKey> = {
   delete: 'permDelete',
   share: 'permShare',
   admin: 'permAdmin',
+}
+
+/** 路径级 ACL 权限动作清单（不含 admin，与后端 folder ACL 契约一致）。 */
+const ACL_ACTIONS: readonly ACLAction[] = ['read', 'write', 'delete', 'share']
+
+/** ACL 主体类型 → i18n key（条目表格与添加行共用）。 */
+const ACL_SUBJECT_KEYS: Record<string, MessageKey> = {
+  user: 'aclSubjectUser',
+  team: 'aclSubjectTeam',
+  role: 'aclSubjectRole',
 }
 
 /** 成员表下拉的选项值：系统角色 'viewer'/'editor' 或自定义角色 'role:<id>'。 */
@@ -114,6 +128,106 @@ export default function TeamSpacePage() {
 
   const [fileReloadKey, setFileReloadKey] = useState(0)
   const [historyTarget, setHistoryTarget] = useState<FileItem | null>(null)
+
+  // ---- 路径级 ACL（文件夹行「权限」按钮，仅 owner 可见；保存整体 PUT 覆盖） ----
+  const [aclTarget, setAclTarget] = useState<FileItem | null>(null)
+  const [aclEntries, setAclEntries] = useState<FolderACLEntry[]>([])
+  const [aclLoading, setAclLoading] = useState(false)
+  const [aclBusy, setAclBusy] = useState(false)
+  const [aclError, setAclError] = useState('')
+  const [aclNotice, setAclNotice] = useState('')
+  const [aclNewType, setAclNewType] = useState<FolderACLEntry['subject_type']>('user')
+  const [aclNewId, setAclNewId] = useState('')
+  const [aclNewEffect, setAclNewEffect] = useState<FolderACLEntry['effect']>('allow')
+  const [aclNewPerms, setAclNewPerms] = useState<Record<string, boolean>>({ read: true })
+
+  // 保存成功 toast：4 秒自动消失。
+  useEffect(() => {
+    if (!aclNotice) return
+    const timer = window.setTimeout(() => setAclNotice(''), 4000)
+    return () => window.clearTimeout(timer)
+  }, [aclNotice])
+
+  const openAcl = async (folder: FileItem) => {
+    setAclTarget(folder)
+    setAclEntries([])
+    setAclError('')
+    setAclLoading(true)
+    setAclNewType('user')
+    setAclNewId('')
+    setAclNewEffect('allow')
+    setAclNewPerms({ read: true })
+    try {
+      setAclEntries(await getFolderACL(folder.id))
+    } catch (err) {
+      setAclError(err instanceof Error ? err.message : msg('loadFailed'))
+    } finally {
+      setAclLoading(false)
+    }
+  }
+
+  const closeAcl = () => {
+    if (aclBusy) return
+    setAclTarget(null)
+  }
+
+  const addAclEntry = (e: FormEvent) => {
+    e.preventDefault()
+    const subjectId = aclNewId.trim()
+    if (!UUID_RE.test(subjectId)) {
+      setAclError(msg('uuidInvalid'))
+      return
+    }
+    const permissions = ACL_ACTIONS.filter((a) => aclNewPerms[a])
+    if (permissions.length === 0) {
+      setAclError(msg('aclNoPerms'))
+      return
+    }
+    setAclEntries((prev) => [
+      ...prev,
+      { subject_type: aclNewType, subject_id: subjectId, effect: aclNewEffect, permissions: [...permissions] },
+    ])
+    setAclNewId('')
+    setAclError('')
+  }
+
+  const removeAclEntry = (index: number) => {
+    setAclEntries((prev) => prev.filter((_, i) => i !== index))
+  }
+
+  const setAclEntryEffect = (index: number, effect: FolderACLEntry['effect']) => {
+    setAclEntries((prev) => prev.map((entry, i) => (i === index ? { ...entry, effect } : entry)))
+  }
+
+  const toggleAclEntryPerm = (index: number, action: ACLAction) => {
+    setAclEntries((prev) =>
+      prev.map((entry, i) =>
+        i === index
+          ? {
+              ...entry,
+              permissions: entry.permissions.includes(action)
+                ? entry.permissions.filter((a) => a !== action)
+                : [...entry.permissions, action],
+            }
+          : entry,
+      ),
+    )
+  }
+
+  const handleSaveAcl = async () => {
+    if (!aclTarget) return
+    setAclBusy(true)
+    setAclError('')
+    try {
+      await putFolderACL(aclTarget.id, aclEntries)
+      setAclTarget(null)
+      setAclNotice(msg('aclSaved'))
+    } catch (err) {
+      setAclError(err instanceof Error ? err.message : msg('saveFailed'))
+    } finally {
+      setAclBusy(false)
+    }
+  }
 
   const myId = currentUserId()
   const isOwner = team !== null && myId !== null && team.owner_id === myId
@@ -279,6 +393,7 @@ export default function TeamSpacePage() {
       </div>
 
       {error && <div className="banner error">{error}</div>}
+      {aclNotice && <div className="banner ok">{aclNotice}</div>}
       {loading && <div className="hint">{msg('loading')}</div>}
 
       {!loading && team && (
@@ -424,11 +539,16 @@ export default function TeamSpacePage() {
               createFolderFn={(name, parentId) => createTeamFolder(id, name, parentId)}
               uploadFn={uploadFile}
               reloadKey={fileReloadKey}
-              rowActions={(item) =>
-                item.type === 'file' ? (
-                  <button className="btn small" onClick={() => setHistoryTarget(item)}>历史</button>
-                ) : null
-              }
+              rowActions={(item) => (
+                <>
+                  {item.type === 'folder' && isOwner && (
+                    <button className="btn small" onClick={() => void openAcl(item)}>{msg('acl')}</button>
+                  )}
+                  {item.type === 'file' && (
+                    <button className="btn small" onClick={() => setHistoryTarget(item)}>历史</button>
+                  )}
+                </>
+              )}
               emptyHint={msg('teamSpaceEmpty')}
             />
           </div>
@@ -441,6 +561,103 @@ export default function TeamSpacePage() {
           onClose={() => setHistoryTarget(null)}
           onChanged={() => setFileReloadKey((k) => k + 1)}
         />
+      )}
+
+      {/* 路径级 ACL 管理：条目列表（主体/效果/权限勾选可改、删除行）+ 添加行，
+          保存时整体 PUT 覆盖全部条目。 */}
+      {aclTarget && (
+        <Modal wide title={formatMessage(msg('aclTitle'), { name: aclTarget.name })} onClose={closeAcl}>
+          <p className="hint">{msg('aclHint')}</p>
+          {aclLoading ? (
+            <p className="hint">{msg('loading')}</p>
+          ) : (
+            <>
+              <div className="acl-list">
+                <div className="acl-row acl-head">
+                  <span>{msg('aclSubjectType')}</span>
+                  <span>{msg('aclSubjectId')}</span>
+                  <span>{msg('aclEffect')}</span>
+                  <span>{msg('permission')}</span>
+                  <span />
+                </div>
+                {aclEntries.length === 0 && <p className="hint">{msg('aclEmpty')}</p>}
+                {aclEntries.map((entry, index) => (
+                  <div key={index} className="acl-row">
+                    <span className="acl-type">{msg(ACL_SUBJECT_KEYS[entry.subject_type] ?? 'aclSubjectUser')}</span>
+                    <input className="acl-uuid" readOnly value={entry.subject_id} title={entry.subject_id} />
+                    <select
+                      value={entry.effect}
+                      disabled={aclBusy}
+                      onChange={(e) => setAclEntryEffect(index, e.target.value as FolderACLEntry['effect'])}
+                    >
+                      <option value="allow">{msg('aclAllow')}</option>
+                      <option value="deny">{msg('aclDeny')}</option>
+                    </select>
+                    <span className="acl-perms">
+                      {ACL_ACTIONS.map((a) => (
+                        <label key={a} className="check-item">
+                          <input
+                            type="checkbox"
+                            checked={entry.permissions.includes(a)}
+                            onChange={() => toggleAclEntryPerm(index, a)}
+                          />
+                          {msg(PERM_LABEL_KEYS[a])}
+                        </label>
+                      ))}
+                    </span>
+                    <button className="btn small danger" disabled={aclBusy} onClick={() => removeAclEntry(index)}>
+                      {msg('delete')}
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <form className="acl-add" onSubmit={addAclEntry}>
+                <select
+                  value={aclNewType}
+                  onChange={(e) => setAclNewType(e.target.value as FolderACLEntry['subject_type'])}
+                >
+                  <option value="user">{msg('aclSubjectUser')}</option>
+                  <option value="team">{msg('aclSubjectTeam')}</option>
+                  <option value="role">{msg('aclSubjectRole')}</option>
+                </select>
+                <input
+                  value={aclNewId}
+                  onChange={(e) => setAclNewId(e.target.value)}
+                  placeholder="3f0c9c2e-…"
+                />
+                <select
+                  value={aclNewEffect}
+                  onChange={(e) => setAclNewEffect(e.target.value as FolderACLEntry['effect'])}
+                >
+                  <option value="allow">{msg('aclAllow')}</option>
+                  <option value="deny">{msg('aclDeny')}</option>
+                </select>
+                <span className="acl-perms">
+                  {ACL_ACTIONS.map((a) => (
+                    <label key={a} className="check-item">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(aclNewPerms[a])}
+                        onChange={(e) => setAclNewPerms({ ...aclNewPerms, [a]: e.target.checked })}
+                      />
+                      {msg(PERM_LABEL_KEYS[a])}
+                    </label>
+                  ))}
+                </span>
+                <button type="submit" className="btn small" disabled={aclBusy || !UUID_RE.test(aclNewId.trim())}>
+                  {msg('aclAdd')}
+                </button>
+              </form>
+              {aclError && <div className="error-text">{aclError}</div>}
+              <div className="modal-actions">
+                <button className="btn" disabled={aclBusy} onClick={closeAcl}>{msg('close')}</button>
+                <button className="btn primary" disabled={aclBusy} onClick={() => void handleSaveAcl()}>
+                  {aclBusy ? msg('loading') : msg('save')}
+                </button>
+              </div>
+            </>
+          )}
+        </Modal>
       )}
     </div>
   )

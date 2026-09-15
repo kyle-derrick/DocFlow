@@ -232,6 +232,9 @@ type Service struct {
 	// teamSharer 团队文件分享门控（main 注入 team.CanShare）：nil 时团队文件
 	// 分享一律拒绝（fail closed），个人文件分享不受影响。
 	teamSharer TeamSharer
+	// acl 团队文件 share 判定的路径级 ACL 求值器（main 注入 acl.Service.
+	// ResolveForFile；设计 6.5.3/6.5.4）；nil 未接线（行为不变）。
+	acl files.ACLResolver
 	// defaultExpiryHours 为「创建请求未指定有效期」时的默认时长（小时）
 	// 热读取（system_settings 的 share.default_expiry_hours，main 注入）；
 	// nil 或返回非正值时回退既有行为（不设默认，即永久）。
@@ -354,11 +357,33 @@ func (s *Service) SetTeamSharer(fn TeamSharer) {
 	}
 }
 
-// authorizeShare 团队文件分享门控：仅 CanShare（系统 owner/editor 或含 share
-// 权限的自定义角色）可创建分享；个人文件不经过本判定（Get 已校验 owner）。
+// SetACLResolver 注入路径级 ACL 求值器（幂等；设计 6.5.3/6.5.4）：
+// 团队文件的 share 判定先走 ACL（沿 parent 链求值 folder_acl 条目），
+// 链上无适用条目（matched=false）回退 teamSharer；未注入时行为不变。
+func (s *Service) SetACLResolver(a files.ACLResolver) {
+	if a != nil {
+		s.acl = a
+	}
+}
+
+// authorizeShare 团队文件分享门控：先经路径级 ACL（share，matched 则用其
+// 结果），未匹配走 CanShare（系统 owner/editor 或含 share 权限的自定义角色）；
+// 个人文件不经过本判定（Get 已校验 owner）。
 func (s *Service) authorizeShare(f files.File, user uuid.UUID) error {
 	if f.ScopeType != "team" || f.TeamID == nil {
 		return nil
+	}
+	if s.acl != nil {
+		allowed, matched, err := s.acl(f.ID, *f.TeamID, user, "share")
+		if err != nil {
+			return err
+		}
+		if matched {
+			if !allowed {
+				return ErrForbidden
+			}
+			return nil
+		}
 	}
 	if s.teamSharer == nil {
 		return ErrForbidden

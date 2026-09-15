@@ -76,7 +76,7 @@ func TestAuthorizeParentFolderMatrix(t *testing.T) {
 		{"not a folder", owner, notFolder.ID, ErrNotFound},
 	}
 	for _, tc := range tests {
-		_, err := authorizeParentFolder(repo, tc.user, tc.folder, writer)
+		_, err := authorizeParentFolder(repo, tc.user, tc.folder, writer, nil)
 		if !errors.Is(err, tc.wantErr) {
 			t.Errorf("%s: err = %v, want %v", tc.name, err, tc.wantErr)
 		}
@@ -89,13 +89,13 @@ func TestAuthorizeParentFolderWithoutTeamWriter(t *testing.T) {
 	root := File{ID: uuid.New(), Name: "root", OwnerID: owner, Type: "folder", ScopeType: "team", TeamID: &teamID}
 	repo := &memFolderRepo{folders: map[uuid.UUID]File{root.ID: root}}
 	// 未注入团队权限源：团队目录一律拒绝（安全默认）。
-	if _, err := authorizeParentFolder(repo, owner, root.ID, nil); !errors.Is(err, ErrForbidden) {
+	if _, err := authorizeParentFolder(repo, owner, root.ID, nil, nil); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("team folder without writer: err = %v, want ErrForbidden", err)
 	}
 	// 个人目录不受影响。
 	personal := File{ID: uuid.New(), Name: "p", OwnerID: owner, Type: "folder", ScopeType: "personal"}
 	repo.add(personal)
-	if _, err := authorizeParentFolder(repo, owner, personal.ID, nil); err != nil {
+	if _, err := authorizeParentFolder(repo, owner, personal.ID, nil, nil); err != nil {
 		t.Fatalf("personal folder without writer: %v", err)
 	}
 }
@@ -156,7 +156,7 @@ func TestAuthorizeTeamDeleteMatrix(t *testing.T) {
 		{"team file without deleter injected", teamOwner, teamFile, nil, ErrForbidden},
 	}
 	for _, tc := range tests {
-		err := authorizeTeamDelete(tc.file, tc.user, tc.deleter)
+		err := authorizeTeamDelete(tc.file, tc.user, tc.deleter, nil)
 		if !errors.Is(err, tc.wantErr) {
 			t.Errorf("%s: err = %v, want %v", tc.name, err, tc.wantErr)
 		}
@@ -202,9 +202,63 @@ func TestAuthorizeFileAccessMatrix(t *testing.T) {
 		{"team scope without team_id treated as personal", editor, orphanTeamScope, reader, ErrNotFound},
 	}
 	for _, tc := range tests {
-		err := authorizeFileAccess(tc.file, tc.user, tc.reader)
+		err := authorizeFileAccess(tc.file, tc.user, tc.reader, nil)
 		if !errors.Is(err, tc.wantErr) {
 			t.Errorf("%s: err = %v, want %v", tc.name, err, tc.wantErr)
 		}
+	}
+}
+
+// fakeACL 按 (id, user, perm) 集合模拟 acl.Service 的 ResolveForFile 注入。
+type fakeACL struct {
+	matched map[string]bool // key: fileID|userID|perm -> allowed
+}
+
+func (f fakeACL) resolve(fileOrFolderID, teamID, user uuid.UUID, perm string) (bool, bool, error) {
+	allowed, ok := f.matched[fileOrFolderID.String()+"|"+user.String()+"|"+perm]
+	return allowed, ok, nil
+}
+
+// TestAuthorizeACLOverride 覆盖路径级 ACL 接线语义（设计 6.5.3/6.5.4）：
+// 团队作用域资源 matched=true 时以 ACL 结果为准（allow 放行 viewer/deny 拒绝
+// owner），matched=false 时回退团队角色判定；个人资源不经过 ACL。
+func TestAuthorizeACLOverride(t *testing.T) {
+	teamID := uuid.New()
+	owner := uuid.New()  // 团队 owner（既有判定恒通过）
+	viewer := uuid.New() // 团队 viewer（无写/删权限）
+	root := File{ID: uuid.New(), Name: "root", OwnerID: owner, Type: "folder", ScopeType: "team", TeamID: &teamID}
+	teamFile := File{ID: uuid.New(), Name: "team.txt", OwnerID: owner, Type: "file", ScopeType: "team", TeamID: &teamID}
+	personal := File{ID: uuid.New(), Name: "p.txt", OwnerID: owner, Type: "file", ScopeType: "personal"}
+	repo := &memFolderRepo{folders: map[uuid.UUID]File{root.ID: root}}
+
+	// ACL：viewer 在 root 上 allow write；owner 在 teamFile 上 deny delete。
+	acl := fakeACL{matched: map[string]bool{
+		root.ID.String() + "|" + viewer.String() + "|write":     true,
+		teamFile.ID.String() + "|" + owner.String() + "|delete": false,
+	}}
+	writer := fakeTeamWriter(map[uuid.UUID][]uuid.UUID{owner: {teamID}})
+	deleter := fakeTeamDeleter(map[uuid.UUID][]uuid.UUID{owner: {teamID}})
+	reader := fakeTeamReader(map[uuid.UUID][]uuid.UUID{owner: {teamID}, viewer: {teamID}})
+
+	// viewer 经 ACL allow 获得团队目录写权限（既有判定为 403）。
+	if _, err := authorizeParentFolder(repo, viewer, root.ID, writer, acl.resolve); err != nil {
+		t.Fatalf("viewer with acl allow: err = %v, want nil", err)
+	}
+	// owner 在 teamFile 上被 ACL deny delete（既有 CanDelete=true 被 ACL 覆盖）。
+	if err := authorizeTeamDelete(teamFile, owner, deleter, acl.resolve); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("owner with acl deny delete: err = %v, want ErrForbidden", err)
+	}
+	// read 无 ACL 条目：owner 回退既有判定（成员可读）。
+	if err := authorizeFileAccess(teamFile, owner, reader, acl.resolve); err != nil {
+		t.Fatalf("owner read fallback: err = %v, want nil", err)
+	}
+	// 个人资源不经过 ACL：owner 读取恒通过（ACL 无 personal 条目，回退即 owner 短路）。
+	if err := authorizeFileAccess(personal, owner, nil, acl.resolve); err != nil {
+		t.Fatalf("personal owner read: err = %v, want nil", err)
+	}
+	// ACL 求值器报错时透传（fail closed，不吞错）。
+	boom := ACLResolver(func(_, _, _ uuid.UUID, _ string) (bool, bool, error) { return false, false, errors.New("acl down") })
+	if _, err := authorizeParentFolder(repo, viewer, root.ID, writer, boom); err == nil || err.Error() != "acl down" {
+		t.Fatalf("acl error propagate: err = %v, want acl down", err)
 	}
 }

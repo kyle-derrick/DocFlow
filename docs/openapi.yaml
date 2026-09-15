@@ -63,7 +63,14 @@ tags:
   - name: Public Shares
     description: 公开分享（token 链接，无认证）
   - name: Teams
-    description: 团队与团队空间
+    description: >-
+      团队与团队空间（成员/自定义角色权限、团队目录）；路径级 ACL
+      （/folders/{id}/acl，设计 6.5.3/6.5.4 最小落地：团队作用域目录的
+      read/write/delete/share 判定先走 folder_acl 链，无适用条目回退团队角色）
+  - name: AI
+    description: >-
+      AI 文件摘要（v2 可落地子集）：OpenAI 兼容 /chat/completions；
+      AI_ENABLED=false 时端点返回 503 AI_DISABLED
   - name: Admin
     description: >-
       管理端（仅 admin 角色）：系统设置、基础统计、邀请管理与用户管理
@@ -3199,6 +3206,123 @@ paths:
         '409': { $ref: '#/components/responses/Conflict' }
         '429': { $ref: '#/components/responses/RateLimited' }
 
+  /folders/{id}/acl:
+    get:
+      tags: [Teams]
+      operationId: getFolderACL
+      summary: 查看目录的路径级 ACL 条目
+      description: >-
+        返回团队作用域目录（含团队根目录）的全部 folder_acl 条目（附 subject
+        名称解析：user → username、team → 团队名）。仅文件夹所在团队 owner
+        或系统 admin 可读；个人空间目录 400（NOT_TEAM_FOLDER）。求值语义
+        （read/write/delete/share 判定先走 ACL 链）见 PUT 端点描述。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+          description: 目录 ID（团队根目录或其子目录）
+      responses:
+        '200':
+          description: ACL 条目列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FolderACL' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    put:
+      tags: [Teams]
+      operationId: replaceFolderACL
+      summary: 整体替换目录的 ACL 条目（空数组即清空）
+      description: >-
+        整体替换目录的全部 folder_acl 条目（事务内删旧插新）。仅团队作用域
+        目录可设置（个人空间 400）；权限：文件夹所在团队 owner 或系统 admin。
+        求值规则：沿 parent 链自目标文件/目录向上到团队根收集条目，最近节点
+        优先；同节点 user 条目优先于 team 条目、deny 优先于 allow；链上无
+        适用条目（含未设置任何 ACL 的目录）回退团队角色判定——无 ACL 时
+        行为与既有权限完全一致。审计 acl.update。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+          description: 目录 ID（团队根目录或其子目录）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FolderACLUpdate' }
+      responses:
+        '200':
+          description: 替换后的条目列表（与 GET 同构）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FolderACL' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /files/{id}/ai/summary:
+    post:
+      tags: [AI]
+      operationId: fileAISummary
+      summary: 生成文件当前版本的 AI 摘要
+      description: >-
+        读取文件当前版本内容并调用 OpenAI 兼容 /chat/completions 生成摘要
+        （system 提示要求与文件相同语言、300 字内，max_tokens 500，超时 60s）。
+        前置条件：读权限（个人 owner / 团队在册成员 + 路径级 ACL）、文件为
+        文本类（search.IsTextIndexable 语义：mime text/*、json/xml 或扩展名
+        白名单）、当前版本 blob available、内容 ≤100KB（超出拒绝，不截断）。
+        高频端点：不记录审计。AI_ENABLED=false 时 503 AI_DISABLED。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 摘要结果
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [summary]
+                properties:
+                  summary: { type: string, description: AI 生成的摘要文本 }
+        '400':
+          description: 非文本文件（code=NOT_TEXT_FILE）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 当前版本未 available（扫描中/隔离等）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '413':
+          description: 内容超过 100KB 摘要上限（code=CONTENT_TOO_LARGE）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '502':
+          description: 上游请求失败（含超时）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: AI 摘要未启用（code=AI_DISABLED）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
   /onlyoffice/config:
     get:
       tags: [onlyoffice]
@@ -4808,3 +4932,45 @@ components:
         preferences:
           type: array
           items: { $ref: '#/components/schemas/NotificationPreference' }
+    FolderACLEntry:
+      type: object
+      description: >-
+        folder_acl 条目（migration 031，设计 6.5.3/6.5.4 最小落地）：
+        (目录, subject, effect, permissions) 一行一条；UNIQUE(folder_id,
+        subject_type, subject_id)。subject_name 为服务端解析的展示名
+        （user → username、team → 团队名），解析失败为空串。
+      properties:
+        subject_type: { type: string, enum: [user, team] }
+        subject_id: { type: string, format: uuid }
+        subject_name: { type: string, description: 展示名（username / 团队名） }
+        effect: { type: string, enum: [allow, deny] }
+        permissions:
+          type: array
+          minItems: 1
+          items: { type: string, enum: [read, write, delete, share] }
+        created_at: { type: string, format: date-time }
+    FolderACL:
+      type: object
+      properties:
+        folder_id: { type: string, format: uuid }
+        entries:
+          type: array
+          items: { $ref: '#/components/schemas/FolderACLEntry' }
+    FolderACLUpdate:
+      type: object
+      description: PUT /folders/{id}/acl 请求体：整体替换（空数组即清空）
+      required: [entries]
+      properties:
+        entries:
+          type: array
+          items:
+            type: object
+            required: [subject_type, subject_id, effect, permissions]
+            properties:
+              subject_type: { type: string, enum: [user, team] }
+              subject_id: { type: string, format: uuid }
+              effect: { type: string, enum: [allow, deny] }
+              permissions:
+                type: array
+                minItems: 1
+                items: { type: string, enum: [read, write, delete, share] }

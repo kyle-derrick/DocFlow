@@ -221,15 +221,26 @@ func pruneVersionsLogic(r versionsRepo, fileID uuid.UUID, keep int, keepNewerTha
 }
 
 // authorizeFileWrite 判定 user 能否修改 file（追加版本/回滚）：
-// 个人文件仅 owner；团队文件要求成员写权限（owner/editor，viewer 403）。
+// 个人文件仅 owner；团队文件先经路径级 ACL（write），未匹配走成员写权限
+// （owner/editor，viewer 403）。
 // 个人文件非 owner 统一 ErrNotFound（不泄露存在性），团队越权返回 ErrForbidden。
-func authorizeFileWrite(f File, user uuid.UUID, canWriteTeam TeamWriter) error {
+func authorizeFileWrite(f File, user uuid.UUID, canWriteTeam TeamWriter, acl ACLResolver) error {
 	if f.OwnerID == user {
 		return nil
 	}
 	teamID := teamScope(f)
 	if teamID == nil {
 		return ErrNotFound
+	}
+	allowed, matched, aerr := resolveACL(acl, f.ID, *teamID, user, "write")
+	if aerr != nil {
+		return aerr
+	}
+	if matched {
+		if !allowed {
+			return ErrForbidden
+		}
+		return nil
 	}
 	if canWriteTeam == nil {
 		return ErrForbidden
@@ -493,7 +504,7 @@ func (s *Store) DeleteVersion(user, fileID, versionID uuid.UUID) error {
 		}
 		return err
 	}
-	if err := authorizeFileWrite(f, user, s.teamWriter); err != nil {
+	if err := authorizeFileWrite(f, user, s.teamWriter, s.acl); err != nil {
 		return err
 	}
 	var version FileVersion
@@ -526,7 +537,7 @@ func (s *Store) SetCurrentVersion(user, fileID, versionID uuid.UUID) (File, File
 		}
 		return File{}, FileVersion{}, err
 	}
-	if err := authorizeFileWrite(f, user, s.teamWriter); err != nil {
+	if err := authorizeFileWrite(f, user, s.teamWriter, s.acl); err != nil {
 		return File{}, FileVersion{}, err
 	}
 	var version FileVersion
@@ -577,7 +588,7 @@ func (s *Store) ValidateReplaceTarget(user, target uuid.UUID) (File, error) {
 	if f.Type != "file" {
 		return File{}, ErrInvalidTarget
 	}
-	if err := authorizeFileWrite(f, user, s.teamWriter); err != nil {
+	if err := authorizeFileWrite(f, user, s.teamWriter, s.acl); err != nil {
 		return File{}, err
 	}
 	return f, nil
@@ -595,7 +606,7 @@ func (s *Store) ReplaceFileVersion(user, fileID uuid.UUID, storageKey, sha256 st
 		}
 		return false, err
 	}
-	if err := authorizeFileWrite(f, user, s.teamWriter); err != nil {
+	if err := authorizeFileWrite(f, user, s.teamWriter, s.acl); err != nil {
 		return false, err
 	}
 	_, newBlob, err := s.AddVersion(f, storageKey, sha256, size, mimeType, user)

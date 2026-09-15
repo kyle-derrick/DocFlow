@@ -1,9 +1,11 @@
 package share
 
 import (
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 // 分享权限：view 仅可查看元数据，download 可下载。
@@ -59,6 +61,16 @@ type Share struct {
 // HasPassword 表示公开分享是否受密码保护（仅公开分享可设密码）。
 func (s Share) HasPassword() bool { return s.PasswordHash != "" }
 
+// AfterFind 清洗 CHAR(64) 列读值：无密码分享的空串入库被 PostgreSQL CHAR
+// 填充为 64 空格，读出 TrimSpace 恢复空语义——否则无密码公开分享被误判
+// HasPassword，info/download 一律 401 PASSWORD_REQUIRED（运行时冒烟暴露，
+// 与 upload.expected_sha256 同型的 CHAR 填充陷阱）。钩子必须是 GORM 标准
+// 签名（*gorm.DB 参数 + error 返回），无参变体会被静默忽略。
+func (s *Share) AfterFind(_ *gorm.DB) error {
+	s.PasswordHash = strings.TrimSpace(s.PasswordHash)
+	return nil
+}
+
 // WatermarkTemplate 返回生效的水印模板：自定义模板优先，NULL/空回退默认模板。
 func (s Share) WatermarkTemplate() string {
 	if s.WatermarkText != nil && *s.WatermarkText != "" {
@@ -77,6 +89,10 @@ type AccessSession struct {
 	ExpiresAt   time.Time `json:"expires_at"`
 	CreatedAt   time.Time `json:"created_at"`
 }
+
+// TableName 显式映射 share_access_sessions（gorm 默认复数化为
+// access_sessions，与 migrations/022 的表名不符——运行时才会暴露）。
+func (AccessSession) TableName() string { return "share_access_sessions" }
 
 // AccessEvent 对应 file_access_events 表（migration 023）：公开分享下载/预览
 // 成功事件。IPHash = SHA-256(盐 || ip)（明文 IP 不落库）；IPPrefix 为展示用

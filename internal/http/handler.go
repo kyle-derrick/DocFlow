@@ -140,6 +140,9 @@ type Handler struct {
 	// tags 为标签服务（SetTagging 注入）：标签 CRUD 与文件打/去标签；
 	// 未注入时 tags 端点返回 503（生产恒注入，契约测试注入内存实现）。
 	tags *tagging.Service
+	// acl 为路径级 ACL 管理服务（SetACL 注入）：GET/PUT /folders/:id/acl；
+	// 未注入时端点返回 503（生产恒注入，契约测试注入内存实现）。
+	acl aclService
 	// search 为全文检索服务（SetSearch 注入）：GET /api/v1/search 的
 	// 名称 + 内容检索；未注入时该端点返回 503（生产恒注入）。
 	search searchService
@@ -168,6 +171,12 @@ type Handler struct {
 	// usage 为个人空间存储占用查询源（C3 配额；NewHandler 以 *files.Store
 	// 装配，接口化便于单测注入内存实现）：GET/PATCH /me 的 storage.used。
 	usage storageUsage
+	// ai 为 AI 摘要客户端（SetAI 注入）：POST /files/:id/ai/summary；
+	// 未注入或 AI_ENABLED=false 时端点 503 AI_DISABLED。
+	ai aiSummarizer
+	// aiFiles 为 AI 摘要所需的文件读取源（NewHandler 以 *files.Store 装配，
+	// 接口化便于单测注入内存实现）。
+	aiFiles aiFileSource
 	// csrfStrict 控制 refresh/logout 同源严格校验（C10，CSRF_STRICT 默认
 	// true）：true 时缺失 Origin/Referer 一律 403，见 csrf.go。
 	csrfStrict bool
@@ -179,7 +188,7 @@ type Handler struct {
 }
 
 func NewHandler(authService *auth.Service, users *auth.UserStore, fileStore *files.Store, shares *share.Service, teams *team.Service, uploads *upload.Service, storage upload.Storage, cookieSecure bool, cookieDomain string, refreshTokenTTL time.Duration) *Handler {
-	return &Handler{auth: authService, users: users, files: fileStore, shares: shares, teams: teams, uploads: uploads, storage: storage, cookieSecure: cookieSecure, cookieDomain: cookieDomain, refreshTokenTTL: refreshTokenTTL, audit: audit.NopRecorder{}, mailer: mail.NewNoopMailer(), idem: newIdemCache(idempotencyTTL), versionReader: fileStore, usage: fileStore, csrfStrict: true, loginMaxRetries: 5, loginLockDuration: 15 * time.Minute}
+	return &Handler{auth: authService, users: users, files: fileStore, shares: shares, teams: teams, uploads: uploads, storage: storage, cookieSecure: cookieSecure, cookieDomain: cookieDomain, refreshTokenTTL: refreshTokenTTL, audit: audit.NopRecorder{}, mailer: mail.NewNoopMailer(), idem: newIdemCache(idempotencyTTL), versionReader: fileStore, usage: fileStore, aiFiles: fileStore, csrfStrict: true, loginMaxRetries: 5, loginLockDuration: 15 * time.Minute}
 }
 
 // SetCSRFStrict 控制 refresh/logout 的同源严格校验（CSRF_STRICT，幂等；
@@ -254,6 +263,15 @@ func (h *Handler) SetTagging(svc *tagging.Service) {
 func (h *Handler) SetSearch(svc searchService) {
 	if svc != nil {
 		h.search = svc
+	}
+}
+
+// SetAI 注入 AI 摘要客户端（幂等）；svc 通常为 ai.NewClient(...)。
+// 未注入或 AI_ENABLED=false 时 POST /files/:id/ai/summary 返回 503
+// AI_DISABLED。
+func (h *Handler) SetAI(svc aiSummarizer) {
+	if svc != nil {
+		h.ai = svc
 	}
 }
 
@@ -386,11 +404,18 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	// 个人仪表盘概览统计（admin 附加全局统计，见 dashboard.go）。
 	api.GET("/dashboard", h.dashboardStats)
 	api.POST("/folders", h.createFolder)
+	// 路径级 ACL（设计 6.5.3/6.5.4 最小落地）：团队空间目录的条目查看与
+	// 整体替换（仅团队 owner / 系统 admin；个人空间 400；PUT 记审计 acl.update）。
+	api.GET("/folders/:id/acl", h.getFolderACL)
+	api.PUT("/folders/:id/acl", h.replaceFolderACL)
 	api.GET("/files/:id", h.getFile)
 	api.PATCH("/files/:id", h.renameFile)
 	api.DELETE("/files/:id", h.deleteFile)
 	api.GET("/files/:id/download", h.downloadFile)
 	api.GET("/files/:id/preview", h.previewFile)
+	// AI 摘要（OpenAI 兼容 /chat/completions）：读权限 + 文本类 + 当前版本
+	// available；高频端点不记审计；AI 禁用时 503 AI_DISABLED。
+	api.POST("/files/:id/ai/summary", h.fileAISummary)
 	// 文件版本管理：版本列表与 current_version 回滚（新版本经上传链路 file_id 写入）。
 	api.GET("/files/:id/versions", h.listFileVersions)
 	api.GET("/files/:id/versions/:versionId/content", h.fileVersionContent)

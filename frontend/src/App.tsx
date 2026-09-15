@@ -37,6 +37,7 @@ import SharedPage from './pages/SharedPage'
 import AdminPage from './pages/AdminPage'
 import EditorPage from './pages/EditorPage'
 import DrawioPage from './pages/DrawioPage'
+import ExcalidrawPage from './pages/ExcalidrawPage'
 import SettingsPage from './pages/SettingsPage'
 import DashboardPage from './pages/DashboardPage'
 import { messages, saveLocale, t, useLocale } from './i18n'
@@ -443,14 +444,17 @@ function TopBarSearch() {
 
 /**
  * 全局快捷键（v1.1）：'/' 聚焦顶栏全文搜索框、g f/t/s/h 导航、'?' 帮助。
- * 编辑器页（/edit、/drawio，iframe 捕获键盘）禁用；弹窗打开时由 useHotkeys
- * 统一跳过（Escape 由 HotkeysHelp 自行处理关闭）。
+ * 编辑器页（/edit、/drawio，iframe 捕获键盘；/excalidraw 画布工具快捷键）
+ * 禁用；弹窗打开时由 useHotkeys 统一跳过（Escape 由 HotkeysHelp 自行处理关闭）。
  */
 function GlobalHotkeys() {
   const navigate = useNavigate()
   const location = useLocation()
   const [helpOpen, setHelpOpen] = useState(false)
-  const editorPage = location.pathname.startsWith('/edit/') || location.pathname.startsWith('/drawio/')
+  const editorPage =
+    location.pathname.startsWith('/edit/') ||
+    location.pathname.startsWith('/drawio/') ||
+    location.pathname.startsWith('/excalidraw/')
   useHotkeys(
     {
       '/': () => {
@@ -571,6 +575,9 @@ export default function App() {
         <Route path="/edit/:fileId" element={<RequireAuth><EditorPage /></RequireAuth>} />
         {/* draw.io 图表编辑页（集成启用时由文件行「图表」按钮进入，iframe embed）。 */}
         <Route path="/drawio/:fileId" element={<RequireAuth><DrawioPage /></RequireAuth>} />
+        {/* Excalidraw 白板编辑页（.excalidraw 文件行「白板」按钮进入；
+            编辑器包经 React.lazy 动态加载独立 chunk）。 */}
+        <Route path="/excalidraw/:fileId" element={<RequireAuth><ExcalidrawPage /></RequireAuth>} />
         <Route path="/admin" element={<RequireAuth><AdminPage /></RequireAuth>} />
         <Route path="/trash" element={<RequireAuth><TrashPage /></RequireAuth>} />
         {/* 账户设置：登录会话与个人访问令牌（PAT）管理。 */}

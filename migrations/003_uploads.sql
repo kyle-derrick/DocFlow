@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS upload_sessions (
     tus_id TEXT NOT NULL UNIQUE,
     name VARCHAR(255) NOT NULL,
     storage_key TEXT NOT NULL,
-    offset BIGINT NOT NULL DEFAULT 0 CHECK (offset >= 0),
+    "offset" BIGINT NOT NULL DEFAULT 0 CHECK ("offset" >= 0),
     size BIGINT NOT NULL CHECK (size >= 0),
     expected_sha256 CHAR(64),
     status VARCHAR(16) NOT NULL DEFAULT 'uploading' CHECK (status IN ('uploading','verifying','scanning','available','quarantined','failed')),

@@ -4,6 +4,8 @@
 # 站点地址取环境变量 APP_DOMAIN：未设置时默认 :80（本地验证，无 TLS）；
 # 设为域名（如 docflow.example.com）时自动申请/续期 HTTPS 证书
 #（ACME HTTP 挑战走 80 端口，已在 docker-compose.yml 映射）。
+# CONTENT_DOMAIN 为独立内容 origin；CONTENT_UPSTREAM 默认 backend:8080。
+# 若 DNS/证书暂未就绪，仍可使用主站 /content/* 路径兼容入口。
 {$APP_DOMAIN::80} {
 	encode gzip
 
@@ -29,9 +31,16 @@
 		reverse_proxy backend:8080
 	}
 
-	# 网页包安全预览内容端点：无认证、按 IP 限流与 CSP/nosniff 均由后端提供。
+	# 路径兼容：内容 origin 的安全策略和 Cookie 隔离由此代理保证。
 	handle /content/* {
-		reverse_proxy backend:8080
+		header {
+			-Cookie
+			Content-Security-Policy "sandbox allow-scripts"
+			X-Content-Type-Options nosniff
+		}
+		reverse_proxy {$CONTENT_UPSTREAM:backend:8080} {
+			header_up -Cookie
+		}
 	}
 
 	# ONLYOFFICE Document Server（full profile）。上游经 ONLYOFFICE_UPSTREAM
@@ -72,4 +81,19 @@
 	log {
 		output stdout
 	}
+}
+
+# 独立内容 origin：CONTENT_DOMAIN 需解析到本机并配置证书（生产建议独立域名）。
+# 路径兼容仍保留在上方主站 block；该 block 不承载 API 或 SPA。
+{$CONTENT_DOMAIN:content.localhost} {
+	encode gzip
+	header {
+		-Cookie
+		Content-Security-Policy "sandbox allow-scripts"
+		X-Content-Type-Options nosniff
+	}
+	reverse_proxy /content/* {$CONTENT_UPSTREAM:backend:8080} {
+		header_up -Cookie
+	}
+	respond / 404
 }

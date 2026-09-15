@@ -478,7 +478,7 @@ func TestAuthorizeFileWriteMatrix(t *testing.T) {
 		{"team file without writer injected", editor, teamFile, nil, ErrForbidden},
 	}
 	for _, tc := range tests {
-		if err := authorizeFileWrite(tc.file, tc.user, tc.writer); !errors.Is(err, tc.wantErr) {
+		if err := authorizeFileWrite(tc.file, tc.user, tc.writer, nil); !errors.Is(err, tc.wantErr) {
 			t.Errorf("%s: err = %v, want %v", tc.name, err, tc.wantErr)
 		}
 	}

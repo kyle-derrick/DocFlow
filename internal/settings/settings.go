@@ -212,7 +212,7 @@ type gormRepository struct{ db *gorm.DB }
 
 func (g *gormRepository) GetRow(key string) (Setting, error) {
 	var s Setting
-	err := g.db.First(&s, "`key` = ?", key).Error
+	err := g.db.First(&s, "key = ?", key).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return Setting{}, ErrNotSet
 	}

@@ -59,6 +59,21 @@ type TeamReader func(userID, teamID uuid.UUID) (bool, error)
 // 按 delete 勾选且未被 deny），由 team 包注入实现；nil 表示未配置（拒绝，安全默认）。
 type TeamDeleter func(userID, teamID uuid.UUID) (bool, error)
 
+// ACLResolver 判定用户对团队作用域文件/目录的单个动作权限（设计 6.5.3/6.5.4
+// 路径级 ACL，acl 包注入实现）：沿 parent 链求值 folder_acl 条目，返回
+// (allowed, matched)。matched=false 表示链上无适用条目（回退团队角色判定）；
+// nil 表示未接线（无 ACL 行为不变）。perm 取 read/write/delete/share。
+type ACLResolver func(fileOrFolderID, teamID, userID uuid.UUID, perm string) (allowed, matched bool, err error)
+
+// resolveACL 团队作用域资源的 ACL 求值入口：未接线直接未匹配；匹配则由
+// 调用方按结果放行/拒绝（不再走团队角色判定）。
+func resolveACL(acl ACLResolver, id, teamID, user uuid.UUID, perm string) (bool, bool, error) {
+	if acl == nil {
+		return false, false, nil
+	}
+	return acl(id, teamID, user, perm)
+}
+
 // defaultMaxFolderDepth 目录默认最大深度（根为 1；可经
 // SetMaxFolderDepthProvider / folder.max_depth 覆盖）。
 const defaultMaxFolderDepth = 32
@@ -68,6 +83,8 @@ type Store struct {
 	teamWriter  TeamWriter
 	teamReader  TeamReader
 	teamDeleter TeamDeleter
+	// acl 团队作用域资源的路径级 ACL 求值器（acl 包注入；nil 未接线）。
+	acl         ACLResolver
 	maxVersions int
 	// maxVersionsFn 为版本保留数的运行时提供器（settings 热读取）；nil 时用 maxVersions。
 	maxVersionsFn func() int
@@ -117,6 +134,15 @@ func (s *Store) SetTeamReader(r TeamReader) {
 func (s *Store) SetTeamDeleter(d TeamDeleter) {
 	if d != nil {
 		s.teamDeleter = d
+	}
+}
+
+// SetACLResolver 注入路径级 ACL 求值器（幂等；设计 6.5.3/6.5.4 最小落地）：
+// 团队作用域文件/目录的 read/write/delete 判定先走 ACL，链上无适用条目
+// （matched=false）回退既有团队角色判定；未注入时行为完全不变。
+func (s *Store) SetACLResolver(a ACLResolver) {
+	if a != nil {
+		s.acl = a
 	}
 }
 
@@ -251,13 +277,24 @@ func teamScope(f File) *uuid.UUID {
 }
 
 // authorizeParentFolder 判定 user 能否在 parent 下创建内容：
-// 个人目录要求 owner；团队目录要求成员写权限（owner/editor，viewer 403）。
-func authorizeParentFolder(repo folderAccessor, user, parent uuid.UUID, canWriteTeam TeamWriter) (File, error) {
+// 个人目录要求 owner；团队目录先经路径级 ACL（write，链含 parent 自身，
+// matched 则用其结果），未匹配走成员写权限（owner/editor，viewer 403）。
+func authorizeParentFolder(repo folderAccessor, user, parent uuid.UUID, canWriteTeam TeamWriter, acl ACLResolver) (File, error) {
 	p, err := repo.getFolder(parent)
 	if err != nil {
 		return File{}, err
 	}
 	if teamID := teamScope(p); teamID != nil {
+		allowed, matched, aerr := resolveACL(acl, p.ID, *teamID, user, "write")
+		if aerr != nil {
+			return File{}, aerr
+		}
+		if matched {
+			if !allowed {
+				return File{}, ErrForbidden
+			}
+			return p, nil
+		}
 		if canWriteTeam == nil {
 			return File{}, ErrForbidden
 		}
@@ -277,24 +314,37 @@ func authorizeParentFolder(repo folderAccessor, user, parent uuid.UUID, canWrite
 }
 
 // ValidateFolder 校验 user 可在 parent 下上传/创建内容。
-// 个人目录 owner 可写；团队目录成员 editor/owner 可写，viewer 与非成员 403。
+// 个人目录 owner 可写；团队目录先经路径级 ACL（write）再按成员
+// editor/owner 判定，viewer 与非成员 403。
 func (s *Store) ValidateFolder(user, parent uuid.UUID) error {
-	_, err := authorizeParentFolder(s, user, parent, s.teamWriter)
+	_, err := authorizeParentFolder(s, user, parent, s.teamWriter, s.acl)
 	return err
 }
 
 // authorizeFileAccess 判定 user 能否读取 file（元数据/当前版本/下载/预览共用入口）：
-// 个人文件仅 owner；团队文件（scope_type='team'）经注入的 CanRead 判定
-// （系统角色任意在册成员可读；自定义角色按 read 勾选且未被 deny）。
+// 个人文件仅 owner；团队文件（scope_type='team'）先经路径级 ACL（read，
+// 链自父目录向上），matched 则用其结果（拒绝同非成员按 ErrNotFound 处理，
+// 不泄露存在性），未匹配经注入的 CanRead 判定（系统角色任意在册成员可读；
+// 自定义角色按 read 勾选且未被 deny）。
 // 未注入判定器时团队文件一律拒绝（ErrForbidden，与写路径一致的安全默认）。
 // 非授权访问统一返回 ErrNotFound，不泄露资源存在性；owner 判定短路，行为与旧版一致。
-func authorizeFileAccess(f File, user uuid.UUID, isMember TeamReader) error {
+func authorizeFileAccess(f File, user uuid.UUID, isMember TeamReader, acl ACLResolver) error {
 	if f.OwnerID == user {
 		return nil
 	}
 	teamID := teamScope(f)
 	if teamID == nil {
 		return ErrNotFound
+	}
+	allowed, matched, aerr := resolveACL(acl, f.ID, *teamID, user, "read")
+	if aerr != nil {
+		return aerr
+	}
+	if matched {
+		if !allowed {
+			return ErrNotFound
+		}
+		return nil
 	}
 	if isMember == nil {
 		return ErrForbidden
@@ -319,7 +369,7 @@ func (s *Store) Get(user, id uuid.UUID) (File, error) {
 		}
 		return File{}, err
 	}
-	if err := authorizeFileAccess(f, user, s.teamReader); err != nil {
+	if err := authorizeFileAccess(f, user, s.teamReader, s.acl); err != nil {
 		return File{}, err
 	}
 	now := time.Now().UTC()
@@ -473,7 +523,7 @@ func (s *Store) CreateFolderIn(user, parent uuid.UUID, name string) (File, error
 	if err != nil {
 		return File{}, err
 	}
-	p, err := authorizeParentFolder(s, user, parent, s.teamWriter)
+	p, err := authorizeParentFolder(s, user, parent, s.teamWriter, s.acl)
 	if err != nil {
 		return File{}, err
 	}
@@ -550,13 +600,24 @@ func (s *Store) ListTeam(teamID, parent uuid.UUID, limit int, f TeamListFilter) 
 
 // authorizeTeamDelete 判定 user 能否删除 file（软删除/彻底删除共用）：
 // 个人文件仅 owner（非 owner 统一 ErrNotFound，不泄露存在性）；
-// 团队文件要求 CanDelete（系统仅 owner；自定义角色按 delete 勾选且未被 deny）——
-// 文件行 owner（上传者）不短路：delete 是独立于 write 的权限（设计 6.5.2）。
-func authorizeTeamDelete(f File, user uuid.UUID, canDeleteTeam TeamDeleter) error {
+// 团队文件先经路径级 ACL（delete），未匹配走 CanDelete（系统仅 owner；
+// 自定义角色按 delete 勾选且未被 deny）——文件行 owner（上传者）不短路：
+// delete 是独立于 write 的权限（设计 6.5.2）。
+func authorizeTeamDelete(f File, user uuid.UUID, canDeleteTeam TeamDeleter, acl ACLResolver) error {
 	teamID := teamScope(f)
 	if teamID == nil {
 		if f.OwnerID != user {
 			return ErrNotFound
+		}
+		return nil
+	}
+	allowed, matched, aerr := resolveACL(acl, f.ID, *teamID, user, "delete")
+	if aerr != nil {
+		return aerr
+	}
+	if matched {
+		if !allowed {
+			return ErrForbidden
 		}
 		return nil
 	}
@@ -591,7 +652,7 @@ func (s *Store) Rename(user, id uuid.UUID, name string) (File, error) {
 	if f.IsRoot {
 		return File{}, ErrRoot
 	}
-	if err := authorizeFileWrite(f, user, s.teamWriter); err != nil {
+	if err := authorizeFileWrite(f, user, s.teamWriter, s.acl); err != nil {
 		return File{}, err
 	}
 	result := s.db.Model(&f).Updates(map[string]any{"name": n})
@@ -673,7 +734,7 @@ func (s *Store) CreateUploadedFile(owner, parent uuid.UUID, name, storageKey str
 	if err != nil {
 		return uuid.Nil, false, err
 	}
-	p, err := authorizeParentFolder(s, owner, parent, s.teamWriter)
+	p, err := authorizeParentFolder(s, owner, parent, s.teamWriter, s.acl)
 	if err != nil {
 		return uuid.Nil, false, err
 	}
@@ -718,7 +779,7 @@ func (s *Store) Copy(user, id, parent uuid.UUID, name string) (File, error) {
 	if source.Type == "folder" {
 		return File{}, ErrFolderCopy
 	}
-	parentFile, err := authorizeParentFolder(s, user, parent, s.teamWriter)
+	parentFile, err := authorizeParentFolder(s, user, parent, s.teamWriter, s.acl)
 	if err != nil {
 		return File{}, err
 	}
@@ -784,7 +845,7 @@ func (s *Store) Delete(user, id uuid.UUID) error {
 	if f.IsRoot {
 		return ErrRoot
 	}
-	if err := authorizeTeamDelete(f, user, s.teamDeleter); err != nil {
+	if err := authorizeTeamDelete(f, user, s.teamDeleter, s.acl); err != nil {
 		return err
 	}
 	return s.db.Model(&f).Update("deleted_at", gorm.Expr("CURRENT_TIMESTAMP")).Error

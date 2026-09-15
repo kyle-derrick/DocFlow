@@ -12,6 +12,12 @@ import { VitePWA } from 'vite-plugin-pwa'
 //     （docker-compose.yml 将 onlyoffice 容器 80 映射为宿主机 8081）；
 //   - 或直接禁用集成（ONLYOFFICE_ENABLED=false，此时前端不显示「编辑」入口）。
 export default defineConfig({
+  // @excalidraw/excalidraw 包入口（main.js）以 process.env.IS_PREACT 分发
+  // preact/React 构建；Vite 默认剔除 env 变量会导致浏览器报
+  // "process is not defined"（官方 FAQ），此处固定为 false 走 React 构建。
+  define: {
+    'process.env.IS_PREACT': JSON.stringify('false'),
+  },
   plugins: [
     react(),
     // PWA 基础（v1.1）：可安装（manifest）+ 应用 Shell 预缓存，不做离线数据。

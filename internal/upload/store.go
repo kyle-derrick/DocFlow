@@ -36,9 +36,10 @@ func (s *GormStore) Update(v UploadSession) error {
 // 预占），否则返回 ErrOffset（offset/状态已被并发 Append、Complete 或
 // janitor 改写）。表无 updated_at 列，仅更新 offset。
 func (s *GormStore) AdvanceOffset(id uuid.UUID, from, delta int64, _ time.Time) error {
+	// offset 为 PostgreSQL 保留字，原生片段必须带引号（42601）。
 	result := s.db.Model(&UploadSession{}).
-		Where("id = ? AND offset = ? AND status = ?", id, from, StatusUploading).
-		Update("offset", gorm.Expr("offset + ?", delta))
+		Where("id = ? AND \"offset\" = ? AND status = ?", id, from, StatusUploading).
+		Update("\"offset\"", gorm.Expr("\"offset\" + ?", delta))
 	if result.Error != nil {
 		return result.Error
 	}
@@ -53,7 +54,7 @@ func (s *GormStore) AdvanceOffset(id uuid.UUID, from, delta int64, _ time.Time) 
 // 失败说明会话被并发改写（另一 Complete 已推进 / 仍在写入 / janitor 置 failed）。
 func (s *GormStore) MarkVerifying(id uuid.UUID, size int64) (bool, error) {
 	result := s.db.Model(&UploadSession{}).
-		Where("id = ? AND status = ? AND offset = ?", id, StatusUploading, size).
+		Where("id = ? AND status = ? AND \"offset\" = ?", id, StatusUploading, size).
 		Update("status", StatusVerifying)
 	return result.RowsAffected > 0, result.Error
 }

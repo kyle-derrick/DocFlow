@@ -48,7 +48,11 @@ func (g *GormRepo) QueryDocs(user uuid.UUID, opts QueryOptions) ([]Result, error
 	pattern := LikePattern(opts.Q)
 	cond, condArgs := accessibleScopeSQL("d", user)
 	where := "(f.name ILIKE ? OR d.tsv @@ plainto_tsquery('simple', ?)) AND " + cond
-	args := []any{pattern, opts.Q}
+	// 占位符按 SQL 文本顺序绑定：SELECT 片段（snippet 的 ILIKE 与
+	// plainto_tsquery）在 WHERE 之前出现，须先提供 pattern/Q 再接 WHERE 的
+	// pattern/Q，最后是访问范围、可选过滤与 ORDER BY/LIMIT。
+	args := []any{pattern, opts.Q} // SELECT: CASE WHEN f.name ILIKE ? / snippet plainto_tsquery(?)
+	args = append(args, pattern, opts.Q)
 	args = append(args, condArgs...)
 	if opts.TagID != nil {
 		where += " AND EXISTS (SELECT 1 FROM file_tags ft WHERE ft.file_id = d.file_id AND ft.tag_id = ?)"

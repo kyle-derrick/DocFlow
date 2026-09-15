@@ -112,6 +112,8 @@ type UserTOTP struct {
 	UpdatedAt     time.Time
 }
 
+func (UserTOTP) TableName() string { return "user_totp" }
+
 // PasswordResetToken 对应 password_reset_tokens 表（migrations/014）。
 // TokenHash 为明文 token 的 SHA-256 hex（64 字符）；明文不落库，仅在
 // 请求重置时经邮件发送一次。used_at 原子条件更新保证一次性语义。

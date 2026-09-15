@@ -592,6 +592,135 @@ body {
   margin-left: 4px;
 }
 
+/* ---------- 文件网格视图（设计 6.3.7） ---------- */
+
+/* 工具栏视图模式切换（☰ 列表 / ▦ 网格）：覆盖 .seg 的 flex:1 拉伸。 */
+.view-mode-toggle .seg {
+  flex: none;
+  min-width: 38px;
+  padding: 4px 10px;
+  font-size: 13px;
+  line-height: 1.4;
+  text-align: center;
+}
+
+/* 响应式卡片网格：auto-fill + minmax(180px)，窄屏自动降列。 */
+.file-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.file-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  transition: border-color 0.15s ease;
+}
+
+.file-card:hover {
+  border-color: var(--primary);
+}
+
+.file-card.selected {
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+}
+
+/* 卡片顶行：左选择框、右星标 + 「⋯」菜单按钮（悬浮在卡片主体上方）。 */
+.file-card-top {
+  position: absolute;
+  top: 6px;
+  left: 8px;
+  right: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+}
+
+.file-card-top input {
+  accent-color: var(--primary);
+}
+
+.file-card-top-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.file-card-top-actions .star-btn {
+  padding: 0 2px;
+  font-size: 14px;
+}
+
+.card-menu-btn {
+  padding: 2px 8px;
+}
+
+/* 卡片主体（整卡可点）：文件夹进入、文件预览。 */
+.file-card-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 26px 10px 12px;
+  background: none;
+  border: none;
+  color: var(--text);
+  font: inherit;
+  text-align: center;
+  cursor: pointer;
+}
+
+.file-card-icon {
+  font-size: 34px;
+  line-height: 1;
+}
+
+.file-card-name {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-card-meta {
+  font-size: 12px;
+}
+
+/* 卡片「⋯」操作菜单：与列表行操作一致的纵向下拉。 */
+.file-card-menu {
+  position: absolute;
+  top: 36px;
+  right: 8px;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  min-width: 150px;
+  padding: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+:root[data-mode='light'] .file-card-menu {
+  box-shadow: 0 8px 24px rgba(24, 30, 42, 0.16);
+}
+
+.file-card-menu .btn {
+  margin-left: 0;
+  text-align: left;
+}
+
 /* ---------- 按钮 ---------- */
 
 .btn {
@@ -1996,4 +2125,117 @@ kbd {
 
 :root[data-mode='light'] .update-toast {
   box-shadow: 0 8px 24px rgba(24, 30, 42, 0.16);
+}
+
+/* ---------- Excalidraw 白板编辑页（复用 editor-page/editor-shell 布局） ---------- */
+
+/* 工具条右侧动作组（保存 / 保存并返回）。 */
+.editor-head-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+}
+
+/* 懒加载 chunk 的占位提示。 */
+.excalidraw-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--muted);
+}
+
+/* 编辑器根节点吃满 shell 高度（明暗由组件 theme prop 控制）。 */
+.excalidraw-shell .excalidraw {
+  height: 100%;
+}
+
+/* ---------- AI 摘要（预览对话框内，文本类文件） ---------- */
+
+.ai-summary {
+  margin-top: 10px;
+}
+
+.ai-summary .preview-foot {
+  margin-top: 0;
+}
+
+.ai-summary-box {
+  margin-top: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--primary);
+  border-radius: 6px;
+  background: var(--bg);
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.6;
+  max-height: 30vh;
+  overflow: auto;
+}
+
+/* ---------- 路径级 ACL 管理对话框（团队空间） ---------- */
+
+.acl-list {
+  max-height: 46vh;
+  overflow: auto;
+}
+
+.acl-row {
+  display: grid;
+  grid-template-columns: 72px minmax(140px, 1fr) 92px 1.2fr auto;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+}
+
+.acl-row.acl-head {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.acl-row:last-child {
+  border-bottom: none;
+}
+
+.acl-type {
+  font-size: 12px;
+}
+
+.acl-uuid {
+  font-family: ui-monospace, Consolas, 'Courier New', monospace;
+  font-size: 12px;
+  min-width: 0;
+}
+
+.acl-perms {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.acl-perms .check-item {
+  margin: 0;
+}
+
+.acl-add {
+  display: grid;
+  grid-template-columns: 88px minmax(140px, 1fr) 92px auto auto;
+  gap: 8px;
+  align-items: center;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+@media (max-width: 720px) {
+  .acl-row,
+  .acl-add {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .acl-add {
+    grid-template-columns: 1fr;
+  }
 }

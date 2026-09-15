@@ -124,7 +124,7 @@ func (s *Store) isWithin(candidate, ancestor uuid.UUID) (bool, error) {
 // 移动继承目标目录作用域（个人↔团队移动时更新 scope_type/team_id，
 // 与 CreateFolderIn 的继承语义一致）。
 func (s *Store) BatchMove(user uuid.UUID, ids []uuid.UUID, target uuid.UUID) ([]BatchItemResult, error) {
-	t, err := authorizeParentFolder(s, user, target, s.teamWriter)
+	t, err := authorizeParentFolder(s, user, target, s.teamWriter, s.acl)
 	if err != nil {
 		return nil, err
 	}

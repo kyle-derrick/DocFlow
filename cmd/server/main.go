@@ -17,6 +17,8 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 
+	"github.com/docflow/docflow/internal/acl"
+	"github.com/docflow/docflow/internal/ai"
 	"github.com/docflow/docflow/internal/audit"
 	"github.com/docflow/docflow/internal/auth"
 	"github.com/docflow/docflow/internal/config"
@@ -70,6 +72,12 @@ func main() {
 	fileStore.SetTeamWriter(teamService.CanWrite)
 	// 团队删除权限（软删除/彻底删除）：系统仅 owner、自定义角色按 delete 勾选。
 	fileStore.SetTeamDeleter(teamService.CanDelete)
+	// 路径级 ACL（设计 6.5.3/6.5.4 最小落地）：团队作用域文件/目录的
+	// read/write/delete/share 判定先求值 folder_acl 链（近覆盖远、同节点
+	// deny 优先、user 覆盖 team），链上无适用条目回退团队角色判定
+	//（无 ACL 行为完全不变）；HTTP 管理端点 GET/PUT /api/v1/folders/:id/acl。
+	aclService := acl.NewService(acl.NewGormRepo(db))
+	fileStore.SetACLResolver(aclService.ResolveForFile)
 	// 版本管理：每文件保留版本数上限（MAX_VERSIONS_PER_FILE，默认 5）为回退值；
 	// 运行时经 system_settings 的 upload.max_versions_per_file 热读取覆盖
 	//（读失败回退 config 值）。
@@ -247,9 +255,33 @@ func main() {
 	// 默认 inprocess（进程内 goroutine，零依赖，行为与原内联实现一致）；
 	// QUEUE_DRIVER=redis 时经 asynq 入队（启动 ping 校验失败即 fatal），
 	// 由任意实例的 worker 消费。两种驱动共用同一组处理函数。
-	// 全文检索（v2 规划 Meilisearch，本批次 PostgreSQL 原生）：索引构建
-	// 经 task:search-index 队列异步执行（见下方 fileComplete 钩子接线）。
-	searchStore := search.NewStore(search.NewGormRepo(db))
+	// 全文检索（SEARCH_DRIVER 装配 pg|meili）：索引构建经 task:search-index
+	// 队列异步执行（见下方 fileComplete 钩子接线）。meili 为 v2 可选项：
+	// 启动 EnsureIndex 校验连通性（失败即退出）；访问过滤需要用户团队列表，
+	// 由 teamStore.ListForUser 提供（不扩 Repo.QueryDocs 签名，pg/memory
+	// 实现与既有调用方零改动）。
+	var searchRepo search.Repo = search.NewGormRepo(db)
+	if cfg.SearchDriver == "meili" {
+		meili := search.NewMeiliRepo(cfg.MeiliURL, cfg.MeiliAPIKey, func(user uuid.UUID) ([]uuid.UUID, error) {
+			teams, err := teamStore.ListForUser(user)
+			if err != nil {
+				return nil, err
+			}
+			ids := make([]uuid.UUID, 0, len(teams))
+			for _, t := range teams {
+				ids = append(ids, t.ID)
+			}
+			return ids, nil
+		})
+		if err := meili.EnsureIndex(ctx); err != nil {
+			log.Fatalf("search driver meili: ensure index: %v", err)
+		}
+		searchRepo = meili
+		log.Printf("search driver: meili (%s)", cfg.MeiliURL)
+	} else {
+		log.Print("search driver: pg")
+	}
+	searchStore := search.NewStore(searchRepo)
 	searchIndexer := search.NewIndexer(searchStore, db, storage)
 	completeUpload := tasks.CompleteUploadHandler(uploadService, auditStore)
 	extractWebpkg := tasks.ExtractWebpkgHandler(webpkgService)
@@ -318,6 +350,8 @@ func main() {
 	// 团队文件分享门控（设计 6.5.5）：仅 CanShare（系统 owner/editor、
 	// 自定义角色按 share 勾选且未被 deny）可创建团队文件分享；个人文件不受影响。
 	shareService.SetTeamSharer(teamService.CanShare)
+	// 分享判定的路径级 ACL：folder_acl 链命中（matched）时优先于团队角色。
+	shareService.SetACLResolver(aclService.ResolveForFile)
 	shareService.SetUserDirectory(userStore)
 	// 站内通知接线（share.accessed）：公开/私有分享下载成功（计数已消耗）
 	// 通知分享 owner，标题含文件名（私有分享 owner 本人下载不通知）。
@@ -432,6 +466,14 @@ func main() {
 	handler.SetTagging(tagging.NewService(tagging.NewGormRepo(db), fileStore))
 	// 全文检索：GET /api/v1/search（文件名 + 文本内容；索引构建经队列）。
 	handler.SetSearch(searchStore)
+	// 路径级 ACL 管理端点（GET/PUT /api/v1/folders/:id/acl）。
+	handler.SetACL(aclService)
+	// AI 摘要（v2 可落地子集）：OpenAI 兼容 /chat/completions；AI_ENABLED=false
+	// 时端点恒注册并返回 503 AI_DISABLED。
+	handler.SetAI(ai.New(cfg.AIEnabled, cfg.AIBaseURL, cfg.AIAPIKey, cfg.AIModel))
+	if cfg.AIEnabled {
+		log.Printf("ai summary enabled (base=%s model=%s)", cfg.AIBaseURL, cfg.AIModel)
+	}
 	// 站内通知：列表/已读/未读数与通知偏好端点（本人维度）。
 	handler.SetNotifications(notifyService)
 	// Webhook 通知渠道端点（本人维度）：注册/列举/启停/删除。

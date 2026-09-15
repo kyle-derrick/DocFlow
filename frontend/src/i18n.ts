@@ -30,6 +30,9 @@ const zh = {
   starredOnly: '仅收藏', starredNo: '未收藏', clearFilters: '清除筛选',
   recentHint: '最近访问：按访问时间倒序，跨越全部目录。',
   searchModeHint: '检索模式：结果跨越全部个人与团队目录（标签/收藏过滤）。',
+  // ---- 文件浏览：视图模式（列表/网格，设计 6.3.7） ----
+  viewModeList: '列表视图', viewModeGrid: '网格视图',
+  hotkeyViewList: '切换到列表视图（Ctrl/Cmd+1）', hotkeyViewGrid: '切换到网格视图（Ctrl/Cmd+2）',
   // ---- 批量操作 ----
   batchMove: '移动到…', batchTrashConfirm: '确定将所选 {n} 项移入回收站？',
   batchDownload: '下载 (zip)', downloadFailed: '下载失败',
@@ -97,6 +100,21 @@ const zh = {
   teamNotFound: '未找到该团队：可能已被删除或你不是团队成员',
   teamSpaceEmpty: '团队空间为空，上传文件或新建文件夹开始协作',
   permRead: '读取', permWrite: '写入', permDelete: '删除', permShare: '分享', permAdmin: '管理',
+  // ---- Excalidraw 白板（v1.3） ----
+  whiteboard: '白板', whiteboardEdit: 'Excalidraw 白板编辑', newWhiteboard: '✎ 新建白板',
+  whiteboardCreating: '创建白板中…', whiteboardCreateFailed: '创建白板失败',
+  whiteboardLoading: '正在加载白板编辑器…', whiteboardSaved: '已保存为新版本',
+  saveAndBack: '保存并返回', back: '← 返回', saving: '保存中…', currentVersion: '当前版本 v{n}',
+  // ---- AI 摘要（v1.3） ----
+  aiSummary: 'AI 摘要', aiSummaryLoading: '摘要生成中…', aiSummaryDisabled: 'AI 未启用',
+  aiSummaryUnsupported: '不支持该文件类型', aiSummaryFailed: '摘要生成失败',
+  // ---- 路径级 ACL（团队空间，v1.3） ----
+  acl: '权限', aclTitle: '「{name}」路径权限',
+  aclHint: '路径级 ACL：allow 授予、deny 显式拒绝（优先于团队角色）。保存时整体覆盖全部条目。',
+  aclSubjectType: '主体类型', aclSubjectId: '主体 UUID', aclEffect: '效果',
+  aclAllow: '允许', aclDeny: '拒绝', aclEmpty: '暂无权限条目', aclAdd: '添加',
+  aclNoPerms: '请至少勾选一项权限', aclSaved: '权限已保存',
+  aclSubjectUser: '用户', aclSubjectTeam: '团队', aclSubjectRole: '角色',
 }
 
 const en: { [K in keyof typeof zh]: string } = {
@@ -119,6 +137,9 @@ const en: { [K in keyof typeof zh]: string } = {
   starredOnly: 'Starred only', starredNo: 'Not starred', clearFilters: 'Clear filters',
   recentHint: 'Recently accessed files, sorted by access time across all folders.',
   searchModeHint: 'Search mode: results span all personal and team folders (tag/starred filters).',
+  // ---- File browser: view mode (list/grid, design 6.3.7) ----
+  viewModeList: 'List view', viewModeGrid: 'Grid view',
+  hotkeyViewList: 'Switch to list view (Ctrl/Cmd+1)', hotkeyViewGrid: 'Switch to grid view (Ctrl/Cmd+2)',
   // ---- Batch operations ----
   batchMove: 'Move to…', batchTrashConfirm: 'Move {n} selected items to trash?',
   batchDownload: 'Download (zip)', downloadFailed: 'Download failed',
@@ -186,6 +207,21 @@ const en: { [K in keyof typeof zh]: string } = {
   teamNotFound: 'Team not found: it may have been deleted, or you are not a member',
   teamSpaceEmpty: 'Team space is empty. Upload a file or create a folder to start collaborating',
   permRead: 'Read', permWrite: 'Write', permDelete: 'Delete', permShare: 'Share', permAdmin: 'Admin',
+  // ---- Excalidraw whiteboard (v1.3) ----
+  whiteboard: 'Whiteboard', whiteboardEdit: 'Excalidraw whiteboard editor', newWhiteboard: '✎ New whiteboard',
+  whiteboardCreating: 'Creating…', whiteboardCreateFailed: 'Failed to create whiteboard',
+  whiteboardLoading: 'Loading whiteboard editor…', whiteboardSaved: 'Saved as a new version',
+  saveAndBack: 'Save & back', back: '← Back', saving: 'Saving…', currentVersion: 'Version v{n}',
+  // ---- AI summary (v1.3) ----
+  aiSummary: 'AI summary', aiSummaryLoading: 'Generating summary…', aiSummaryDisabled: 'AI is not enabled',
+  aiSummaryUnsupported: 'Unsupported file type', aiSummaryFailed: 'Failed to generate summary',
+  // ---- Path-level ACL (team space, v1.3) ----
+  acl: 'Permissions', aclTitle: 'Permissions for “{name}”',
+  aclHint: 'Path-level ACL: allow grants, deny explicitly overrides team roles. Saving replaces all entries.',
+  aclSubjectType: 'Subject type', aclSubjectId: 'Subject UUID', aclEffect: 'Effect',
+  aclAllow: 'Allow', aclDeny: 'Deny', aclEmpty: 'No ACL entries yet', aclAdd: 'Add',
+  aclNoPerms: 'Select at least one permission', aclSaved: 'Permissions saved',
+  aclSubjectUser: 'User', aclSubjectTeam: 'Team', aclSubjectRole: 'Role',
 }
 
 export const messages = { 'zh-CN': zh, 'en-US': en } as const

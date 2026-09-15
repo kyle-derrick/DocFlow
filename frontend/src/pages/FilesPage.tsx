@@ -9,6 +9,7 @@ import {
   createFolder,
   createShare,
   deleteFile,
+  getFileMeta,
   listFiles,
   listTeams,
   renameFile,
@@ -225,6 +226,7 @@ export default function FilesPage() {
         rootTargetLabel="我的文件（根目录）"
         viewTabs
         copyFn={(fileId, parentId) => copyFile(fileId, parentId)}
+        fileMetaFn={(fileId) => getFileMeta(fileId).catch(() => null)}
         rowActions={(item) => (
           <>
             {item.type === 'file' && (

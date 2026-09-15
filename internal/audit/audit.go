@@ -67,6 +67,8 @@ const (
 	ResourceUpload  = "upload"
 	ResourceFile    = "file"
 	ResourceShare   = "share"
+	// ResourceFolder 为目录（路径级 ACL 管理等目录维度操作）。
+	ResourceFolder = "folder"
 	// ResourceSettings 系统设置键；ResourceBlob 为 object_blobs 行。
 	ResourceSettings = "settings"
 	ResourceBlob     = "blob"
@@ -112,6 +114,11 @@ func NewStore(db *gorm.DB) *Store { return &Store{db: db} }
 func (s *Store) Record(e Entry) error {
 	if e.CreatedAt.IsZero() {
 		e.CreatedAt = time.Now().UTC()
+	}
+	// metadata 列为 jsonb：空串不是合法 JSON（PostgreSQL 22P02），统一落
+	// "{}"；调用方传入的必须已是合法 JSON 串。
+	if e.Metadata == "" {
+		e.Metadata = "{}"
 	}
 	return s.db.Create(&e).Error
 }
