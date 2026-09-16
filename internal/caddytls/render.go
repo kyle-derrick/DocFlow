@@ -12,16 +12,25 @@ import "strings"
 func Render(mode Mode, domain string) string {
 	site := "{$APP_DOMAIN::80}" // http：env 驱动（本地验证默认，明文）
 	tlsLine := ""
+	defaultSNI := ""
 	switch mode {
 	case ModeAuto:
 		site = domain // Caddy 自动 ACME（HTTP-01 挑战走 80，自动 308 重定向）
 	case ModeInternal:
 		site = domain
 		tlsLine = "\ttls internal\n"
+		// IP 站点（如 127.0.0.1/192.168.x.x）：客户端对 IP 不发送 SNI，
+		// Caddy 无 SNI 时证书匹配失败（TLS internal error alert）。全局
+		// default_sni 兜底到本站点后握手成功（域名站点亦无害）。
+		defaultSNI = strings.Split(domain, ":")[0]
 	}
 
 	var b strings.Builder
-	b.WriteString("{\n\tadmin {$CADDY_ADMIN:localhost:2019}\n}\n\n")
+	b.WriteString("{\n\tadmin {$CADDY_ADMIN:localhost:2019}\n")
+	if defaultSNI != "" {
+		b.WriteString("\tdefault_sni " + defaultSNI + "\n")
+	}
+	b.WriteString("}\n\n")
 	b.WriteString(site + " {\n")
 	if tlsLine != "" {
 		b.WriteString(tlsLine)

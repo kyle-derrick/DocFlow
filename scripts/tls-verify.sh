@@ -1,24 +1,20 @@
 #!/bin/bash
-# HTTPS 运行时切换验证：等 backend 自愈（VM 重启后 OIDC 时序）→ 登录 →
-# GET /admin/tls → 切 internal(127.0.0.1) 断言 https TLS → 切回 http 断言恢复。
-# 注意：admin 密码须与 .env SEED_ADMIN_PASSWORD 一致（密码重置类验证会改密）。
+# TLS 全链路验证（一条龙）：重置库 + seed → 登录 → GET/PUT /admin/tls →
+# internal(127.0.0.1) 断言 https → 切回 http 断言恢复。
 set -e
 PD=/mnt/d/data/code/git/own/DocFlow
 export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
-C="docker compose --env-file $PD/.env -f $PD/docker-compose.yml -f $PD/scripts/compose-scale.yml -p docflow --profile minimal --profile full --profile antivirus --profile search --profile storage"
-PASS="${SEED_ADMIN_PASSWORD:-AdminPassword123}"
+C="docker compose --env-file $PD/.env -f $PD/docker-compose.yml -f $PD/scripts/compose-scale.yml -p docflow"
+PG="docker exec docflow-postgres-1 psql -U docflow -d docflow -t -A"
+PASS=$(grep '^SEED_ADMIN_PASSWORD=' $PD/.env | cut -d= -f2-)
 
-echo '=== [0] wait backend healthy ==='
-for i in $(seq 1 60); do
-  st=$(docker inspect docflow-backend-1 --format '{{.State.Health.Status}}' 2>/dev/null || echo none)
-  [ "$st" = "healthy" ] && { echo "healthy (${i}x3s)"; break; }
-  sleep 3
-done
-[ "$st" = "healthy" ] || { echo BACKEND_NOT_HEALTHY; exit 1; }
+echo '=== [0] reset db + seed ==='
+$PG -c "SELECT 'TRUNCATE TABLE ' || string_agg(format('%I.%I', schemaname, tablename), ', ') || ' RESTART IDENTITY CASCADE' FROM pg_tables WHERE schemaname='public' AND tablename <> 'schema_migrations';" | $PG
+$C run --rm seed 2>&1 | tail -1
 
-echo '=== [1] login ==='
+echo '=== [1] login（login 接口按 email 认证） ==='
 RESP=$(curl -s -m 5 -X POST http://127.0.0.1/api/v1/auth/login -H 'Content-Type: application/json' \
-  -d "{\"username\":\"admin\",\"password\":\"$PASS\"}")
+  -d "{\"email\":\"admin@example.com\",\"password\":\"$PASS\"}")
 TOK=$(echo "$RESP" | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
 [ -n "$TOK" ] || { echo "LOGIN_FAIL: $(echo "$RESP" | head -c 150)"; exit 1; }
 

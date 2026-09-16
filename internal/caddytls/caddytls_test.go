@@ -104,10 +104,14 @@ func TestRenderModes(t *testing.T) {
 	if !strings.Contains(internalConf, "192.168.1.10 {\n\ttls internal\n") {
 		t.Fatalf("internal mode site/tls invalid:\n%s", firstLines(internalConf, 3))
 	}
+	// internal 模式带 default_sni（IP 客户端不发 SNI 的握手兜底）。
+	if !strings.Contains(internalConf, "default_sni 192.168.1.10\n") {
+		t.Fatalf("internal mode missing default_sni:\n%s", firstLines(internalConf, 4))
+	}
 
 	for name, conf := range map[string]string{"http": httpConf, "auto": autoConf, "internal": internalConf} {
 		for _, anchor := range []string{
-			"{\n\tadmin {$CADDY_ADMIN:localhost:2019}\n}",
+			"admin {$CADDY_ADMIN:localhost:2019}",
 			"handle /api/*", "reverse_proxy backend:8080",
 			"handle /content/*", "handle_path /onlyoffice/*", "handle_path /drawio/*",
 			"X-Forwarded-Path /onlyoffice",
