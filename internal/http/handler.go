@@ -697,6 +697,7 @@ func (h *Handler) logout(c *gin.Context) {
 		_ = h.auth.RevokeRefreshToken(cookie.Value)
 	}
 	c.SetCookie("refresh_token", "", -1, "/api/v1/auth/refresh", h.cookieDomain, h.cookieSecure, true)
+	clearCSRFCookies(c, h.cookieDomain, h.cookieSecure)
 	c.Status(http.StatusNoContent)
 }
 func (h *Handler) setRefreshCookie(c *gin.Context, token string) {

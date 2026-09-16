@@ -45,4 +45,14 @@ test.describe('认证', () => {
     await expect(page.getByRole('button', { name: '退出登录' })).toBeVisible()
     await expect(page.getByRole('heading', { name: '文件' })).toBeVisible()
   })
+
+  test('两个标签页并发恢复会话不会触发 refresh token 重放', async ({ page, context }) => {
+    await loginViaUI(page)
+    const second = await context.newPage()
+    await Promise.all([page.reload(), second.goto('/')])
+    await expect(page).toHaveURL(/\/$/)
+    await expect(second).toHaveURL(/\/$/)
+    await expect(page.getByRole('button', { name: '退出登录' })).toBeVisible()
+    await expect(second.getByRole('button', { name: '退出登录' })).toBeVisible()
+  })
 })

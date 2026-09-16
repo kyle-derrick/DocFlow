@@ -230,18 +230,19 @@ export default function FilesPage() {
         rowActions={(item) => (
           <>
             {item.type === 'file' && (
-              <button className="btn small" onClick={() => openShare(item)}>分享</button>
+              <button type="button" className="btn small" onClick={() => openShare(item)}>分享</button>
             )}
             {item.type === 'file' && (
-              <button className="btn small" onClick={() => setHistoryTarget(item)}>历史</button>
+              <button type="button" className="btn small" onClick={() => setHistoryTarget(item)}>历史</button>
             )}
             <button
+              type="button"
               className="btn small"
               onClick={() => { setRenameTarget(item); setRenameValue(item.name); setRenameError('') }}
             >
               重命名
             </button>
-            <button className="btn small danger" onClick={() => void handleDelete(item)}>删除</button>
+            <button type="button" className="btn small danger" onClick={() => void handleDelete(item)}>删除</button>
           </>
         )}
       />

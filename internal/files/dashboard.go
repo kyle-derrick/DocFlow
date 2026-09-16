@@ -52,7 +52,8 @@ func (s *Store) PersonalDashboardStats(owner uuid.UUID, recentLimit int) (Person
 		return PersonalDashboard{}, err
 	}
 	if err := s.db.
-		Where(personalFileScope, owner).
+		Where(personalFileScope+" AND current_version_id IS NOT NULL", owner).
+		Where("EXISTS (SELECT 1 FROM file_versions fv JOIN object_blobs ob ON ob.id = fv.object_blob_id WHERE fv.id = files.current_version_id AND fv.file_id = files.id AND ob.status = ?)", BlobStatusAvailable).
 		Order("updated_at DESC, id DESC").
 		Limit(recentLimit).
 		Find(&out.RecentFiles).Error; err != nil {

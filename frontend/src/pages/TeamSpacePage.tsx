@@ -542,10 +542,10 @@ export default function TeamSpacePage() {
               rowActions={(item) => (
                 <>
                   {item.type === 'folder' && isOwner && (
-                    <button className="btn small" onClick={() => void openAcl(item)}>{msg('acl')}</button>
+                    <button type="button" className="btn small" onClick={() => void openAcl(item)}>{msg('acl')}</button>
                   )}
                   {item.type === 'file' && (
-                    <button className="btn small" onClick={() => setHistoryTarget(item)}>历史</button>
+                    <button type="button" className="btn small" onClick={() => setHistoryTarget(item)}>历史</button>
                   )}
                 </>
               )}

@@ -78,6 +78,38 @@ func TestApplyCSRFMatrix(t *testing.T) {
 // refresh/logout 全链路（Register 装配）：严格模式下无 Origin 的 refresh 被
 // CSRF 中间件拒绝（403 CSRF_REJECTED）；带同源 Origin 后进入业务（401 无
 // cookie）。SetCSRFStrict(false) 后无两头请求进入业务路径。
+func TestApplyCSRFAcceptsMatchingRootCookieWhenLegacyPathCookieComesFirst(t *testing.T) {
+	r := csrfTestRouter(true)
+	req := httptest.NewRequest(http.MethodPost, "/op", nil)
+	req.Header.Set("Origin", "http://example.com")
+	req.Header.Set("X-CSRF-Token", "current")
+	req.Header.Set("Cookie", "docflow_csrf=legacy; docflow_csrf=current; refresh_token=refresh")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204 with matching root cookie", w.Code)
+	}
+}
+
+func TestSetAndClearCSRFCookiesCoverCurrentAndLegacyPaths(t *testing.T) {
+	h := NewHandler(nil, nil, nil, nil, nil, nil, nil, false, "", time.Minute)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	h.setCSRFCookie(c)
+	cookies := w.Result().Cookies()
+	if len(cookies) != 2 || cookies[0].Path != "/api/v1" || cookies[0].MaxAge >= 0 || cookies[1].Path != "/" || cookies[1].MaxAge <= 0 {
+		t.Fatalf("set cookies = %#v, want legacy deletion then root token", cookies)
+	}
+
+	w = httptest.NewRecorder()
+	c, _ = gin.CreateTestContext(w)
+	clearCSRFCookies(c, "", false)
+	cookies = w.Result().Cookies()
+	if len(cookies) != 2 || cookies[0].Path != "/" || cookies[1].Path != "/api/v1" || cookies[0].MaxAge >= 0 || cookies[1].MaxAge >= 0 {
+		t.Fatalf("clear cookies = %#v, want deletions for both paths", cookies)
+	}
+}
+
 func TestCSRFWiredOnRefreshLogout(t *testing.T) {
 	h := NewHandler(nil, nil, nil, nil, nil, nil, nil, false, "", time.Minute)
 	router := gin.New()

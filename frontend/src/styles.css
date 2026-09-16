@@ -1895,21 +1895,82 @@ body {
   overflow-wrap: normal;
 }
 
+/* ---------- 文本 / Markdown 独立编辑页 ---------- */
+
+.text-editor-page {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 20px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.text-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.text-editor-head h1 {
+  margin: 0 0 4px;
+  font-size: 20px;
+}
+
+.text-editor-input,
+.markdown-preview {
+  flex: 1;
+  width: 100%;
+  min-height: calc(100vh - 130px);
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.text-editor-input {
+  resize: none;
+  font: 14px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.text-editor-state {
+  padding: 32px;
+  text-align: center;
+}
+
+.markdown-preview {
+  overflow: auto;
+  line-height: 1.65;
+}
+
+.markdown-preview pre {
+  overflow: auto;
+  padding: 12px;
+  border-radius: 6px;
+  background: var(--bg);
+}
+
+.markdown-preview blockquote {
+  margin-left: 0;
+  padding-left: 12px;
+  border-left: 3px solid var(--primary);
+  color: var(--muted);
+}
+
 /* ---------- ONLYOFFICE 编辑器页 ---------- */
 
-/* 全幅全高容器：以 left/translate 突破 .content 的 960px 限宽（全幅编辑器），
-   负外边距抵消 .content 上下内边距，高度精确为视口减 56px 顶栏，
-   使页面整体恰好 100vh——不出现页面级滚动条。 */
+/* 独立编辑布局占满视口，不依赖站点导航与内容容器。 */
 .editor-page {
   display: flex;
   flex-direction: column;
   width: 100vw;
   max-width: 100vw;
   position: relative;
-  left: 50%;
-  transform: translateX(-50%);
-  height: calc(100vh - 56px);
-  margin: -24px 0 -48px;
+  height: 100vh;
+  margin: 0;
   padding: 12px 16px 16px;
 }
 

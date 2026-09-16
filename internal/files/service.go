@@ -828,7 +828,10 @@ func (s *Store) Recent(owner uuid.UUID, limit int) ([]File, error) {
 		limit = 50
 	}
 	var out []File
-	err := s.db.Where("owner_id = ? AND deleted_at IS NULL AND last_access_at IS NOT NULL", owner).Order("last_access_at DESC, id DESC").Limit(limit).Find(&out).Error
+	err := s.db.
+		Where("owner_id = ? AND deleted_at IS NULL AND last_access_at IS NOT NULL AND current_version_id IS NOT NULL", owner).
+		Where("EXISTS (SELECT 1 FROM file_versions fv JOIN object_blobs ob ON ob.id = fv.object_blob_id WHERE fv.id = files.current_version_id AND fv.file_id = files.id AND ob.status = ?)", BlobStatusAvailable).
+		Order("last_access_at DESC, id DESC").Limit(limit).Find(&out).Error
 	return out, err
 }
 

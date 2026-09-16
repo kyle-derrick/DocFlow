@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """手写 HS256 JWT（无三方依赖）+ 模拟 OnlyOffice DocumentServer 保存回调。"""
-import base64, hmac, hashlib, json, sys, urllib.request, time, uuid
+import base64, hmac, hashlib, io, json, subprocess, sys, urllib.request, time, uuid, zipfile
 
 SECRET = b'verify-onlyoffice-jwt-secret-0123456789'
 BASE = 'http://127.0.0.1'
@@ -13,6 +13,14 @@ def sign(claims: dict) -> str:
     p = b64url(json.dumps(claims).encode())
     sig = b64url(hmac.new(SECRET, f'{h}.{p}'.encode(), hashlib.sha256).digest())
     return f'{h}.{p}.{sig}'
+
+def minimal_docx(text: str) -> bytes:
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')
+        archive.writestr('_rels/.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>')
+        archive.writestr('word/document.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>' + text + '</w:t></w:r></w:p><w:sectPr/></w:body></w:document>')
+    return out.getvalue()
 
 def login():
     req = urllib.request.Request(f'{BASE}/api/v1/auth/login',
@@ -38,9 +46,9 @@ token = login()
 me = api('GET', '/api/v1/me', token)
 admin_id = me['id'] if isinstance(me, dict) and 'id' in me else me
 
-# 1) 上传一个 docx 占位文件（版本 1）
+# 1) 上传合法的最小 DOCX（版本 1）
 fname = f'oo-test-{uuid.uuid4().hex[:6]}.docx'
-content = b'docflow onlyoffice callback test v1'
+content = minimal_docx('DocFlow OnlyOffice callback test v1')
 up = api('POST', '/api/v1/uploads', token, {
     'name': fname, 'size': len(content)}, expect=201)
 req = urllib.request.Request(f"{BASE}/api/v1/uploads/{up['id']}", data=content,
@@ -61,8 +69,10 @@ vers_before = api('GET', f'/api/v1/files/{file_id}/versions', token)
 n_before = len(vers_before.get('versions', vers_before if isinstance(vers_before, list) else []))
 print('versions before =', n_before)
 
-# 4) 模拟 DS 保存回调：status=2 + 同源 url（DS 容器上的可下载内容）
-cb_url = 'http://onlyoffice/healthcheck'
+# 4) 把合法 DOCX 放到 DocumentServer 同源临时 HTTP 目录，再模拟保存回调。
+saved_name = f'docflow-callback-{uuid.uuid4().hex}.docx'
+subprocess.run(['docker', 'compose', 'exec', '-T', 'onlyoffice', 'sh', '-c', f'cat > /var/www/onlyoffice/documentserver-example/public/{saved_name}'], input=minimal_docx('DocFlow OnlyOffice callback saved v2'), check=True)
+cb_url = f'http://onlyoffice/example/{saved_name}'
 claims = {'key': doc_key, 'status': 2, 'url': cb_url, 'users': [admin_id]}
 jwt = sign(claims)
 def post_callback(url, tok):

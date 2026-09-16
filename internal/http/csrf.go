@@ -30,11 +30,16 @@ func newCSRFToken() string {
 
 func (h *Handler) setCSRFCookie(c *gin.Context) {
 	if token := newCSRFToken(); token != "" {
-		// Path 必须为 "/"：SPA 页面路径（/、/files 等）下 document.cookie 读不到
-		// 更深路径的 cookie，Path=/api/v1 会导致刷新页/新标签页的 refresh 请求
-		// 缺 X-CSRF-Token 头而被 403（表现为"老是掉登录"）。该 cookie 本就设计
-		// 为 JS 可读（双提交令牌），放开到根路径无额外暴露。
+		// 删除旧版本曾下发的 Path=/api/v1 cookie。若不删除，浏览器请求 refresh
+		// 时会同时发送两个同名 cookie，并把更长路径的旧值排在前面。
+		http.SetCookie(c.Writer, &http.Cookie{Name: "docflow_csrf", Value: "", Path: "/api/v1", Domain: h.cookieDomain, MaxAge: -1, HttpOnly: false, Secure: h.cookieSecure, SameSite: http.SameSiteLaxMode})
 		http.SetCookie(c.Writer, &http.Cookie{Name: "docflow_csrf", Value: token, Path: "/", Domain: h.cookieDomain, MaxAge: int(h.refreshTokenTTL.Seconds()), HttpOnly: false, Secure: h.cookieSecure, SameSite: http.SameSiteLaxMode})
+	}
+}
+
+func clearCSRFCookies(c *gin.Context, domain string, secure bool) {
+	for _, path := range []string{"/", "/api/v1"} {
+		http.SetCookie(c.Writer, &http.Cookie{Name: "docflow_csrf", Value: "", Path: path, Domain: domain, MaxAge: -1, HttpOnly: false, Secure: secure, SameSite: http.SameSiteLaxMode})
 	}
 }
 
@@ -64,9 +69,15 @@ func applyCSRF(strict bool) gin.HandlerFunc {
 			return
 		}
 		if _, err := c.Request.Cookie("refresh_token"); err == nil {
-			cookie, cookieErr := c.Request.Cookie("docflow_csrf")
 			token := c.GetHeader("X-CSRF-Token")
-			if cookieErr != nil || token == "" || subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(token)) != 1 {
+			matched := false
+			for _, cookie := range c.Request.Cookies() {
+				if cookie.Name == "docflow_csrf" && token != "" && subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(token)) == 1 {
+					matched = true
+					break
+				}
+			}
+			if !matched {
 				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "csrf token rejected", "code": "CSRF_REJECTED"})
 				return
 			}

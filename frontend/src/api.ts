@@ -52,7 +52,7 @@ function withCSRF(init: RequestInit): RequestInit {
 
 export async function refreshSession(): Promise<boolean> {
   if (refreshing) return refreshing
-  const p = (async (): Promise<boolean> => {
+  const exchange = async (): Promise<boolean> => {
     try {
       const res = await fetch('/api/v1/auth/refresh', withCSRF({ method: 'POST', credentials: 'same-origin' }))
       if (!res.ok) return false
@@ -62,6 +62,14 @@ export async function refreshSession(): Promise<boolean> {
     } catch {
       return false
     }
+  }
+  const p = (async (): Promise<boolean> => {
+    // refresh token 每次使用都会轮换；不同标签页的模块级 Promise 无法互相
+    // 共享，必须跨页串行，避免同一旧 token 并发重放触发整个 session 撤销。
+    if (navigator.locks) {
+      return navigator.locks.request('docflow-refresh', { mode: 'exclusive' }, exchange)
+    }
+    return exchange()
   })()
   refreshing = p
   try {

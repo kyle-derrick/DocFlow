@@ -38,6 +38,7 @@ import AdminPage from './pages/AdminPage'
 import EditorPage from './pages/EditorPage'
 import DrawioPage from './pages/DrawioPage'
 import ExcalidrawPage from './pages/ExcalidrawPage'
+import TextEditorPage from './pages/TextEditorPage'
 import SettingsPage from './pages/SettingsPage'
 import DashboardPage from './pages/DashboardPage'
 import { messages, saveLocale, t, useLocale } from './i18n'
@@ -518,7 +519,7 @@ function TopBar() {
   )
 }
 
-function RequireAuth({ children }: { children: ReactElement }) {
+function RequireAuth({ children, bare = false }: { children: ReactElement; bare?: boolean }) {
   const navigate = useNavigate()
   // access_token 仅存内存：页面刷新后为空，先用 refresh cookie 静默续期恢复
   // 会话（api.ts 头注释约定的行为），失败再跳登录页。
@@ -541,6 +542,7 @@ function RequireAuth({ children }: { children: ReactElement }) {
     }
   }, [authed, navigate])
   if (!authed) return null
+  if (bare) return children
   return (
     <div className="app-shell">
       <TopBar />
@@ -572,12 +574,15 @@ export default function App() {
         <Route path="/teams/:id" element={<RequireAuth><TeamSpacePage /></RequireAuth>} />
         <Route path="/shared" element={<RequireAuth><SharedPage /></RequireAuth>} />
         {/* ONLYOFFICE 在线编辑页（集成启用时由文件行「编辑」按钮进入）。 */}
-        <Route path="/edit/:fileId" element={<RequireAuth><EditorPage /></RequireAuth>} />
+        <Route path="/edit/:fileId" element={<RequireAuth bare><EditorPage /></RequireAuth>} />
         {/* draw.io 图表编辑页（集成启用时由文件行「图表」按钮进入，iframe embed）。 */}
-        <Route path="/drawio/:fileId" element={<RequireAuth><DrawioPage /></RequireAuth>} />
+        <Route path="/drawio/:fileId" element={<RequireAuth bare><DrawioPage /></RequireAuth>} />
         {/* Excalidraw 白板编辑页（.excalidraw 文件行「白板」按钮进入；
             编辑器包经 React.lazy 动态加载独立 chunk）。 */}
-        <Route path="/excalidraw/:fileId" element={<RequireAuth><ExcalidrawPage /></RequireAuth>} />
+        <Route path="/excalidraw/:fileId" element={<RequireAuth bare><ExcalidrawPage /></RequireAuth>} />
+        {/* 文本与 Markdown 使用不带站点顶栏的独立编辑窗口。 */}
+        <Route path="/text/:fileId" element={<RequireAuth bare><TextEditorPage kind="text" /></RequireAuth>} />
+        <Route path="/markdown/:fileId" element={<RequireAuth bare><TextEditorPage kind="markdown" /></RequireAuth>} />
         <Route path="/admin" element={<RequireAuth><AdminPage /></RequireAuth>} />
         <Route path="/trash" element={<RequireAuth><TrashPage /></RequireAuth>} />
         {/* 账户设置：登录会话与个人访问令牌（PAT）管理。 */}

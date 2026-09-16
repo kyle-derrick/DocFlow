@@ -62,9 +62,8 @@ func (c *Checker) Check(ctx context.Context) (map[string]string, bool) {
 	if c.cfg.OnlyOfficeEnabled {
 		check("onlyoffice", httpHealth(pingCtx, c.cfg.OnlyOfficeServerURL))
 	}
-	if c.cfg.DrawioEnabled {
-		check("drawio", httpHealth(pingCtx, c.cfg.DrawioServerURL))
-	}
+	// draw.io 静态层由 caddy 镜像 /drawio/* 直接服务，不属于 backend
+	// 就绪依赖，因此不在此处伪造独立服务检查项。
 	return checks, ok
 }
 

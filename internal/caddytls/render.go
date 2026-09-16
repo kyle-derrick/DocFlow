@@ -71,8 +71,17 @@ func Render(mode Mode, domain string) string {
 		}
 	}
 
+	@drawioEditor path_regexp drawioEditor ^/drawio/[0-9a-fA-F-]{36}$
+	handle @drawioEditor {
+		root * /srv/frontend
+		try_files {path} /index.html
+		file_server
+	}
+
 	handle_path /drawio/* {
-		reverse_proxy {$DRAWIO_UPSTREAM:127.0.0.1:9}
+		root * /srv/drawio
+		try_files {path} /index.html
+		file_server
 	}
 
 	handle {

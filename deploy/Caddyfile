@@ -71,18 +71,21 @@
 		}
 	}
 
-	# draw.io Diagrams（full profile）。上游经 DRAWIO_UPSTREAM 注入，机制同
-	# ONLYOFFICE：minimal 下无 drawio 服务，若此处写死 drawio:8080，Caddy 启动
-	# 时静态上游 DNS 解析失败会直接退出，故默认指向本机 discard 端口
-	#（127.0.0.1:9，minimal 下 /drawio/* 返回 502 属预期）；
-	# make up-full 会注入 DRAWIO_UPSTREAM=drawio:8080。
-	# 浏览器经本路径以 iframe embed 模式加载编辑器（postMessage JSON 协议）：
-	# .env 设 DRAWIO_PUBLIC_URL=https://<域名>/drawio（后端 /drawio/config 将其
-	# 返回给前端；DRAWIO_SERVER_URL 仅为 PUBLIC_URL 未配置时的回退地址）。
+	# draw.io Diagrams 静态层：官方 webapp 在构建期并入本镜像 /srv/drawio
+	#（frontend/Dockerfile 第三阶段），浏览器经本路径以 iframe embed 模式
+	# 加载编辑器（postMessage JSON 协议，零后端依赖）。.env 设
+	# DRAWIO_PUBLIC_URL=https://<域名>/drawio（后端 /drawio/config 返回给前端）。
+	@drawioEditor path_regexp drawioEditor ^/drawio/[0-9a-fA-F-]{36}$
+	handle @drawioEditor {
+		root * /srv/frontend
+		try_files {path} /index.html
+		file_server
+	}
+
 	handle_path /drawio/* {
-		# 同 onlyoffice：剥 /drawio 前缀（drawio 为浏览器侧 iframe embed，
-		# 静态站资源以相对路径为主；若目标部署资源断链，改为独立域名直连）。
-		reverse_proxy {$DRAWIO_UPSTREAM:127.0.0.1:9}
+		root * /srv/drawio
+		try_files {path} /index.html
+		file_server
 	}
 
 	# /metrics 与 backend 的 /health、/ready 不写反代规则即不经 Caddy 暴露

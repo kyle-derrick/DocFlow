@@ -19,6 +19,7 @@ const zh = {
   // ---- 通用补充 ----
   cancel: '取消', save: '保存', create: '创建', edit: '编辑', refresh: '刷新', actions: '操作',
   name: '名称', time: '时间', all: '全部', status: '状态', loadFailed: '加载失败', unknownError: '未知错误', saveFailed: '保存失败',
+  textEditor: '文本编辑器', markdownEditor: 'Markdown 编辑器', previewMode: '预览', editMode: '编辑', saved: '已保存',
   noPermission: '无写权限', uuidInvalid: 'UUID 格式不正确', operationFailed: '操作失败',
   selectedCount: '已选 {n} 项', clearSelection: '取消选择', selectAll: '全选', selectItem: '选择',
   clipboardCopyFailed: '复制失败，请手动复制', copied: '已复制 ✓',
@@ -126,6 +127,7 @@ const en: { [K in keyof typeof zh]: string } = {
   // ---- Common additions ----
   cancel: 'Cancel', save: 'Save', create: 'Create', edit: 'Edit', refresh: 'Refresh', actions: 'Actions',
   name: 'Name', time: 'Time', all: 'All', status: 'Status', loadFailed: 'Failed to load', unknownError: 'Unknown error', saveFailed: 'Save failed',
+  textEditor: 'Text editor', markdownEditor: 'Markdown editor', previewMode: 'Preview', editMode: 'Edit', saved: 'Saved',
   noPermission: 'No write permission', uuidInvalid: 'Invalid UUID format', operationFailed: 'Operation failed',
   selectedCount: '{n} selected', clearSelection: 'Clear selection', selectAll: 'Select all', selectItem: 'Select',
   clipboardCopyFailed: 'Copy failed; please copy manually', copied: 'Copied ✓',

@@ -11,6 +11,8 @@ const folderRenamed = `e2eB_${stamp}`
 const subFolder = `e2eC_${stamp}`
 const fileName = `e2eD_${stamp}.txt`
 const fileBody = `DocFlow E2E ${stamp}\nhello playwright\n`
+const createdTextPrefix = 'text-'
+const createdMarkdownPrefix = 'note-'
 
 /** 登录后进入二级目录（根 → folderRenamed → subFolder）。 */
 async function openSubFolder(page: Page): Promise<void> {
@@ -24,7 +26,8 @@ async function openSubFolder(page: Page): Promise<void> {
 test.describe.serial('文件全流程', () => {
   test('新建文件夹后出现在列表', async ({ page }) => {
     await loginViaUI(page)
-    await page.getByRole('button', { name: /新建文件夹/ }).click()
+    await page.getByRole('button', { name: '＋ 新建' }).click()
+    await page.getByRole('button', { name: '文件夹', exact: true }).click()
     await page.getByLabel('名称').fill(folder)
     await page.getByRole('button', { name: '创建', exact: true }).click()
     await expect(fileRow(page, folder)).toBeVisible()
@@ -43,7 +46,8 @@ test.describe.serial('文件全流程', () => {
     await fileRow(page, folderRenamed).locator('.name-btn').click()
     await expect(page.locator('.breadcrumb')).toContainText(folderRenamed)
 
-    await page.getByRole('button', { name: /新建文件夹/ }).click()
+    await page.getByRole('button', { name: '＋ 新建' }).click()
+    await page.getByRole('button', { name: '文件夹', exact: true }).click()
     await page.getByLabel('名称').fill(subFolder)
     await page.getByRole('button', { name: '创建', exact: true }).click()
     await expect(fileRow(page, subFolder)).toBeVisible()
@@ -74,12 +78,33 @@ test.describe.serial('文件全流程', () => {
     await expect(fileRow(page, fileName)).toBeVisible()
   })
 
-  test('预览文本内容', async ({ page }) => {
+  test('新建文本和 Markdown，并通过菜单在独立编辑页打开', async ({ page, context }) => {
     await loginViaUI(page)
     await openSubFolder(page)
-    await fileRow(page, fileName).locator('.name-btn').click()
-    await expect(page.locator('.preview-text')).toContainText(`DocFlow E2E ${stamp}`)
-    await page.getByRole('button', { name: '关闭' }).click()
+
+    for (const name of ['文本文件', 'Markdown 笔记']) {
+      await page.getByRole('button', { name: '＋ 新建' }).click()
+      const [editor] = await Promise.all([
+        context.waitForEvent('page'),
+        page.getByRole('button', { name, exact: true }).click(),
+      ])
+      await editor.waitForLoadState()
+      await expect(editor.locator('textarea')).toBeVisible()
+      await editor.close()
+    }
+
+    await expect(fileRow(page, createdTextPrefix)).toBeVisible()
+    await expect(fileRow(page, createdMarkdownPrefix)).toBeVisible()
+
+    const row = fileRow(page, fileName)
+    await row.getByRole('button', { name: '操作' }).click()
+    const [editor] = await Promise.all([
+      context.waitForEvent('page'),
+      page.locator('.ctx-menu').getByRole('button', { name: '打开', exact: true }).click(),
+    ])
+    await expect(editor).toHaveURL(/\/text\//)
+    await expect(editor.locator('textarea')).toHaveValue(fileBody)
+    await editor.close()
   })
 
   test('下载文件', async ({ page }) => {

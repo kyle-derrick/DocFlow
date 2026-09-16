@@ -553,8 +553,8 @@ func main() {
 	// METRICS_ENABLED 控制（默认启用，无认证，生产由 Caddy/网络层限制访问）。
 	handler.SetMetricsEnabled(cfg.MetricsEnabled)
 	// draw.io 图表编辑集成：仅注入配置（编辑器为浏览器侧 iframe embed，
-	// postMessage JSON 协议；后端不与 drawio 服务通信，保存复用「上传 file_id
-	// 覆盖新版本」链路）。config 探测端点恒注册（禁用时 enabled=false）。
+	// postMessage JSON 协议；官方 webapp 静态层由 caddy 镜像 /drawio/* 服务，
+	// 后端零依赖）。config 探测端点恒注册（禁用时 enabled=false）。
 	handler.SetDrawio(cfg.DrawioEnabled, cfg.DrawioServerURL, cfg.DrawioPublicURL)
 	if cfg.DrawioEnabled {
 		log.Printf("drawio integration enabled (server=%s public=%s)", cfg.DrawioServerURL, cfg.DrawioPublicURL)

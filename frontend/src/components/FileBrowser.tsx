@@ -91,7 +91,7 @@ export function Modal({
       <div className={`modal${wide ? ' wide' : ''}`} onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">
           <h3>{title}</h3>
-          <button className="btn ghost" onClick={onClose} aria-label="关闭">×</button>
+          <button type="button" className="btn ghost" onClick={onClose} aria-label="关闭">×</button>
         </div>
         {children}
       </div>
@@ -242,7 +242,7 @@ export default function FileBrowser({
   // 「＋ 新建」下拉开关。
   const [createMenuOpen, setCreateMenuOpen] = useState(false)
 
-  // 右键菜单与新建下拉点击外部关闭（菜单内部点击由 onClickCapture 收口）。
+  // 右键菜单与新建下拉点击外部关闭（菜单内部动作在冒泡阶段完成后收口）。
   useEffect(() => {
     if (!ctxMenu && !createMenuOpen) return
     const onDown = (e: MouseEvent) => {
@@ -960,10 +960,14 @@ export default function FileBrowser({
     const key = ++uploadKey.current
     setUploads((prev) => [...prev, { key, name, phase: 'creating' }])
     try {
-      await uploadFn(blob, currentFolderId, (phase) => {
+      const created = await uploadFn(blob, currentFolderId, (phase) => {
         setUploads((prev) => prev.map((r) => (r.key === key ? { ...r, phase } : r)))
       })
       await load(currentParent)
+      const fileID = typeof created === 'object' && created !== null && 'file_id' in created
+        ? String((created as { file_id?: string }).file_id ?? '')
+        : ''
+      if (fileID) openEditorWindow(`/${kind === 'md' ? 'markdown' : 'text'}/${fileID}`)
     } catch (err) {
       setUploads((prev) =>
         prev.map((r) =>
@@ -1043,7 +1047,16 @@ export default function FileBrowser({
   // 集成编辑/查看页统一在新窗口打开（独立窗口便于与文件列表并行操作，
   // 编辑器自身带「返回」：window.open 打开的窗口可直接关闭）。
   const openEditorWindow = (path: string) => {
-    window.open(path, '_blank', 'noopener')
+    const url = new URL(path, window.location.origin)
+    url.searchParams.set('returnTo', `${window.location.pathname}${window.location.search}`)
+    window.open(`${url.pathname}${url.search}`, '_blank', 'noopener')
+  }
+
+  const textEditorPath = (item: FileItem): string | null => {
+    const name = item.name.toLowerCase()
+    if (name.endsWith('.md') || name.endsWith('.markdown')) return `/markdown/${item.id}`
+    if (name.endsWith('.txt')) return `/text/${item.id}`
+    return null
   }
 
   // 默认打开：文件夹进入目录；office/图表/白板文件打开对应编辑器（新窗口）；
@@ -1053,6 +1066,8 @@ export default function FileBrowser({
       if (!searchMode) openFolder(item)
       return
     }
+    const textPath = textEditorPath(item)
+    if (textPath) return openEditorWindow(textPath)
     if (ooEnabled && isOfficeFile(item.name)) return openEditorWindow(`/edit/${item.id}`)
     if (drawioEnabled && isDrawioFile(item.name)) return openEditorWindow(`/drawio/${item.id}`)
     if (isExcalidrawFile(item.name)) return openEditorWindow(`/excalidraw/${item.id}`)
@@ -1064,50 +1079,54 @@ export default function FileBrowser({
   // 下载 / 标签 / 复制 + 调用方 rowActions（分享/重命名/删除等）。
   const itemMenuContent = (item: FileItem) => (
     <>
-      <button className="btn small" onClick={() => openItem(item)}>
+      <button type="button" className="btn small" onClick={() => openItem(item)}>
         {item.type === 'folder' ? (locale === 'zh-CN' ? '进入' : 'Open') : locale === 'zh-CN' ? '打开' : 'Open'}
       </button>
       {item.type === 'file' && (
-        <button className="btn small" onClick={() => void openPreview(item)}>
+        <button type="button" className="btn small" onClick={() => {
+          const path = textEditorPath(item)
+          if (path) openEditorWindow(path)
+          else void openPreview(item)
+        }}>
           {locale === 'zh-CN' ? '预览' : 'Preview'}
         </button>
       )}
       {item.type === 'file' && ooEnabled && isOfficeFile(item.name) && (
         <>
-          <button className="btn small" onClick={() => openEditorWindow(`/edit/${item.id}`)}>
+          <button type="button" className="btn small" onClick={() => openEditorWindow(`/edit/${item.id}`)}>
             ONLYOFFICE {locale === 'zh-CN' ? '编辑' : 'Edit'}
           </button>
-          <button className="btn small" onClick={() => openEditorWindow(`/edit/${item.id}?mode=view`)}>
+          <button type="button" className="btn small" onClick={() => openEditorWindow(`/edit/${item.id}?mode=view`)}>
             ONLYOFFICE {locale === 'zh-CN' ? '查看' : 'View'}
           </button>
         </>
       )}
       {item.type === 'file' && drawioEnabled && isDrawioFile(item.name) && (
         <>
-          <button className="btn small" onClick={() => openEditorWindow(`/drawio/${item.id}`)}>
+          <button type="button" className="btn small" onClick={() => openEditorWindow(`/drawio/${item.id}`)}>
             {locale === 'zh-CN' ? '图表编辑' : 'Edit diagram'}
           </button>
-          <button className="btn small" onClick={() => openEditorWindow(`/drawio/${item.id}?mode=view`)}>
+          <button type="button" className="btn small" onClick={() => openEditorWindow(`/drawio/${item.id}?mode=view`)}>
             {locale === 'zh-CN' ? '图表查看' : 'View diagram'}
           </button>
         </>
       )}
       {item.type === 'file' && isExcalidrawFile(item.name) && (
         <>
-          <button className="btn small" onClick={() => openEditorWindow(`/excalidraw/${item.id}`)}>
+          <button type="button" className="btn small" onClick={() => openEditorWindow(`/excalidraw/${item.id}`)}>
             {locale === 'zh-CN' ? '白板编辑' : 'Edit whiteboard'}
           </button>
-          <button className="btn small" onClick={() => openEditorWindow(`/excalidraw/${item.id}?mode=view`)}>
+          <button type="button" className="btn small" onClick={() => openEditorWindow(`/excalidraw/${item.id}?mode=view`)}>
             {locale === 'zh-CN' ? '白板查看' : 'View whiteboard'}
           </button>
         </>
       )}
       {item.type === 'file' && (
-        <button className="btn small" onClick={() => void handleDownload(item)}>{msg('download')}</button>
+        <button type="button" className="btn small" onClick={() => void handleDownload(item)}>{msg('download')}</button>
       )}
-      <button className="btn small" onClick={() => void openTagModal(item)}>{msg('tag')}</button>
+      <button type="button" className="btn small" onClick={() => void openTagModal(item)}>{msg('tag')}</button>
       {item.type === 'file' && copyFn && (
-        <button className="btn small" onClick={() => openCopyDialog(item)}>{msg('copy')}</button>
+        <button type="button" className="btn small" onClick={() => openCopyDialog(item)}>{msg('copy')}</button>
       )}
       {rowActions?.(item)}
     </>
@@ -1140,33 +1159,33 @@ export default function FileBrowser({
           </div>
           {(createFolderFn || uploadFn) && !searchMode && (
             <div className="create-menu-wrap">
-              <button className="btn" aria-haspopup="menu" aria-expanded={createMenuOpen} onClick={() => setCreateMenuOpen((v) => !v)}>
+              <button type="button" className="btn" aria-haspopup="menu" aria-expanded={createMenuOpen} onClick={() => setCreateMenuOpen((v) => !v)}>
                 ＋ {locale === 'zh-CN' ? '新建' : 'New'}
               </button>
               {createMenuOpen && (
-                <div className="file-card-menu create-menu" role="menu" onClickCapture={() => setCreateMenuOpen(false)}>
+                <div className="file-card-menu create-menu" role="menu" onClick={() => setCreateMenuOpen(false)}>
                   {createFolderFn && (
-                    <button className="btn small" onClick={() => { setFolderOpen(true); setFolderName(''); setFolderError('') }}>
+                    <button type="button" className="btn small" onClick={() => { setFolderOpen(true); setFolderName(''); setFolderError('') }}>
                       {locale === 'zh-CN' ? '文件夹' : 'Folder'}
                     </button>
                   )}
                   {uploadFn && (
-                    <button className="btn small" disabled={docCreating} onClick={() => void handleCreateDocFile('md')}>
+                    <button type="button" className="btn small" disabled={docCreating} onClick={() => void handleCreateDocFile('md')}>
                       {locale === 'zh-CN' ? 'Markdown 笔记' : 'Markdown note'}
                     </button>
                   )}
                   {uploadFn && (
-                    <button className="btn small" disabled={docCreating} onClick={() => void handleCreateDocFile('txt')}>
+                    <button type="button" className="btn small" disabled={docCreating} onClick={() => void handleCreateDocFile('txt')}>
                       {locale === 'zh-CN' ? '文本文件' : 'Text file'}
                     </button>
                   )}
                   {uploadFn && drawioEnabled && (
-                    <button className="btn small" disabled={diagramCreating} onClick={() => void handleCreateDiagram()}>
+                    <button type="button" className="btn small" disabled={diagramCreating} onClick={() => void handleCreateDiagram()}>
                       {diagramCreating ? (locale === 'zh-CN' ? '创建图表中…' : 'Creating…') : locale === 'zh-CN' ? '流程图表' : 'Diagram'}
                     </button>
                   )}
                   {uploadFn && (
-                    <button className="btn small" disabled={whiteboardCreating} onClick={() => void handleCreateWhiteboard()}>
+                    <button type="button" className="btn small" disabled={whiteboardCreating} onClick={() => void handleCreateWhiteboard()}>
                       {whiteboardCreating ? msg('whiteboardCreating') : locale === 'zh-CN' ? '白板' : 'Whiteboard'}
                     </button>
                   )}
@@ -1176,7 +1195,7 @@ export default function FileBrowser({
           )}
           {uploadFn && !searchMode && (
             <>
-              <button className="btn primary" onClick={() => fileInputRef.current?.click()}>⬆ 上传文件</button>
+              <button type="button" className="btn primary" onClick={() => fileInputRef.current?.click()}>⬆ 上传文件</button>
               <input
                 ref={fileInputRef}
                 type="file"
@@ -1432,7 +1451,7 @@ export default function FileBrowser({
                   </span>
                 </button>
                 {cardMenuFor === item.id && (
-                  <div className="file-card-menu" role="menu" onClickCapture={() => setCardMenuFor(null)}>
+                  <div className="file-card-menu" role="menu" onClick={() => setCardMenuFor(null)}>
                     {itemMenuContent(item)}
                   </div>
                 )}
@@ -1680,7 +1699,7 @@ export default function FileBrowser({
             left: `${Math.max(8, Math.min(ctxMenu.x, window.innerWidth - 240))}px`,
             top: `${Math.max(8, Math.min(ctxMenu.y, window.innerHeight - 380))}px`,
           }}
-          onClickCapture={() => setCtxMenu(null)}
+          onClick={() => setCtxMenu(null)}
         >
           {itemMenuContent(ctxMenu.item)}
         </div>

@@ -75,6 +75,7 @@ func (h *Handler) revokeAllSessions(c *gin.Context) {
 		return
 	}
 	c.SetCookie("refresh_token", "", -1, "/api/v1/auth/refresh", h.cookieDomain, h.cookieSecure, true)
+	clearCSRFCookies(c, h.cookieDomain, h.cookieSecure)
 	c.Status(http.StatusNoContent)
 }
 

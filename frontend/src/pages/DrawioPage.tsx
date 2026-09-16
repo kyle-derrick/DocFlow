@@ -52,6 +52,8 @@ export default function DrawioPage() {
   // ?mode=view 只读查看（在线预览入口）；编辑器语言跟随界面语言。
   const [searchParams] = useSearchParams()
   const viewMode = searchParams.get('mode') === 'view'
+  const returnToParam = searchParams.get('returnTo')
+  const returnTo = returnToParam?.startsWith('/') && !returnToParam.startsWith('//') ? returnToParam : '/'
   const locale = useLocale()
   const navigate = useNavigate()
 
@@ -68,6 +70,8 @@ export default function DrawioPage() {
   const xmlRef = useRef('')
   const dirtyRef = useRef(false)
   const savingRef = useRef(false)
+  const savePromiseRef = useRef<Promise<boolean> | null>(null)
+  const exitPendingRef = useRef(false)
 
   // 探测集成 → 拉取文件元数据与内容 → 挂 iframe。内容读取失败或为空
   // （含新建模板上传后立即打开）回退初始模板，不阻塞编辑。
@@ -105,14 +109,13 @@ export default function DrawioPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fileId, viewMode, locale])
 
-  // 退出编辑器：经 window.open 打开的新窗口可直接关闭；站内导航则返回上一页
-  // （无历史时回根路径，避免“保存并退出”后停留在编辑页）。
+  // 退出编辑器：显式返回打开时记录的文件页，不依赖 noopener 新窗口中不可靠的
+  // history。脚本可关闭由 window.open 创建的窗口；普通标签页则确定性导航。
   const closeEditor = () => {
     window.close()
-    if (!window.closed) {
-      if (window.history.length > 1) navigate(-1)
-      else navigate('/')
-    }
+    window.setTimeout(() => {
+      if (!window.closed) navigate(returnTo, { replace: true })
+    }, 50)
   }
 
   // postMessage JSON 协议：init → load；save/export → 覆盖为新版本
@@ -133,20 +136,21 @@ export default function DrawioPage() {
         return
       }
       if (msg.event === 'exit') {
-        closeEditor()
+        if (savePromiseRef.current) exitPendingRef.current = true
+        else closeEditor()
         return
       }
       if (msg.event === 'save' || msg.event === 'export') {
         if (msg.xml) {
-          if (msg.exit) {
-            void saveDiagram(msg.xml).then((ok) => {
-              if (ok) closeEditor()
-            })
-          } else {
-            void saveDiagram(msg.xml)
-          }
+          exitPendingRef.current = msg.exit === true
+          const pending = saveDiagram(msg.xml)
+          savePromiseRef.current = pending
+          void pending.then((ok) => {
+            if (ok && exitPendingRef.current) closeEditor()
+          }).finally(() => {
+            if (savePromiseRef.current === pending) savePromiseRef.current = null
+          })
         } else if (msg.exit) {
-          // 无导出内容的保存并退出（未改动）：直接退出。
           closeEditor()
         }
       }
@@ -159,7 +163,7 @@ export default function DrawioPage() {
   // 保存：导出 XML 作为新版本上传（file_id 会话沿用目标文件名/父目录），
   // 成功后刷新元数据展示新版本号；失败置未保存标记。返回是否保存成功。
   const saveDiagram = async (xml: string): Promise<boolean> => {
-    if (savingRef.current) return false
+    if (savingRef.current) return savePromiseRef.current ?? false
     savingRef.current = true
     setSaving(true)
     setError('')
