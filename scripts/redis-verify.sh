@@ -2,7 +2,7 @@
 # Redis 双实例验证：起 redis + backend x2（18081/18082 直连）→ wscheck 跨实例断言
 set -e
 export PATH=/opt/go/bin:$PATH
-cd /mnt/d/data/code/git/own/DocFlow
+cd "$(dirname "$0")/.."
 
 echo '=== [1] up redis (full profile 单服务) ==='
 docker compose -f docker-compose.yml -f scripts/compose-scale.yml \

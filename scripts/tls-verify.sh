@@ -2,7 +2,7 @@
 # TLS 全链路验证（一条龙）：重置库 + seed → 登录 → GET/PUT /admin/tls →
 # internal(127.0.0.1) 断言 https → 切回 http 断言恢复。
 set -e
-PD=/mnt/d/data/code/git/own/DocFlow
+PD="$(cd "$(dirname "$0")/.." && pwd)"
 export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
 C="docker compose --env-file $PD/.env -f $PD/docker-compose.yml -f $PD/scripts/compose-scale.yml -p docflow"
 PG="docker exec docflow-postgres-1 psql -U docflow -d docflow -t -A"

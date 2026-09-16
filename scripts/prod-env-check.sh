@@ -1,7 +1,7 @@
 #!/bin/bash
 # 校验 .env.production.example：占位符替换后 compose config 必须通过
 set -e
-cd /mnt/d/data/code/git/own/DocFlow
+cd "$(dirname "$0")/.."
 sed -e 's/=CHANGE_ME.*/=prodtest-0123456789abcdef/' \
     -e 's|^DATABASE_URL=.*|DATABASE_URL=postgres://docflow:prodtest-0123456789abcdef@postgres:5432/docflow?sslmode=disable|' \
     .env.production.example > /tmp/env.prodtest

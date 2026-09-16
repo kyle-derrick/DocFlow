@@ -1,10 +1,10 @@
 #!/bin/bash
 # DocFlow 运行时重置：停服 -> TRUNCATE -> 重建二进制 -> 启动 -> seed 管理员
 # 用法（Windows 侧）：
-#   wsl -e bash -c "tr -d '\r' < /mnt/d/data/code/git/own/DocFlow/scripts/reset-runtime.sh > /tmp/reset-runtime.sh && bash /tmp/reset-runtime.sh"
+#   wsl -e bash -c "tr -d '\r' < <repo-root>/scripts/reset-runtime.sh > /tmp/reset-runtime.sh && bash /tmp/reset-runtime.sh"
 set -e
 export PATH=/opt/go/bin:$PATH
-cd /mnt/d/data/code/git/own/DocFlow
+cd "$(dirname "$0")/.."
 
 echo "=== [1/6] stop old server ==="
 pkill -f docflow-runtime-server 2>/dev/null || true

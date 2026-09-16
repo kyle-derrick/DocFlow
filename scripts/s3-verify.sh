@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
-cd /mnt/d/data/code/git/own/DocFlow
+cd "$(dirname "$0")/.."
 C="docker compose -f docker-compose.yml -f scripts/compose-scale.yml --profile minimal --profile search --profile full --profile storage"
 $C up -d caddy 2>&1 | tail -1
 for i in $(seq 1 30); do curl -sf -o /dev/null http://127.0.0.1/ready && break; sleep 2; done

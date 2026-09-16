@@ -1,7 +1,7 @@
 #!/bin/bash
 # compose 栈（caddy :80）上的全量冒烟：适配 base 与 Origin 后复用 runtime-smoke.sh
 set -e
-cd /mnt/d/data/code/git/own/DocFlow
+cd "$(dirname "$0")/.."
 tr -d '\r' < scripts/runtime-smoke.sh | \
   sed -e 's|base=http://127.0.0.1:18080|base=http://127.0.0.1|' \
       -e 's|Origin: http://127.0.0.1:18080|Origin: http://127.0.0.1|' > /tmp/smoke-compose.sh

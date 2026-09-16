@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
-cd /mnt/d/data/code/git/own/DocFlow
+cd "$(dirname "$0")/.."
 C="docker compose -f docker-compose.yml -f scripts/compose-scale.yml --profile minimal --profile search --profile full --profile storage --profile antivirus"
 $C build backend 2>&1 | tail -2
 $C up -d --force-recreate backend 2>&1 | tail -1

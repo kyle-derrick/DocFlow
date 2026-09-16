@@ -1,7 +1,7 @@
 #!/bin/bash
 # compose 栈验证循环：重建 backend 镜像 → recreate → TRUNCATE → reseed → 冒烟
 set -e
-cd /mnt/d/data/code/git/own/DocFlow
+cd "$(dirname "$0")/.."
 docker compose --profile minimal build backend 2>&1 | tail -2
 docker compose --profile minimal --profile search up -d 2>&1 | tail -2
 # backend recreate 会级联重启 caddy（depends_on healthy），轮询等入口可用

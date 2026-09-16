@@ -1,6 +1,6 @@
 #!/bin/bash
 # 生产前核对 - 栈状态探查：容器健康 + /ready 六项 + caddy 入口
-cd /mnt/d/data/code/git/own/DocFlow
+cd "$(dirname "$0")/.."
 echo '=== containers ==='
 docker ps -a --format 'table {{.Names}}\t{{.Status}}' | grep -E 'docflow|NAMES'
 echo '=== /ready (direct 18081/18082) ==='

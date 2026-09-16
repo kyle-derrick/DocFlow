@@ -189,7 +189,7 @@ expect "sessions 200" 200 "$(curl -sS -o /tmp/r -w '%{http_code}' "${A[@]}" "$ba
 
 # ---------- 网页包 ----------
 mkdir -p /tmp/webpkg-src && printf '<html><body>hi</body></html>' >/tmp/webpkg-src/index.html
-python3 /mnt/d/data/code/git/own/DocFlow/scripts/make_webpkg_zip.py >/dev/null
+python3 "$(dirname "$0")/make_webpkg_zip.py" >/dev/null
 body=$(python3 -c "import json,os;print(json.dumps({'parent_id':'$folder','name':'site.zip','size':os.path.getsize('/tmp/webpkg.zip'),'expected_sha256':'$(sha /tmp/webpkg.zip)'}))")
 code=$(curl -sS -o /tmp/r -w '%{http_code}' "${A[@]}" -H 'Content-Type: application/json' --data-binary "$body" "$base/api/v1/uploads")
 expect "webpkg session 200/201" OK "$([ "$code" = 200 ] || [ "$code" = 201 ] && echo OK || echo "$code")"; wpup=$(cat /tmp/r | json id)

@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 export PATH=/opt/go/bin:$PATH
-cd /mnt/d/data/code/git/own/DocFlow
+cd "$(dirname "$0")/.."
 echo '=== go vet ==='
 go vet ./... && echo VET_OK
 echo '=== unit tests (changed pkgs + full) ==='
