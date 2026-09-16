@@ -263,8 +263,10 @@ func TestOnlyOfficeSessionAndCallbackEndpoints(t *testing.T) {
 		t.Fatalf("session config = %v", config)
 	}
 	document := config["document"].(map[string]any)
-	if document["key"] != store.file.ID.String()+":"+store.version.ID.String() {
-		t.Fatalf("document.key = %v", document["key"])
+	// key 为 DS 8.x 白名单字符集格式：<fileID 32hex>-<versionID 32hex>（无冒号）。
+	wantKey := strings.ReplaceAll(store.file.ID.String(), "-", "") + "-" + strings.ReplaceAll(store.version.ID.String(), "-", "")
+	if document["key"] != wantKey {
+		t.Fatalf("document.key = %v, want %s", document["key"], wantKey)
 	}
 	docURL := document["url"].(string)
 	if !strings.HasPrefix(docURL, "http://backend:8080/api/v1/onlyoffice/download/") {

@@ -237,6 +237,24 @@ export default function FileBrowser({
   // 网格卡片的「⋯」操作菜单：当前展开的条目 ID（null = 关闭）。
   const [cardMenuFor, setCardMenuFor] = useState<string | null>(null)
 
+  // 右键 / 列表行「⋯」菜单：目标条目 + 视口坐标（null = 关闭）。
+  const [ctxMenu, setCtxMenu] = useState<{ item: FileItem; x: number; y: number } | null>(null)
+  // 「＋ 新建」下拉开关。
+  const [createMenuOpen, setCreateMenuOpen] = useState(false)
+
+  // 右键菜单与新建下拉点击外部关闭（菜单内部点击由 onClickCapture 收口）。
+  useEffect(() => {
+    if (!ctxMenu && !createMenuOpen) return
+    const onDown = (e: MouseEvent) => {
+      const el = e.target as HTMLElement | null
+      if (el?.closest?.('.ctx-menu, .create-menu-wrap')) return
+      setCtxMenu(null)
+      setCreateMenuOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [ctxMenu, createMenuOpen])
+
   const changeViewMode = (mode: ViewMode) => {
     setCardMenuFor(null)
     setViewMode(mode)
@@ -929,6 +947,34 @@ export default function FileBrowser({
     }
   }
 
+  // 新建文本/Markdown 文档：空内容时间戳文件名经普通上传落当前目录（同
+  // 新建图表/白板管线），完成后刷新列表；在线编辑后续版本按需扩展。
+  const [docCreating, setDocCreating] = useState(false)
+  const handleCreateDocFile = async (kind: 'txt' | 'md') => {
+    if (!uploadFn || docCreating) return
+    const name = `${kind === 'md' ? 'note' : 'text'}-${Date.now()}.${kind}`
+    const content = kind === 'md' ? '# 新笔记\n' : ''
+    const blob = new File([content], name, { type: 'text/plain' })
+    setDocCreating(true)
+    setError('')
+    const key = ++uploadKey.current
+    setUploads((prev) => [...prev, { key, name, phase: 'creating' }])
+    try {
+      await uploadFn(blob, currentFolderId, (phase) => {
+        setUploads((prev) => prev.map((r) => (r.key === key ? { ...r, phase } : r)))
+      })
+      await load(currentParent)
+    } catch (err) {
+      setUploads((prev) =>
+        prev.map((r) =>
+          r.key === key ? { ...r, phase: 'error', error: writeErrorText(err, locale === 'zh-CN' ? '新建失败' : 'Create failed') } : r,
+        ),
+      )
+    } finally {
+      setDocCreating(false)
+    }
+  }
+
   // 页面快捷键（v1.1）：n 新建文件夹 / u 上传 / Delete 删除选中 /
   // Escape 依次关弹窗（预览→标签→移动→新建文件夹），无弹窗时清空选择。
   // v1.2（设计 6.16.1）：Ctrl/Cmd+1 列表视图、Ctrl/Cmd+2 网格视图
@@ -950,6 +996,14 @@ export default function FileBrowser({
       if (selected.size > 0 && !batchBusy) void handleBatchTrash()
     },
     Escape: () => {
+      if (ctxMenu) {
+        setCtxMenu(null)
+        return
+      }
+      if (createMenuOpen) {
+        setCreateMenuOpen(false)
+        return
+      }
       if (cardMenuFor) {
         setCardMenuFor(null)
         return
@@ -986,31 +1040,74 @@ export default function FileBrowser({
     },
   })
 
-  // 条目操作按钮（列表行与网格卡片「⋯」菜单共用，语义一致）：
-  // 标签 / 复制 / office 编辑 / draw.io 图表 / 白板 / 下载 + 调用方 rowActions。
-  const itemActions = (item: FileItem) => (
+  // 集成编辑/查看页统一在新窗口打开（独立窗口便于与文件列表并行操作，
+  // 编辑器自身带「返回」：window.open 打开的窗口可直接关闭）。
+  const openEditorWindow = (path: string) => {
+    window.open(path, '_blank', 'noopener')
+  }
+
+  // 默认打开：文件夹进入目录；office/图表/白板文件打开对应编辑器（新窗口）；
+  // 其余文件打开预览弹窗。
+  const openItem = (item: FileItem) => {
+    if (item.type === 'folder') {
+      if (!searchMode) openFolder(item)
+      return
+    }
+    if (ooEnabled && isOfficeFile(item.name)) return openEditorWindow(`/edit/${item.id}`)
+    if (drawioEnabled && isDrawioFile(item.name)) return openEditorWindow(`/drawio/${item.id}`)
+    if (isExcalidrawFile(item.name)) return openEditorWindow(`/excalidraw/${item.id}`)
+    void openPreview(item)
+  }
+
+  // 条目操作菜单（列表行「⋯」、右键菜单、网格卡片菜单共用）：
+  // 打开 / 打开方式（ONLYOFFICE·图表·白板的编辑与查看，均新窗口）/ 预览 /
+  // 下载 / 标签 / 复制 + 调用方 rowActions（分享/重命名/删除等）。
+  const itemMenuContent = (item: FileItem) => (
     <>
-      <button className="btn small" onClick={() => void openTagModal(item)}>{msg('tag')}</button>
-      {item.type === 'file' && copyFn && (
-        <button className="btn small" onClick={() => openCopyDialog(item)}>{msg('copy')}</button>
+      <button className="btn small" onClick={() => openItem(item)}>
+        {item.type === 'folder' ? (locale === 'zh-CN' ? '进入' : 'Open') : locale === 'zh-CN' ? '打开' : 'Open'}
+      </button>
+      {item.type === 'file' && (
+        <button className="btn small" onClick={() => void openPreview(item)}>
+          {locale === 'zh-CN' ? '预览' : 'Preview'}
+        </button>
       )}
       {item.type === 'file' && ooEnabled && isOfficeFile(item.name) && (
-        <button className="btn small" title="ONLYOFFICE 在线编辑" onClick={() => navigate(`/edit/${item.id}`)}>
-          {locale === 'zh-CN' ? '编辑' : 'Edit'}
-        </button>
+        <>
+          <button className="btn small" onClick={() => openEditorWindow(`/edit/${item.id}`)}>
+            ONLYOFFICE {locale === 'zh-CN' ? '编辑' : 'Edit'}
+          </button>
+          <button className="btn small" onClick={() => openEditorWindow(`/edit/${item.id}?mode=view`)}>
+            ONLYOFFICE {locale === 'zh-CN' ? '查看' : 'View'}
+          </button>
+        </>
       )}
       {item.type === 'file' && drawioEnabled && isDrawioFile(item.name) && (
-        <button className="btn small" title="draw.io 图表编辑" onClick={() => navigate(`/drawio/${item.id}`)}>
-          {locale === 'zh-CN' ? '图表' : 'Diagram'}
-        </button>
+        <>
+          <button className="btn small" onClick={() => openEditorWindow(`/drawio/${item.id}`)}>
+            {locale === 'zh-CN' ? '图表编辑' : 'Edit diagram'}
+          </button>
+          <button className="btn small" onClick={() => openEditorWindow(`/drawio/${item.id}?mode=view`)}>
+            {locale === 'zh-CN' ? '图表查看' : 'View diagram'}
+          </button>
+        </>
       )}
       {item.type === 'file' && isExcalidrawFile(item.name) && (
-        <button className="btn small" title={msg('whiteboardEdit')} onClick={() => navigate(`/excalidraw/${item.id}`)}>
-          {msg('whiteboard')}
-        </button>
+        <>
+          <button className="btn small" onClick={() => openEditorWindow(`/excalidraw/${item.id}`)}>
+            {locale === 'zh-CN' ? '白板编辑' : 'Edit whiteboard'}
+          </button>
+          <button className="btn small" onClick={() => openEditorWindow(`/excalidraw/${item.id}?mode=view`)}>
+            {locale === 'zh-CN' ? '白板查看' : 'View whiteboard'}
+          </button>
+        </>
       )}
       {item.type === 'file' && (
         <button className="btn small" onClick={() => void handleDownload(item)}>{msg('download')}</button>
+      )}
+      <button className="btn small" onClick={() => void openTagModal(item)}>{msg('tag')}</button>
+      {item.type === 'file' && copyFn && (
+        <button className="btn small" onClick={() => openCopyDialog(item)}>{msg('copy')}</button>
       )}
       {rowActions?.(item)}
     </>
@@ -1041,20 +1138,41 @@ export default function FileBrowser({
               ▦
             </button>
           </div>
-          {createFolderFn && !searchMode && (
-            <button className="btn" onClick={() => { setFolderOpen(true); setFolderName(''); setFolderError('') }}>
-              ＋ 新建文件夹
-            </button>
-          )}
-          {uploadFn && drawioEnabled && !searchMode && (
-            <button className="btn" disabled={diagramCreating} onClick={() => void handleCreateDiagram()}>
-              {diagramCreating ? (locale === 'zh-CN' ? '创建图表中…' : 'Creating…') : locale === 'zh-CN' ? '✎ 新建图表' : '✎ New diagram'}
-            </button>
-          )}
-          {uploadFn && !searchMode && (
-            <button className="btn" disabled={whiteboardCreating} onClick={() => void handleCreateWhiteboard()}>
-              {whiteboardCreating ? msg('whiteboardCreating') : msg('newWhiteboard')}
-            </button>
+          {(createFolderFn || uploadFn) && !searchMode && (
+            <div className="create-menu-wrap">
+              <button className="btn" aria-haspopup="menu" aria-expanded={createMenuOpen} onClick={() => setCreateMenuOpen((v) => !v)}>
+                ＋ {locale === 'zh-CN' ? '新建' : 'New'}
+              </button>
+              {createMenuOpen && (
+                <div className="file-card-menu create-menu" role="menu" onClickCapture={() => setCreateMenuOpen(false)}>
+                  {createFolderFn && (
+                    <button className="btn small" onClick={() => { setFolderOpen(true); setFolderName(''); setFolderError('') }}>
+                      {locale === 'zh-CN' ? '文件夹' : 'Folder'}
+                    </button>
+                  )}
+                  {uploadFn && (
+                    <button className="btn small" disabled={docCreating} onClick={() => void handleCreateDocFile('md')}>
+                      {locale === 'zh-CN' ? 'Markdown 笔记' : 'Markdown note'}
+                    </button>
+                  )}
+                  {uploadFn && (
+                    <button className="btn small" disabled={docCreating} onClick={() => void handleCreateDocFile('txt')}>
+                      {locale === 'zh-CN' ? '文本文件' : 'Text file'}
+                    </button>
+                  )}
+                  {uploadFn && drawioEnabled && (
+                    <button className="btn small" disabled={diagramCreating} onClick={() => void handleCreateDiagram()}>
+                      {diagramCreating ? (locale === 'zh-CN' ? '创建图表中…' : 'Creating…') : locale === 'zh-CN' ? '流程图表' : 'Diagram'}
+                    </button>
+                  )}
+                  {uploadFn && (
+                    <button className="btn small" disabled={whiteboardCreating} onClick={() => void handleCreateWhiteboard()}>
+                      {whiteboardCreating ? msg('whiteboardCreating') : locale === 'zh-CN' ? '白板' : 'Whiteboard'}
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
           )}
           {uploadFn && !searchMode && (
             <>
@@ -1197,7 +1315,14 @@ export default function FileBrowser({
           </thead>
           <tbody>
             {items.map((item) => (
-              <tr key={item.id} className={selected.has(item.id) ? 'selected' : ''}>
+              <tr
+                key={item.id}
+                className={selected.has(item.id) ? 'selected' : ''}
+                onContextMenu={(e) => {
+                  e.preventDefault()
+                  setCtxMenu({ item, x: e.clientX, y: e.clientY })
+                }}
+              >
                 <td className="col-check">
                   <input
                     type="checkbox"
@@ -1225,14 +1350,27 @@ export default function FileBrowser({
                       {item.name}
                     </span>
                   ) : (
-                    <button className="name-btn" title="预览" onClick={() => void openPreview(item)}>
+                    <button className="name-btn" title={msg('preview')} onClick={() => openItem(item)}>
                       <span className="icon">📄</span>
                       {item.name}
                     </button>
                   )}
                 </td>
                 <td className="muted">{formatTime(item.updated_at)}</td>
-                <td className="col-actions">{itemActions(item)}</td>
+                <td className="col-actions">
+                  {/* 操作收进「⋯」/右键菜单（操作项较多，不再平铺）。 */}
+                  <button
+                    className="btn ghost small card-menu-btn"
+                    title={msg('actions')}
+                    aria-haspopup="menu"
+                    onClick={(e) => {
+                      const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+                      setCtxMenu({ item, x: rect.left, y: rect.bottom + 4 })
+                    }}
+                  >
+                    ⋯
+                  </button>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -1247,7 +1385,14 @@ export default function FileBrowser({
           {items.map((item) => {
             const size = sizeCache.current.get(item.id) ?? 0
             return (
-              <div key={item.id} className={`file-card${selected.has(item.id) ? ' selected' : ''}`}>
+              <div
+                key={item.id}
+                className={`file-card${selected.has(item.id) ? ' selected' : ''}`}
+                onContextMenu={(e) => {
+                  e.preventDefault()
+                  setCtxMenu({ item, x: e.clientX, y: e.clientY })
+                }}
+              >
                 <div className="file-card-top">
                   <input
                     type="checkbox"
@@ -1277,10 +1422,7 @@ export default function FileBrowser({
                 <button
                   className="file-card-body"
                   title={item.type === 'file' ? msg('preview') : item.name}
-                  onClick={() => {
-                    if (item.type === 'folder') openFolder(item)
-                    else void openPreview(item)
-                  }}
+                  onClick={() => openItem(item)}
                 >
                   <span className="file-card-icon">{item.type === 'folder' ? '📁' : '📄'}</span>
                   <span className="file-card-name" title={item.name}>{item.name}</span>
@@ -1291,7 +1433,7 @@ export default function FileBrowser({
                 </button>
                 {cardMenuFor === item.id && (
                   <div className="file-card-menu" role="menu" onClickCapture={() => setCardMenuFor(null)}>
-                    {itemActions(item)}
+                    {itemMenuContent(item)}
                   </div>
                 )}
               </div>
@@ -1484,6 +1626,11 @@ export default function FileBrowser({
             <div>
               <div className="empty">该文件类型暂不支持在线预览，请下载后查看</div>
               <div className="preview-foot">
+                {ooEnabled && isOfficeFile(previewTarget.name) && (
+                  <button className="btn" onClick={() => openEditorWindow(`/edit/${previewTarget.id}?mode=view`)}>
+                    ONLYOFFICE {locale === 'zh-CN' ? '查看' : 'View'}
+                  </button>
+                )}
                 <button className="btn primary" onClick={() => void handleDownload(previewTarget)}>下载</button>
               </div>
             </div>
@@ -1500,6 +1647,11 @@ export default function FileBrowser({
             // 内容端点带严格 CSP/nosniff，且不携带主站认证信息。
             <div className="preview-box">
               <iframe className="preview-frame" sandbox="allow-scripts" src={previewUrl} title={previewTarget.name} />
+              <div className="preview-foot">
+                <button className="btn" onClick={() => window.open(previewUrl, '_blank', 'noopener')}>
+                  {locale === 'zh-CN' ? '新窗口打开' : 'Open in new window'}
+                </button>
+              </div>
             </div>
           ) : previewKindState === 'text' ? (
             <div className="preview-box">
@@ -1517,6 +1669,21 @@ export default function FileBrowser({
             </div>
           ) : null}
         </Modal>
+      )}
+
+      {/* 右键 / 列表行「⋯」菜单：视口定位浮层，内容与网格卡片菜单一致。 */}
+      {ctxMenu && (
+        <div
+          className="ctx-menu file-card-menu"
+          role="menu"
+          style={{
+            left: `${Math.max(8, Math.min(ctxMenu.x, window.innerWidth - 240))}px`,
+            top: `${Math.max(8, Math.min(ctxMenu.y, window.innerHeight - 380))}px`,
+          }}
+          onClickCapture={() => setCtxMenu(null)}
+        >
+          {itemMenuContent(ctxMenu.item)}
+        </div>
       )}
     </div>
   )

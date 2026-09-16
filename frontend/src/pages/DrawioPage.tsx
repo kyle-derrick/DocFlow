@@ -12,7 +12,7 @@
 //   通知父页脏态，autosave:0 亦不产生自动保存事件）。
 // - 集成禁用或探测失败显示「图表服务不可用」。
 import { useEffect, useRef, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import {
   EMPTY_DRAWIO_XML,
   FileWithVersion,
@@ -21,22 +21,39 @@ import {
   getFileMeta,
   uploadFileVersion,
 } from '../api'
+import { useLocale } from '../i18n'
 
-/** draw.io embed 编辑器 iframe URL（proto=json postMessage 协议）。 */
-function drawioEditorURL(base: string): string {
+/**
+ * draw.io embed 编辑器/查看器 iframe URL（proto=json postMessage 协议）。
+ * lang 跟随界面语言（drawio 资源名 zh/en）；view=true 为只读查看器
+ * （viewer=1，隐藏编辑工具与保存），否则编辑模式（保存并退出按钮）。
+ */
+function drawioEditorURL(base: string, lang: string, view: boolean): string {
   const trimmed = base.replace(/\/+$/, '')
-  return `${trimmed}/?embed=1&proto=json&spin=1&saveAndExit=1&noSaveBtn=0&libraries=1`
+  const params = new URLSearchParams({ embed: '1', proto: 'json', spin: '1', libraries: '1', lang })
+  if (view) params.set('viewer', '1')
+  else {
+    params.set('saveAndExit', '1')
+    params.set('noSaveBtn', '0')
+  }
+  return `${trimmed}/?${params.toString()}`
 }
 
-/** draw.io postMessage JSON 协议消息（仅用到的事件/字段）。 */
+/** draw.io postMessage JSON 协议消息（仅用到的事件/字段；exit 标记保存并退出）。 */
 interface DrawioMessage {
   event?: string
   action?: string
   xml?: string
+  exit?: boolean
 }
 
 export default function DrawioPage() {
   const { fileId = '' } = useParams()
+  // ?mode=view 只读查看（在线预览入口）；编辑器语言跟随界面语言。
+  const [searchParams] = useSearchParams()
+  const viewMode = searchParams.get('mode') === 'view'
+  const locale = useLocale()
+  const navigate = useNavigate()
 
   const [file, setFile] = useState<FileWithVersion | null>(null)
   const [editorURL, setEditorURL] = useState('')
@@ -74,7 +91,7 @@ export default function DrawioPage() {
         if (!alive) return
         setFile(meta)
         xmlRef.current = text.trim() ? text : EMPTY_DRAWIO_XML
-        setEditorURL(drawioEditorURL(status.url))
+        setEditorURL(drawioEditorURL(status.url, locale === 'zh-CN' ? 'zh' : 'en', viewMode))
       } catch (err) {
         if (alive) setError(err instanceof Error ? err.message : '图表编辑器加载失败')
       } finally {
@@ -85,9 +102,21 @@ export default function DrawioPage() {
     return () => {
       alive = false
     }
-  }, [fileId])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fileId, viewMode, locale])
 
-  // postMessage JSON 协议：init → load；save/export → 覆盖为新版本。
+  // 退出编辑器：经 window.open 打开的新窗口可直接关闭；站内导航则返回上一页
+  // （无历史时回根路径，避免“保存并退出”后停留在编辑页）。
+  const closeEditor = () => {
+    window.close()
+    if (!window.closed) {
+      if (window.history.length > 1) navigate(-1)
+      else navigate('/')
+    }
+  }
+
+  // postMessage JSON 协议：init → load；save/export → 覆盖为新版本
+  // （exit 标记或 exit 事件时保存成功后退出编辑器）。
   useEffect(() => {
     if (!editorURL) return
     const onMessage = (e: MessageEvent) => {
@@ -103,8 +132,23 @@ export default function DrawioPage() {
         frame.contentWindow?.postMessage(JSON.stringify({ action: 'load', xml: xmlRef.current, autosave: 0 }), '*')
         return
       }
+      if (msg.event === 'exit') {
+        closeEditor()
+        return
+      }
       if (msg.event === 'save' || msg.event === 'export') {
-        if (msg.xml) void saveDiagram(msg.xml)
+        if (msg.xml) {
+          if (msg.exit) {
+            void saveDiagram(msg.xml).then((ok) => {
+              if (ok) closeEditor()
+            })
+          } else {
+            void saveDiagram(msg.xml)
+          }
+        } else if (msg.exit) {
+          // 无导出内容的保存并退出（未改动）：直接退出。
+          closeEditor()
+        }
       }
     }
     window.addEventListener('message', onMessage)
@@ -113,9 +157,9 @@ export default function DrawioPage() {
   }, [editorURL, fileId, file?.name])
 
   // 保存：导出 XML 作为新版本上传（file_id 会话沿用目标文件名/父目录），
-  // 成功后刷新元数据展示新版本号；失败置未保存标记。
-  const saveDiagram = async (xml: string) => {
-    if (savingRef.current) return
+  // 成功后刷新元数据展示新版本号；失败置未保存标记。返回是否保存成功。
+  const saveDiagram = async (xml: string): Promise<boolean> => {
+    if (savingRef.current) return false
     savingRef.current = true
     setSaving(true)
     setError('')
@@ -129,9 +173,11 @@ export default function DrawioPage() {
       } catch {
         // 元数据刷新失败不影响保存结果展示
       }
+      return true
     } catch (err) {
       dirtyRef.current = true
       setError(err instanceof Error ? err.message : '保存失败')
+      return false
     } finally {
       savingRef.current = false
       setSaving(false)
@@ -155,15 +201,16 @@ export default function DrawioPage() {
   return (
     <div className="editor-page">
       <div className="editor-head">
-        <Link className="btn ghost small" to="/">← 返回</Link>
+        <button type="button" className="btn ghost small" onClick={closeEditor}>← 返回</button>
         <h2 className="editor-title">{file?.name ?? '加载中…'}</h2>
         {versionNo !== undefined && <span className="badge current">当前版本 v{versionNo}</span>}
         {saving && <span className="badge uploading">保存中…</span>}
+        {viewMode && <span className="badge">只读</span>}
       </div>
 
       {notice && <div className="banner ok editor-hint">{notice}</div>}
       {error && <div className="banner error">{error}</div>}
-      {loading && !error && <div className="hint">正在加载图表编辑器…</div>}
+      {loading && !error && <div className="hint">{viewMode ? '正在加载图表查看器…' : '正在加载图表编辑器…'}</div>}
 
       {/* iframe 编辑器：未进入错误态且地址就绪后渲染（init 事件由监听器应答）。 */}
       {!error && !loading && editorURL && (

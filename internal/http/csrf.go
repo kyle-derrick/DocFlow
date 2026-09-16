@@ -30,7 +30,11 @@ func newCSRFToken() string {
 
 func (h *Handler) setCSRFCookie(c *gin.Context) {
 	if token := newCSRFToken(); token != "" {
-		http.SetCookie(c.Writer, &http.Cookie{Name: "docflow_csrf", Value: token, Path: "/api/v1", Domain: h.cookieDomain, MaxAge: int(h.refreshTokenTTL.Seconds()), HttpOnly: false, Secure: h.cookieSecure, SameSite: http.SameSiteLaxMode})
+		// Path 必须为 "/"：SPA 页面路径（/、/files 等）下 document.cookie 读不到
+		// 更深路径的 cookie，Path=/api/v1 会导致刷新页/新标签页的 refresh 请求
+		// 缺 X-CSRF-Token 头而被 403（表现为"老是掉登录"）。该 cookie 本就设计
+		// 为 JS 可读（双提交令牌），放开到根路径无额外暴露。
+		http.SetCookie(c.Writer, &http.Cookie{Name: "docflow_csrf", Value: token, Path: "/", Domain: h.cookieDomain, MaxAge: int(h.refreshTokenTTL.Seconds()), HttpOnly: false, Secure: h.cookieSecure, SameSite: http.SameSiteLaxMode})
 	}
 }
 

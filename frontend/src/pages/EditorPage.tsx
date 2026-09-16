@@ -8,7 +8,7 @@
 //   其他窗口经 storage 事件感知后自动刷新（跨标签页的简单实现）。
 // - 销毁时调用 docEditor.destroyEditor()；脚本加载失败提示「编辑服务不可用」。
 import { useEffect, useRef, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useParams, useSearchParams } from 'react-router-dom'
 import {
   ApiError,
   FileWithVersion,
@@ -17,6 +17,7 @@ import {
   getFileMeta,
   onlyOfficeStatus,
 } from '../api'
+import { useLocale } from '../i18n'
 
 /** DocsAPI.DocEditor 实例（仅用到的 destroyEditor）。 */
 interface DocEditorInstance {
@@ -68,6 +69,10 @@ function loadDocEditorScript(serverUrl: string): { ready: Promise<void>; remove:
 
 export default function EditorPage() {
   const { fileId = '' } = useParams()
+  // ?mode=view 强制只读会话（在线预览入口）；编辑器语言跟随界面语言。
+  const [searchParams] = useSearchParams()
+  const viewMode = searchParams.get('mode') === 'view'
+  const locale = useLocale()
 
   const [file, setFile] = useState<FileWithVersion | null>(null)
   const [loading, setLoading] = useState(true)
@@ -124,7 +129,10 @@ export default function EditorPage() {
           return
         }
         const [config, meta] = await Promise.all([
-          createOnlyOfficeSession(fileId),
+          createOnlyOfficeSession(fileId, {
+            mode: viewMode ? 'view' : undefined,
+            lang: locale,
+          }),
           getFileMeta(fileId).catch(() => null),
         ])
         if (!alive) return
@@ -161,7 +169,7 @@ export default function EditorPage() {
       editorRef.current = null
       for (const fn of removeFns) fn()
     }
-  }, [fileId])
+  }, [fileId, viewMode, locale])
 
   const versionNo = file?.current_version?.version
 
@@ -176,7 +184,7 @@ export default function EditorPage() {
 
       {saveHint && <div className="banner ok editor-hint">{saveHint}</div>}
       {error && <div className="banner error">{error}</div>}
-      {loading && !error && <div className="hint">正在加载编辑器…</div>}
+      {loading && !error && <div className="hint">{viewMode ? '正在加载查看器…' : '正在加载编辑器…'}</div>}
 
       {/* DocEditor 挂载容器：未进入错误态时始终渲染，保证 placeholder 存在。 */}
       {!error && <div className="editor-shell"><div id={placeholderId.current} className="editor-placeholder" /></div>}

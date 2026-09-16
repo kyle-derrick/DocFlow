@@ -1387,9 +1387,22 @@ export function isOfficeFile(name: string): boolean {
   return i >= 0 && OFFICE_EXTS.has(name.slice(i + 1).toLowerCase())
 }
 
+/** 会话可选项：mode=view 强制只读（预览）；lang 编辑器界面语言（zh-CN/en-US）。 */
+export interface OnlyOfficeSessionOptions {
+  mode?: 'edit' | 'view'
+  lang?: string
+}
+
 /** 生成编辑会话配置（含 5 分钟有效的 document.url 签名地址与整体 JWT token）。 */
-export async function createOnlyOfficeSession(fileId: string): Promise<OnlyOfficeEditorConfig> {
-  return api<OnlyOfficeEditorConfig>('/api/v1/onlyoffice/session', jsonInit('POST', { file_id: fileId }))
+export async function createOnlyOfficeSession(
+  fileId: string,
+  opts: OnlyOfficeSessionOptions = {},
+): Promise<OnlyOfficeEditorConfig> {
+  return api<OnlyOfficeEditorConfig>('/api/v1/onlyoffice/session', jsonInit('POST', {
+    file_id: fileId,
+    ...(opts.mode ? { mode: opts.mode } : {}),
+    ...(opts.lang ? { lang: opts.lang } : {}),
+  }))
 }
 
 // 集成可用性探测缓存（见 onlyOfficeStatus）：文件列表行「编辑」按钮与

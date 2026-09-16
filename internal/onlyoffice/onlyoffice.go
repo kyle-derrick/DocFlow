@@ -23,12 +23,14 @@
 package onlyoffice
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -177,18 +179,29 @@ func (s *Service) PublicServerURL() string {
 	return s.cfg.ServerURL
 }
 
-// documentKey 生成编辑会话与版本绑定的 document.key（file_id:version_id）。
+// documentKey 生成编辑会话与版本绑定的 document.key。
+// 格式：<file_id 去连字符 32hex>-<version_id 去连字符 32hex>：DocumentServer
+// 8.x 对 key 有字符白名单（仅 0-9-.a-zA-Z_=，实报 "unexpected key use key
+// pattern"），uuid 原生的冒号分隔与连字符均需规避——冒号直接被拒，故用
+// 去连字符 hex + 单个连字符分隔（总长 65，两段各 32 无歧义）。
 func documentKey(fileID, versionID uuid.UUID) string {
-	return fileID.String() + ":" + versionID.String()
+	return strings.ReplaceAll(fileID.String(), "-", "") + "-" + strings.ReplaceAll(versionID.String(), "-", "")
 }
 
-// fileIDFromKey 从 document.key 解析 file_id（key 冒号前缀）。
+// fileIDFromKey 从 document.key 解析 file_id（key 前段 32 hex，还原连字符
+// 后交给 uuid.Parse——google/uuid 亦直接接受 32 位 hex，此处统一走还原路径）。
 func fileIDFromKey(key string) (uuid.UUID, error) {
-	prefix, _, _ := strings.Cut(key, ":")
-	id, err := uuid.Parse(prefix)
-	if err != nil {
+	prefix, _, _ := strings.Cut(key, "-")
+	if len(prefix) != 32 {
 		return uuid.Nil, ErrInvalidKey
 	}
+	var b [16]byte
+	if _, err := hex.Decode(b[:], []byte(prefix)); err != nil {
+		return uuid.Nil, ErrInvalidKey
+	}
+	id := uuid.UUID(b)
+	// fileIDFromKey 仅用于回调定位文件，不要求 version 段存在（status 4 等
+	// 通知可能只带前段），但前段必须可解析。
 	return id, nil
 }
 
@@ -211,6 +224,29 @@ func documentType(name string) string {
 	}
 }
 
+// SessionOptions 编辑/查看会话的可选项（HTTP 层从 /onlyoffice/session 请求体
+// 解析后传入；零值 = 既有行为）。
+type SessionOptions struct {
+	// View 强制只读会话（mode=view 且 permissions.edit=false），用于在线预览；
+	// false 时按写权限判定（可写 edit，否则 view）。
+	View bool
+	// Lang 编辑器界面语言（BCP 47 风格，如 zh-CN / en-US）；空或非法回退 zh。
+	Lang string
+}
+
+// editorLangRe 合法语言标记形状（字母段 + 可选 -数字/字母子段）；防止把
+// 任意请求体字符串原样写进编辑器配置。
+var editorLangRe = regexp.MustCompile(`^[a-zA-Z]{2,3}(-[a-zA-Z0-9]{2,8}){0,2}$`)
+
+// sanitizeEditorLang 归一化编辑器语言，非法值回退 zh（与历史默认一致）。
+func sanitizeEditorLang(lang string) string {
+	trimmed := strings.TrimSpace(lang)
+	if trimmed == "" || !editorLangRe.MatchString(trimmed) {
+		return "zh"
+	}
+	return trimmed
+}
+
 // NewEditConfig 生成可直接传给 DocsAPI.DocEditor 的编辑配置（含 JWT token）。
 // 读取权限与 authorizeFileAccess 同规则（个人文件 owner、团队文件任意在册成员），
 // 且当前版本 blob 须为 available；编辑能力按写权限降级：注入的写授权器
@@ -220,6 +256,12 @@ func documentType(name string) string {
 // 5 分钟有效期的签名下载 URL，token 以 ONLYOFFICE_JWT_SECRET（HS256）对
 // document+editorConfig 整体签名（aud=onlyoffice-config）。
 func (s *Service) NewEditConfig(user, fileID uuid.UUID) (map[string]any, error) {
+	return s.NewSessionConfig(user, fileID, SessionOptions{})
+}
+
+// NewSessionConfig 按 SessionOptions 生成编辑/查看会话配置：
+// opts.View 强制只读（预览），opts.Lang 覆盖编辑器界面语言。
+func (s *Service) NewSessionConfig(user, fileID uuid.UUID, opts SessionOptions) (map[string]any, error) {
 	f, err := s.files.Get(user, fileID)
 	if err != nil {
 		return nil, err
@@ -234,8 +276,9 @@ func (s *Service) NewEditConfig(user, fileID uuid.UUID) (map[string]any, error) 
 	if blob.Status != files.BlobStatusAvailable {
 		return nil, files.ErrBlobUnavailable
 	}
-	// 写权限判定：缺授权器时保守只读（fail closed），viewer 只读会话。
-	canEdit := s.authorizeWrite != nil && s.authorizeWrite(user, fileID) == nil
+	// 写权限判定：缺授权器时保守只读（fail closed），viewer 只读会话；
+	// 显式请求查看会话（预览）时一律只读。
+	canEdit := !opts.View && s.authorizeWrite != nil && s.authorizeWrite(user, fileID) == nil
 	mode := "view"
 	if canEdit {
 		mode = "edit"
@@ -262,7 +305,7 @@ func (s *Service) NewEditConfig(user, fileID uuid.UUID) (map[string]any, error) 
 	editorConfig := map[string]any{
 		"callbackUrl": base + "/api/v1/onlyoffice/callback",
 		"mode":        mode,
-		"lang":        "zh",
+		"lang":        sanitizeEditorLang(opts.Lang),
 		"user":        map[string]any{"id": user.String(), "name": name},
 	}
 	config := map[string]any{

@@ -11,7 +11,7 @@
 // - 保存失败置未保存标记（beforeunload 兜底提示，同 DrawioPage）。
 import { Suspense, lazy, useEffect, useRef, useState } from 'react'
 import type { ComponentProps } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { FileWithVersion, fetchFileText, getFileMeta, uploadFileVersion } from '../api'
 import { MessageKey, formatMessage, t, useLocale } from '../i18n'
 
@@ -71,10 +71,22 @@ function useColorMode(): 'dark' | 'light' {
 
 export default function ExcalidrawPage() {
   const { fileId = '' } = useParams()
+  // ?mode=view 只读查看（在线预览入口）：viewModeEnabled + 隐藏保存入口。
+  const [searchParams] = useSearchParams()
+  const viewMode = searchParams.get('mode') === 'view'
   const locale = useLocale()
   const navigate = useNavigate()
   const msg = (key: MessageKey) => t(locale, key)
   const mode = useColorMode()
+
+  // 退出：window.open 打开的新窗口直接关闭，站内导航返回上一页（无历史回根路径）。
+  const closeEditor = () => {
+    window.close()
+    if (!window.closed) {
+      if (window.history.length > 1) navigate(-1)
+      else navigate('/')
+    }
+  }
 
   const [file, setFile] = useState<FileWithVersion | null>(null)
   const [initial, setInitial] = useState<SceneSnapshot | null>(null)
@@ -170,25 +182,28 @@ export default function ExcalidrawPage() {
   return (
     <div className="editor-page">
       <div className="editor-head">
-        <Link className="btn ghost small" to="/">{msg('back')}</Link>
+        <button type="button" className="btn ghost small" onClick={closeEditor}>{msg('back')}</button>
         <h2 className="editor-title">{file?.name ?? msg('loading')}</h2>
         {versionNo !== undefined && (
           <span className="badge current">{formatMessage(msg('currentVersion'), { n: versionNo })}</span>
         )}
         {saving && <span className="badge uploading">{msg('saving')}</span>}
-        <span className="editor-head-actions">
-          <button className="btn" disabled={saving || !initial} onClick={() => void save(false)}>
-            {saving ? msg('saving') : msg('save')}
-          </button>
-          <button className="btn primary" disabled={saving || !initial} onClick={() => void save(true)}>
-            {msg('saveAndBack')}
-          </button>
-        </span>
+        {viewMode && <span className="badge">只读</span>}
+        {!viewMode && (
+          <span className="editor-head-actions">
+            <button className="btn" disabled={saving || !initial} onClick={() => void save(false)}>
+              {saving ? msg('saving') : msg('save')}
+            </button>
+            <button className="btn primary" disabled={saving || !initial} onClick={() => void save(true)}>
+              {msg('saveAndBack')}
+            </button>
+          </span>
+        )}
       </div>
 
       {notice && <div className="banner ok editor-hint">{notice}</div>}
       {error && <div className="banner error">{error}</div>}
-      {loading && !error && <div className="hint">{msg('whiteboardLoading')}</div>}
+      {loading && !error && <div className="hint">{viewMode ? '正在加载白板查看器…' : msg('whiteboardLoading')}</div>}
 
       {/* 编辑器：场景就绪后渲染（chunk 加载中显示占位提示）。 */}
       {!error && !loading && initial && (
@@ -197,6 +212,7 @@ export default function ExcalidrawPage() {
             <Excalidraw
               langCode={locale === 'zh-CN' ? 'zh-CN' : 'en'}
               theme={mode}
+              viewModeEnabled={viewMode}
               initialData={{ elements: initial.elements, appState: initial.appState, scrollToContent: true }}
               onChange={handleChange}
             />

@@ -61,11 +61,16 @@ func (h *Handler) registerOnlyOfficeRoutes(api *gin.RouterGroup, r *gin.Engine) 
 
 type onlyofficeSessionRequest struct {
 	FileID string `json:"file_id"`
+	// mode 会话模式：默认按写权限判定（edit/view）；显式 "view" 强制只读
+	// （在线预览），其余值按默认处理。
+	Mode string `json:"mode"`
+	// Lang 编辑器界面语言（如 zh-CN/en-US，随前端界面语言传入）。
+	Lang string `json:"lang"`
 }
 
 // createOnlyOfficeSession POST /api/v1/onlyoffice/session：校验读权限与当前
 // 版本可用性后，返回可直接传给 DocsAPI.DocEditor 的编辑配置（含 5 分钟有效
-// 的 JWT token 与签名下载 URL）。
+// 的 JWT token 与签名下载 URL）。mode="view" 强制只读会话（预览用）。
 func (h *Handler) createOnlyOfficeSession(c *gin.Context) {
 	var req onlyofficeSessionRequest
 	if c.ShouldBindJSON(&req) != nil {
@@ -77,7 +82,10 @@ func (h *Handler) createOnlyOfficeSession(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
 		return
 	}
-	config, err := h.onlyoffice.NewEditConfig(userID(c), id)
+	config, err := h.onlyoffice.NewSessionConfig(userID(c), id, onlyoffice.SessionOptions{
+		View: strings.EqualFold(strings.TrimSpace(req.Mode), "view"),
+		Lang: req.Lang,
+	})
 	if onlyofficeError(c, err) {
 		return
 	}

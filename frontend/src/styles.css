@@ -721,6 +721,28 @@ body {
   text-align: left;
 }
 
+/* 右键 / 列表行「⋯」菜单：复用卡片菜单配色，视口固定定位。 */
+.ctx-menu {
+  position: fixed;
+  z-index: 60;
+  min-width: 200px;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+/* 「＋ 新建」下拉：触发按钮包裹层与下拉面板。 */
+.create-menu-wrap {
+  position: relative;
+}
+
+.create-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 40;
+  min-width: 180px;
+}
+
 /* ---------- 按钮 ---------- */
 
 .btn {
