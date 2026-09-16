@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
-cd "$(dirname "$0")/.."
+[ -f "$(dirname "$0")/../docker-compose.yml" ] && cd "$(dirname "$0")/.." || true  # /tmp 副本时继承调用方 CWD
 C="docker compose -f docker-compose.yml -f scripts/compose-scale.yml --profile minimal --profile search --profile full --profile storage --profile antivirus"
 $C build backend 2>&1 | tail -2
 $C up -d --force-recreate backend 2>&1 | tail -1

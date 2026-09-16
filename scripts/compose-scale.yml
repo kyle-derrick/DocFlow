@@ -6,6 +6,11 @@ services:
   backend:
     ports:
       - "18081-18082:8080"
+    # OIDC issuer 主机名（与 .env OIDC_ISSUER 一致）：容器内解析到宿主网关
+    #（host-gateway = Docker Desktop 宿主），Windows/WSL 侧由各自 hosts 指向
+    # 127.0.0.1（Docker Desktop 发布端口对两者均在 localhost 可达）。
+    extra_hosts:
+      - "docflow-idp.local:host-gateway"
   mailpit:
     image: axllent/mailpit:v1.21
     restart: unless-stopped

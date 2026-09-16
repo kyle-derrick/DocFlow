@@ -36,7 +36,7 @@ echo 'keycloak configured'
 echo '=== [4] backend OIDC on ==='
 grep -q '^OIDC_ENABLED=' .env || cat >> .env <<'EOF'
 OIDC_ENABLED=true
-OIDC_ISSUER=http://172.18.0.1:18090/realms/docflow
+OIDC_ISSUER=http://docflow-idp.local:18090/realms/docflow
 OIDC_CLIENT_ID=docflow
 OIDC_CLIENT_SECRET=verify-oidc-client-secret
 PUBLIC_BASE_URL=http://127.0.0.1
@@ -47,7 +47,7 @@ curl -sf http://127.0.0.1/ready; echo ' (oidc backend ready)'
 $C up -d caddy 2>&1 | tail -1
 
 echo '=== [5] discovery check (backend -> issuer) ==='
-$C exec -T backend wget -qO- http://172.18.0.1:18090/realms/docflow/.well-known/openid-configuration | head -c 120; echo
+$C exec -T backend wget -qO- http://docflow-idp.local:18090/realms/docflow/.well-known/openid-configuration | head -c 120; echo
 
 echo '=== [6] authorization code flow ==='
 python3 scripts/oidc-flow.py

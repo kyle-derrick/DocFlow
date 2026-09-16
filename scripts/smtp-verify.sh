@@ -2,7 +2,7 @@
 # SMTP 真实投递验证：起 mailpit → recreate backend（SMTP_ENABLED）→
 # 创建邀请 + 忘记密码 → Mailpit API 断言邮件到达且含令牌链接。
 set -e
-cd "$(dirname "$0")/.."
+[ -f "$(dirname "$0")/../docker-compose.yml" ] && cd "$(dirname "$0")/.." || true  # /tmp 副本时继承调用方 CWD
 C="docker compose -f docker-compose.yml -f scripts/compose-scale.yml --profile minimal --profile search --profile full --profile storage"
 
 echo '=== [1] up mailpit + recreate backend ==='

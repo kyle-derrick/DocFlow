@@ -2,7 +2,7 @@
 # Redis 双实例验证：起 redis + backend x2（18081/18082 直连）→ wscheck 跨实例断言
 set -e
 export PATH=/opt/go/bin:$PATH
-cd "$(dirname "$0")/.."
+[ -f "$(dirname "$0")/../docker-compose.yml" ] && cd "$(dirname "$0")/.." || true  # /tmp 副本时继承调用方 CWD
 
 echo '=== [1] up redis (full profile 单服务) ==='
 docker compose -f docker-compose.yml -f scripts/compose-scale.yml \

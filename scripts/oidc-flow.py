@@ -3,7 +3,9 @@
 import http.cookiejar, json, re, sys, urllib.parse, urllib.request
 
 BASE = 'http://127.0.0.1'
-ISSUER_HOST = 'http://172.18.0.1:18090'
+# Keycloak issuer 主机名（与 .env OIDC_ISSUER 逐字一致；Ubuntu hosts 指向
+# 127.0.0.1，Docker Desktop 对集成发行区做 localhost 端口转发）。
+ISSUER_HOST = 'http://docflow-idp.local:18090'
 
 jar = http.cookiejar.CookieJar()
 opener = urllib.request.build_opener(

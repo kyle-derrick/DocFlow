@@ -1,7 +1,7 @@
 #!/bin/bash
 # EICAR 上传隔离链路（backend 已连宿主 clamd）
 set -e
-cd "$(dirname "$0")/.."
+[ -f "$(dirname "$0")/../docker-compose.yml" ] && cd "$(dirname "$0")/.." || true  # /tmp 副本时继承调用方 CWD
 login=$(curl -sS -H 'Content-Type: application/json' --data-binary '{"email":"admin@example.com","password":"AdminPassword123"}' http://127.0.0.1/api/v1/auth/login)
 token=$(printf '%s' "$login" | python3 -c 'import json,sys;print(json.load(sys.stdin)["access_token"])')
 H=(-H "Authorization: Bearer $token")

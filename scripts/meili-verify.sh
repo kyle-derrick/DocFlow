@@ -1,7 +1,7 @@
 #!/bin/bash
 # meili 联动验证：清库 + seed + 全量冒烟（search 段走真实 meili）
 set -e
-cd "$(dirname "$0")/.."
+[ -f "$(dirname "$0")/../docker-compose.yml" ] && cd "$(dirname "$0")/.." || true  # /tmp 副本时继承调用方 CWD
 echo '--- meili health ---'
 docker compose exec -T meilisearch sh -c \
   "wget -qO- --header 'Authorization: Bearer verify-meili-master-key-0123456789abcdef' http://127.0.0.1:7700/health"
