@@ -3592,6 +3592,82 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '429': { $ref: '#/components/responses/RateLimited' }
 
+  /admin/tls:
+    get:
+      tags: [Admin]
+      operationId: getTls
+      summary: 查询 HTTPS 运行时状态（仅 admin）
+      description: >-
+        返回当前 TLS 模式（http 明文 / auto 域名+ACME 自动签发 /
+        internal 域名或 IP+Caddy 内部 CA 自签）与站点域名。managed=false
+        表示未配置 CADDY_ADMIN_ADDR（功能关闭，TLS 由部署配置 APP_DOMAIN
+        决定），页面应降级为只读提示。
+      responses:
+        '200':
+          description: TLS 状态
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mode:
+                    type: string
+                    enum: [http, auto, internal]
+                  domain:
+                    type: string
+                    description: auto/internal 模式的站点域名或 IP；http 恒空
+                  managed:
+                    type: boolean
+                    description: 是否接入运行时切换（CADDY_ADMIN_ADDR 已配置）
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    put:
+      tags: [Admin]
+      operationId: updateTls
+      summary: 切换 HTTPS 模式（仅 admin，热生效）
+      description: >-
+        渲染与 deploy/Caddyfile 同构的配置并经 Caddy admin API（POST /load）
+        热下发，立即生效且无需重启容器。原子性：Caddy 拒绝配置（非法域名、
+        ACME 不可达等）时保持旧配置、不落库。auto 模式要求公网域名（公共
+        CA 不签发 IP）；internal 允许域名或 IP（自签证书，浏览器不受信告警）。
+        持久化于 tls_state（migration 033）；caddy 容器单独重启后由 backend
+        启动对账重新下发。切换后注意 .env 的 COOKIE_SECURE 与模式匹配。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mode]
+              properties:
+                mode:
+                  type: string
+                  enum: [http, auto, internal]
+                domain:
+                  type: string
+                  description: auto/internal 必填；host 或 host:port，禁止 scheme/路径
+            example:
+              mode: internal
+              domain: 192.168.1.10
+      responses:
+        '200':
+          description: 已生效的 TLS 状态
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mode: { type: string, enum: [http, auto, internal] }
+                  domain: { type: string }
+                  managed: { type: boolean }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503':
+          description: 未配置 CADDY_ADMIN_ADDR（功能关闭）
+
   /admin/quarantine:
     get:
       tags: [Admin]

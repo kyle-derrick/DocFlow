@@ -51,10 +51,15 @@ services:
       # 独立内容 origin；默认 content.localhost 仅用于本地验证。
       CONTENT_DOMAIN: ${CONTENT_DOMAIN:-content.localhost}
       CONTENT_UPSTREAM: ${CONTENT_UPSTREAM:-backend:8080}
+      # admin API（HTTPS 运行时切换的下发通道）：监听容器内全部接口，
+      # 仅 expose 给 compose 内网（无宿主端口映射，外部不可达）。
+      CADDY_ADMIN: ${CADDY_ADMIN:-:2019}
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
+    expose:
+      - "2019"
     depends_on:
       backend:
         condition: service_healthy
@@ -102,6 +107,9 @@ services:
       RATE_LIMIT_PER_MIN: ${RATE_LIMIT_PER_MIN:-120}
       # 对外基地址（邮件/分享/OIDC 回调链接前缀）：生产设 https://<域名>。
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+      # HTTPS 运行时切换（管理页面 /api/v1/admin/tls）：Caddy admin API 地址；
+      # 默认指向 compose 内网 caddy（开箱可用）；显式置空可关闭该功能。
+      CADDY_ADMIN_ADDR: ${CADDY_ADMIN_ADDR:-caddy:2019}
       LOGIN_RATE_LIMIT_PER_MIN: ${LOGIN_RATE_LIMIT_PER_MIN:-10}
       PUBLIC_RATE_LIMIT_PER_MIN: ${PUBLIC_RATE_LIMIT_PER_MIN:-60}
       MAX_VERSIONS_PER_FILE: ${MAX_VERSIONS_PER_FILE:-5}

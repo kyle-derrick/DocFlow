@@ -17,13 +17,17 @@ import {
   SettingItem,
   SettingType,
   SettingValue,
+  TlsMode,
+  TlsStatus,
   adminCreateInvitation,
   adminDownloadAuditCSV,
   adminGetBackupStatus,
   adminVerifyBackup,
   adminGetSettings,
+  adminGetTls,
   adminListAuditLogs,
   adminListQuarantine,
+  adminPutTls,
   adminQuarantineAction,
   adminRunBackup,
   adminGetStats,
@@ -91,6 +95,122 @@ const invitationStatusText: Record<Invitation['status'], string> = {
   pending: '待接受',
   accepted: '已接受',
   expired: '已过期',
+}
+
+/** TLS 模式选项（值与后端 caddytls.Mode 对齐）。 */
+const tlsModeOptions: Array<{ value: TlsMode; label: string; desc: string }> = [
+  { value: 'http', label: 'HTTP（明文）', desc: '仅限本地/内网验证；127.0.0.1 等无域名场景' },
+  { value: 'auto', label: 'HTTPS（自动证书）', desc: '公网域名 DNS 指向本机，自动签发受信证书（Let\u0027s Encrypt）' },
+  { value: 'internal', label: 'HTTPS（自签）', desc: '内网域名或 IP 可用，流量加密但浏览器会提示不受信' },
+]
+
+/** HTTPS 运行时切换卡片：模式选择 + 域名，保存后经 Caddy admin API 热下发
+ * （立即生效，无需重启容器；caddy 拒绝时原子回退）。未托管（managed=false）
+ * 时降级为提示。切换到 HTTPS 后提示 COOKIE_SECURE 联动。 */
+function TlsPanel({ onNotice }: { onNotice: (msg: string) => void }) {
+  const [status, setStatus] = useState<TlsStatus | null>(null)
+  const [mode, setMode] = useState<TlsMode>('http')
+  const [domain, setDomain] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [rowError, setRowError] = useState('')
+
+  useEffect(() => {
+    adminGetTls()
+      .then((st) => {
+        setStatus(st)
+        setMode(st.mode)
+        setDomain(st.domain)
+      })
+      .catch(() => setStatus(null))
+  }, [])
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault()
+    setRowError('')
+    setSaving(true)
+    try {
+      const st = await adminPutTls(mode, domain.trim())
+      setStatus(st)
+      const notice =
+        st.mode === 'http'
+          ? '已切换为 HTTP 明文模式'
+          : `HTTPS 已生效（${st.mode === 'auto' ? '自动证书' : '自签证书'}：${st.domain || '默认'}）`
+      onNotice(`${notice}。若 .env 的 COOKIE_SECURE 与当前模式不符，请调整后重启 backend。`)
+    } catch (err) {
+      setRowError(err instanceof Error ? err.message : '保存失败')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const current = tlsModeOptions.find((o) => o.value === mode)
+  return (
+    <div className="panel setting-group">
+      <h3>HTTPS / TLS</h3>
+      {status === null ? (
+        <div className="hint">TLS 状态加载失败</div>
+      ) : !status.managed ? (
+        <div className="setting-desc muted">
+          当前部署未接入运行时切换（CADDY_ADMIN_ADDR 未配置）。TLS 由部署配置决定：
+          .env 设置 APP_DOMAIN 为域名时入口自动启用 HTTPS（ACME 自动签发），
+          未设置时为 HTTP 明文（本地验证）。
+        </div>
+      ) : (
+        <form className="setting-edit" onSubmit={submit} style={{ flexDirection: 'column', alignItems: 'stretch', gap: 8 }}>
+          <div className="setting-row" style={{ width: '100%' }}>
+            <div className="setting-main">
+              <div className="setting-key">当前模式</div>
+              <div className="setting-desc muted">
+                {status.mode === 'http'
+                  ? 'HTTP 明文'
+                  : status.mode === 'auto'
+                    ? `HTTPS 自动证书${status.domain ? `（${status.domain}）` : ''}`
+                    : `HTTPS 自签${status.domain ? `（${status.domain}）` : ''}`}
+              </div>
+            </div>
+          </div>
+          <div>
+            {tlsModeOptions.map((opt) => (
+              <label key={opt.value} className="setting-bool" style={{ display: 'flex', marginRight: 16 }}>
+                <input
+                  type="radio"
+                  name="tls-mode"
+                  checked={mode === opt.value}
+                  onChange={() => setMode(opt.value)}
+                />
+                <span>
+                  {opt.label}
+                  <span className="muted" style={{ marginLeft: 6 }}>{opt.desc}</span>
+                </span>
+              </label>
+            ))}
+          </div>
+          {mode !== 'http' && (
+            <input
+              type="text"
+              placeholder="站点域名或 IP（如 docflow.example.com / 192.168.1.10）"
+              value={domain}
+              onChange={(e) => setDomain(e.target.value)}
+              required
+            />
+          )}
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <button type="submit" className="btn small primary" disabled={saving}>
+              {saving ? '下发中…' : '保存并立即生效'}
+            </button>
+            {rowError && <span className="badge failed">{rowError}</span>}
+          </div>
+          {current && mode !== 'http' && (
+            <div className="setting-desc muted">
+              {mode === 'auto'
+                ? '要求：域名公网 DNS 指向本机、80/443 端口可达（ACME 挑战与重定向）。'
+                : '自签证书：浏览器将提示不受信（可信任导入 Caddy 根证书消除）；切换后请用 https:// 访问。'}
+            </div>
+          )}
+        </form>
+      )}
+    </div>
+  )
 }
 
 /** 邀请管理卡片：创建（一次性注册链接展示/复制）、列表状态与撤销。 */
@@ -940,6 +1060,7 @@ export default function AdminPage() {
       {!loading && !forbidden && <BackupPanel onError={(msg) => { setError(msg); setNotice('') }} onNotice={(msg) => { setNotice(msg); setError('') }} />}
       {!loading && !forbidden && <QuarantinePanel onError={(msg) => { setError(msg); setNotice('') }} onNotice={(msg) => { setNotice(msg); setError('') }} />}
       {!loading && !forbidden && <SecretsPanel secrets={secrets} />}
+      {!loading && !forbidden && <TlsPanel onNotice={(msg) => { setNotice(msg); setError('') }} />}
 
       {!loading && !forbidden && (
         <InvitationsPanel

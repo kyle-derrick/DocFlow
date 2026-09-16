@@ -6,6 +6,15 @@
 #（ACME HTTP 挑战走 80 端口，已在 docker-compose.yml 映射）。
 # CONTENT_DOMAIN 为独立内容 origin；CONTENT_UPSTREAM 默认 backend:8080。
 # 若 DNS/证书暂未就绪，仍可使用主站 /content/* 路径兼容入口。
+#
+# admin 块：admin API 监听地址（默认仅容器内 localhost:2019）。compose 部署
+# 注入 CADDY_ADMIN=:2019 并 expose（不映射宿主端口），供 backend 管理页面
+# HTTPS 运行时切换热下发配置（internal/caddytls 渲染的模板含同款占位，
+# reload 后保持可达——注意勿在自定义配置中删除本块）。
+{
+	admin {$CADDY_ADMIN:localhost:2019}
+}
+
 {$APP_DOMAIN::80} {
 	encode gzip
 

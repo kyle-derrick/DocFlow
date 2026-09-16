@@ -11,6 +11,7 @@ import (
 
 	"github.com/docflow/docflow/internal/audit"
 	"github.com/docflow/docflow/internal/auth"
+	"github.com/docflow/docflow/internal/caddytls"
 	"github.com/docflow/docflow/internal/files"
 	"github.com/docflow/docflow/internal/invite"
 	"github.com/docflow/docflow/internal/mail"
@@ -102,6 +103,9 @@ type Handler struct {
 	stats      statsSource
 	auditQuery auditQuerySource
 	roles      auth.RoleLookup
+	// caddyTLS 为 HTTPS 运行时切换服务（SetCaddyTLS 注入）；nil 时
+	// GET /admin/tls 返回 managed=false，PUT 返回 503。
+	caddyTLS *caddytls.Service
 	// quarantine 为隔离区管理服务（SetQuarantineService 注入）；nil 时
 	// 隔离区端点 503（生产恒注入）。
 	quarantine quarantineService
@@ -495,6 +499,10 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	admin := api.Group("/admin", auth.RequireRole(auth.RoleAdmin, h.roles))
 	admin.GET("/settings", h.listAdminSettings)
 	admin.PUT("/settings/:key", h.updateAdminSetting)
+	// HTTPS 运行时切换（热下发 Caddy admin API）：GET 恒注册（未托管时
+	// managed=false 供页面降级展示）；PUT 未托管时 503。
+	admin.GET("/tls", h.adminGetTLS)
+	admin.PUT("/tls", h.adminUpdateTLS)
 	// 隔离区管理（G6，仅 admin）：隔离 blob 列表与 rescan/release/delete 处置
 	//（release 须显式 confirm=true；全部动作写审计）。
 	admin.GET("/quarantine", h.listQuarantine)

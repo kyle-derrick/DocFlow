@@ -1556,6 +1556,27 @@ export async function adminGetStats(): Promise<AdminStats> {
   return api<AdminStats>('/api/v1/admin/stats')
 }
 
+// ---------- HTTPS 运行时切换（仅 admin；经 Caddy admin API 热下发） ----------
+
+/** TLS 模式：http 明文 / auto 域名+ACME 自动签发 / internal 域名或 IP+自签。 */
+export type TlsMode = 'http' | 'auto' | 'internal'
+
+/** GET /admin/tls 响应；managed=false 表示未配置 CADDY_ADMIN_ADDR（不可切换）。 */
+export interface TlsStatus {
+  mode: TlsMode
+  domain: string
+  managed: boolean
+}
+
+export async function adminGetTls(): Promise<TlsStatus> {
+  return api<TlsStatus>('/api/v1/admin/tls')
+}
+
+/** 切换 HTTPS 模式（caddy 拒绝或不可达时 400，旧配置保持）；返回生效状态。 */
+export async function adminPutTls(mode: TlsMode, domain: string): Promise<TlsStatus> {
+  return api<TlsStatus>('/api/v1/admin/tls', jsonInit('PUT', { mode, domain }))
+}
+
 // ---------- 隔离区管理（仅 admin；G6） ----------
 
 /** 隔离 blob 条目（GET /admin/quarantine）；file_* 经 file_versions join，孤儿 blob 为 null。 */

@@ -21,6 +21,7 @@ import (
 	"github.com/docflow/docflow/internal/ai"
 	"github.com/docflow/docflow/internal/audit"
 	"github.com/docflow/docflow/internal/auth"
+	"github.com/docflow/docflow/internal/caddytls"
 	"github.com/docflow/docflow/internal/config"
 	"github.com/docflow/docflow/internal/files"
 	httpapi "github.com/docflow/docflow/internal/http"
@@ -484,6 +485,15 @@ func main() {
 	handler.SetSettingsService(settingsStore)
 	handler.SetStatsSource(httpapi.NewAdminStats(db))
 	handler.SetRoleLookup(userStore)
+	// HTTPS 运行时切换（管理页面）：CADDY_ADMIN_ADDR 配置时经 Caddy admin
+	// API 热下发；启动期对账覆盖 caddy 先于 backend 重启丢配置的窗口。
+	if cfg.CaddyAdminAddr != "" {
+		caddyTLS := caddytls.NewService(db, cfg.CaddyAdminAddr)
+		caddyTLS.SetAuditRecorder(auditStore)
+		handler.SetCaddyTLS(caddyTLS)
+		go caddyTLS.ReapplyStartup(ctx)
+		log.Printf("caddy tls runtime switching enabled (admin=%s)", cfg.CaddyAdminAddr)
+	}
 	// 隔离区管理（G6，仅 admin）：隔离 blob 列表与 rescan/release/delete
 	// 处置（复用 fileStore.PurgeBlobs 的两步物理删除语义；扫描器与上传
 	// 链路同一选型的独立实例）。
