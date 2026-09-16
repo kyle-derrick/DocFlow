@@ -53,8 +53,9 @@ up-full:
 # CLAMAV_ADDR=clamav:3310。
 
 # 停止全部 profile 的服务并移除容器（数据卷保留；需清数据再接 -v）。
+# search/storage 为可选项 profile，一并列入，确保 meilisearch/minio 不残留。
 down:
-	docker compose --profile minimal --profile full --profile antivirus down
+	docker compose --profile minimal --profile full --profile antivirus --profile search --profile storage down
 
 backup:
 	sh scripts/backup.sh

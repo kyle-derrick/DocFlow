@@ -10,4 +10,4 @@ echo '--- meili indexes ---'
 docker compose exec -T meilisearch sh -c \
   "wget -qO- --header 'Authorization: Bearer verify-meili-master-key-0123456789abcdef' 'http://127.0.0.1:7700/indexes?limit=5'"
 echo
-bash /tmp/reset-compose.sh 2>&1 | tail -4
+tr -d '\r' < scripts/prod-smoke-reset.sh > /tmp/prod-smoke-reset.sh && bash /tmp/prod-smoke-reset.sh 2>&1 | tail -4

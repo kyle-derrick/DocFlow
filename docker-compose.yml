@@ -11,6 +11,8 @@
 #   antivirus  minimal + clamav（可与 full 叠加）          —— docker compose
 #              --profile full --profile antivirus up -d
 #   search     minimal + meilisearch（可与 full 叠加）     —— 全文搜索引擎可选项
+#   storage    minimal + minio（可与 full 叠加）           —— S3 对象存储可选项，
+#              需 .env 联动 STORAGE_DRIVER=s3（否则 local 驱动不使用该服务）
 # 三个核心 profile（minimal/full/antivirus）均含核心三件套（caddy/backend/
 # postgres），可单独或叠加启动；search profile 需 .env 联动 SEARCH_DRIVER=meili
 #（否则 backend 仍用 pg 引擎，meilisearch 服务不被使用）。

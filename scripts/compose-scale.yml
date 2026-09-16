@@ -15,7 +15,8 @@ services:
       - "18025:8025"
     profiles: ["minimal", "full", "antivirus"]
   # keycloak：OIDC IdP（宿主 18090，backend 经网关 172.18.0.1:18090 访问，
-  # issuer 两端一致）。验证专用，不并入生产编排。
+  # issuer 两端一致）。dev-file 的 H2 落在 /opt/keycloak/data，挂 named
+  # volume 防容器 recreate 丢 realm/client/user。验证专用，不并入生产编排。
   keycloak:
     image: quay.io/keycloak/keycloak:26.0
     command: ["start-dev", "--http-port=8080"]
@@ -23,6 +24,10 @@ services:
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
       KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+    volumes:
+      - keycloak_dev_data:/opt/keycloak/data
     ports:
       - "18090:8080"
     profiles: ["minimal", "full", "antivirus"]
+volumes:
+  keycloak_dev_data:
