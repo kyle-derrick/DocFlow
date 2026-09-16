@@ -90,17 +90,19 @@ const (
 )
 
 // Entry 表示一条审计日志（对应 audit_logs 表）。
+// json tag 必须齐全：缺少时 Go 按字段名输出帕斯卡命名（CreatedAt 等），
+// 前端按 snake_case 读取得到 undefined（审计页时间列全显 Invalid Date）。
 type Entry struct {
-	ID           int64      `gorm:"primaryKey"`
-	UserID       *uuid.UUID `gorm:"type:uuid"`
-	Action       string     `gorm:"size:64;not null"`
-	ResourceType string     `gorm:"size:32"`
-	ResourceID   string     `gorm:"size:64"`
-	IP           *string    `gorm:"size:45"`
-	UserAgent    string     `gorm:"size:512"`
-	Status       string     `gorm:"size:16"`
-	Metadata     string     `gorm:"type:jsonb"`
-	CreatedAt    time.Time  `gorm:"not null"`
+	ID           int64      `gorm:"primaryKey" json:"id"`
+	UserID       *uuid.UUID `gorm:"type:uuid" json:"user_id"`
+	Action       string     `gorm:"size:64;not null" json:"action"`
+	ResourceType string     `gorm:"size:32" json:"resource_type"`
+	ResourceID   string     `gorm:"size:64" json:"resource_id"`
+	IP           *string    `gorm:"size:45" json:"ip"`
+	UserAgent    string     `gorm:"size:512" json:"user_agent"`
+	Status       string     `gorm:"size:16" json:"status"`
+	Metadata     string     `gorm:"type:jsonb" json:"metadata"`
+	CreatedAt    time.Time  `gorm:"not null" json:"created_at"`
 }
 
 // TableName 显式映射到 audit_logs（gorm 默认复数化为 entries）。
