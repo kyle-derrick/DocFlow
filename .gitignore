@@ -13,3 +13,6 @@ frontend/blob-report/
 .env.local
 .idea/
 .vscode/
+
+# AI 辅助开发过程产物（设计稿等，不属于开源交付物）
+.design/
