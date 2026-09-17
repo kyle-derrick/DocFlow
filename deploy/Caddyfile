@@ -52,6 +52,27 @@
 		}
 	}
 
+	# 受控原始内容（/raw/*：路径型访问与目录分享子资源，HMAC grant 鉴权，
+	# 无 Cookie 依赖）：与 /content/* 同区处理——剥 Cookie、sandbox CSP
+	# （后端 /raw 端点自带同款 CSP 与 nosniff，此处模板保证反代路径一致）、
+	# no-referrer（URL 内含短期 grant，不得外泄）。
+	handle /raw/* {
+		header {
+			-Cookie
+			Content-Security-Policy "sandbox allow-scripts"
+			X-Content-Type-Options nosniff
+			Referrer-Policy no-referrer
+		}
+		reverse_proxy {$CONTENT_UPSTREAM:backend:8080} {
+			header_up -Cookie
+		}
+	}
+
+	# MCP 服务（JSON-RPC over HTTP，PAT/access Bearer 鉴权，后端独立限流）。
+	handle /mcp {
+		reverse_proxy {$CONTENT_UPSTREAM:backend:8080}
+	}
+
 	# ONLYOFFICE Document Server（full profile）。上游经 ONLYOFFICE_UPSTREAM
 	# 注入：minimal 下无 onlyoffice 服务，若此处写死 onlyoffice:80，Caddy 启动
 	# 时静态上游 DNS 解析失败会直接退出，故默认指向本机 discard 端口
@@ -61,12 +82,16 @@
 	#（后端 /onlyoffice/config 将其返回给浏览器；回调 SSRF 校验仍以内网
 	# ONLYOFFICE_SERVER_URL 为基准，与本路径无关）。
 	handle_path /onlyoffice/* {
-		# handle_path 剥 /onlyoffice 前缀后转 DS；X-Forwarded-Path 为 DS
-		# 官方子路径部署协议（8.x）：DS 据此生成带前缀的资源 URL，否则
-		# api.js 可达但编辑器后续 /web-apps/* 绝对路径资源全部落 SPA 404
-		#（真实栈验证暴露：原样转发前缀时 DS 404，剥前缀不带 header 时
-		# 页面资源断链——二者都不可用）。
+		# handle_path 剥 /onlyoffice 前缀后转 DS；X-Forwarded-Prefix 为 DS
+		# 8.x 官方子路径部署协议：DS（含 docservice Node 层 getBaseUrlByRequest
+		# 与 nginx 层 $the_prefix map）据此给下发给浏览器的绝对 URL 加 /onlyoffice
+		# 前缀。缺失时 docservice 生成的 Editor.bin 回源地址为根路径
+		# /cache/files/...，经 Caddy 落 SPA 兜底返回 index.html，sdkjs 按
+		# 内容识别格式失败，编辑器弹「文件内容与文件扩展名不匹配」且无法打开
+		#（真实栈定位：sdkjs 抓到的 Editor.bin 为 696 字节 HTML）。
+		# X-Forwarded-Path 为兼容新增 DS 版本的冗余头，8.2.3 不消费。
 		reverse_proxy {$ONLYOFFICE_UPSTREAM:127.0.0.1:9} {
+			header_up X-Forwarded-Prefix /onlyoffice
 			header_up X-Forwarded-Path /onlyoffice
 		}
 	}

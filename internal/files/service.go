@@ -457,7 +457,10 @@ func (s *Store) IncrementViewCount(user, fileID uuid.UUID) error {
 func (s *Store) EnsureRoot(owner uuid.UUID) (File, error) {
 	var root File
 	err := s.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("owner_id = ? AND is_root = true", owner).First(&root).Error; err == nil {
+		// 个人根目录限定 team_id IS NULL（idx_files_owner_root，migration 032）：
+		// 同一 owner 可能同时名下团队根目录（team_id 非空），不加条件会命中
+		// 团队根导致个人空间数据错乱。
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("owner_id = ? AND is_root = true AND team_id IS NULL", owner).First(&root).Error; err == nil {
 			return nil
 		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
@@ -465,7 +468,7 @@ func (s *Store) EnsureRoot(owner uuid.UUID) (File, error) {
 		root = File{ID: uuid.New(), Name: "根目录", OwnerID: owner, Type: "folder", IsRoot: true, ScopeType: "personal"}
 		if err := tx.Create(&root).Error; err != nil {
 			if strings.Contains(strings.ToLower(err.Error()), "unique") {
-				return tx.Where("owner_id = ? AND is_root = true", owner).First(&root).Error
+				return tx.Where("owner_id = ? AND is_root = true AND team_id IS NULL", owner).First(&root).Error
 			}
 			return err
 		}

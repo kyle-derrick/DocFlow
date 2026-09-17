@@ -207,16 +207,35 @@ func purgeBlobsLogic(r trashRepo, blobs []ObjectBlob, deleteObject func(storageK
 	return nil
 }
 
-// ListTrash 列出当前用户软删除的文件（仅顶层删除项：父目录也在回收站中的后代不重复出现）。
+// ListTrash 列出当前用户个人空间的软删除文件。
 func (s *Store) ListTrash(owner uuid.UUID, limit int) ([]File, error) {
+	return s.ListTrashScope(owner, "personal", nil, limit)
+}
+
+// ListTrashScope 按个人或指定团队空间列出顶层删除项。团队查询先验证成员读权限，
+// 再按 team_id 限定，不能用创建者 owner_id 代替团队授权。
+func (s *Store) ListTrashScope(user uuid.UUID, scope string, teamID *uuid.UUID, limit int) ([]File, error) {
 	if limit <= 0 {
 		limit = 100
 	}
+	q := s.db.Where("deleted_at IS NOT NULL AND is_root = false AND NOT EXISTS (SELECT 1 FROM files p WHERE p.id = files.parent_id AND p.deleted_at IS NOT NULL)")
+	if scope == "team" {
+		if teamID == nil || s.teamReader == nil {
+			return nil, ErrForbidden
+		}
+		ok, err := s.teamReader(user, *teamID)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, ErrForbidden
+		}
+		q = q.Where("scope_type = ? AND team_id = ?", "team", *teamID)
+	} else {
+		q = q.Where("scope_type = ? AND owner_id = ?", "personal", user)
+	}
 	var out []File
-	err := s.db.Where(
-		"owner_id = ? AND deleted_at IS NOT NULL AND is_root = false AND NOT EXISTS (SELECT 1 FROM files p WHERE p.id = files.parent_id AND p.deleted_at IS NOT NULL)",
-		owner,
-	).Order("deleted_at DESC, id").Limit(limit).Find(&out).Error
+	err := q.Order("deleted_at DESC, id").Limit(limit).Find(&out).Error
 	return out, err
 }
 

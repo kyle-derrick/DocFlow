@@ -21,7 +21,10 @@ import {
   getFileMeta,
   uploadFileVersion,
 } from '../api'
+import DrawioViewer from '../components/DrawioViewer'
 import { useLocale } from '../i18n'
+import { useColorMode } from '../theme'
+import { closeEditorWithFallback, safeReturnTo } from '../editorNavigation'
 
 /**
  * draw.io embed 编辑器/查看器 iframe URL（proto=json postMessage 协议）。
@@ -47,15 +50,19 @@ interface DrawioMessage {
   exit?: boolean
 }
 
-export default function DrawioPage() {
-  const { fileId = '' } = useParams()
-  // ?mode=view 只读查看（在线预览入口）；编辑器语言跟随界面语言。
+export default function DrawioPage({ mode, fileId: fileIdProp }: { mode?: 'edit' | 'view'; fileId?: string } = {}) {
+  const { fileId: routeFileId = '' } = useParams()
+  // by-path 路由经 prop 传入 resolve 得到的 file_id；缺省回退路由参数。
+  const fileId = fileIdProp ?? routeFileId
+  // 独立 /view 路由或 ?mode=view 均强制只读；编辑器语言跟随界面语言。
   const [searchParams] = useSearchParams()
-  const viewMode = searchParams.get('mode') === 'view'
-  const returnToParam = searchParams.get('returnTo')
-  const returnTo = returnToParam?.startsWith('/') && !returnToParam.startsWith('//') ? returnToParam : '/'
+  const viewMode = mode === 'view' || searchParams.get('mode') === 'view'
+  const returnTo = safeReturnTo(searchParams.get('returnTo'))
   const locale = useLocale()
   const navigate = useNavigate()
+  // 只读渲染跟随站点明暗主题与界面语言（zh-CN → drawio 中文资源）。
+  const colorMode = useColorMode()
+  const viewerLang = locale === 'zh-CN' ? 'zh' : ''
 
   const [file, setFile] = useState<FileWithVersion | null>(null)
   const [editorURL, setEditorURL] = useState('')
@@ -95,7 +102,7 @@ export default function DrawioPage() {
         if (!alive) return
         setFile(meta)
         xmlRef.current = text.trim() ? text : EMPTY_DRAWIO_XML
-        setEditorURL(drawioEditorURL(status.url, locale === 'zh-CN' ? 'zh' : 'en', viewMode))
+        setEditorURL(viewMode ? status.url.replace(/\/+$/, '') : drawioEditorURL(status.url, locale === 'zh-CN' ? 'zh' : 'en', false))
       } catch (err) {
         if (alive) setError(err instanceof Error ? err.message : '图表编辑器加载失败')
       } finally {
@@ -111,17 +118,12 @@ export default function DrawioPage() {
 
   // 退出编辑器：显式返回打开时记录的文件页，不依赖 noopener 新窗口中不可靠的
   // history。脚本可关闭由 window.open 创建的窗口；普通标签页则确定性导航。
-  const closeEditor = () => {
-    window.close()
-    window.setTimeout(() => {
-      if (!window.closed) navigate(returnTo, { replace: true })
-    }, 50)
-  }
+  const closeEditor = () => closeEditorWithFallback(navigate, returnTo)
 
   // postMessage JSON 协议：init → load；save/export → 覆盖为新版本
   // （exit 标记或 exit 事件时保存成功后退出编辑器）。
   useEffect(() => {
-    if (!editorURL) return
+    if (!editorURL || viewMode) return
     const onMessage = (e: MessageEvent) => {
       const frame = frameRef.current
       if (!frame || e.source !== frame.contentWindow) return
@@ -158,7 +160,7 @@ export default function DrawioPage() {
     window.addEventListener('message', onMessage)
     return () => window.removeEventListener('message', onMessage)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editorURL, fileId, file?.name])
+  }, [editorURL, fileId, file?.name, viewMode])
 
   // 保存：导出 XML 作为新版本上传（file_id 会话沿用目标文件名/父目录），
   // 成功后刷新元数据展示新版本号；失败置未保存标记。返回是否保存成功。
@@ -203,21 +205,27 @@ export default function DrawioPage() {
   const versionNo = file?.current_version?.version
 
   return (
-    <div className="editor-page">
-      <div className="editor-head">
+    <div className={`editor-page${viewMode ? ' viewer-only' : ''}`}>
+      {!viewMode && <div className="editor-head">
         <button type="button" className="btn ghost small" onClick={closeEditor}>← 返回</button>
         <h2 className="editor-title">{file?.name ?? '加载中…'}</h2>
         {versionNo !== undefined && <span className="badge current">当前版本 v{versionNo}</span>}
         {saving && <span className="badge uploading">保存中…</span>}
-        {viewMode && <span className="badge">只读</span>}
-      </div>
+      </div>}
 
-      {notice && <div className="banner ok editor-hint">{notice}</div>}
+      {!viewMode && notice && <div className="banner ok editor-hint">{notice}</div>}
       {error && <div className="banner error">{error}</div>}
       {loading && !error && <div className="hint">{viewMode ? '正在加载图表查看器…' : '正在加载图表编辑器…'}</div>}
 
-      {/* iframe 编辑器：未进入错误态且地址就绪后渲染（init 事件由监听器应答）。 */}
-      {!error && !loading && editorURL && (
+      {!error && !loading && editorURL && (viewMode ? (
+        <DrawioViewer
+          baseURL={editorURL}
+          xml={xmlRef.current}
+          title={file?.name ?? '图表'}
+          dark={colorMode === 'dark'}
+          lang={viewerLang}
+        />
+      ) : (
         <div className="editor-shell">
           <iframe
             ref={frameRef}
@@ -226,7 +234,7 @@ export default function DrawioPage() {
             title={file?.name ?? '图表编辑器'}
           />
         </div>
-      )}
+      ))}
     </div>
   )
 }

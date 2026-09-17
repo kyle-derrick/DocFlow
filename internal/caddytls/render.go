@@ -65,6 +65,22 @@ func Render(mode Mode, domain string) string {
 		}
 	}
 
+	handle /raw/* {
+		header {
+			-Cookie
+			Content-Security-Policy "sandbox allow-scripts"
+			X-Content-Type-Options nosniff
+			Referrer-Policy no-referrer
+		}
+		reverse_proxy {$CONTENT_UPSTREAM:backend:8080} {
+			header_up -Cookie
+		}
+	}
+
+	handle /mcp {
+		reverse_proxy {$CONTENT_UPSTREAM:backend:8080}
+	}
+
 	handle_path /onlyoffice/* {
 		reverse_proxy {$ONLYOFFICE_UPSTREAM:127.0.0.1:9} {
 			header_up X-Forwarded-Path /onlyoffice

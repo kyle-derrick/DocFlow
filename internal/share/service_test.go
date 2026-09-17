@@ -247,7 +247,9 @@ func TestCreateValidations(t *testing.T) {
 	}{
 		{"other owner file", uuid.New(), fileID, PermissionView, 0, nil, ErrFileNotFound},
 		{"deleted file", owner, deletedID, PermissionView, 0, nil, ErrFileNotFound},
-		{"folder", owner, folderID, PermissionView, 0, nil, ErrFileNotShareable},
+		// 目录分享自 v1.1 起允许作为公开分享根（CreatePublic）；
+		// CreatePrivate 仍限文件（见 private_test.go）。
+		{"folder", owner, folderID, PermissionView, 0, nil, nil},
 		{"no current version", owner, noVersionID, PermissionView, 0, nil, ErrFileNotShareable},
 		{"blob not available", owner, quarantinedID, PermissionView, 0, nil, ErrFileNotShareable},
 		{"invalid permission", owner, fileID, "rw", 0, nil, ErrInvalidPermission},

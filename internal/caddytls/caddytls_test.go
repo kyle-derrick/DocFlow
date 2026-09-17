@@ -113,13 +113,26 @@ func TestRenderModes(t *testing.T) {
 		for _, anchor := range []string{
 			"admin {$CADDY_ADMIN:localhost:2019}",
 			"handle /api/*", "reverse_proxy backend:8080",
-			"handle /content/*", "handle_path /onlyoffice/*", "handle_path /drawio/*",
+			"handle /content/*", "handle /raw/*", "handle_path /onlyoffice/*", "handle_path /drawio/*",
 			"X-Forwarded-Path /onlyoffice",
 			"root * /srv/frontend",
 			"{$CONTENT_DOMAIN:content.localhost}",
 		} {
 			if !strings.Contains(conf, anchor) {
 				t.Fatalf("%s mode template missing anchor %q", name, anchor)
+			}
+		}
+		// /raw/* 段的安全头锚定（剥 Cookie + sandbox CSP + nosniff + no-referrer）。
+		rawIdx := strings.Index(conf, "handle /raw/*")
+		contentIdx := strings.Index(conf, "handle /content/*")
+		spaIdx := strings.Index(conf, "handle {\n")
+		if rawIdx < 0 || rawIdx < contentIdx || rawIdx > spaIdx {
+			t.Fatalf("%s mode: /raw/* handle must sit with /content/* and before SPA fallback:\n%s", name, conf)
+		}
+		rawBlock := conf[rawIdx:spaIdx]
+		for _, anchor := range []string{"-Cookie", `Content-Security-Policy "sandbox allow-scripts"`, "X-Content-Type-Options nosniff", "Referrer-Policy no-referrer", "{$CONTENT_UPSTREAM:backend:8080}"} {
+			if !strings.Contains(rawBlock, anchor) {
+				t.Fatalf("%s mode /raw/* block missing anchor %q", name, anchor)
 			}
 		}
 	}
@@ -226,7 +239,7 @@ func TestReapplyStartup(t *testing.T) {
 		t.Fatalf("seed apply: %v", err)
 	}
 	fc.mu.Lock()
-	fc.loads = nil // 模拟 caddy 重启丢配置
+	fc.loads = nil  // 模拟 caddy 重启丢配置
 	fc.declines = 2 // 重启后前两次 /load 失败（如 caddy 尚未就绪）
 	fc.mu.Unlock()
 

@@ -6,6 +6,7 @@ import (
 	"github.com/google/uuid"
 	"io"
 	"strconv"
+	"time"
 )
 
 type auditQuerySource interface {
@@ -14,6 +15,27 @@ type auditQuerySource interface {
 }
 
 func (h *Handler) SetAuditQuerySource(s auditQuerySource) { h.auditQuery = s }
+func parseAuditQuery(c *gin.Context) (audit.Query, error) {
+	q := audit.Query{Action: c.Query("action"), Status: c.Query("status"), ResourceType: c.Query("resource_type"), ResourceID: c.Query("resource_id")}
+	if raw := c.Query("user_id"); raw != "" {
+		id, err := uuid.Parse(raw)
+		if err != nil {
+			return q, err
+		}
+		q.UserID = &id
+	}
+	for raw, dest := range map[string]**time.Time{"from": &q.From, "to": &q.To} {
+		if value := c.Query(raw); value != "" {
+			parsed, err := time.Parse(time.RFC3339, value)
+			if err != nil {
+				return q, err
+			}
+			*dest = &parsed
+		}
+	}
+	return q, nil
+}
+
 func (h *Handler) adminAudit(c *gin.Context) {
 	if h.auditQuery == nil {
 		c.JSON(503, gin.H{"error": "audit query not configured"})
@@ -26,17 +48,14 @@ func (h *Handler) adminAudit(c *gin.Context) {
 	if limit > 1000 {
 		limit = 1000
 	}
-	var uid *uuid.UUID
-	if raw := c.Query("user_id"); raw != "" {
-		id, e := uuid.Parse(raw)
-		if e != nil {
-			c.JSON(400, gin.H{"error": "invalid user_id"})
-			return
-		}
-		uid = &id
+	q, err := parseAuditQuery(c)
+	if err != nil {
+		c.JSON(400, gin.H{"error": "invalid audit filter"})
+		return
 	}
-	cur, _ := strconv.ParseInt(c.Query("cursor"), 10, 64)
-	r, e := h.auditQuery.Query(audit.Query{Limit: limit, Cursor: cur, Action: c.Query("action"), UserID: uid})
+	q.Limit = limit
+	q.Cursor, _ = strconv.ParseInt(c.Query("cursor"), 10, 64)
+	r, e := h.auditQuery.Query(q)
 	if e != nil {
 		c.JSON(500, gin.H{"error": "unable to query audit logs"})
 		return
@@ -48,9 +67,14 @@ func (h *Handler) adminAuditCSV(c *gin.Context) {
 		c.JSON(503, gin.H{"error": "audit query not configured"})
 		return
 	}
+	q, err := parseAuditQuery(c)
+	if err != nil {
+		c.JSON(400, gin.H{"error": "invalid audit filter"})
+		return
+	}
 	c.Header("Content-Type", "text/csv")
 	c.Header("Content-Disposition", "attachment; filename=\"audit-logs.csv\"")
-	if e := h.auditQuery.Export(c.Writer, audit.Query{Action: c.Query("action")}); e != nil {
+	if e := h.auditQuery.Export(c.Writer, q); e != nil {
 		return
 	}
 }

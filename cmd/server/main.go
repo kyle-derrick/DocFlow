@@ -23,6 +23,7 @@ import (
 	"github.com/docflow/docflow/internal/auth"
 	"github.com/docflow/docflow/internal/caddytls"
 	"github.com/docflow/docflow/internal/config"
+	"github.com/docflow/docflow/internal/contenturl"
 	"github.com/docflow/docflow/internal/files"
 	httpapi "github.com/docflow/docflow/internal/http"
 	"github.com/docflow/docflow/internal/invite"
@@ -348,6 +349,8 @@ func main() {
 	})
 	shareService := share.NewService(share.NewGormStore(db), fileStore)
 	shareService.SetTeamMembership(teamStore)
+	// 目录分享树源（tree/raw-share 子资源解析与清单，生产恒注入）。
+	shareService.SetTreeSource(fileStore)
 	// 团队文件分享门控（设计 6.5.5）：仅 CanShare（系统 owner/editor、
 	// 自定义角色按 share 勾选且未被 deny）可创建团队文件分享；个人文件不受影响。
 	shareService.SetTeamSharer(teamService.CanShare)
@@ -561,6 +564,15 @@ func main() {
 	}
 	// 网页包内容端点 /content/:pid/*filepath（独立按 IP 轻限流）与手动解包入口。
 	handler.SetWebpkg(webpkgService, cfg.WebpkgRateLimitPerMinute)
+	// 受控原始内容（/raw/*）：短期授权 HMAC grant 签发器（RAW_URL_SECRET，
+	// 缺省由 JWT_SECRET 经 HKDF 派生）与 origin_content 绝对化基地址
+	//（CONTENT_PUBLIC_BASE_URL，可选）。resolve API 据此签发 raw_url。
+	rawSecret := cfg.RawURLSecret
+	if rawSecret == "" {
+		rawSecret = cfg.JWTSecret
+	}
+	handler.SetContentSigner(contenturl.NewSigner(rawSecret, contenturl.DefaultTTL))
+	handler.SetContentPublicBaseURL(cfg.ContentPublicBaseURL)
 	handler.Register(router, cfg.JWTSecret, cfg.RateLimitPerMinute, cfg.LoginRateLimitPerMinute, cfg.PublicRateLimitPerMinute)
 	// 后台清理任务（janitor）：过期上传会话、deleting blob 回收与回收站超期清理。
 	// 回收站超期清理走系统级 PurgeSystem（不做用户 CanDelete 判定——清理的是

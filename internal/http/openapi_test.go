@@ -133,12 +133,24 @@ func ginPathToOpenapi(base, path string) (string, bool) {
 //     METRICS_ENABLED 默认启用；设计文档 13.2 将其归为基础设施探针）；
 //   - 网页包内容域端点 /content/:pid/*filepath：无认证的内容子资源路径，
 //     面向 sandbox iframe 而非 API 客户端（独立按 IP 轻限流、严格 CSP），
-//     与 /metrics 同属契约外基础设施路由，不入 docs/openapi.yaml。
+//     与 /metrics 同属契约外基础设施路由，不入 docs/openapi.yaml；
+//   - 受控原始内容域端点 /raw/auth/:grant/... 与 /raw/share/:token/:grant/...：
+//     授权经 HMAC grant（resolve API / tree 端点签发，见契约），raw 域自身
+//     无认证、面向 sandbox iframe，与 /content/* 同属契约外内容域路由。
 func isExcludedRoute(path string) bool {
 	if path == "/health" || path == "/ready" || path == "/metrics" {
 		return true
 	}
 	if strings.HasPrefix(path, "/content/") {
+		return true
+	}
+	if strings.HasPrefix(path, "/raw/") {
+		return true
+	}
+	// MCP 端点（POST /mcp JSON-RPC；GET /mcp 恒 405）：独立协议
+	//（Model Context Protocol），面向 AI agent 客户端而非 REST API 消费方，
+	// 见 docs/mcp.md，不入 docs/openapi.yaml。
+	if path == "/mcp" {
 		return true
 	}
 	return strings.Contains(path, "prometheus") || strings.Contains(path, "metrics")

@@ -44,14 +44,30 @@ export default defineConfig({
         navigateFallback: 'index.html',
         navigateFallbackDenylist: [/^\/api\//, /^\/content\//, /^\/onlyoffice\//, /^\/drawio\//, /^\/s\//],
         globPatterns: ['**/*.{js,css,html,svg,png,webmanifest}'],
+        // mermaid 生态按需懒加载块（图表类型子块为「名-哈希-哈希」双段命名，
+        // 另有 mermaid.core/cytoscape/katex 单段大件）合计 5MB+，仅查看图表
+        // 时才需要：不进 SW 预缓存（避免首装全量下载），在线按需拉取。
+        // 富文本编辑器（Tiptap + lowlight，~640KB）同例：仅编辑 markdown 时
+        // 懒加载（RichTextEditor-*.js 独立 chunk），不进预缓存。
+        globIgnores: [
+          'assets/*-*-*.js',
+          'assets/mermaid*.js',
+          'assets/cytoscape*.js',
+          'assets/katex-*.js',
+          'assets/RichTextEditor*.js',
+        ],
       },
     }),
   ],
   server: {
     proxy: {
       '/api': {
-        target: 'http://localhost:8080',
-        changeOrigin: true,
+        // DOCFLOW_DEV_API 可指向完整栈入口（如 http://127.0.0.1 的 caddy），
+        // 便于 dev server 复用真实后端联调；缺省本地 Go 后端 :8080。
+        // 注意 changeOrigin 必须为 false：后端 CSRF 校验要求 Origin/Referer
+        // 的 host 与请求 Host 一致，改写 Host 会导致 /auth/refresh 被 403。
+        target: process.env.DOCFLOW_DEV_API ?? 'http://localhost:8080',
+        changeOrigin: false,
       },
     },
   },

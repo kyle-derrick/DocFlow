@@ -332,7 +332,7 @@ func TestEditConfigTokenGenerationAndExpiry(t *testing.T) {
 	if user := editor["user"].(map[string]any); user["name"] != "alice" || user["id"] != owner.String() {
 		t.Fatalf("editorConfig.user = %v", user)
 	}
-	if !strings.HasPrefix(document["url"].(string), "http://backend:8080/api/v1/onlyoffice/download/"+file.ID.String()+"?v=") {
+	if !strings.HasPrefix(document["url"].(string), "http://backend:8080/api/v1/onlyoffice/download/"+file.ID.String()+"/PRD.docx?v=") {
 		t.Fatalf("document.url = %v", document["url"])
 	}
 

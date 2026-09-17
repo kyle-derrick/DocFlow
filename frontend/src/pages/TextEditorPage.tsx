@@ -1,81 +1,103 @@
-import { Fragment, ReactNode, useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
+import { isValidElement, lazy, Suspense } from 'react'
+import CodeMirror from '@uiw/react-codemirror'
+import { markdown as markdownLanguage } from '@codemirror/lang-markdown'
+import { html as htmlLanguage } from '@codemirror/lang-html'
+import { css as cssLanguage } from '@codemirror/lang-css'
+import { javascript as javascriptLanguage } from '@codemirror/lang-javascript'
+import ReactMarkdown from 'react-markdown'
+import type { Components } from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { useParams, useSearchParams } from 'react-router-dom'
 import { fetchFileText, getFileMeta, uploadFileVersion } from '../api'
+import MarkmapDiagram from '../components/MarkmapDiagram'
+import MermaidDiagram from '../components/MermaidDiagram'
 import { MessageKey, t, useLocale } from '../i18n'
+import { useColorMode } from '../theme'
 
-type EditorKind = 'text' | 'markdown'
+// 富文本编辑器（Tiptap + lowlight 产物 1MB+）懒加载独立 chunk，仅 markdown
+// 编辑态进入时按需拉取。
+const RichTextEditor = lazy(() => import('../components/richtext/RichTextEditor'))
 
-function inlineMarkdown(text: string): ReactNode[] {
-  const parts = text.split(/(`[^`\n]+`|\*\*[^*\n]+\*\*|\[[^\]\n]+\]\(https?:\/\/[^\s)]+\))/g)
-  return parts.map((part, index) => {
-    if (part.startsWith('`') && part.endsWith('`')) return <code key={index}>{part.slice(1, -1)}</code>
-    if (part.startsWith('**') && part.endsWith('**')) return <strong key={index}>{part.slice(2, -2)}</strong>
-    const link = part.match(/^\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)$/)
-    if (link) return <a key={index} href={link[2]} target="_blank" rel="noreferrer">{link[1]}</a>
-    return <Fragment key={index}>{part}</Fragment>
-  })
+export type EditorKind = 'text' | 'markdown' | 'html' | 'css' | 'javascript'
+
+const defaultNames: Record<EditorKind, string> = {
+  text: 'text.txt',
+  markdown: 'note.md',
+  html: 'index.html',
+  css: 'style.css',
+  javascript: 'script.js',
 }
 
-function MarkdownPreview({ source }: { source: string }) {
-  const lines = source.replace(/\r\n?/g, '\n').split('\n')
-  const nodes: ReactNode[] = []
-  let code: string[] | null = null
-  let list: string[] = []
-  const flushList = () => {
-    if (list.length === 0) return
-    nodes.push(<ul key={`list-${nodes.length}`}>{list.map((item, i) => <li key={i}>{inlineMarkdown(item)}</li>)}</ul>)
-    list = []
-  }
-  lines.forEach((line) => {
-    if (line.startsWith('```')) {
-      flushList()
-      if (code === null) code = []
-      else {
-        nodes.push(<pre key={`code-${nodes.length}`}><code>{code.join('\n')}</code></pre>)
-        code = null
+const mimeTypes: Record<EditorKind, string> = {
+  text: 'text/plain',
+  markdown: 'text/markdown',
+  html: 'text/html',
+  css: 'text/css',
+  javascript: 'text/javascript',
+}
+
+/** 从 <pre> 的子节点中提取 mermaid/markmap 围栏代码块（{lang, code}）。 */
+function diagramFromPre(children: ReactNode): { lang: 'mermaid' | 'markmap'; code: string } | null {
+  const child = Array.isArray(children) ? children[0] : children
+  if (!isValidElement<{ className?: unknown; children?: unknown }>(child)) return null
+  const className = typeof child.props.className === 'string' ? child.props.className : ''
+  const match = /^language-(mermaid|markmap)$/.exec(className)
+  if (!match) return null
+  if (typeof child.props.children !== 'string') return null
+  return { lang: match[1] as 'mermaid' | 'markmap', code: child.props.children.replace(/\n$/, '') }
+}
+
+function MarkdownViewer({ source }: { source: string }) {
+  const dark = useColorMode() === 'dark'
+  // ```mermaid / ```markmap 围栏代码块渲染为只读图表，其余代码块原样展示。
+  const components: Components = {
+    pre: ({ children, ...rest }) => {
+      const diagram = diagramFromPre(children)
+      if (diagram?.lang === 'mermaid') {
+        return <div className="diagram-block"><MermaidDiagram source={diagram.code} dark={dark} /></div>
       }
-      return
-    }
-    if (code !== null) {
-      code.push(line)
-      return
-    }
-    const item = line.match(/^[-*]\s+(.+)$/)
-    if (item) {
-      list.push(item[1])
-      return
-    }
-    flushList()
-    const heading = line.match(/^(#{1,6})\s+(.+)$/)
-    if (heading) {
-      const children = inlineMarkdown(heading[2])
-      const level = heading[1].length
-      if (level === 1) nodes.push(<h1 key={nodes.length}>{children}</h1>)
-      else if (level === 2) nodes.push(<h2 key={nodes.length}>{children}</h2>)
-      else if (level === 3) nodes.push(<h3 key={nodes.length}>{children}</h3>)
-      else nodes.push(<h4 key={nodes.length}>{children}</h4>)
-    } else if (line.startsWith('> ')) {
-      nodes.push(<blockquote key={nodes.length}>{inlineMarkdown(line.slice(2))}</blockquote>)
-    } else if (line.trim()) {
-      nodes.push(<p key={nodes.length}>{inlineMarkdown(line)}</p>)
-    } else {
-      nodes.push(<br key={nodes.length} />)
-    }
-  })
-  flushList()
-  const trailingCode = code as string[] | null
-  if (trailingCode !== null) nodes.push(<pre key={`code-${nodes.length}`}><code>{trailingCode.join('\n')}</code></pre>)
-  return <div className="markdown-preview">{nodes}</div>
+      if (diagram?.lang === 'markmap') {
+        return <div className="diagram-block markmap-block"><MarkmapDiagram source={diagram.code} /></div>
+      }
+      return <pre {...rest}>{children}</pre>
+    },
+  }
+  return <div className="markdown-preview"><ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>{source}</ReactMarkdown></div>
 }
 
-export default function TextEditorPage({ kind }: { kind: EditorKind }) {
-  const { fileId = '' } = useParams()
+export { MarkdownViewer }
+
+function HtmlViewer({ source, name }: { source: string; name: string }) {
+  const url = useMemo(() => URL.createObjectURL(new Blob([source], { type: 'text/html' })), [source])
+  useEffect(() => () => URL.revokeObjectURL(url), [url])
+  return <iframe className="standalone-viewer-frame" sandbox="allow-scripts" src={url} title={name} />
+}
+
+function SourceViewer({ kind, source, name }: { kind: EditorKind; source: string; name: string }) {
+  if (kind === 'markdown') return <MarkdownViewer source={source} />
+  if (kind === 'html') return <HtmlViewer source={source} name={name} />
+  return <pre className="preview-text">{source}</pre>
+}
+
+export default function TextEditorPage({
+  kind,
+  mode,
+  fileId: fileIdProp,
+}: { kind: EditorKind; mode?: 'edit' | 'view'; fileId?: string }) {
+  const { fileId: routeFileId = '' } = useParams()
+  // by-path 路由经 prop 传入 resolve 得到的 file_id；缺省回退路由参数。
+  const fileId = fileIdProp ?? routeFileId
   const [searchParams] = useSearchParams()
-  const viewMode = searchParams.get('mode') === 'view'
+  const viewMode = mode === 'view' || searchParams.get('mode') === 'view'
+  const requestedKind = searchParams.get('kind')
+  const editorKind: EditorKind = requestedKind === 'html' || requestedKind === 'css' || requestedKind === 'javascript'
+    ? requestedKind
+    : kind
   const locale = useLocale()
   const msg = (key: MessageKey) => t(locale, key)
-  const markdown = kind === 'markdown'
-  const [name, setName] = useState(markdown ? 'note.md' : 'text.txt')
+  const [name, setName] = useState(defaultNames[editorKind])
   const [text, setText] = useState('')
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -83,11 +105,24 @@ export default function TextEditorPage({ kind }: { kind: EditorKind }) {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const dirtyRef = useRef(false)
+  // markdown 富文本/源码模式（默认富文本；往返失败自动降级源码并提示）。
+  const [richMode, setRichMode] = useState(true)
+  const [richKey, setRichKey] = useState(0)
+
+  const extensions = useMemo(() => {
+    if (editorKind === 'markdown') return [markdownLanguage()]
+    if (editorKind === 'html') return [htmlLanguage()]
+    if (editorKind === 'css') return [cssLanguage()]
+    if (editorKind === 'javascript') return [javascriptLanguage()]
+    return []
+  }, [editorKind])
 
   useEffect(() => {
     let alive = true
     setLoading(true)
     setError('')
+    // 换文件时 markdown 回到默认富文本模式。
+    setRichMode(true)
     void Promise.all([getFileMeta(fileId), fetchFileText(fileId)])
       .then(([meta, content]) => {
         if (!alive) return
@@ -120,8 +155,7 @@ export default function TextEditorPage({ kind }: { kind: EditorKind }) {
     setError('')
     setNotice('')
     try {
-      const file = new File([text], name, { type: markdown ? 'text/markdown' : 'text/plain' })
-      await uploadFileVersion(file, fileId, () => {})
+      await uploadFileVersion(new File([text], name, { type: mimeTypes[kind] }), fileId, () => {})
       dirtyRef.current = false
       setNotice(msg('saved'))
     } catch (err) {
@@ -132,22 +166,39 @@ export default function TextEditorPage({ kind }: { kind: EditorKind }) {
   }
 
   if (viewMode) return (
-    <main className="text-editor-page">
+    <main className="text-editor-page viewer-only">
       {loading ? <div className="text-editor-state">{msg('loading')}</div> : error ? (
         <div className="banner error">{error}</div>
-      ) : markdown ? <MarkdownPreview source={text} /> : <pre className="preview-text">{text}</pre>}
+      ) : <SourceViewer kind={editorKind} source={text} name={name} />}
     </main>
   )
 
+  const canPreview = kind === 'markdown' || kind === 'html'
+  const isRich = editorKind === 'markdown' && richMode
   return (
     <main className="text-editor-page">
       <header className="text-editor-head">
         <div>
-          <h1>{markdown ? msg('markdownEditor') : msg('textEditor')}</h1>
+          <h1>{editorKind === 'markdown' ? msg('markdownEditor') : `${name.split('.').pop()?.toUpperCase() ?? '文本'} 编辑器`}</h1>
           <div className="muted">{name}</div>
         </div>
         <div className="editor-head-actions">
-          {markdown && (
+          {editorKind === 'markdown' && (
+            <button
+              type="button"
+              className="btn"
+              onClick={() => {
+                setRichMode((value) => !value)
+                setRichKey((key) => key + 1)
+                setNotice('')
+              }}
+            >
+              {richMode
+                ? (locale === 'zh-CN' ? '源码' : 'Source')
+                : (locale === 'zh-CN' ? '富文本' : 'Rich text')}
+            </button>
+          )}
+          {canPreview && (
             <button type="button" className="btn" onClick={() => setPreview((value) => !value)}>
               {preview ? msg('editMode') : msg('previewMode')}
             </button>
@@ -161,16 +212,35 @@ export default function TextEditorPage({ kind }: { kind: EditorKind }) {
       {notice && <div className="banner ok">{notice}</div>}
       {loading ? (
         <div className="text-editor-state">{msg('loading')}</div>
-      ) : preview && markdown ? (
-        <MarkdownPreview source={text} />
+      ) : preview && canPreview ? (
+        <SourceViewer kind={editorKind} source={text} name={name} />
+      ) : isRich ? (
+        <Suspense fallback={<div className="text-editor-state">{msg('loading')}</div>}>
+          <RichTextEditor
+            key={`${fileId}-${richKey}`}
+            initialMarkdown={text}
+            fileId={fileId}
+            onChange={(md) => {
+              setText(md)
+              setNotice('')
+              dirtyRef.current = true
+            }}
+            onRoundtripFail={() => {
+              setRichMode(false)
+              setNotice(locale === 'zh-CN'
+                ? '该文档包含富文本无法无损承载的内容，已切换为源码模式'
+                : 'This document cannot be losslessly represented in rich text, switched to source mode')
+            }}
+          />
+        </Suspense>
       ) : (
-        <textarea
-          className="text-editor-input"
-          aria-label={markdown ? msg('markdownEditor') : msg('textEditor')}
+        <CodeMirror
+          className="code-editor"
           value={text}
-          spellCheck
-          onChange={(event) => {
-            setText(event.target.value)
+          height="100%"
+          extensions={extensions}
+          onChange={(value) => {
+            setText(value)
             setNotice('')
             dirtyRef.current = true
           }}

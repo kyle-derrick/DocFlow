@@ -85,6 +85,27 @@ func (s *Store) SearchAccessible(user uuid.UUID, opts SearchOptions) ([]File, er
 	return out, err
 }
 
+// HasIndexWebChildren 批量判断给定目录的直接子级中是否存在 index.html
+// （大小写不敏感，忽略软删除）。用于文件列表的 has_index_web 标记：
+// 前端据此把该目录的默认点击行为切换为"网页打开"。
+func (s *Store) HasIndexWebChildren(folderIDs []uuid.UUID) (map[uuid.UUID]bool, error) {
+	out := make(map[uuid.UUID]bool, len(folderIDs))
+	if len(folderIDs) == 0 {
+		return out, nil
+	}
+	var ids []uuid.UUID
+	err := s.db.Model(&File{}).
+		Where("parent_id IN ? AND type = 'file' AND deleted_at IS NULL AND lower(name) = 'index.html'", folderIDs).
+		Pluck("parent_id", &ids).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range ids {
+		out[id] = true
+	}
+	return out, nil
+}
+
 // SetStarred 切换收藏标记并返回更新后的元数据。
 // 权限取舍：is_starred 为行级布尔（团队文件共享星标，不引入 per-user 表），
 // 放宽为读权限即可切换（authorizeFileAccess：个人 owner、团队任意在册成员）；

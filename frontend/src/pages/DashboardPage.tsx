@@ -2,7 +2,6 @@
 // 快捷键提示卡；admin 附全局统计卡组。统计口径为个人空间（owner 维度），
 // 团队文件单列 team_files。
 import { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { DashboardData, getDashboard } from '../api'
 import { hotkeyDocs } from '../components/HotkeysHelp'
 import { formatTime } from '../components/FileBrowser'
@@ -41,7 +40,6 @@ const ADMIN_CARDS: Array<{ key: keyof NonNullable<DashboardData['admin']>; label
 ]
 
 export default function DashboardPage() {
-  const navigate = useNavigate()
   const locale = useLocale()
   const msg = (key: MessageKey) => t(locale, key)
   const [data, setData] = useState<DashboardData | null>(null)
@@ -108,7 +106,11 @@ export default function DashboardPage() {
               <ul className="dash-recent">
                 {data.recent_files.map((f) => (
                   <li key={f.id}>
-                    <button className="dash-recent-item" onClick={() => navigate('/')} title={msg('goFiles')}>
+                    <button type="button" className="dash-recent-item" onClick={() => {
+                      const url = new URL(`/view/${f.id}`, window.location.origin)
+                      url.searchParams.set('returnTo', f.scope_type === 'team' && f.team_id ? `/teams/${f.team_id}` : '/')
+                      window.open(`${url.pathname}${url.search}`, '_blank', 'noopener')
+                    }} title={msg('goFiles')}>
                       <span className="icon">📄</span>
                       <span className="dash-recent-name">{f.name}</span>
                       <span className="muted">{formatTime(f.updated_at)}</span>

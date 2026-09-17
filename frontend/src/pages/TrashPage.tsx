@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
-import { FileItem, batchRestoreFiles, listTrash, purgeFile, restoreFile } from '../api'
+import { FileItem, Team, batchRestoreFiles, listTeams, listTrash, purgeFile, restoreFile } from '../api'
 import { describeBatchResults } from '../components/FileBrowser'
+import SpaceSwitcher from '../components/SpaceSwitcher'
 import { MessageKey, formatMessage, t, useLocale } from '../i18n'
 
 function formatTime(iso: string): string {
@@ -17,12 +18,14 @@ export default function TrashPage() {
   const [notice, setNotice] = useState('')
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [batchBusy, setBatchBusy] = useState(false)
+  const [teams, setTeams] = useState<Team[]>([])
+  const [scope, setScope] = useState('personal')
 
-  const load = async () => {
+  const load = async (nextScope = scope) => {
     setLoading(true)
     setError('')
     try {
-      const list = await listTrash()
+      const list = await listTrash(nextScope === 'personal' ? 'personal' : 'team', nextScope === 'personal' ? '' : nextScope)
       list.sort((a, b) => a.name.localeCompare(b.name))
       setItems(list)
     } catch (err) {
@@ -34,7 +37,8 @@ export default function TrashPage() {
   }
 
   useEffect(() => {
-    void load()
+    void listTeams().then(setTeams).catch(() => setTeams([]))
+    void load('personal')
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -95,10 +99,19 @@ export default function TrashPage() {
   }
 
   return (
-    <div className="page">
+    <div className="page wide-page">
+      <SpaceSwitcher />
       <div className="page-head">
         <h2>{msg('trash')}</h2>
         <button className="btn ghost" onClick={() => void load()}>{msg('refresh')}</button>
+      </div>
+      <div className="filter-bar">
+        <label className="filter-item">回收站范围
+          <select className="form-select" value={scope} onChange={(e) => { setScope(e.target.value); setSelected(new Set()); void load(e.target.value) }}>
+            <option value="personal">我的文件</option>
+            {teams.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}
+          </select>
+        </label>
       </div>
 
       {error && <div className="banner error">{error}</div>}

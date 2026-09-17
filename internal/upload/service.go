@@ -1,6 +1,7 @@
 package upload
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -442,6 +443,19 @@ func (s *Service) Start(user, parent uuid.UUID, name string, size int64, expecte
 	return s.start(user, parent, name, size, expected, nil)
 }
 
+// UploadBytes runs generated content through the same validation, quota, scan,
+// storage, version and scope pipeline as an HTTP upload.
+func (s *Service) UploadBytes(user, parent uuid.UUID, name string, data []byte) (UploadSession, error) {
+	v, err := s.Start(user, parent, name, int64(len(data)), "")
+	if err != nil {
+		return v, err
+	}
+	if _, err = s.Append(v.ID, 0, bytes.NewReader(data)); err != nil {
+		return v, err
+	}
+	return s.Complete(v.ID)
+}
+
 // StartReplace 创建「覆盖为新版本」会话：target 必须是 user 有 CanWrite 权限的
 // 已有文件（type=file、未删除）；会话名称与父目录沿用目标文件现有值，
 // 请求侧传入的文件名被忽略。Complete 成功后向该文件追加新版本并按保留策略裁剪。
@@ -682,6 +696,12 @@ func (s *Service) Complete(id uuid.UUID) (UploadSession, error) {
 		v.Status = StatusFailed
 		_ = s.store.Update(v)
 		return v, ErrBlockedExtension
+	}
+	if err := s.validateOffice(v); err != nil {
+		v.Status = StatusFailed
+		_ = s.store.Update(v)
+		_ = s.storage.Delete(v.StorageKey)
+		return v, err
 	}
 	// verifying → scanning 条件迁移：中途被 janitor 置 failed 等情况下中止。
 	if hasMarker {

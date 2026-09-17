@@ -385,6 +385,26 @@ func (s *UserStore) Lookup(q string, limit int) ([]User, error) {
 	return out, err
 }
 
+// Search 按 username/nickname 子串（大小写不敏感）检索活跃用户；q 含 @ 时
+// 额外匹配 email 子串（邮箱不做无 @ 的模糊匹配，沿用 Lookup 的防枚举策略）。
+// 供成员/ACL 主体选择器使用；返回的 User 含 email 等档案字段，
+// 由 HTTP 层按场景裁剪序列化。
+func (s *UserStore) Search(q string, limit int) ([]User, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	like := "%" + strings.ToLower(q) + "%"
+	db := s.db.Where("status = ?", StatusActive)
+	if strings.Contains(q, "@") {
+		db = db.Where("username LIKE ? OR nickname LIKE ? OR email LIKE ?", like, like, like)
+	} else {
+		db = db.Where("username LIKE ? OR nickname LIKE ?", like, like)
+	}
+	var out []User
+	err := db.Order("username, id").Limit(limit).Find(&out).Error
+	return out, err
+}
+
 // UsernameExists 判断用户名是否已被占用（任意状态的用户均占用唯一约束）；
 // 供 OIDC 自动开户的用户名去重使用。
 func (s *UserStore) UsernameExists(username string) (bool, error) {

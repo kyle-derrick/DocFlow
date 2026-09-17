@@ -4,6 +4,8 @@
 //   data-mode（dark|light，system 模式按 prefers-color-scheme 实时解析）；
 // - 默认 indigo + dark，与既有视觉保持一致；非法存储值回退默认。
 
+import { useEffect, useState } from 'react'
+
 /** 五种 accent 主题（与 styles.css :root[data-theme] 选择器一致）。 */
 export type ThemeAccent = 'indigo' | 'violet' | 'emerald' | 'rose' | 'amber'
 
@@ -97,4 +99,20 @@ export function initTheme(): () => void {
   const onChange = () => applyTheme(loadTheme())
   mql.addEventListener('change', onChange)
   return () => mql.removeEventListener('change', onChange)
+}
+
+/**
+ * 实时读取当前生效的明暗模式（组件态）：跟随 <html data-mode> 变化——
+ * 设置页切换与 system 模式跟随系统明暗均会触发。供查看器/编辑器内嵌
+ * 渲染（draw.io viewer、Excalidraw、Mermaid 等）跟随站点主题。
+ */
+export function useColorMode(): 'dark' | 'light' {
+  const read = () => (document.documentElement.dataset.mode === 'light' ? 'light' : 'dark')
+  const [mode, setMode] = useState<'dark' | 'light'>(read)
+  useEffect(() => {
+    const observer = new MutationObserver(() => setMode(read()))
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-mode'] })
+    return () => observer.disconnect()
+  }, [])
+  return mode
 }

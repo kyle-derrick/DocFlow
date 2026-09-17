@@ -461,12 +461,27 @@ func (h *Handler) publicShareInfo(c *gin.Context) {
 	if !h.shareSessionAllowed(c, token, r.Share) {
 		return
 	}
+	// 目录分享根：无版本/blob 语义，返回目录元数据（子树经 /tree 与 /raw/share）。
+	if r.File.Type == "folder" {
+		c.JSON(http.StatusOK, gin.H{
+			"name":              r.File.Name,
+			"type":              "folder",
+			"permission":        r.Share.Permission,
+			"expires_at":        r.Share.ExpiresAt,
+			"max_downloads":     r.Share.MaxDownloads,
+			"download_count":    r.Share.DownloadCount,
+			"watermark_enabled": r.Share.WatermarkEnabled,
+			"watermark_text":    watermarkTextOf(r, c),
+		})
+		return
+	}
 	var watermarkText any
 	if r.Share.WatermarkEnabled {
 		watermarkText = share.RenderWatermark(r.Share.WatermarkTemplate(), r.File.Name, c.ClientIP(), time.Now())
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"name":              r.File.Name,
+		"type":              "file",
 		"size":              r.Blob.Size,
 		"mime_type":         r.Blob.MimeType,
 		"version":           r.Version.Version,
@@ -478,6 +493,14 @@ func (h *Handler) publicShareInfo(c *gin.Context) {
 		"watermark_enabled": r.Share.WatermarkEnabled,
 		"watermark_text":    watermarkText,
 	})
+}
+
+// watermarkTextOf 渲染分享水印文案（目录分享根用目录名）。
+func watermarkTextOf(r share.Resolved, c *gin.Context) any {
+	if !r.Share.WatermarkEnabled {
+		return nil
+	}
+	return share.RenderWatermark(r.Share.WatermarkTemplate(), r.File.Name, c.ClientIP(), time.Now())
 }
 
 // publicShareDownload GET /api/v1/public/shares/:token/download 公开流式下载。

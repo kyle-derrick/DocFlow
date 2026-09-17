@@ -15,7 +15,7 @@ const zh = {
   login: '登录', logout: '退出登录', files: '文件', settings: '设置', upload: '上传文件', empty: '此目录为空',
   language: '语言', switchLanguage: 'English', loading: '加载中…', delete: '删除', undo: '撤销',
   deleteConfirm: '确定删除此项？可在回收站中恢复。', deleteFailed: '删除失败', restoreFailed: '恢复失败',
-  noMatch: '没有匹配的文件', close: '关闭', download: '下载', preview: '预览', previewFailed: '预览加载失败',
+  noMatch: '没有匹配的文件', close: '关闭', download: '下载', preview: '查看', previewFailed: '查看加载失败',
   // ---- 通用补充 ----
   cancel: '取消', save: '保存', create: '创建', edit: '编辑', refresh: '刷新', actions: '操作',
   name: '名称', time: '时间', all: '全部', status: '状态', loadFailed: '加载失败', unknownError: '未知错误', saveFailed: '保存失败',

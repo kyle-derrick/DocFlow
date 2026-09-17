@@ -18,6 +18,7 @@ import {
   onlyOfficeStatus,
 } from '../api'
 import { useLocale } from '../i18n'
+import { useColorMode } from '../theme'
 
 /** DocsAPI.DocEditor 实例（仅用到的 destroyEditor）。 */
 interface DocEditorInstance {
@@ -67,12 +68,15 @@ function loadDocEditorScript(serverUrl: string): { ready: Promise<void>; remove:
   return { ready, remove: () => script.remove() }
 }
 
-export default function EditorPage() {
-  const { fileId = '' } = useParams()
-  // ?mode=view 强制只读会话（在线预览入口）；编辑器语言跟随界面语言。
+export default function EditorPage({ mode, fileId: fileIdProp }: { mode?: 'edit' | 'view'; fileId?: string } = {}) {
+  const { fileId: routeFileId = '' } = useParams()
+  // by-path 路由经 prop 传入 resolve 得到的 file_id；缺省回退路由参数。
+  const fileId = fileIdProp ?? routeFileId
+  // 独立 /view 路由或 ?mode=view 均强制只读会话；编辑器语言跟随界面语言。
   const [searchParams] = useSearchParams()
-  const viewMode = searchParams.get('mode') === 'view'
+  const viewMode = mode === 'view' || searchParams.get('mode') === 'view'
   const locale = useLocale()
+  const colorMode = useColorMode()
 
   const [file, setFile] = useState<FileWithVersion | null>(null)
   const [loading, setLoading] = useState(true)
@@ -130,7 +134,7 @@ export default function EditorPage() {
         }
         const [config, meta] = await Promise.all([
           createOnlyOfficeSession(fileId, {
-            mode: viewMode ? 'view' : undefined,
+            mode: viewMode ? 'view' : 'edit',
             lang: locale,
           }),
           getFileMeta(fileId).catch(() => null),
@@ -148,6 +152,12 @@ export default function EditorPage() {
           ...config,
           width: '100%',
           height: '100%',
+          // 编辑器 UI 明暗跟随站点主题（DS 8.x 默认跟随系统，浏览器深色
+          // 模式下会把浅色站点里的编辑器渲染成深色，与站点观感割裂）。
+          customization: {
+            ...((config.customization as Record<string, unknown> | undefined) ?? {}),
+            uiTheme: colorMode === 'dark' ? 'theme-dark' : 'theme-classic-light',
+          },
           events: {
             onDocumentStateChange: () => scheduleSaveHint(),
             onChange: () => scheduleSaveHint(),
@@ -169,20 +179,20 @@ export default function EditorPage() {
       editorRef.current = null
       for (const fn of removeFns) fn()
     }
-  }, [fileId, viewMode, locale])
+  }, [fileId, viewMode, locale, colorMode])
 
   const versionNo = file?.current_version?.version
 
   return (
-    <div className="editor-page">
-      <div className="editor-head">
+    <div className={`editor-page${viewMode ? ' viewer-only' : ''}`}>
+      {!viewMode && <div className="editor-head">
         <Link className="btn ghost small" to="/">← 返回</Link>
         <h2 className="editor-title">{file?.name ?? '加载中…'}</h2>
         {versionNo !== undefined && <span className="badge current">当前版本 v{versionNo}</span>}
-        <button className="btn small" onClick={() => void refreshVersion('版本已刷新')}>刷新版本</button>
-      </div>
+        <button type="button" className="btn small" onClick={() => void refreshVersion('版本已刷新')}>刷新版本</button>
+      </div>}
 
-      {saveHint && <div className="banner ok editor-hint">{saveHint}</div>}
+      {!viewMode && saveHint && <div className="banner ok editor-hint">{saveHint}</div>}
       {error && <div className="banner error">{error}</div>}
       {loading && !error && <div className="hint">{viewMode ? '正在加载查看器…' : '正在加载编辑器…'}</div>}
 

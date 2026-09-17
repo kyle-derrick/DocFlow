@@ -9,6 +9,7 @@ import {
   Team,
   TeamMember,
   TeamRoleDef,
+  UserSearchResult,
   UUID_RE,
   addTeamMember,
   createTeamFolder,
@@ -22,12 +23,15 @@ import {
   listTeams,
   putFolderACL,
   removeTeamMember,
+  searchUsers,
   updateTeamMemberRole,
   updateTeamRole,
   uploadFile,
 } from '../api'
-import FileBrowser, { DirListing, Modal, formatTime } from '../components/FileBrowser'
+import { FileBrowserWithTree } from '../components/FolderTreeNav'
+import { DirListing, Modal, formatTime } from '../components/FileBrowser'
 import VersionHistoryModal from '../components/VersionHistoryModal'
+import SpaceSwitcher from '../components/SpaceSwitcher'
 import { MessageKey, formatMessage, t, useLocale } from '../i18n'
 
 /** 权限动作清单（与后端 team.ValidActions 一致，设计 6.5.2）。 */
@@ -100,10 +104,11 @@ function formToPermissions(f: RoleFormState): RolePermissions {
 }
 
 /**
- * 团队空间：左侧成员管理（owner 可添加/移除成员、改派角色）与自定义角色
- * 管理卡（CRUD + 权限勾选 + deny 显式拒绝，设计 6.5.2），右侧团队文件浏览
- * （列表 / 上传 / 下载 / 预览 / 新建文件夹 / 版本历史复用 FileBrowser；
- * 写操作 403 提示「无写权限」）。
+ * 团队空间：中间团队文件浏览（列表 / 上传 / 下载 / 预览 / 新建文件夹 /
+ * 版本历史复用 FileBrowser；左侧目录树见 FolderTreeNav），右侧成员管理
+ * 面板（280px 可折叠；owner 可添加/移除成员、改派角色）与自定义角色
+ * 管理卡（CRUD + 权限勾选 + deny 显式拒绝，设计 6.5.2）；写操作 403
+ * 提示「无写权限」。
  */
 export default function TeamSpacePage() {
   const { id = '' } = useParams()
@@ -114,9 +119,17 @@ export default function TeamSpacePage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
+  // 全局视图（全部 / 收藏 / 最近）：SpaceSwitcher 切换、透传 FileBrowser。
+  const [spaceView, setSpaceView] = useState<'all' | 'starred' | 'recent'>('all')
+  // 右侧成员面板折叠开关。
+  const [memberCollapsed, setMemberCollapsed] = useState(false)
+
   const [members, setMembers] = useState<TeamMember[]>([])
   const [memberError, setMemberError] = useState('')
   const [memberUserId, setMemberUserId] = useState('')
+  const [memberQuery, setMemberQuery] = useState('')
+  const [memberOptions, setMemberOptions] = useState<UserSearchResult[]>([])
+  const [memberSearching, setMemberSearching] = useState(false)
   const [memberRole, setMemberRole] = useState<string>('viewer')
   const [memberBusy, setMemberBusy] = useState(false)
 
@@ -285,6 +298,19 @@ export default function TeamSpacePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id])
 
+  useEffect(() => {
+    const q = memberQuery.trim()
+    if (q.length < 2 || memberUserId) {
+      setMemberOptions([])
+      return
+    }
+    const timer = window.setTimeout(() => {
+      setMemberSearching(true)
+      void searchUsers(q).then(setMemberOptions).catch(() => setMemberOptions([])).finally(() => setMemberSearching(false))
+    }, 300)
+    return () => window.clearTimeout(timer)
+  }, [memberQuery, memberUserId])
+
   const handleAddMember = async (e: FormEvent) => {
     e.preventDefault()
     const uid = memberUserId.trim()
@@ -298,6 +324,8 @@ export default function TeamSpacePage() {
         await addTeamMember(id, uid, memberRole as 'editor' | 'viewer')
       }
       setMemberUserId('')
+      setMemberQuery('')
+      setMemberOptions([])
       await loadMembers()
       await loadRoles()
     } catch (err) {
@@ -387,7 +415,8 @@ export default function TeamSpacePage() {
   }
 
   return (
-    <div className="page">
+    <div className="page wide-page">
+      <SpaceSwitcher activeView={spaceView} onViewChange={setSpaceView} />
       <div className="team-back">
         <Link className="btn ghost small" to="/teams">{msg('backToTeams')}</Link>
       </div>
@@ -397,19 +426,78 @@ export default function TeamSpacePage() {
       {loading && <div className="hint">{msg('loading')}</div>}
 
       {!loading && team && (
-        <div className="team-layout">
-          <aside className="member-panel">
-            <h3>{formatMessage(msg('membersTitle'), { n: members.length })}</h3>
+        <div className="team-workspace">
+          {/* 中区：团队文件浏览（左侧目录树 + 文件列表，复用 FileBrowser）。 */}
+          <div className="team-workspace-main">
+            <FileBrowserWithTree
+              title={team.name}
+              rootLabel={team.name}
+              listItems={listItems}
+              createFolderFn={(name, parentId) => createTeamFolder(id, name, parentId)}
+              uploadFn={uploadFile}
+              reloadKey={fileReloadKey}
+              activeView={spaceView}
+              ns={{ type: 'team', scope: id }}
+              rowActions={(item) => (
+                <>
+                  {item.type === 'folder' && isOwner && (
+                    <button type="button" className="btn small" onClick={() => void openAcl(item)}>{msg('acl')}</button>
+                  )}
+                  {item.type === 'file' && (
+                    <button type="button" className="btn small" onClick={() => setHistoryTarget(item)}>历史</button>
+                  )}
+                </>
+              )}
+              emptyHint={msg('teamSpaceEmpty')}
+            />
+          </div>
+
+          {/* 右侧：成员管理面板（280px 可折叠；添加成员 / 成员列表 / 角色管理）。 */}
+          <aside className={`member-panel team-member-panel${memberCollapsed ? ' collapsed' : ''}`}>
+            {memberCollapsed ? (
+              <button
+                type="button"
+                className="btn ghost small team-member-collapse-btn"
+                title={locale === 'zh-CN' ? '展开成员面板' : 'Expand members panel'}
+                aria-label={locale === 'zh-CN' ? '展开成员面板' : 'Expand members panel'}
+                onClick={() => setMemberCollapsed(false)}
+              >
+                «
+              </button>
+            ) : (
+              <>
+            <div className="team-member-head">
+              <h3>{formatMessage(msg('membersTitle'), { n: members.length })}</h3>
+              <button
+                type="button"
+                className="btn ghost small team-member-collapse-btn"
+                title={locale === 'zh-CN' ? '收起成员面板' : 'Collapse members panel'}
+                aria-label={locale === 'zh-CN' ? '收起成员面板' : 'Collapse members panel'}
+                onClick={() => setMemberCollapsed(true)}
+              >
+                »
+              </button>
+            </div>
             {isOwner ? (
               <form className="member-add" onSubmit={handleAddMember}>
-                <label className="field">
-                  <span>{msg('userUUID')}</span>
+                <div className="field user-search-field">
+                  <span>搜索用户</span>
                   <input
-                    value={memberUserId}
-                    onChange={(e) => setMemberUserId(e.target.value)}
-                    placeholder="例如 3f0c9c2e-…（完整 UUID）"
+                    value={memberQuery}
+                    onChange={(e) => { setMemberQuery(e.target.value); setMemberUserId('') }}
+                    placeholder="输入昵称、用户名或邮箱（至少 2 字）"
                   />
-                </label>
+                  {memberSearching && <span className="hint">搜索中…</span>}
+                  {memberOptions.length > 0 && <div className="user-search-options">
+                    {memberOptions.map((user) => {
+                      const nickname = user.nickname ?? user.profile?.nickname
+                      return <button type="button" key={user.id} onClick={() => { setMemberUserId(user.id); setMemberQuery(nickname || user.username); setMemberOptions([]) }}>
+                        <strong>{nickname || user.username}</strong><span>{user.username} · {user.email}</span>
+                      </button>
+                    })}
+                  </div>}
+                  {memberUserId && <span className="hint">已选择：{memberQuery}</span>}
+                </div>
                 <label className="field">
                   <span>{msg('roleLabel')}</span>
                   <select value={memberRole} onChange={(e) => setMemberRole(e.target.value)}>
@@ -529,29 +617,9 @@ export default function TeamSpacePage() {
                 </form>
               </div>
             )}
+              </>
+            )}
           </aside>
-
-          <div className="team-files">
-            <FileBrowser
-              title={team.name}
-              rootLabel={team.name}
-              listItems={listItems}
-              createFolderFn={(name, parentId) => createTeamFolder(id, name, parentId)}
-              uploadFn={uploadFile}
-              reloadKey={fileReloadKey}
-              rowActions={(item) => (
-                <>
-                  {item.type === 'folder' && isOwner && (
-                    <button type="button" className="btn small" onClick={() => void openAcl(item)}>{msg('acl')}</button>
-                  )}
-                  {item.type === 'file' && (
-                    <button type="button" className="btn small" onClick={() => setHistoryTarget(item)}>历史</button>
-                  )}
-                </>
-              )}
-              emptyHint={msg('teamSpaceEmpty')}
-            />
-          </div>
         </div>
       )}
 

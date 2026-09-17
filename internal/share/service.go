@@ -244,6 +244,9 @@ type Service struct {
 	// main 注入）；nil 时回退内置默认（开启 + DefaultWatermarkTemplate）。
 	watermarkDefaults func() (enabled bool, text string)
 	publicEnabled     func() bool
+	// tree 目录分享树源（main 注入 *files.Store；nil 时 ResolveTree 返回
+	// ErrTreeUnavailable，HTTP 层 503）。
+	tree TreeSource
 	// notifyDispatcher 站内通知回调（main 注入 notify.Dispatcher 适配器）：
 	// 公开/私有分享下载成功（计数已消耗）后通知分享 owner share.accessed。
 	// 私有分享 owner 本人下载不通知（避免噪音）。
@@ -466,14 +469,18 @@ func (s *Service) CreatePublic(owner, fileID uuid.UUID, permission string, expir
 	if err := s.authorizeShare(f, owner); err != nil {
 		return Share{}, "", err
 	}
-	if f.Type != "file" {
-		return Share{}, "", ErrFileNotShareable
-	}
-	_, blob, err := s.files.CurrentVersion(owner, fileID)
-	if err != nil {
-		return Share{}, "", ErrFileNotShareable
-	}
-	if blob.Status != files.BlobStatusAvailable {
+	switch f.Type {
+	case "file":
+		_, blob, err := s.files.CurrentVersion(owner, fileID)
+		if err != nil {
+			return Share{}, "", ErrFileNotShareable
+		}
+		if blob.Status != files.BlobStatusAvailable {
+			return Share{}, "", ErrFileNotShareable
+		}
+	case "folder":
+		// 目录分享根：不要求当前版本（目录无 blob），子树经 tree/raw-share 访问。
+	default:
 		return Share{}, "", ErrFileNotShareable
 	}
 	token, err := NewToken()
@@ -794,7 +801,8 @@ func (s *Service) SharedWithMe(user uuid.UUID, limit int) ([]SharedWithMeItem, e
 }
 
 // Resolve 通过明文 token 解析有效分享（未过期、未撤销、未达下载上限），返回 share+file+blob。
-// 文件已被删除或当前版本缺失时同样视为失效。
+// 文件已被删除或当前版本缺失时同样视为失效；目录分享根（type=folder）无版本
+// 语义，直接返回（子树访问经 ResolveTree）。
 func (s *Service) Resolve(token string) (Resolved, error) {
 	token = strings.TrimSpace(token)
 	if token == "" {
@@ -810,6 +818,9 @@ func (s *Service) Resolve(token string) (Resolved, error) {
 	f, err := s.files.Get(sh.OwnerID, sh.FileID)
 	if err != nil {
 		return Resolved{}, ErrGone
+	}
+	if f.Type == "folder" {
+		return Resolved{Share: sh, File: f}, nil
 	}
 	version, blob, err := s.files.CurrentVersion(sh.OwnerID, sh.FileID)
 	if err != nil {
@@ -869,6 +880,43 @@ func (s *Service) ResolveForDownload(token string) (Resolved, error) {
 		return Resolved{}, err
 	}
 	// 公开下载无访问者身份（downloader 传零值）：恒通知分享 owner。
+	s.notifyAccessed(r, uuid.Nil)
+	return r, nil
+}
+
+// ResolveForFolderDownload 为目录分享的打包下载（流式 zip）入口：分享根须为
+// 目录且分享具 download 权限，随后与 ResolveForDownload 相同语义地原子消耗
+// 一次下载额度（达上限 ErrDownloadLimit、刚失效 ErrGone）并递增根目录的
+// files.download_count。子树内容读取由调用方完成（HTTP 层流式 zip）。
+func (s *Service) ResolveForFolderDownload(token string) (Resolved, error) {
+	r, err := s.Resolve(token)
+	if err != nil {
+		return Resolved{}, err
+	}
+	if r.File.Type != "folder" {
+		return Resolved{}, ErrFileNotShareable
+	}
+	if r.Share.Permission != PermissionDownload {
+		return Resolved{}, ErrDownloadForbidden
+	}
+	consumed, err := s.repo.ConsumeDownload(r.Share.ID, s.now())
+	if err != nil {
+		return Resolved{}, err
+	}
+	if !consumed {
+		latest, gerr := s.repo.Get(r.Share.ID)
+		if gerr != nil {
+			return Resolved{}, ErrNotFound
+		}
+		if latest.MaxDownloads != nil && latest.DownloadCount >= *latest.MaxDownloads {
+			return Resolved{}, ErrDownloadLimit
+		}
+		return Resolved{}, ErrGone
+	}
+	if err := s.files.IncrementDownloadCount(r.Share.OwnerID, r.Share.FileID); err != nil {
+		return Resolved{}, err
+	}
+	// 公开打包下载无访问者身份（downloader 传零值）：恒通知分享 owner。
 	s.notifyAccessed(r, uuid.Nil)
 	return r, nil
 }

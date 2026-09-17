@@ -6,3 +6,8 @@ frontend
 storage
 .env
 .env.local
+# 本地缓存（npm/Go/Playwright 等工作区内缓存目录，体积大且与构建无关；
+# 曾致 WSL 下 build context readdirent ENOMEM）。
+.cache
+.npm-cache
+.tmp

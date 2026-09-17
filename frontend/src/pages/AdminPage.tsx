@@ -4,7 +4,8 @@
 // 状态与撤销；用户列表（q 前缀检索 + 分页）、禁用/启用（立即撤销其全部
 // 会话）、改配额、改角色与重置密码（C6；删除以软禁用替代，见 openapi 取舍）。
 // 非 admin（403）显示无权限页；保存成功后刷新列表并提示。
-import { FormEvent, useEffect, useMemo, useState } from 'react'
+import { Fragment, FormEvent, useEffect, useMemo, useState } from 'react'
+import { NavLink, Navigate, useParams } from 'react-router-dom'
 import {
   AdminStats,
   AdminUser,
@@ -633,14 +634,17 @@ function UsersPanel({ onError, onNotice }: { onError: (msg: string) => void; onN
 }
 
 function AuditPanel({ onError }: { onError: (msg: string) => void }) {
-  const locale = useLocale()
-  const msg = (key: MessageKey) => t(locale, key)
-  const [action, setAction] = useState('')
-  const [userId, setUserId] = useState('')
-  const [data, setData] = useState<{ items: import('../api').AuditEntry[]; next_cursor: string; total: number } | null>(null)
-  const load = async (cursor = '') => { try { setData(await adminListAuditLogs(action, userId, cursor)) } catch (e) { onError(e instanceof Error ? e.message : msg('auditLoadFailed')) } }
+  const [filters, setFilters] = useState<import('../api').AuditFilters>({})
+  const [data, setData] = useState<import('../api').AuditListResult | null>(null)
+  const [history, setHistory] = useState<string[]>([])
+  const [expanded, setExpanded] = useState<number | null>(null)
+  const load = async (cursor = '', push = false) => {
+    try { setData(await adminListAuditLogs(filters, cursor)); if (push) setHistory((h) => [...h, cursor]) }
+    catch (e) { onError(e instanceof Error ? e.message : '审计日志加载失败') }
+  }
   useEffect(() => { void load() }, [])
-  return <div className="panel setting-group"><h3>{msg('auditTitle')}</h3><form className="team-create-row" onSubmit={(e) => { e.preventDefault(); void load() }}><input placeholder="操作类型" value={action} onChange={(e) => setAction(e.target.value)} /><input placeholder="用户 UUID" value={userId} onChange={(e) => setUserId(e.target.value)} /><button className="btn primary">筛选</button><button type="button" className="btn" onClick={() => void adminDownloadAuditCSV(action)}>下载 CSV</button></form>{data && <><div className="setting-meta muted">共 {data.total} 条</div><div className="table-scroll"><table><thead><tr><th>{msg('time')}</th><th>{msg('actionCol')}</th><th>资源</th><th>{msg('status')}</th></tr></thead><tbody>{data.items.map((e) => <tr key={e.id}><td>{formatTime(e.created_at)}</td><td>{e.action}</td><td>{e.resource_type} {e.resource_id}</td><td>{e.status}</td></tr>)}</tbody></table></div>{data.next_cursor && <button className="btn small" onClick={() => void load(data.next_cursor)}>下一页</button>}</>}</div>
+  const field = (key: keyof import('../api').AuditFilters, placeholder: string, type = 'text') => <input className="form-control" type={type} placeholder={placeholder} value={filters[key] ?? ''} onChange={(e) => setFilters({ ...filters, [key]: e.target.value })} />
+  return <div className="panel setting-group audit-panel"><h3>审计日志</h3><form className="audit-filters" onSubmit={(e) => { e.preventDefault(); setHistory([]); void load() }}>{field('action', 'Action')}{field('userId', '用户 UUID')}<select className="form-select" value={filters.status ?? ''} onChange={(e) => setFilters({ ...filters, status: e.target.value })}><option value="">全部状态</option><option value="success">success</option><option value="failure">failure</option></select>{field('resourceType', '资源类型')}{field('resourceId', '资源 ID')}{field('from', '开始时间', 'datetime-local')}{field('to', '结束时间', 'datetime-local')}<button className="btn primary">筛选</button><button type="button" className="btn" onClick={() => void adminDownloadAuditCSV(filters)}>按当前筛选导出 CSV</button></form>{data && <><div className="setting-meta muted">共 {data.total} 条</div><div className="table-scroll"><table><thead><tr><th>用户</th><th>IP</th><th>操作</th><th>资源</th><th>状态</th><th>时间</th></tr></thead><tbody>{data.items.map((entry) => <Fragment key={entry.id}>{<tr className="clickable" onClick={() => setExpanded(expanded === entry.id ? null : entry.id)}><td>{entry.user_id || '系统/匿名'}</td><td>{entry.ip || '-'}</td><td>{entry.action}</td><td>{entry.resource_type} {entry.resource_id}</td><td><span className={`badge ${entry.status === 'success' ? 'available' : 'failed'}`}>{entry.status}</span></td><td>{formatTime(entry.created_at)}</td></tr>}{expanded === entry.id && <tr key={`${entry.id}-detail`}><td colSpan={6}><strong>User-Agent</strong><pre>{entry.user_agent || '-'}</pre><strong>Metadata</strong><pre>{entry.metadata || '{}'}</pre></td></tr>}</Fragment>)}</tbody></table></div><div className="pager"><button className="btn small" disabled={history.length === 0} onClick={() => { const next = history.slice(0, -1); setHistory(next); void load(next[next.length - 1] ?? '') }}>上一页</button><button className="btn small" disabled={!data.next_cursor} onClick={() => void load(data.next_cursor, true)}>下一页</button></div></>}</div>
 }
 
 /** 字节数的人类可读表示（备份文件/总大小展示）。 */
@@ -914,7 +918,13 @@ function QuarantinePanel({ onError, onNotice }: { onError: (msg: string) => void
   )
 }
 
+const adminSections = [
+  ['overview', '概览'], ['people', '人员'], ['audit', '审计日志'], ['security', '安全'],
+  ['tls', 'TLS'], ['mail', '邮件'], ['backup', '备份'], ['system', '系统设置'],
+] as const
+
 export default function AdminPage() {
+  const { section = 'overview' } = useParams()
   const locale = useLocale()
   const msg = (key: MessageKey) => t(locale, key)
   const [stats, setStats] = useState<AdminStats | null>(null)
@@ -1013,6 +1023,8 @@ export default function AdminPage() {
     }
   }
 
+  if (!adminSections.some(([key]) => key === section)) return <Navigate to="/admin/overview" replace />
+
   if (forbidden) {
     return (
       <div className="page">
@@ -1028,7 +1040,9 @@ export default function AdminPage() {
   }
 
   return (
-    <div className="page">
+    <div className="page wide-page admin-page">
+      <aside className="section-sidebar"><h3>管理</h3>{adminSections.map(([key, label]) => <NavLink key={key} to={`/admin/${key}`} className={({ isActive }) => isActive ? 'active' : ''}>{label}</NavLink>)}</aside>
+      <div className="section-content">
       <div className="page-head">
         <h2>{msg('adminTitle')}</h2>
         <button className="btn ghost" onClick={() => { setNotice(''); void load() }}>{msg('refresh')}</button>
@@ -1038,7 +1052,7 @@ export default function AdminPage() {
       {error && <div className="banner error">{error}</div>}
       {loading && <div className="hint">{msg('loading')}</div>}
 
-      {!loading && stats && (
+      {section === 'overview' && !loading && stats && (
         <div className="stats-grid">
           {statCards.map(({ key, label }) => (
             <div key={key} className="stat-card">
@@ -1049,27 +1063,27 @@ export default function AdminPage() {
         </div>
       )}
 
-      {!loading && !forbidden && (
+      {section === 'people' && !loading && !forbidden && (
         <UsersPanel
           onError={(msg) => { setError(msg); setNotice('') }}
           onNotice={(msg) => { setNotice(msg); setError('') }}
         />
       )}
 
-      {!loading && !forbidden && <AuditPanel onError={(msg) => { setError(msg); setNotice('') }} />}
-      {!loading && !forbidden && <BackupPanel onError={(msg) => { setError(msg); setNotice('') }} onNotice={(msg) => { setNotice(msg); setError('') }} />}
-      {!loading && !forbidden && <QuarantinePanel onError={(msg) => { setError(msg); setNotice('') }} onNotice={(msg) => { setNotice(msg); setError('') }} />}
-      {!loading && !forbidden && <SecretsPanel secrets={secrets} />}
-      {!loading && !forbidden && <TlsPanel onNotice={(msg) => { setNotice(msg); setError('') }} />}
+      {section === 'audit' && !loading && !forbidden && <AuditPanel onError={(msg) => { setError(msg); setNotice('') }} />}
+      {section === 'backup' && !loading && !forbidden && <BackupPanel onError={(msg) => { setError(msg); setNotice('') }} onNotice={(msg) => { setNotice(msg); setError('') }} />}
+      {section === 'security' && !loading && !forbidden && <QuarantinePanel onError={(msg) => { setError(msg); setNotice('') }} onNotice={(msg) => { setNotice(msg); setError('') }} />}
+      {section === 'security' && !loading && !forbidden && <SecretsPanel secrets={secrets} />}
+       {section === 'tls' && !loading && !forbidden && <TlsPanel onNotice={(msg) => { setNotice(msg); setError('') }} />}
 
-      {!loading && !forbidden && (
+      {section === 'people' && !loading && !forbidden && (
         <InvitationsPanel
           onError={(msg) => { setError(msg); setNotice('') }}
           onNotice={(msg) => { setNotice(msg); setError('') }}
         />
       )}
 
-      {!loading && groups.map(([prefix, items]) => (
+      {section === 'system' && !loading && groups.map(([prefix, items]) => (
         <div key={prefix} className="panel setting-group">
           <h3>{groupTitles[prefix] ?? prefix}</h3>
           {items.map((item) => {
@@ -1150,6 +1164,7 @@ export default function AdminPage() {
           })}
         </div>
       ))}
+      </div>
     </div>
   )
 }

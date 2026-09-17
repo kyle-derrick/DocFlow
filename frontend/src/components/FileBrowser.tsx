@@ -8,7 +8,7 @@
 // v1.2 追加：列表/网格视图切换（设计 6.3.7；偏好持久化 localStorage，
 // Ctrl/Cmd+1、Ctrl/Cmd+2 快捷键见设计 6.16.1）。
 import { FormEvent, ReactNode, useEffect, useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { zipSync, strToU8 } from 'fflate'
 import {
   ApiError,
   BatchItemResult,
@@ -17,32 +17,49 @@ import {
   FileItem,
   FileQueryOptions,
   FileWithVersion,
-  PreviewContent,
-  PreviewKind,
+  OpenWithMap,
+  OpenWithOpener,
   Tag,
   UploadPhase,
   addFileTag,
-  aiSummarize,
   batchMoveFiles,
   batchTrashFiles,
+  createOfficeTemplate,
   createShare,
   createTag,
+  deleteOpenWith,
   downloadBatchFiles,
   downloadFile,
+  downloadFolderZip,
   drawioStatus,
-  fetchPreview,
   isDrawioFile,
   isExcalidrawFile,
   isOfficeFile,
   listFileTags,
+  listOpenWith,
   listTags,
   onlyOfficeStatus,
   removeFileTag,
+  encodePathSegments,
+  resolveFileById,
+  resolvePath,
   setFileStarred,
+  setOpenWith,
   summarizeBatchResults,
+  unpackZip,
 } from '../api'
+import {
+  ALL_OPENERS,
+  extOf,
+  openWithOptions,
+  openerLabel,
+  resolveOpener,
+} from '../openers'
 import { useHotkeys } from '../useHotkeys'
 import { MessageKey, formatMessage, t, useLocale } from '../i18n'
+// 弹窗内嵌查看：复用独立查看页的按类型分发器（office/drawio/白板/
+// xmind/mermaid/md/网页/文本等），保证弹窗与新窗口打开渲染一致。
+import { FileViewerDispatch } from '../pages/ViewerPage'
 
 /** 文件浏览视图模式（设计 6.3.7）：list = 现有表格，grid = 卡片网格。 */
 export type ViewMode = 'list' | 'grid'
@@ -79,16 +96,19 @@ export function Modal({
   title,
   onClose,
   wide,
+  className,
   children,
 }: {
   title: string
   onClose: () => void
   wide?: boolean
+  /** 追加到 .modal 的自定义类（如查看弹窗 modal-viewer 加宽加高）。 */
+  className?: string
   children: ReactNode
 }) {
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className={`modal${wide ? ' wide' : ''}`} onClick={(e) => e.stopPropagation()}>
+      <div className={`modal${wide ? ' wide' : ''}${className ? ` ${className}` : ''}`} onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">
           <h3>{title}</h3>
           <button type="button" className="btn ghost" onClick={onClose} aria-label="关闭">×</button>
@@ -151,6 +171,20 @@ export interface DirListing {
   folderId: string | null
 }
 
+/**
+ * 面包屑 → 命名空间内相对路径段（去掉首段根标签；个人空间与团队空间
+ * 通用，供「作为网页打开」等需要按路径 resolve 的场景拼路径复用）。
+ */
+export function pathSegmentsOf(crumbs: Array<{ id: string | null; name: string }>): string[] {
+  return crumbs.slice(1).map((c) => c.name)
+}
+
+/** 「编辑文本」入口的适用扩展名（md/markdown/txt）。 */
+function isTextEditable(name: string): boolean {
+  const lower = name.toLowerCase()
+  return lower.endsWith('.md') || lower.endsWith('.markdown') || lower.endsWith('.txt')
+}
+
 function sortItems(items: FileItem[]): FileItem[] {
   return [...items].sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === 'folder' ? -1 : 1))
 }
@@ -173,8 +207,6 @@ export interface FileBrowserProps {
   uploadFn?: (file: File, parentId: string | null, onPhase: (phase: UploadPhase) => void) => Promise<unknown>
   /** 下载实现，缺省走个人文件端点。 */
   downloadFn?: (item: FileItem) => Promise<void>
-  /** 预览实现，缺省走个人文件端点。 */
-  previewFn?: (fileId: string) => Promise<PreviewContent>
   /** 每行追加操作按钮（分享 / 重命名 / 删除等由调用方渲染）。 */
   rowActions?: (item: FileItem) => ReactNode
   emptyHint?: string
@@ -182,12 +214,21 @@ export interface FileBrowserProps {
   reloadKey?: number
   /** 提供时批量移动对话框含「根目录」选项（个人空间；空目标即个人根）。 */
   rootTargetLabel?: string
-  /** 提供时顶部显示视图切换（全部 / 收藏 / 最近，复用 ?starred= 与 ?recent= 参数）。 */
-  viewTabs?: boolean
+  /**
+   * 受控视图（全部/收藏/最近）：由 SpaceSwitcher 驱动（视图切换 UI 已上移到
+   * 空间切换行，本组件顶栏不再渲染）；变化时同步内部筛选状态并重新查询。
+   */
+  activeView?: 'all' | 'starred' | 'recent'
   /** 提供时文件行显示「复制」（parentId 为目标目录 UUID；留空目标由本组件解析为源目录）。 */
   copyFn?: (fileId: string, parentId: string) => Promise<unknown>
   /** 文件元数据来源（GET /files/{id}）；提供时网格视图卡片惰性补齐文件大小。 */
   fileMetaFn?: (fileId: string) => Promise<FileWithVersion | null>
+  /**
+   * 当前空间命名空间（供目录「作为网页打开」按路径 resolve）：个人空间
+   * personal + 自己 user UUID；团队空间 team + 团队 ID。检索模式（跨目录）
+   * 下面包屑不代表条目位置，菜单项自动隐藏。
+   */
+  ns?: { type: 'personal' | 'team'; scope: string }
 }
 
 export default function FileBrowser({
@@ -197,23 +238,22 @@ export default function FileBrowser({
   createFolderFn,
   uploadFn,
   downloadFn,
-  previewFn,
   rowActions,
   emptyHint,
   reloadKey,
   rootTargetLabel,
-  viewTabs,
+  activeView,
   copyFn,
   fileMetaFn,
+  ns,
 }: FileBrowserProps) {
   const locale = useLocale()
   const msg = (key: MessageKey) => t(locale, key)
   const doDownload = downloadFn ?? downloadFile
-  const doPreview = previewFn ?? fetchPreview
-  const navigate = useNavigate()
 
   const [crumbs, setCrumbs] = useState<Crumb[]>([{ id: null, folderId: null, name: rootLabel }])
   const [items, setItems] = useState<FileItem[]>([])
+  const [directoryQuery, setDirectoryQuery] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
@@ -241,19 +281,22 @@ export default function FileBrowser({
   const [ctxMenu, setCtxMenu] = useState<{ item: FileItem; x: number; y: number } | null>(null)
   // 「＋ 新建」下拉开关。
   const [createMenuOpen, setCreateMenuOpen] = useState(false)
+  // 「⬆ 上传」下拉开关（上传文件 / 上传目录合一入口）。
+  const [uploadMenuOpen, setUploadMenuOpen] = useState(false)
 
-  // 右键菜单与新建下拉点击外部关闭（菜单内部动作在冒泡阶段完成后收口）。
+  // 右键菜单与新建/上传下拉点击外部关闭（菜单内部动作在冒泡阶段完成后收口）。
   useEffect(() => {
-    if (!ctxMenu && !createMenuOpen) return
+    if (!ctxMenu && !createMenuOpen && !uploadMenuOpen) return
     const onDown = (e: MouseEvent) => {
       const el = e.target as HTMLElement | null
       if (el?.closest?.('.ctx-menu, .create-menu-wrap')) return
       setCtxMenu(null)
       setCreateMenuOpen(false)
+      setUploadMenuOpen(false)
     }
     document.addEventListener('mousedown', onDown)
     return () => document.removeEventListener('mousedown', onDown)
-  }, [ctxMenu, createMenuOpen])
+  }, [ctxMenu, createMenuOpen, uploadMenuOpen])
 
   const changeViewMode = (mode: ViewMode) => {
     setCardMenuFor(null)
@@ -297,6 +340,8 @@ export default function FileBrowser({
 
   const [batchNotice, setBatchNotice] = useState('')
   const [batchError, setBatchError] = useState('')
+  // zip 解包为目录树（POST /files/:id/unpack）：进行中条目 ID + 部分失败明细随结果展示。
+  const [unpackBusyId, setUnpackBusyId] = useState<string | null>(null)
   const [moveOpen, setMoveOpen] = useState(false)
   const [moveTarget, setMoveTarget] = useState('')
   const [moveManual, setMoveManual] = useState('')
@@ -352,21 +397,44 @@ export default function FileBrowser({
     }
   }, [])
 
+  // ---- 默认打开方式偏好（/me/open-with）：初始化加载；保存/删除后即时更新本地映射。 ----
+  const [openWith, setOpenWithMap] = useState<OpenWithMap>({})
+  const [openWithMgrOpen, setOpenWithMgrOpen] = useState(false)
+  const [openWithMgrError, setOpenWithMgrError] = useState('')
+  useEffect(() => {
+    let alive = true
+    void listOpenWith()
+      .then((map) => {
+        if (alive) setOpenWithMap(map)
+      })
+      .catch(() => {
+        /* 偏好不可用（旧后端等）：按内置默认分发 */
+      })
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  // ---- 目录上传（webkitdirectory）：进行中进度与结束后的成功/失败明细。 ----
+  const dirInputRef = useRef<HTMLInputElement>(null)
+  const [dirUpload, setDirUpload] = useState<{ done: number; total: number } | null>(null)
+  const [dirResult, setDirResult] = useState<{
+    root: string
+    ok: number
+    failures: Array<{ path: string; reason: string }>
+  } | null>(null)
+
+  // ---- 目录打包下载（download.zip）：进行中的条目 ID（按钮禁用/文案用）。 ----
+  const [zipBusyId, setZipBusyId] = useState<string | null>(null)
+
   const [folderOpen, setFolderOpen] = useState(false)
   const [folderName, setFolderName] = useState('')
   const [folderError, setFolderError] = useState('')
+  const [createKind, setCreateKind] = useState<'md' | 'txt' | 'code' | 'html' | 'drawio' | 'whiteboard' | 'word' | 'spreadsheet' | 'presentation' | 'xmind' | null>(null)
+  const [createName, setCreateName] = useState('')
+  const [createError, setCreateError] = useState('')
 
   const [previewTarget, setPreviewTarget] = useState<FileItem | null>(null)
-  const [previewLoading, setPreviewLoading] = useState(false)
-  const [previewKindState, setPreviewKindState] = useState<PreviewKind | null>(null)
-  const [previewUrl, setPreviewUrl] = useState('')
-  const [previewText, setPreviewText] = useState('')
-  const [previewError, setPreviewError] = useState('')
-
-  // AI 摘要（预览对话框内文本类文件）：按钮触发一次，结果就地展示。
-  const [aiState, setAiState] = useState<'idle' | 'loading' | 'done' | 'error'>('idle')
-  const [aiSummary, setAiSummary] = useState('')
-  const [aiError, setAiError] = useState('')
 
   const [uploads, setUploads] = useState<UploadRow[]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -374,6 +442,9 @@ export default function FileBrowser({
 
   const currentParent = crumbs[crumbs.length - 1].id
   const currentFolderId = crumbs[crumbs.length - 1].folderId
+  const visibleItems = directoryQuery.trim()
+    ? items.filter((item) => item.name.toLocaleLowerCase().includes(directoryQuery.trim().toLocaleLowerCase()))
+    : items
 
   const currentOpts = (): FileQueryOptions => ({
     tagId: tagFilter || null,
@@ -454,14 +525,27 @@ export default function FileBrowser({
     setRecentView(false)
   }
 
-  // 视图切换（全部 / 收藏 / 最近）：与下方标签、收藏筛选联动——收藏视图即
-  // starred=true；最近视图走 ?recent=true（后端忽略其余过滤）；其余清空。
-  const activeView: 'all' | 'starred' | 'recent' = recentView ? 'recent' : starredFilter === 'true' ? 'starred' : 'all'
-  const setView = (view: 'all' | 'starred' | 'recent') => {
-    setRecentView(view === 'recent')
-    setTagFilter('')
-    setStarredFilter(view === 'starred' ? 'true' : '')
+  // 表头排序：点击已激活键翻转方向；切换键时取该键默认方向
+  //（名称升序；修改时间/大小默认降序 = 最新/最大优先）。
+  const toggleSort = (key: 'name' | 'updated_at' | 'size') => {
+    if (sortKey === key) {
+      setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc')
+      return
+    }
+    setSortKey(key)
+    setSortOrder(key === 'name' ? 'asc' : 'desc')
   }
+
+  // 视图切换（全部 / 收藏 / 最近）：UI 已上移到 SpaceSwitcher，本组件经受控
+  // prop activeView 驱动——外部值变化时同步内部筛选状态（收藏视图即
+  // starred=true；最近视图走 ?recent=true，后端忽略其余过滤；其余清空），
+  // 由此触发下方的筛选 effect 重新查询。
+  useEffect(() => {
+    if (!activeView) return
+    setRecentView(activeView === 'recent')
+    setTagFilter('')
+    setStarredFilter(activeView === 'starred' ? 'true' : '')
+  }, [activeView])
 
   const toggleSelect = (id: string) => {
     setSelected((prev) => {
@@ -564,10 +648,10 @@ export default function FileBrowser({
     }
   }
 
-  // ---- 批量分享（逐个创建公开分享，完成后弹链接列表） ----
+  // ---- 批量分享（逐个创建公开分享，完成后弹链接列表；文件与目录均可） ----
 
   const handleBatchShare = async () => {
-    const targets = items.filter((it) => selected.has(it.id) && it.type === 'file')
+    const targets = items.filter((it) => selected.has(it.id))
     if (targets.length === 0) {
       setBatchError(msg('batchShareEmpty'))
       return
@@ -805,58 +889,74 @@ export default function FileBrowser({
     }
   }
 
-  const closePreview = () => {
-    setPreviewLoading(false)
-    setPreviewKindState(null)
-    if (previewUrl) URL.revokeObjectURL(previewUrl)
-    setPreviewUrl('')
-    setPreviewText('')
-    setPreviewError('')
-    setAiState('idle')
-    setAiSummary('')
-    setAiError('')
-    setPreviewTarget(null)
+  // ---- 打开路由：by-path 优先（网页相对引用不漂移），检索模式回退 uuid ----
+
+  // 命名空间内按路径构造 /view|edit/by-path URL：URL 携带完整目录路径，
+  // html/js 内部相对引用（ajax、相对 src/href）按路径层级解析不漂移；
+  // by-path 页按扩展名自动分发查看器/编辑器。跨目录检索模式（面包屑
+  // 不代表条目位置）或 ns 缺失时回退 UUID 路由。
+  const routeFor = (prefix: 'view' | 'edit', item: FileItem) => {
+    if (!ns || searchMode) return `/${prefix}/${item.id}`
+    const segs = [...pathSegmentsOf(crumbs), item.name].map(encodeURIComponent)
+    return `/${prefix}/by-path/${ns.type}/${encodeURIComponent(ns.scope)}/${segs.join('/')}/`
   }
 
-  const openPreview = async (item: FileItem) => {
-    if (previewUrl) URL.revokeObjectURL(previewUrl)
-    setPreviewTarget(item)
-    setPreviewLoading(true)
-    setPreviewKindState(null)
-    setPreviewUrl('')
-    setPreviewText('')
-    setPreviewError('')
-    setAiState('idle')
-    setAiSummary('')
-    setAiError('')
+  // ---- 目录「作为网页打开」（resolve 目录下 index.html → 新窗口 by-path 查看页） ----
+
+  // 面包屑拼当前目录路径段（含团队空间）；逐段 encodeURIComponent 后拼 URL。
+  const openAsWebsite = async (item: FileItem) => {
+    if (!ns) return
+    const segments = [...pathSegmentsOf(crumbs), item.name]
+    setError('')
     try {
-      const content = await doPreview(item.id)
-      setPreviewKindState(content.kind)
-      setPreviewUrl(content.url ?? '')
-      setPreviewText(content.text ?? '')
+      await resolvePath(ns.type, ns.scope, [...segments, 'index.html'].join('/'), { mode: 'view' })
+    } catch {
+      // index.html 不存在：尝试 index.htm（打开时以文件 raw_url 渲染）。
+      try {
+        await resolvePath(ns.type, ns.scope, [...segments, 'index.htm'].join('/'), { mode: 'view' })
+      } catch {
+        setError('该目录没有 index.html')
+        return
+      }
+    }
+    const encoded = encodePathSegments(segments)
+    openEditorWindow(`/view/by-path/${ns.type}/${encodeURIComponent(ns.scope)}/${encoded}/`)
+  }
+
+  // ---- zip 解包为目录树（父目录下以 zip 名建目录，部分成功语义） ----
+
+  const handleUnpack = async (item: FileItem) => {
+    if (unpackBusyId) return
+    setUnpackBusyId(item.id)
+    setBatchNotice(`正在解包「${item.name}」…`)
+    setBatchError('')
+    try {
+      const r = await unpackZip(item.id)
+      const summary = `新建 ${r.created_folders} 个目录、${r.created_files} 个文件${r.skipped > 0 ? `，同名跳过 ${r.skipped} 项` : ''}`
+      if (r.failures && r.failures.length > 0) {
+        const detail = r.failures.map((f) => `${f.path}：${f.error}`).join('；')
+        setBatchNotice('')
+        setBatchError(`解包完成（${summary}），但 ${r.failures.length} 项失败：${detail}`)
+      } else {
+        setBatchError('')
+        setBatchNotice(`解包完成：${summary}。`)
+      }
+      await load(currentParent)
     } catch (err) {
-      setPreviewError(err instanceof Error ? err.message : '预览加载失败')
+      setBatchNotice('')
+      setBatchError(writeErrorText(err, '解包失败'))
     } finally {
-      setPreviewLoading(false)
+      setUnpackBusyId(null)
     }
   }
 
-  // AI 摘要：503 = 后端 AI 未启用，400 = 不支持该文件类型，其余透传错误。
-  const handleSummarize = async () => {
-    if (!previewTarget || aiState === 'loading') return
-    setAiState('loading')
-    setAiError('')
-    setAiSummary('')
-    try {
-      const r = await aiSummarize(previewTarget.id)
-      setAiSummary(r.summary ?? '')
-      setAiState('done')
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 503) setAiError(msg('aiSummaryDisabled'))
-      else if (err instanceof ApiError && err.status === 400) setAiError(msg('aiSummaryUnsupported'))
-      else setAiError(err instanceof Error ? err.message : msg('aiSummaryFailed'))
-      setAiState('error')
-    }
+  // 弹窗查看：内容渲染由 FileViewerDispatch 就地完成（无预加载逻辑）。
+  const openPreview = (item: FileItem) => {
+    setPreviewTarget(item)
+  }
+
+  const closePreview = () => {
+    setPreviewTarget(null)
   }
 
   const handleFilesPicked = async (files: FileList | null) => {
@@ -880,100 +980,76 @@ export default function FileBrowser({
     await load(currentParent)
   }
 
-  // 新建图表：在当前目录上传「diagram-<timestamp>.drawio」初始模板（普通
-  // 文件上传，无需后端专用端点），完成后按文件名定位新文件并跳转编辑页。
-  const [diagramCreating, setDiagramCreating] = useState(false)
-  const handleCreateDiagram = async () => {
-    if (!uploadFn || diagramCreating) return
-    const name = `diagram-${Date.now()}.drawio`
-    const blob = new File([EMPTY_DRAWIO_XML], name, { type: 'text/xml' })
-    setDiagramCreating(true)
-    setError('')
-    const key = ++uploadKey.current
-    setUploads((prev) => [...prev, { key, name, phase: 'creating' }])
-    try {
-      await uploadFn(blob, currentFolderId, (phase) => {
-        setUploads((prev) => prev.map((r) => (r.key === key ? { ...r, phase } : r)))
-      })
-      const { items: list } = await listItems(currentFolderId)
-      const created = list.find((it) => it.type === 'file' && it.name === name)
-      if (created) {
-        navigate(`/drawio/${created.id}`)
-      } else {
-        await load(currentParent)
-      }
-    } catch (err) {
-      setUploads((prev) =>
-        prev.map((r) =>
-          r.key === key ? { ...r, phase: 'error', error: writeErrorText(err, '创建图表失败') } : r,
-        ),
-      )
-    } finally {
-      setDiagramCreating(false)
-    }
-  }
-
-  // 新建白板：在当前目录上传「whiteboard-<timestamp>.excalidraw」初始空场景
-  // （普通文件上传，无需后端专用端点/集成配置，按钮恒可用），完成后按文件名
-  // 定位新文件并跳转编辑页。
-  const [whiteboardCreating, setWhiteboardCreating] = useState(false)
-  const handleCreateWhiteboard = async () => {
-    if (!uploadFn || whiteboardCreating) return
-    const name = `whiteboard-${Date.now()}.excalidraw`
-    const blob = new File([EMPTY_EXCALIDRAW_JSON], name, { type: 'application/json' })
-    setWhiteboardCreating(true)
-    setError('')
-    const key = ++uploadKey.current
-    setUploads((prev) => [...prev, { key, name, phase: 'creating' }])
-    try {
-      await uploadFn(blob, currentFolderId, (phase) => {
-        setUploads((prev) => prev.map((r) => (r.key === key ? { ...r, phase } : r)))
-      })
-      const { items: list } = await listItems(currentFolderId)
-      const created = list.find((it) => it.type === 'file' && it.name === name)
-      if (created) {
-        navigate(`/excalidraw/${created.id}`)
-      } else {
-        await load(currentParent)
-      }
-    } catch (err) {
-      setUploads((prev) =>
-        prev.map((r) =>
-          r.key === key ? { ...r, phase: 'error', error: writeErrorText(err, msg('whiteboardCreateFailed')) } : r,
-        ),
-      )
-    } finally {
-      setWhiteboardCreating(false)
-    }
-  }
-
-  // 新建文本/Markdown 文档：空内容时间戳文件名经普通上传落当前目录（同
-  // 新建图表/白板管线），完成后刷新列表；在线编辑后续版本按需扩展。
   const [docCreating, setDocCreating] = useState(false)
-  const handleCreateDocFile = async (kind: 'txt' | 'md') => {
-    if (!uploadFn || docCreating) return
-    const name = `${kind === 'md' ? 'note' : 'text'}-${Date.now()}.${kind}`
-    const content = kind === 'md' ? '# 新笔记\n' : ''
-    const blob = new File([content], name, { type: 'text/plain' })
+
+  const createSpec = createKind ? {
+    md: { label: 'Markdown', ext: '.md', content: '# 新文档\n', mime: 'text/markdown', route: 'markdown' },
+    txt: { label: 'TXT', ext: '.txt', content: '', mime: 'text/plain', route: 'text' },
+    code: { label: '代码', ext: '.js', content: '', mime: 'text/javascript', route: 'code' },
+    html: { label: 'HTML', ext: '.html', content: '<!doctype html>\n<html><body></body></html>\n', mime: 'text/html', route: 'view' },
+    drawio: { label: 'draw.io', ext: '.drawio', content: EMPTY_DRAWIO_XML, mime: 'text/xml', route: 'drawio' },
+    whiteboard: { label: '白板', ext: '.excalidraw', content: EMPTY_EXCALIDRAW_JSON, mime: 'application/json', route: 'excalidraw' },
+    xmind: { label: 'XMind', ext: '.xmind', content: '', mime: 'application/x-xmind', route: 'view' },
+    word: { label: 'Word', ext: '.docx', content: '', mime: '', route: 'edit' },
+    spreadsheet: { label: 'Excel', ext: '.xlsx', content: '', mime: '', route: 'edit' },
+    presentation: { label: 'PPT', ext: '.pptx', content: '', mime: '', route: 'edit' },
+  }[createKind] : null
+
+  const beginNamedCreate = (kind: NonNullable<typeof createKind>) => {
+    const defaults: Record<NonNullable<typeof createKind>, string> = {
+      md: '新文档.md', txt: '新文本.txt', code: 'main.js', html: 'index.html', drawio: '新图表.drawio',
+      whiteboard: '新白板.excalidraw', xmind: '新思维导图.xmind', word: '新文档.docx',
+      spreadsheet: '新表格.xlsx', presentation: '新演示文稿.pptx',
+    }
+    setCreateKind(kind)
+    setCreateName(defaults[kind])
+    setCreateError('')
+    setCreateMenuOpen(false)
+  }
+
+  const handleNamedCreate = async (e: FormEvent) => {
+    e.preventDefault()
+    if (!createKind || !createSpec || docCreating) return
+    let name = createName.trim()
+    if (!name) return
+    if (!name.toLowerCase().endsWith(createSpec.ext)) name += createSpec.ext
+    if (/[/\\:*?"<>|]/.test(name)) {
+      setCreateError('文件名不能包含 / \\ : * ? " < > |')
+      return
+    }
+    const child = window.open('about:blank', '_blank')
     setDocCreating(true)
-    setError('')
+    setCreateError('')
     const key = ++uploadKey.current
     setUploads((prev) => [...prev, { key, name, phase: 'creating' }])
     try {
-      const created = await uploadFn(blob, currentFolderId, (phase) => {
-        setUploads((prev) => prev.map((r) => (r.key === key ? { ...r, phase } : r)))
-      })
+      let fileID = ''
+      if (createKind === 'word' || createKind === 'spreadsheet' || createKind === 'presentation') {
+        const created = await createOfficeTemplate(createKind, currentFolderId, name)
+        fileID = created.id
+      } else if (uploadFn) {
+        let bytes: string | Uint8Array = createSpec.content
+        if (createKind === 'xmind') {
+          bytes = zipSync({
+            'content.json': strToU8(JSON.stringify([{ id: 'root', class: 'sheet', title: name.replace(/\.xmind$/i, ''), rootTopic: { id: 'topic', class: 'topic', title: '中心主题' } }])),
+            'metadata.json': strToU8(JSON.stringify({ creator: { name: 'DocFlow' }, activeSheetId: 'root' })),
+          })
+        }
+        const content = typeof bytes === 'string' ? bytes : new Blob([bytes.slice().buffer])
+        const created = await uploadFn(new File([content], name, { type: createSpec.mime }), currentFolderId, (phase) => {
+          setUploads((prev) => prev.map((r) => (r.key === key ? { ...r, phase } : r)))
+        })
+        fileID = typeof created === 'object' && created !== null && 'file_id' in created
+          ? String((created as { file_id?: string }).file_id ?? '') : ''
+      }
       await load(currentParent)
-      const fileID = typeof created === 'object' && created !== null && 'file_id' in created
-        ? String((created as { file_id?: string }).file_id ?? '')
-        : ''
-      if (fileID) openEditorWindow(`/${kind === 'md' ? 'markdown' : 'text'}/${fileID}`)
+      setCreateKind(null)
+      if (fileID && child) child.location.href = `/${createSpec.route}/${fileID}`
+      else child?.close()
     } catch (err) {
-      setUploads((prev) =>
-        prev.map((r) =>
-          r.key === key ? { ...r, phase: 'error', error: writeErrorText(err, locale === 'zh-CN' ? '新建失败' : 'Create failed') } : r,
-        ),
-      )
+      child?.close()
+      setCreateError(writeErrorText(err, '新建失败'))
+      setUploads((prev) => prev.map((r) => r.key === key ? { ...r, phase: 'error', error: writeErrorText(err, '新建失败') } : r))
     } finally {
       setDocCreating(false)
     }
@@ -1004,8 +1080,16 @@ export default function FileBrowser({
         setCtxMenu(null)
         return
       }
+      if (openWithMgrOpen) {
+        setOpenWithMgrOpen(false)
+        return
+      }
       if (createMenuOpen) {
         setCreateMenuOpen(false)
+        return
+      }
+      if (uploadMenuOpen) {
+        setUploadMenuOpen(false)
         return
       }
       if (cardMenuFor) {
@@ -1052,71 +1136,256 @@ export default function FileBrowser({
     window.open(`${url.pathname}${url.search}`, '_blank', 'noopener')
   }
 
-  const textEditorPath = (item: FileItem): string | null => {
-    const name = item.name.toLowerCase()
-    if (name.endsWith('.md') || name.endsWith('.markdown')) return `/markdown/${item.id}`
-    if (name.endsWith('.txt')) return `/text/${item.id}`
-    return null
+  // ---- 默认打开方式：偏好（按 ext）优先，未配置按文件类型自动选择。 ----
+
+  const openFileWith = (item: FileItem, opener: OpenWithOpener) => {
+    // by-path 优先：编辑类 opener 统一 /edit/by-path（按扩展名分发编辑器），
+    // 其余走查看；office/drawio 集成未启用时回落查看。
+    const wantsEdit = opener !== 'default' && opener !== 'web'
+    const prefix = wantsEdit && !(opener === 'office' && !ooEnabled) && !(opener === 'drawio' && !drawioEnabled) ? 'edit' : 'view'
+    openEditorWindow(routeFor(prefix, item))
+  }
+  /** 「打开方式」选择：PUT 保存为默认（即时生效，失败提示但不阻断）并以该方式打开。 */
+  const handleOpenWithChoice = async (item: FileItem, opener: OpenWithOpener) => {
+    const ext = extOf(item.name)
+    if (ext) {
+      try {
+        await setOpenWith(ext, opener)
+        setOpenWithMap((prev) => ({ ...prev, [ext]: opener }))
+      } catch (err) {
+        setError(err instanceof Error ? err.message : '保存默认打开方式失败')
+      }
+    }
+    openFileWith(item, opener)
   }
 
-  // 默认打开：文件夹进入目录；office/图表/白板文件打开对应编辑器（新窗口）；
-  // 其余文件打开预览弹窗。
+  /** 管理弹窗内修改某扩展名的默认打开器。 */
+  const handleMgrChange = async (ext: string, opener: OpenWithOpener) => {
+    setOpenWithMgrError('')
+    try {
+      await setOpenWith(ext, opener)
+      setOpenWithMap((prev) => ({ ...prev, [ext]: opener }))
+    } catch (err) {
+      setOpenWithMgrError(err instanceof Error ? err.message : '保存失败')
+    }
+  }
+
+  /** 管理弹窗内删除某扩展名偏好（恢复按文件类型自动选择）。 */
+  const handleMgrDelete = async (ext: string) => {
+    setOpenWithMgrError('')
+    try {
+      await deleteOpenWith(ext)
+      setOpenWithMap((prev) => {
+        const next = { ...prev }
+        delete next[ext]
+        return next
+      })
+    } catch (err) {
+      setOpenWithMgrError(err instanceof Error ? err.message : '删除失败')
+    }
+  }
+
+  // ---- 目录打包下载 ZIP（download.zip 流式归档，认证 fetch 转 blob 保存）。 ----
+
+  const handleZipDownload = async (item: FileItem) => {
+    if (zipBusyId) return
+    setZipBusyId(item.id)
+    setError('')
+    try {
+      await downloadFolderZip(item.id, item.name)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '目录打包下载失败')
+    } finally {
+      setZipBusyId(null)
+    }
+  }
+
+  // ---- 目录上传：按 webkitRelativePath 重建目录树，目录先于子项创建。 ----
+
+  const handleDirPicked = async (files: FileList | null) => {
+    if (!uploadFn || !createFolderFn || dirUpload || !files || files.length === 0) return
+    if (dirInputRef.current) dirInputRef.current.value = ''
+    const list = Array.from(files)
+    const relOf = (f: File) => (f as File & { webkitRelativePath?: string }).webkitRelativePath || f.name
+    const firstRel = relOf(list[0])
+    // 目录上传的目标根 = 当前目录下与所选目录同名的首段文件夹；无目录段时直接入当前目录。
+    const rootName = firstRel.includes('/') ? firstRel.split('/')[0] : '目录'
+    const failures: Array<{ path: string; reason: string }> = []
+    // 目录相对路径 → 已建/既有目录 ID（'' = 当前目录；递归确保父目录先创建）。
+    const dirIds = new Map<string, string>()
+    const rootId = currentFolderId ?? ''
+    dirIds.set('', rootId)
+    const ensureDir = async (path: string): Promise<string> => {
+      const known = dirIds.get(path)
+      if (known !== undefined) return known
+      const idx = path.lastIndexOf('/')
+      const parentPath = idx >= 0 ? path.slice(0, idx) : ''
+      const name = idx >= 0 ? path.slice(idx + 1) : path
+      const parentId = await ensureDir(parentPath)
+      let id = ''
+      try {
+        const created = await createFolderFn(name, parentId || null)
+        id = (created as { id?: string } | null)?.id ?? ''
+      } catch (err) {
+        // 已存在（409 name conflict）视为成功：列出父目录定位同名目录。
+        if (err instanceof ApiError && err.status === 409) {
+          try {
+            const { items: siblings } = await listItems(parentId || null)
+            id = siblings.find((it) => it.type === 'folder' && it.name === name)?.id ?? ''
+          } catch {
+            /* 定位失败走下方抛出 */
+          }
+        }
+        if (!id) throw err
+      }
+      dirIds.set(path, id)
+      return id
+    }
+
+    setDirResult(null)
+    setDirUpload({ done: 0, total: list.length })
+    let ok = 0
+    for (let i = 0; i < list.length; i++) {
+      const file = list[i]
+      const rel = relOf(file)
+      const segments = rel.split('/').filter(Boolean)
+      const dirPath = segments.slice(0, -1).join('/')
+      try {
+        const parentId = dirPath ? await ensureDir(dirPath) : rootId
+        await uploadFn(file, parentId || null, () => {})
+        ok++
+      } catch (err) {
+        failures.push({ path: rel, reason: writeErrorText(err, '上传失败') })
+      }
+      setDirUpload({ done: i + 1, total: list.length })
+    }
+    setDirUpload(null)
+    setDirResult({ root: rootName, ok, failures })
+    await load(currentParent)
+  }
+
+  // 默认点击始终查看；只有明确的“编辑”菜单才进入编辑器。
   const openItem = (item: FileItem) => {
     if (item.type === 'folder') {
-      if (!searchMode) openFolder(item)
+      if (item.has_index_web && ns && !searchMode) void openAsWebsite(item)
+      else if (!searchMode) openFolder(item)
       return
     }
-    const textPath = textEditorPath(item)
-    if (textPath) return openEditorWindow(textPath)
-    if (ooEnabled && isOfficeFile(item.name)) return openEditorWindow(`/edit/${item.id}`)
-    if (drawioEnabled && isDrawioFile(item.name)) return openEditorWindow(`/drawio/${item.id}`)
-    if (isExcalidrawFile(item.name)) return openEditorWindow(`/excalidraw/${item.id}`)
-    void openPreview(item)
+    openPreview(item)
   }
 
   // 条目操作菜单（列表行「⋯」、右键菜单、网格卡片菜单共用）：
-  // 打开 / 打开方式（ONLYOFFICE·图表·白板的编辑与查看，均新窗口）/ 预览 /
-  // 下载 / 标签 / 复制 + 调用方 rowActions（分享/重命名/删除等）。
+  // 打开（按默认打开方式）/ 打开方式子菜单 / 目录「下载为 ZIP」/ 打开方式
+  // 管理入口 + 既有「查看 / 编辑 / 预览 / 下载 / 标签 / 复制」与调用方 rowActions。
   const itemMenuContent = (item: FileItem) => (
     <>
-      <button type="button" className="btn small" onClick={() => openItem(item)}>
-        {item.type === 'folder' ? (locale === 'zh-CN' ? '进入' : 'Open') : locale === 'zh-CN' ? '打开' : 'Open'}
-      </button>
+      {item.type === 'folder' && <button type="button" className="btn small" onClick={() => openFolder(item)}>
+        {item.has_index_web ? (locale === 'zh-CN' ? '目录浏览' : 'Browse folder') : (locale === 'zh-CN' ? '进入' : 'Open')}
+      </button>}
+      {item.type === 'folder' && (
+        <button
+          type="button"
+          className="btn small"
+          disabled={zipBusyId !== null}
+          onClick={() => void handleZipDownload(item)}
+        >
+          {zipBusyId === item.id
+            ? (locale === 'zh-CN' ? '打包中…' : 'Zipping…')
+            : (locale === 'zh-CN' ? '下载为 ZIP' : 'Download as ZIP')}
+        </button>
+      )}
       {item.type === 'file' && (
-        <button type="button" className="btn small" onClick={() => {
-          const path = textEditorPath(item)
-          if (path) openEditorWindow(path)
-          else void openPreview(item)
-        }}>
-          {locale === 'zh-CN' ? '预览' : 'Preview'}
+        <>
+          <button type="button" className="btn small" onClick={() => openPreview(item)}>{locale === 'zh-CN' ? '查看' : 'View'}</button>
+          <button type="button" className="btn small" onClick={() => openEditorWindow(routeFor('view', item))}>{locale === 'zh-CN' ? '新窗口查看' : 'View in new window'}</button>
+        </>
+      )}
+      {item.type === 'file' && openWithOptions(item.name).some((op) => op !== 'default' && op !== 'web') && (
+        <div className="openwith-group" role="group" aria-label={locale === 'zh-CN' ? '打开方式' : 'Open with'}>
+          <div className="ctx-menu-label">{locale === 'zh-CN' ? '打开方式（选择后设为默认）' : 'Open with (sets default)'}</div>
+          {openWithOptions(item.name).map((op) => (
+            <button
+              key={op}
+              type="button"
+              className="btn small openwith-item"
+              title={openerLabel(op, locale === 'zh-CN')}
+              onClick={() => void handleOpenWithChoice(item, op)}
+            >
+              <span className={`openwith-dot${resolveOpener(item.name, openWith) === op ? ' on' : ''}`} aria-hidden="true" />
+              {openerLabel(op, locale === 'zh-CN')}
+            </button>
+          ))}
+          <button
+            type="button"
+            className="btn small ghost"
+            onClick={() => {
+              setCtxMenu(null)
+              setCardMenuFor(null)
+              setOpenWithMgrOpen(true)
+            }}
+          >
+            {locale === 'zh-CN' ? '管理默认打开方式…' : 'Manage defaults…'}
+          </button>
+        </div>
+      )}
+      {item.type === 'folder' && ns && !searchMode && (
+        <button
+          type="button"
+          className="btn small"
+          onClick={() => void openAsWebsite(item)}
+          title={locale === 'zh-CN' ? '将该目录作为静态网站打开（index.html）' : 'Open this folder as a website (index.html)'}
+        >
+          {locale === 'zh-CN' ? '作为网页打开' : 'Open as website'}
+        </button>
+      )}
+      {item.type === 'file' && item.name.toLowerCase().endsWith('.zip') && (
+        <button
+          type="button"
+          className="btn small"
+          disabled={unpackBusyId !== null}
+          onClick={() => void handleUnpack(item)}
+        >
+          {unpackBusyId === item.id
+            ? locale === 'zh-CN' ? '解包中…' : 'Unpacking…'
+            : locale === 'zh-CN' ? '解包为目录' : 'Unpack to folder'}
+        </button>
+      )}
+      {item.type === 'file' && !(ooEnabled && isOfficeFile(item.name)) && (
+        <button type="button" className="btn small" onClick={() => openEditorWindow(routeFor('view', item))}>
+          {locale === 'zh-CN' ? '查看' : 'View'}
         </button>
       )}
       {item.type === 'file' && ooEnabled && isOfficeFile(item.name) && (
         <>
-          <button type="button" className="btn small" onClick={() => openEditorWindow(`/edit/${item.id}`)}>
-            ONLYOFFICE {locale === 'zh-CN' ? '编辑' : 'Edit'}
+          <button type="button" className="btn small" onClick={() => openEditorWindow(routeFor('view', item))}>
+            {locale === 'zh-CN' ? '查看 Office' : 'View Office'}
           </button>
-          <button type="button" className="btn small" onClick={() => openEditorWindow(`/edit/${item.id}?mode=view`)}>
-            ONLYOFFICE {locale === 'zh-CN' ? '查看' : 'View'}
+          <button type="button" className="btn small" onClick={() => openEditorWindow(routeFor('edit', item))}>
+            {locale === 'zh-CN' ? '编辑 Office' : 'Edit Office'}
           </button>
         </>
       )}
       {item.type === 'file' && drawioEnabled && isDrawioFile(item.name) && (
         <>
-          <button type="button" className="btn small" onClick={() => openEditorWindow(`/drawio/${item.id}`)}>
+          <button type="button" className="btn small" onClick={() => openEditorWindow(routeFor('edit', item))}>
             {locale === 'zh-CN' ? '图表编辑' : 'Edit diagram'}
           </button>
-          <button type="button" className="btn small" onClick={() => openEditorWindow(`/drawio/${item.id}?mode=view`)}>
+          <button type="button" className="btn small" onClick={() => openEditorWindow(routeFor('view', item))}>
             {locale === 'zh-CN' ? '图表查看' : 'View diagram'}
           </button>
         </>
       )}
+      {item.type === 'file' && (() => {
+        return isTextEditable(item.name) ? <button type="button" className="btn small" onClick={() => openEditorWindow(routeFor('edit', item))}>
+          {locale === 'zh-CN' ? '编辑文本' : 'Edit text'}
+        </button> : null
+      })()}
       {item.type === 'file' && isExcalidrawFile(item.name) && (
         <>
-          <button type="button" className="btn small" onClick={() => openEditorWindow(`/excalidraw/${item.id}`)}>
+          <button type="button" className="btn small" onClick={() => openEditorWindow(routeFor('edit', item))}>
             {locale === 'zh-CN' ? '白板编辑' : 'Edit whiteboard'}
           </button>
-          <button type="button" className="btn small" onClick={() => openEditorWindow(`/excalidraw/${item.id}?mode=view`)}>
+          <button type="button" className="btn small" onClick={() => openEditorWindow(routeFor('view', item))}>
             {locale === 'zh-CN' ? '白板查看' : 'View whiteboard'}
           </button>
         </>
@@ -1135,28 +1404,19 @@ export default function FileBrowser({
   return (
     <div className="file-browser">
       <div className="page-head">
-        <h2>{title}</h2>
+        {title && <h2>{title}</h2>}
         <div className="toolbar">
-          <div className="seg-group view-mode-toggle" role="group" aria-label={locale === 'zh-CN' ? '视图模式' : 'View mode'}>
-            <button
-              type="button"
-              className={`seg${viewMode === 'list' ? ' active' : ''}`}
-              title={msg('viewModeList')}
-              aria-pressed={viewMode === 'list'}
-              onClick={() => changeViewMode('list')}
-            >
-              ☰
-            </button>
-            <button
-              type="button"
-              className={`seg${viewMode === 'grid' ? ' active' : ''}`}
-              title={msg('viewModeGrid')}
-              aria-pressed={viewMode === 'grid'}
-              onClick={() => changeViewMode('grid')}
-            >
-              ▦
-            </button>
-          </div>
+          {/* 列表/网格切换合一：单按钮按当前模式显示对侧图标（title 提示目标模式）。 */}
+          <button
+            type="button"
+            className="btn view-toggle-btn"
+            title={viewMode === 'list' ? msg('viewModeGrid') : msg('viewModeList')}
+            aria-label={viewMode === 'list' ? msg('viewModeGrid') : msg('viewModeList')}
+            aria-pressed={viewMode === 'grid'}
+            onClick={() => changeViewMode(viewMode === 'list' ? 'grid' : 'list')}
+          >
+            {viewMode === 'list' ? '▦' : '☰'}
+          </button>
           {(createFolderFn || uploadFn) && !searchMode && (
             <div className="create-menu-wrap">
               <button type="button" className="btn" aria-haspopup="menu" aria-expanded={createMenuOpen} onClick={() => setCreateMenuOpen((v) => !v)}>
@@ -1169,33 +1429,49 @@ export default function FileBrowser({
                       {locale === 'zh-CN' ? '文件夹' : 'Folder'}
                     </button>
                   )}
-                  {uploadFn && (
-                    <button type="button" className="btn small" disabled={docCreating} onClick={() => void handleCreateDocFile('md')}>
-                      {locale === 'zh-CN' ? 'Markdown 笔记' : 'Markdown note'}
+                  {uploadFn && (['md', 'txt', 'code', 'html', 'drawio', 'whiteboard', 'word', 'spreadsheet', 'presentation', 'xmind'] as const).map((kind) => (
+                    <button key={kind} type="button" className="btn small" disabled={docCreating} onClick={() => beginNamedCreate(kind)}>
+                      {{ md: 'Markdown', txt: 'TXT', code: '代码', html: 'HTML', drawio: 'draw.io', whiteboard: '白板', word: 'Word', spreadsheet: 'Excel', presentation: 'PPT', xmind: 'XMind' }[kind]}
                     </button>
-                  )}
-                  {uploadFn && (
-                    <button type="button" className="btn small" disabled={docCreating} onClick={() => void handleCreateDocFile('txt')}>
-                      {locale === 'zh-CN' ? '文本文件' : 'Text file'}
-                    </button>
-                  )}
-                  {uploadFn && drawioEnabled && (
-                    <button type="button" className="btn small" disabled={diagramCreating} onClick={() => void handleCreateDiagram()}>
-                      {diagramCreating ? (locale === 'zh-CN' ? '创建图表中…' : 'Creating…') : locale === 'zh-CN' ? '流程图表' : 'Diagram'}
-                    </button>
-                  )}
-                  {uploadFn && (
-                    <button type="button" className="btn small" disabled={whiteboardCreating} onClick={() => void handleCreateWhiteboard()}>
-                      {whiteboardCreating ? msg('whiteboardCreating') : locale === 'zh-CN' ? '白板' : 'Whiteboard'}
-                    </button>
-                  )}
+                  ))}
+                  <div className="ctx-menu-label">PDF 仅支持上传和查看，不能空白创建</div>
                 </div>
               )}
             </div>
           )}
+          {/* 上传合一：「⬆ 上传」下拉提供文件/目录两个入口（目录上传依赖建目录权限）。 */}
           {uploadFn && !searchMode && (
-            <>
-              <button type="button" className="btn primary" onClick={() => fileInputRef.current?.click()}>⬆ 上传文件</button>
+            <div className="create-menu-wrap">
+              <button
+                type="button"
+                className="btn primary"
+                aria-haspopup="menu"
+                aria-expanded={uploadMenuOpen}
+                disabled={dirUpload !== null}
+                onClick={() => setUploadMenuOpen((v) => !v)}
+              >
+                {dirUpload !== null
+                  ? (locale === 'zh-CN' ? '上传中…' : 'Uploading…')
+                  : (locale === 'zh-CN' ? '⬆ 上传' : '⬆ Upload')}
+              </button>
+              {uploadMenuOpen && (
+                <div className="file-card-menu create-menu" role="menu" onClick={() => setUploadMenuOpen(false)}>
+                  <button type="button" className="btn small" onClick={() => fileInputRef.current?.click()}>
+                    {locale === 'zh-CN' ? '上传文件' : 'Upload files'}
+                  </button>
+                  {createFolderFn && (
+                    <button
+                      type="button"
+                      className="btn small"
+                      disabled={dirUpload !== null}
+                      onClick={() => dirInputRef.current?.click()}
+                      title={locale === 'zh-CN' ? '选择本地目录，按原目录结构上传到当前目录下' : 'Pick a local folder and upload with its structure'}
+                    >
+                      {locale === 'zh-CN' ? '上传目录' : 'Upload folder'}
+                    </button>
+                  )}
+                </div>
+              )}
               <input
                 ref={fileInputRef}
                 type="file"
@@ -1203,29 +1479,32 @@ export default function FileBrowser({
                 hidden
                 onChange={(e) => void handleFilesPicked(e.target.files)}
               />
-            </>
+              {createFolderFn && (
+                <input
+                  ref={dirInputRef}
+                  type="file"
+                  multiple
+                  hidden
+                  onChange={(e) => void handleDirPicked(e.target.files)}
+                  {...({ webkitdirectory: '', directory: '' } as Record<string, string>)}
+                />
+              )}
+            </div>
           )}
         </div>
       </div>
 
-      {/* 顶栏筛选：视图切换（全部/收藏/最近）+ 标签 / 收藏 / 排序（跨目录检索或最近访问模式） */}
+      {/* 顶栏筛选：目录内搜索 + 标签 / 收藏下拉（排序已表头化，网格视图无表头、
+          保留一个精简排序下拉；全部/收藏/最近视图切换在 SpaceSwitcher 行）。 */}
       <div className="filter-bar">
-        {viewTabs && (
-          <div className="seg-group view-tabs" role="tablist">
-            {(['all', 'starred', 'recent'] as const).map((view) => (
-              <button
-                key={view}
-                type="button"
-                role="tab"
-                aria-selected={activeView === view}
-                className={`seg${activeView === view ? ' active' : ''}`}
-                onClick={() => setView(view)}
-              >
-                {view === 'all' ? msg('viewAll') : view === 'starred' ? msg('viewStarred') : msg('viewRecent')}
-              </button>
-            ))}
-          </div>
-        )}
+        <label className="filter-item directory-search">
+          <input
+            type="search"
+            value={directoryQuery}
+            placeholder={locale === 'zh-CN' ? '搜索当前目录…' : 'Search this folder…'}
+            onChange={(event) => setDirectoryQuery(event.target.value)}
+          />
+        </label>
         <label className="filter-item">
           <span>{msg('tag')}</span>
           <select data-hotkey="filter" value={tagFilter} onChange={(e) => { setTagFilter(e.target.value); setRecentView(false) }}>
@@ -1243,21 +1522,26 @@ export default function FileBrowser({
             <option value="false">{msg('starredNo')}</option>
           </select>
         </label>
-        <label className="filter-item">
-          <span>{msg('sort')}</span>
-          <select value={sortKey} onChange={(e) => setSortKey(e.target.value as 'name' | 'updated_at' | 'size')}>
-            <option value="name">{msg('sortOrderName')}</option>
-            <option value="updated_at">{msg('sortOrderUpdated')}</option>
-            <option value="size">{msg('sortOrderSize')}</option>
-          </select>
-        </label>
-        <label className="filter-item">
-          <span>{msg('direction')}</span>
-          <select value={sortOrder} onChange={(e) => setSortOrder(e.target.value as 'asc' | 'desc')}>
-            <option value="asc">{msg('orderAsc')}</option>
-            <option value="desc">{msg('orderDesc')}</option>
-          </select>
-        </label>
+        {viewMode === 'grid' && (
+          <label className="filter-item">
+            <span>{msg('sort')}</span>
+            <select
+              value={`${sortKey}:${sortOrder}`}
+              onChange={(e) => {
+                const [key, order] = e.target.value.split(':')
+                setSortKey(key as 'name' | 'updated_at' | 'size')
+                setSortOrder(order as 'asc' | 'desc')
+              }}
+            >
+              <option value="name:asc">{msg('sortOrderName')} ↑</option>
+              <option value="name:desc">{msg('sortOrderName')} ↓</option>
+              <option value="updated_at:desc">{msg('sortOrderUpdated')} ↓</option>
+              <option value="updated_at:asc">{msg('sortOrderUpdated')} ↑</option>
+              <option value="size:desc">{msg('sortOrderSize')} ↓</option>
+              <option value="size:asc">{msg('sortOrderSize')} ↑</option>
+            </select>
+          </label>
+        )}
         {searchMode && (
           <button className="btn ghost small" onClick={clearFilters}>{msg('clearFilters')}</button>
         )}
@@ -1309,13 +1593,40 @@ export default function FileBrowser({
       {batchNotice && <div className="banner ok">{batchNotice}</div>}
       {batchError && <div className="banner error">{batchError}</div>}
 
-      {error && <div className="banner error">{error}</div>}
-      {loading && <div className="hint">{msg('loading')}</div>}
-      {!loading && items.length === 0 && !error && (
-        <div className="empty">{searchMode ? msg('noMatch') : emptyHint ?? (locale === 'zh-CN' ? '此目录为空，上传文件或新建文件夹开始使用' : 'This folder is empty. Upload a file or create a folder to get started.')}</div>
+      {dirUpload && (
+        <div className="banner dir-upload-progress">
+          {locale === 'zh-CN'
+            ? `目录上传中 已完成 ${dirUpload.done}/${dirUpload.total}`
+            : `Uploading folder ${dirUpload.done}/${dirUpload.total}`}
+        </div>
+      )}
+      {dirResult && (
+        <div className={`banner ${dirResult.failures.length > 0 ? 'error' : 'ok'} dir-upload-result`}>
+          <span>
+            {locale === 'zh-CN'
+              ? `「${dirResult.root}」上传完成：成功 ${dirResult.ok}/${dirResult.ok + dirResult.failures.length} 个文件`
+              : `“${dirResult.root}” uploaded: ${dirResult.ok}/${dirResult.ok + dirResult.failures.length} files`}
+            {dirResult.failures.length > 0 && (
+              <>
+                {locale === 'zh-CN' ? '；失败明细：' : '; failures: '}
+                {dirResult.failures.slice(0, 10).map((f) => `${f.path}：${f.reason}`).join('；')}
+                {dirResult.failures.length > 10
+                  ? (locale === 'zh-CN' ? `；等共 ${dirResult.failures.length} 项` : `; ${dirResult.failures.length} in total`)
+                  : ''}
+              </>
+            )}
+          </span>
+          <button type="button" className="btn ghost small" onClick={() => setDirResult(null)} aria-label={msg('close')}>×</button>
+        </div>
       )}
 
-      {items.length > 0 && viewMode === 'list' && (
+      {error && <div className="banner error">{error}</div>}
+      {loading && <div className="hint">{msg('loading')}</div>}
+      {!loading && visibleItems.length === 0 && !error && (
+        <div className="empty">{directoryQuery.trim() || searchMode ? msg('noMatch') : emptyHint ?? (locale === 'zh-CN' ? '此目录为空，上传文件或新建文件夹开始使用' : 'This folder is empty. Upload a file or create a folder to get started.')}</div>
+      )}
+
+      {visibleItems.length > 0 && viewMode === 'list' && (
         <table className="file-table">
           <thead>
             <tr>
@@ -1327,13 +1638,38 @@ export default function FileBrowser({
                   aria-label={msg('selectAll')}
                 />
               </th>
-              <th>{msg('name')}</th>
-              <th>{msg('sortOrderUpdated')}</th>
+              <th>
+                {/* 表头排序：点击切换排序键/方向（复用服务端排序状态）。 */}
+                <button
+                  type="button"
+                  className={`th-sort${sortKey === 'name' ? ' active' : ''}`}
+                  onClick={() => toggleSort('name')}
+                  title={msg('sort')}
+                >
+                  {msg('name')}
+                  {sortKey === 'name' && (
+                    <span className="th-sort-arrow" aria-hidden="true">{sortOrder === 'asc' ? '↑' : '↓'}</span>
+                  )}
+                </button>
+              </th>
+              <th>
+                <button
+                  type="button"
+                  className={`th-sort${sortKey === 'updated_at' ? ' active' : ''}`}
+                  onClick={() => toggleSort('updated_at')}
+                  title={msg('sort')}
+                >
+                  {msg('sortOrderUpdated')}
+                  {sortKey === 'updated_at' && (
+                    <span className="th-sort-arrow" aria-hidden="true">{sortOrder === 'asc' ? '↑' : '↓'}</span>
+                  )}
+                </button>
+              </th>
               <th className="col-actions">{msg('actions')}</th>
             </tr>
           </thead>
           <tbody>
-            {items.map((item) => (
+            {visibleItems.map((item) => (
               <tr
                 key={item.id}
                 className={selected.has(item.id) ? 'selected' : ''}
@@ -1359,9 +1695,9 @@ export default function FileBrowser({
                     {item.is_starred ? '★' : '☆'}
                   </button>
                   {item.type === 'folder' && !searchMode ? (
-                    <button className="name-btn" onClick={() => openFolder(item)}>
-                      <span className="icon">📁</span>
-                      {item.name}
+                    <button className="name-btn" onClick={() => openItem(item)}>
+                      <span className="icon">{item.has_index_web ? '🌐' : '📁'}</span>
+                      {item.name}{item.has_index_web && <span className="web-folder-badge">网页</span>}
                     </button>
                   ) : item.type === 'folder' ? (
                     <span className="name-btn muted">
@@ -1399,9 +1735,9 @@ export default function FileBrowser({
       {/* 网格视图（设计 6.3.7）：卡片 = 图标/文件名/大小/时间；文件夹卡片点击
           进入，文件卡片点击预览；右上「⋯」打开与列表行一致的操作菜单；
           选择状态与列表视图共享（多选 + 批量工具条两视图通用）。 */}
-      {items.length > 0 && viewMode === 'grid' && (
+      {visibleItems.length > 0 && viewMode === 'grid' && (
         <div className="file-grid">
-          {items.map((item) => {
+          {visibleItems.map((item) => {
             const size = sizeCache.current.get(item.id) ?? 0
             return (
               <div
@@ -1440,11 +1776,11 @@ export default function FileBrowser({
                 </div>
                 <button
                   className="file-card-body"
-                  title={item.type === 'file' ? msg('preview') : item.name}
+                  title={item.type === 'file' ? (locale === 'zh-CN' ? '查看' : 'View') : item.name}
                   onClick={() => openItem(item)}
                 >
-                  <span className="file-card-icon">{item.type === 'folder' ? '📁' : '📄'}</span>
-                  <span className="file-card-name" title={item.name}>{item.name}</span>
+                  <span className="file-card-icon">{item.type === 'folder' ? (item.has_index_web ? '🌐' : '📁') : '📄'}</span>
+                  <span className="file-card-name" title={item.name}>{item.name}{item.has_index_web && <span className="web-folder-badge">网页</span>}</span>
                   <span className="file-card-meta muted">
                     {size > 0 ? `${formatSize(size)} · ` : ''}
                     {formatTime(item.updated_at)}
@@ -1488,6 +1824,23 @@ export default function FileBrowser({
             <div className="modal-actions">
               <button type="button" className="btn" onClick={() => setFolderOpen(false)}>取消</button>
               <button type="submit" className="btn primary" disabled={!folderName.trim()}>创建</button>
+            </div>
+          </form>
+        </Modal>
+      )}
+
+      {createKind && createSpec && (
+        <Modal title={`新建 ${createSpec.label}`} onClose={() => !docCreating && setCreateKind(null)}>
+          <form onSubmit={handleNamedCreate}>
+            <label className="field">
+              <span>文件名</span>
+              <input autoFocus value={createName} onChange={(e) => setCreateName(e.target.value)} placeholder={`名称${createSpec.ext}`} />
+            </label>
+            <p className="hint">未填写 {createSpec.ext} 扩展名时会自动补全。</p>
+            {createError && <div className="error-text">{createError}</div>}
+            <div className="modal-actions">
+              <button type="button" className="btn" disabled={docCreating} onClick={() => setCreateKind(null)}>取消</button>
+              <button type="submit" className="btn primary" disabled={docCreating || !createName.trim()}>{docCreating ? '创建中…' : '创建并打开'}</button>
             </div>
           </form>
         </Modal>
@@ -1631,62 +1984,71 @@ export default function FileBrowser({
       )}
 
       {previewTarget && (
-        <Modal wide title={`预览「${previewTarget.name}」`} onClose={closePreview}>
-          {previewLoading ? (
-            <p className="hint">加载预览…</p>
-          ) : previewError ? (
-            <div>
-              <div className="error-text">{previewError}</div>
-              <div className="preview-foot">
-                <button className="btn primary" onClick={() => void handleDownload(previewTarget)}>下载</button>
-              </div>
+        <Modal wide className="modal-viewer" title={`查看「${previewTarget.name}」`} onClose={closePreview}>
+          <div className="preview-open-actions">
+            <button className="btn small" onClick={() => openEditorWindow(routeFor('view', previewTarget))}>新窗口打开</button>
+            <button className="btn small" onClick={() => void handleDownload(previewTarget)}>下载</button>
+          </div>
+          {/* 弹窗内嵌完整查看器（与独立查看页同一分发器）：office/
+              drawio/白板/xmind/mermaid/md/网页/文本等全部类型就地渲染。 */}
+          <div className="preview-embed">
+            <FileViewerDispatch
+              fileId={previewTarget.id}
+              name={previewTarget.name}
+              resolveRawUrl={async () => {
+                try {
+                  const r = await resolveFileById(previewTarget.id, { mode: 'view' })
+                  return r.raw_url
+                } catch {
+                  return null
+                }
+              }}
+            />
+          </div>
+        </Modal>
+      )}
+
+      {/* 管理默认打开方式：列出已配置 ext→opener，可即时修改（PUT）或删除（DELETE）。 */}
+      {openWithMgrOpen && (
+        <Modal wide title={locale === 'zh-CN' ? '管理默认打开方式' : 'Manage default openers'} onClose={() => setOpenWithMgrOpen(false)}>
+          <p className="hint">
+            {locale === 'zh-CN'
+              ? '按扩展名保存的默认打开方式；修改即时保存，删除后恢复按文件类型自动选择。'
+              : 'Per-extension default openers. Changes save immediately; deleting restores automatic selection by file type.'}
+          </p>
+          {Object.keys(openWith).length === 0 ? (
+            <p className="hint">
+              {locale === 'zh-CN'
+                ? '暂无已配置项。在文件菜单「打开方式」中选择即可保存为默认。'
+                : 'No defaults configured yet. Pick one from a file’s “Open with” menu to save.'}
+            </p>
+          ) : (
+            <div className="openwith-mgr">
+              {Object.entries(openWith)
+                .sort(([a], [b]) => a.localeCompare(b))
+                .map(([ext, opener]) => (
+                  <div key={ext} className="openwith-mgr-row">
+                    <span className="openwith-mgr-ext">.{ext}</span>
+                    <select
+                      value={opener}
+                      aria-label={`.${ext}`}
+                      onChange={(e) => void handleMgrChange(ext, e.target.value as OpenWithOpener)}
+                    >
+                      {ALL_OPENERS.map((op) => (
+                        <option key={op} value={op}>{openerLabel(op, locale === 'zh-CN')}</option>
+                      ))}
+                    </select>
+                    <button type="button" className="btn small danger" onClick={() => void handleMgrDelete(ext)}>
+                      {msg('delete')}
+                    </button>
+                  </div>
+                ))}
             </div>
-          ) : previewKindState === 'unsupported' ? (
-            <div>
-              <div className="empty">该文件类型暂不支持在线预览，请下载后查看</div>
-              <div className="preview-foot">
-                {ooEnabled && isOfficeFile(previewTarget.name) && (
-                  <button className="btn" onClick={() => openEditorWindow(`/edit/${previewTarget.id}?mode=view`)}>
-                    ONLYOFFICE {locale === 'zh-CN' ? '查看' : 'View'}
-                  </button>
-                )}
-                <button className="btn primary" onClick={() => void handleDownload(previewTarget)}>下载</button>
-              </div>
-            </div>
-          ) : previewKindState === 'image' ? (
-            <div className="preview-box">
-              <img className="preview-image" src={previewUrl} alt={previewTarget.name} />
-            </div>
-          ) : previewKindState === 'pdf' ? (
-            <div className="preview-box">
-              <iframe className="preview-frame" src={previewUrl} title={previewTarget.name} />
-            </div>
-          ) : previewKindState === 'webpkg' ? (
-            // 网页包：sandbox 不含 allow-same-origin（唯一化 origin 沙箱），
-            // 内容端点带严格 CSP/nosniff，且不携带主站认证信息。
-            <div className="preview-box">
-              <iframe className="preview-frame" sandbox="allow-scripts" src={previewUrl} title={previewTarget.name} />
-              <div className="preview-foot">
-                <button className="btn" onClick={() => window.open(previewUrl, '_blank', 'noopener')}>
-                  {locale === 'zh-CN' ? '新窗口打开' : 'Open in new window'}
-                </button>
-              </div>
-            </div>
-          ) : previewKindState === 'text' ? (
-            <div className="preview-box">
-              <pre className="preview-text">{previewText}</pre>
-              {/* AI 摘要：按需触发生成，结果/错误就地展示（503=未启用，400=类型不支持）。 */}
-              <div className="ai-summary">
-                <div className="preview-foot">
-                  <button className="btn" disabled={aiState === 'loading'} onClick={() => void handleSummarize()}>
-                    {aiState === 'loading' ? msg('aiSummaryLoading') : msg('aiSummary')}
-                  </button>
-                </div>
-                {aiState === 'done' && aiSummary && <div className="ai-summary-box">{aiSummary}</div>}
-                {aiState === 'error' && <div className="error-text">{aiError}</div>}
-              </div>
-            </div>
-          ) : null}
+          )}
+          {openWithMgrError && <div className="error-text">{openWithMgrError}</div>}
+          <div className="modal-actions">
+            <button type="button" className="btn" onClick={() => setOpenWithMgrOpen(false)}>{msg('close')}</button>
+          </div>
         </Modal>
       )}
 
@@ -1696,8 +2058,8 @@ export default function FileBrowser({
           className="ctx-menu file-card-menu"
           role="menu"
           style={{
-            left: `${Math.max(8, Math.min(ctxMenu.x, window.innerWidth - 240))}px`,
-            top: `${Math.max(8, Math.min(ctxMenu.y, window.innerHeight - 380))}px`,
+            left: `${Math.max(8, Math.min(ctxMenu.x, window.innerWidth - 228))}px`,
+            top: `${Math.max(8, Math.min(ctxMenu.y, window.innerHeight - 360))}px`,
           }}
           onClick={() => setCtxMenu(null)}
         >

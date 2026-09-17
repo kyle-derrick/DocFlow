@@ -101,11 +101,12 @@ func TestCompleteReplaceNotifiesOwner(t *testing.T) {
 	)
 	dispatcher := &fakeNotifyDispatcher{}
 	svc.SetNotifyDispatcher(dispatcher.record)
-	v, err := svc.StartReplace(user, target, 3, "")
+	data := officeArchive(t, "[Content_Types].xml", "word/document.xml")
+	v, err := svc.StartReplace(user, target, int64(len(data)), "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Append(v.ID, 0, bytes.NewBufferString("abc")); err != nil {
+	if _, err := svc.Append(v.ID, 0, bytes.NewReader(data)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := svc.Complete(v.ID); err != nil {

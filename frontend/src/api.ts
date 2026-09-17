@@ -169,6 +169,8 @@ export interface FileItem {
   description: string
   is_public: boolean
   is_starred?: boolean
+  /** 目录下存在 index.html/index.htm，可直接作为网页打开。 */
+  has_index_web?: boolean
   view_count: number
   download_count: number
   created_at: string
@@ -415,6 +417,10 @@ export async function loginTotp(identifier: string, password: string, code: stri
     jsonInit('POST', { identifier, password, code, recovery_code: recoveryCode }),
   )
   applyLoginToken(data.access_token)
+}
+
+export async function changePassword(oldPassword: string, newPassword: string): Promise<void> {
+  await api('/api/v1/auth/change-password', jsonInit('POST', { old_password: oldPassword, new_password: newPassword }))
 }
 
 export async function logout(): Promise<void> {
@@ -747,6 +753,16 @@ export async function createFolder(name: string, parentId: string | null): Promi
   return api<FileItem>('/api/v1/folders', jsonInit('POST', { name, parent_id: parentId ?? '' }))
 }
 
+export type OfficeTemplateKind = 'word' | 'spreadsheet' | 'presentation'
+
+export async function createOfficeTemplate(kind: OfficeTemplateKind, parentId: string | null, name?: string): Promise<FileItem> {
+  return api<FileItem>('/api/v1/files/from-template', jsonInit('POST', {
+    kind,
+    parent_id: parentId ?? '',
+    ...(name ? { name } : {}),
+  }))
+}
+
 export async function renameFile(id: string, name: string): Promise<FileItem> {
   return api<FileItem>(`/api/v1/files/${id}`, jsonInit('PATCH', { name }))
 }
@@ -765,8 +781,10 @@ export async function deleteFile(id: string): Promise<void> {
   await api(`/api/v1/files/${id}`, { method: 'DELETE' })
 }
 
-export async function listTrash(): Promise<FileItem[]> {
-  const data = await api<{ files: FileItem[] }>('/api/v1/trash')
+export async function listTrash(scope: 'personal' | 'team' = 'personal', teamId = ''): Promise<FileItem[]> {
+  const params = new URLSearchParams({ scope })
+  if (scope === 'team') params.set('team_id', teamId)
+  const data = await api<{ files: FileItem[] }>(`/api/v1/trash?${params.toString()}`)
   return data.files ?? []
 }
 
@@ -816,10 +834,27 @@ export async function fetchFileText(fileId: string): Promise<string> {
   return res.text()
 }
 
+/** 认证读取文件当前版本内容为 ArrayBuffer（.xmind 等二进制查看器加载用）。 */
+export async function fetchFileArrayBuffer(fileId: string): Promise<ArrayBuffer> {
+  const res = await authFetch(`/api/v1/files/${fileId}/download`)
+  if (!res.ok) {
+    const data = (await res.json().catch(() => null)) as { error?: string } | null
+    throw new ApiError(res.status, data?.error ?? '文件读取失败')
+  }
+  return res.arrayBuffer()
+}
+
 /** 私有分享下载（需 download 权限，成功计入分享下载次数）。 */
 export async function downloadShareFile(shareId: string, fileId: string, name: string): Promise<void> {
   const blob = await fetchBlob(`/api/v1/shares/${shareId}/files/${fileId}/download`, '下载失败')
   saveBlob(blob, name)
+}
+
+/** 目录打包下载（GET /files/:id/download.zip，流式 zip）：子树预遍历限 2000
+ * 条目 / 2GB（超限 413 → ApiError）；权限同文件读取（个人 owner、团队成员/ACL）。 */
+export async function downloadFolderZip(id: string, name: string): Promise<void> {
+  const blob = await fetchBlob(`/api/v1/files/${id}/download.zip`, '目录打包下载失败')
+  saveBlob(blob, `${name}.zip`)
 }
 
 // ---------- 预览（与后端白名单一致：image/* 除 SVG、pdf、text/plain、json、网页包） ----------
@@ -894,10 +929,13 @@ export async function fetchSharePreview(shareId: string, fileId: string): Promis
 
 export interface PublicShareInfo {
   name: string
-  size: number
-  mime_type: string
-  version: number
-  version_status: string
+  /** 分享根类型（v1.1 起返回；folder = 目录分享，子树经 tree/raw 端点浏览）。 */
+  type?: 'file' | 'folder'
+  /** 仅 type=file 时返回（目录分享无版本/blob 语义）。 */
+  size?: number
+  mime_type?: string
+  version?: number
+  version_status?: string
   permission: 'view' | 'download'
   expires_at: string | null
   max_downloads: number | null
@@ -945,6 +983,219 @@ export async function fetchPublicWebpkgPreview(token: string): Promise<string> {
     return data.url
   }
   throw new ApiError(res.status || 415, '网页包预览不可用')
+}
+
+// ---------- 目录分享树（公开，/public/shares/{token}/tree） ----------
+
+/** 目录分享树条目（相对分享根的 canonical path + 当前版本 size/mime）。 */
+export interface ShareTreeEntry {
+  name: string
+  type: 'file' | 'folder'
+  path: string
+  size?: number
+  mime_type?: string
+}
+
+/** 目录分享树响应：目录清单（type=folder，含 entries）或文件元数据（type=file）。 */
+export interface PublicShareTree {
+  name: string
+  type: 'file' | 'folder'
+  /** 相对分享根的 canonical 路径（分享根目录为空串）。 */
+  path: string
+  permission: 'view' | 'download'
+  expires_at: string | null
+  entries?: ShareTreeEntry[]
+  size?: number
+  mime_type?: string
+  /** /raw/share/{token}/{grant}（grant 已含）；子资源内容 = raw_base + '/' + 逐段编码路径。 */
+  raw_base: string
+  grant_expires_at: string
+}
+
+/**
+ * 目录分享树访问（无认证）：path 为空返回分享根清单；命中子目录返回直接
+ * 子项；命中文件返回元数据。密码保护分享复用 verify 会话 cookie（未携带
+ * 时 401 code=PASSWORD_REQUIRED），故调用方须先走既有 verify 流程。
+ */
+export async function publicShareTree(token: string, path = ''): Promise<PublicShareTree> {
+  const encoded = encodePathSegments(path.split('/').filter(Boolean))
+  return publicApi<PublicShareTree>(`/api/v1/public/shares/${encodeURIComponent(token)}/tree/${encoded}`)
+}
+
+// ---------- 路径解析与受控原始内容（resolve / raw） ----------
+
+/** 命名空间类型：personal（scope=自己 user UUID）或 team（scope=团队 UUID）。 */
+export type ResolveNamespaceType = 'personal' | 'team'
+
+/** GET /resolve 响应：文件元数据 + view/edit 前端路由 + 10 分钟 raw 授权 URL。 */
+export interface ResolveResult {
+  file_id: string
+  name: string
+  type: 'file' | 'folder'
+  /** 文件当前版本 MIME（目录或无版本时为 null）。 */
+  mime_type: string | null
+  canonical_path: string
+  view_url: string
+  edit_url: string
+  /** /raw/auth/{grant}/...（目录以尾斜杠结尾，raw 端点解析 index.html）。 */
+  raw_url: string
+  grant_expires_at: string
+}
+
+/** 逐段 encodeURIComponent 拼 "/" 分隔路径（中文保留、空格/#/? 等安全转义）。 */
+export function encodePathSegments(segments: string[]): string {
+  return segments.map((s) => encodeURIComponent(s)).join('/')
+}
+
+export interface ResolveOptions {
+  mode?: 'view' | 'edit'
+  /** true 时 raw_url 以 CONTENT_PUBLIC_BASE_URL 绝对化（未配置回退相对）。 */
+  originContent?: boolean
+}
+
+/**
+ * 按命名空间+路径解析文件（登录）：mode=edit 额外按写权限（viewer 403）。
+ * grant 10 分钟，查看器每次进入页面现取；路径不存在统一 404。
+ */
+export async function resolvePath(
+  nsType: ResolveNamespaceType,
+  nsScope: string,
+  path: string,
+  opts: ResolveOptions = {},
+): Promise<ResolveResult> {
+  const params = new URLSearchParams()
+  if (opts.mode) params.set('mode', opts.mode)
+  if (opts.originContent) params.set('origin_content', '1')
+  const query = params.toString()
+  const encoded = encodePathSegments(path.split('/').filter(Boolean))
+  return api<ResolveResult>(`/api/v1/resolve/${nsType}/${encodeURIComponent(nsScope)}/${encoded}${query ? `?${query}` : ''}`)
+}
+
+/** 沿 parent_id 上溯至空间根目录重建命名空间内相对路径（根目录段剔除）。 */
+async function rebuildFilePath(fileId: string): Promise<string> {
+  const segments: string[] = []
+  let node = await getFileMeta(fileId)
+  segments.unshift(node.name)
+  let guard = 0
+  while (!node.is_root && node.parent_id && guard++ < 64) {
+    node = await getFileMeta(node.parent_id)
+    if (!node.is_root) segments.unshift(node.name)
+  }
+  return segments.join('/')
+}
+
+/** 先按个人空间（JWT sub）、再遍历我的团队探测路径；命中判定以返回
+ * file_id 与目标一致为准（resolveFileById 与 resolveNamespaceOf 共用）。 */
+async function probeNamespace(
+  path: string,
+  fileId: string,
+  opts: ResolveOptions,
+): Promise<{ ns: { type: ResolveNamespaceType; scope: string }; result: ResolveResult } | null> {
+  const me = currentUserId()
+  if (me) {
+    try {
+      const r = await resolvePath('personal', me, path, opts)
+      if (r.file_id === fileId) return { ns: { type: 'personal', scope: me }, result: r }
+    } catch {
+      /* 个人空间未命中：继续团队探测 */
+    }
+  }
+  const teams = await listTeams()
+  for (const team of teams) {
+    try {
+      const r = await resolvePath('team', team.id, path, opts)
+      if (r.file_id === fileId) return { ns: { type: 'team', scope: team.id }, result: r }
+    } catch {
+      /* 尝试下一个团队 */
+    }
+  }
+  return null
+}
+
+/**
+ * 由 fileId 重建命名空间与相对路径后 resolve（供 /view/:fileId 的网页查看
+ * 取 raw_url）：探测逻辑与实现说明见 probeNamespace；全部未命中抛 404。
+ */
+export async function resolveFileById(fileId: string, opts: ResolveOptions = {}): Promise<ResolveResult> {
+  const path = await rebuildFilePath(fileId)
+  const hit = await probeNamespace(path, fileId, opts)
+  if (hit) return hit.result
+  throw new ApiError(404, '无法确定文件所在空间，网页查看不可用')
+}
+
+/**
+ * 判定文件/目录所在命名空间（个人空间或某团队空间）：路径重建 + 空间探测
+ * 均为尽力而为（仅登录用户自己的可读文件）；失败返回 null，由调用方自行
+ * 兜底（通常按个人空间处理）。供富文本图片上传等需按空间分发端点的场景。
+ */
+export async function resolveNamespaceOf(
+  fileId: string,
+): Promise<{ type: ResolveNamespaceType; scope: string } | null> {
+  try {
+    const node = await getFileMeta(fileId)
+    // 根目录（个人根 / 团队根）无法按子路径 resolve 命中自身：改为遍历我的
+    // 团队比对根目录 ID；无命中即为个人根。
+    if (node.is_root) {
+      const teams = await listTeams()
+      for (const team of teams) {
+        try {
+          const listing = await listTeamFiles(team.id, null)
+          if (listing.parent_id === fileId) return { type: 'team', scope: team.id }
+        } catch {
+          /* 尝试下一个团队 */
+        }
+      }
+      const me = currentUserId()
+      return me ? { type: 'personal', scope: me } : null
+    }
+    const path = await rebuildFilePath(fileId)
+    return (await probeNamespace(path, fileId, {}))?.ns ?? null
+  } catch {
+    return null
+  }
+}
+
+// ---------- zip 解包为目录树（POST /files/{id}/unpack） ----------
+
+/** 解包单条目失败明细（部分成功语义）。 */
+export interface UnpackFailure {
+  path: string
+  error: string
+}
+
+/** 解包结果：新目录树统计 + 同名跳过数 + 逐条目失败明细。 */
+export interface UnpackResult {
+  root_folder_id: string
+  created_files: number
+  created_folders: number
+  skipped: number
+  failures: UnpackFailure[]
+}
+
+/**
+ * zip 解为真实文件树（在其父目录下以 zip 名建目录，逐条目走上传管线；
+ * 条目 ≤500、总量 ≤500MB、Zip Slip 清洗，结构类失败整体 400
+ * UNPACK_INVALID）。需要文件读权限 + 父目录写权限。
+ */
+export async function unpackZip(fileId: string): Promise<UnpackResult> {
+  return api<UnpackResult>(`/api/v1/files/${fileId}/unpack`, { method: 'POST' })
+}
+
+// ---------- XMind → Markdown 转换 ----------
+
+/** POST /files/{id}/convert-markdown 响应：新 .md 文件元数据（落库到源文件所在目录）。 */
+export interface ConvertMarkdownResult {
+  file_id: string
+  name: string
+  size: number
+}
+
+/**
+ * .xmind 转 Markdown：源须 .xmind 且有父目录，产物经上传管线落库同目录
+ * （<源名>.md，冲突自动 -converted-N 后缀）；解析失败 422（CONVERT_FAILED）。
+ */
+export async function convertMarkdown(fileId: string): Promise<ConvertMarkdownResult> {
+  return api<ConvertMarkdownResult>(`/api/v1/files/${fileId}/convert-markdown`, jsonInit('POST', {}))
 }
 
 // ---------- 分享 ----------
@@ -1466,6 +1717,12 @@ export function drawioStatus(): Promise<DrawioStatus> {
 
 // ---------- Excalidraw 白板编辑器（前端内置，无需后端集成配置） ----------
 
+/** .html/.htm 文件按网页查看（resolve 现取 raw_url 后 sandbox iframe 渲染），不走纯文本预览。 */
+export function isHtmlFile(name: string): boolean {
+  const lower = name.toLowerCase()
+  return lower.endsWith('.html') || lower.endsWith('.htm')
+}
+
 /** 仅 .excalidraw 扩展名进入白板编辑；编辑器由前端懒加载，按钮恒可用。 */
 export function isExcalidrawFile(name: string): boolean {
   return name.toLowerCase().endsWith('.excalidraw')
@@ -1473,6 +1730,29 @@ export function isExcalidrawFile(name: string): boolean {
 
 /** 空白板初始场景（新建 .excalidraw 文件与空/损坏内容容错共用）。 */
 export const EMPTY_EXCALIDRAW_JSON = '{"type":"excalidraw","version":2,"elements":[],"appState":{}}'
+
+// ---------- XMind 思维导图查看器（前端 fflate 解析 + Markmap 渲染） ----------
+
+/** 仅 .xmind 扩展名进入思维导图查看（本地解析只读渲染，无编辑）。 */
+export function isXmindFile(name: string): boolean {
+  return name.toLowerCase().endsWith('.xmind')
+}
+
+// ---------- Mermaid 图表与思维导图 Markdown（mermaid / markmap） ----------
+
+/** .mmd / .mermaid 为 Mermaid 图表源码，查看页直接 mermaid 渲染。 */
+export function isMermaidFile(name: string): boolean {
+  const lower = name.toLowerCase()
+  return lower.endsWith('.mmd') || lower.endsWith('.mermaid')
+}
+
+/**
+ * 判断 XML 文本是否为 draw.io 图表（根元素 mxfile / mxGraphModel）：
+ * .xml 文件按内容嗅探分发到图表查看，避免扩展名限制误伤普通 XML。
+ */
+export function isDrawioXmlContent(text: string): boolean {
+  return /^\s*(<\?xml[^>]*\?>\s*)?<(mxfile|mxGraphModel)[\s>]/i.test(text)
+}
 
 // ---------- AI 摘要（文本类文件） ----------
 
@@ -1644,21 +1924,32 @@ export interface AuditEntry {
   action: string
   resource_type: string
   resource_id: string
+  ip: string | null
+  user_agent: string
+  metadata: string
   status: string
   created_at: string
 }
+export interface AuditFilters { action?: string; userId?: string; status?: string; resourceType?: string; resourceId?: string; from?: string; to?: string }
 export interface AuditListResult { items: AuditEntry[]; next_cursor: string; total: number }
-export async function adminListAuditLogs(action = '', userId = '', cursor = ''): Promise<AuditListResult> {
+function auditParams(filters: AuditFilters, cursor = ''): URLSearchParams {
   const params = new URLSearchParams()
-  if (action) params.set('action', action)
-  if (userId) params.set('user_id', userId)
+  if (filters.action) params.set('action', filters.action)
+  if (filters.userId) params.set('user_id', filters.userId)
+  if (filters.status) params.set('status', filters.status)
+  if (filters.resourceType) params.set('resource_type', filters.resourceType)
+  if (filters.resourceId) params.set('resource_id', filters.resourceId)
+  if (filters.from) params.set('from', new Date(filters.from).toISOString())
+  if (filters.to) params.set('to', new Date(filters.to).toISOString())
   if (cursor) params.set('cursor', cursor)
-  const query = params.toString()
-  return api<AuditListResult>(`/api/v1/admin/audit-logs${query ? `?${query}` : ''}`)
+  return params
 }
-export async function adminDownloadAuditCSV(action = ''): Promise<void> {
-  const query = action ? `?action=${encodeURIComponent(action)}` : ''
-  const res = await authFetch(`/api/v1/admin/audit-logs/export.csv${query}`)
+export async function adminListAuditLogs(filters: AuditFilters = {}, cursor = ''): Promise<AuditListResult> {
+  const params = auditParams(filters, cursor)
+  return api<AuditListResult>(`/api/v1/admin/audit-logs?${params.toString()}`)
+}
+export async function adminDownloadAuditCSV(filters: AuditFilters = {}): Promise<void> {
+  const res = await authFetch(`/api/v1/admin/audit-logs/export.csv?${auditParams(filters).toString()}`)
   if (!res.ok) throw new ApiError(res.status, '审计日志导出失败')
   saveBlob(await res.blob(), 'audit-logs.csv')
 }
@@ -1731,6 +2022,10 @@ export async function adminRunBackup(): Promise<void> {
 export interface DashboardRecentFile {
   id: string
   name: string
+  parent_id: string | null
+  current_version_id: string
+  scope_type: 'personal' | 'team'
+  team_id: string | null
   updated_at: string
 }
 
@@ -1846,6 +2141,22 @@ export async function getMe(): Promise<MeData> {
   return api<MeData>('/api/v1/me')
 }
 
+export interface UserSearchResult {
+  id: string
+  username: string
+  email: string
+  nickname?: string | null
+  profile?: { nickname?: string | null }
+}
+
+/** 成员/ACL 主体选择：至少 2 字符的昵称、用户名或邮箱检索。 */
+export async function searchUsers(q: string): Promise<UserSearchResult[]> {
+  const data = await api<{ users?: UserSearchResult[]; results?: UserSearchResult[] }>(
+    `/api/v1/users/search?q=${encodeURIComponent(q)}`,
+  )
+  return data.users ?? data.results ?? []
+}
+
 /** PATCH /me 可更新字段（undefined 表示不更新；空串清空文本字段）。 */
 export interface UpdateMeOptions {
   nickname?: string
@@ -1864,6 +2175,41 @@ export async function updateMe(opts: UpdateMeOptions): Promise<MeData> {
     if (opts[key] !== undefined) body[key] = opts[key]
   }
   return api<MeData>('/api/v1/me', jsonInit('PATCH', body))
+}
+
+// ---------- 默认打开方式偏好（/me/open-with，按扩展名） ----------
+
+/** 打开器枚举（与后端 openWithOpeners 白名单一致）。 */
+export type OpenWithOpener = 'office' | 'drawio' | 'excalidraw' | 'text' | 'markdown' | 'code' | 'web' | 'default'
+
+/** 单条偏好（GET 列表与 PUT upsert 响应共用）。 */
+export interface OpenWithPreference {
+  ext: string
+  opener: OpenWithOpener
+  updated_at: string
+}
+
+/** ext → opener 映射（FileBrowser / Wiki 视图分发用）。 */
+export type OpenWithMap = Record<string, OpenWithOpener>
+
+/** 我的全部打开方式偏好（GET /me/open-with {open_with:[...]} → Map 形态）。 */
+export async function listOpenWith(): Promise<OpenWithMap> {
+  const data = await api<{ open_with: OpenWithPreference[] }>('/api/v1/me/open-with')
+  const map: OpenWithMap = {}
+  for (const row of data.open_with ?? []) {
+    if (row?.ext && row.opener) map[row.ext] = row.opener
+  }
+  return map
+}
+
+/** upsert 一条偏好（ext 服务端规范化：小写去点 1..16 位 [a-z0-9]；非法 400）。 */
+export async function setOpenWith(ext: string, opener: OpenWithOpener): Promise<OpenWithPreference> {
+  return api<OpenWithPreference>('/api/v1/me/open-with', jsonInit('PUT', { ext, opener }))
+}
+
+/** 删除一条偏好（幂等；恢复按文件类型自动选择）。 */
+export async function deleteOpenWith(ext: string): Promise<void> {
+  await api(`/api/v1/me/open-with?ext=${encodeURIComponent(ext)}`, { method: 'DELETE' })
 }
 
 // ---------- 管理端用户管理（仅 admin） ----------

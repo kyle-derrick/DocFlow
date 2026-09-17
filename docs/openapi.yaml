@@ -1,12 +1,26 @@
 # DocFlow HTTP API 契约（OpenAPI 3.1）。
 # 本文件以 internal/http 实际实现为准（handler.go / uploads.go / tus.go / shares.go /
 # teams.go / trash.go / preview.go / download.go / ratelimit.go / webpkg.go / tags.go /
-# batch.go / dashboard.go / webhooks.go），由
+# batch.go / dashboard.go / webhooks.go / resolve.go / sharetree.go / unpack.go），由
 # internal/http/openapi_test.go 做双向路由一致性校验，契约与实现不允许漂移。
 # 说明：/health、/ready、/metrics 为基础设施端点，不属于业务契约；路由参数统一写作 {id} 形式。
 # 网页包内容域端点 GET /content/{pid}/{filepath} 为契约外路由（openapi_test.go
 # isExcludedRoute 豁免）：无认证、面向 sandbox iframe 而非 API 客户端，独立按 IP
 # 轻限流并携带严格 CSP/nosniff，语义见 /files/{id}/preview 的 webpkg 分支。
+# 受控原始内容域端点同为契约外路由（isExcludedRoute 豁免）：
+#   - GET/HEAD /raw/auth/{grant}/{nsType}/{nsScope}/{path}：登录用户经
+#     GET /resolve/{nsType}/{nsScope}/*path 换取 10 分钟 HMAC grant（绑定
+#     purpose=raw/user/ns/scope）后访问；每请求实时复验读授权与当前版本
+#     blob 可用性；扩展名白名单（html/css/js/json/txt/png/jpg/jpeg/gif/webp/
+#     avif/svg/ico/woff/woff2/pdf/mp4/webm/mp3，未知扩展 415）；目录无尾斜杠
+#     308 加斜杠、尾斜杠解析 index.html；单区间 Range；响应携带 CSP
+#     sandbox allow-scripts、nosniff、Cache-Control private,no-store、
+#     Referrer-Policy no-referrer。无 /raw/view 登录态端点——raw 域无 Cookie
+#     依赖，授权一律经 resolve API 换取 grant（前端查看器直接使用 raw_url）。
+#   - GET/HEAD /raw/share/{token}/{grant}/{path}：公开目录分享子资源；grant
+#     由 GET /public/shares/{token}/tree/*path（密码分享须先 verify）签发，
+#     purpose=raw-share 且绑定 share_id；每请求复查分享未撤销/未过期（410）、
+#     根存在、路径在子树内（404）与 blob 可用；不消耗 download_count。
 openapi: 3.1.0
 info:
   title: DocFlow API
@@ -48,6 +62,12 @@ tags:
     description: 个人仪表盘概览统计（admin 附加全局统计）
   - name: Files
     description: 个人空间文件与目录
+  - name: Paths
+    description: >-
+      路径型访问（v1.1）：GET /resolve 按命名空间+路径解析文件并签发短期
+      raw 授权（/raw/* 为契约外内容域端点，见文件头说明）
+  - name: Zip Import
+    description: zip 导入目录树（POST /files/{id}/unpack：解为真实文件树，逐条目走上传管线）
   - name: Tags
     description: 标签与收藏（用户维度标签 CRUD、文件打/去标签、行级星标）
   - name: Batch
@@ -976,6 +996,44 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '429': { $ref: '#/components/responses/RateLimited' }
 
+  /users/search:
+    get:
+      tags: [Users]
+      operationId: searchUsers
+      summary: 用户检索（成员/ACL 主体选择器）
+      description: >-
+        按 username/nickname 子串（大小写不敏感）检索活跃用户；q 含 @ 时
+        额外匹配 email 子串（邮箱不做无 @ 的模糊匹配，防枚举）。任何登录用户
+        可用（添加团队成员/ACL 场景需要），固定最多返回 20 条；响应含
+        id/username/email/nickname（团队协作场景需 email 区分同名用户）。
+        q 少于 2 个字符返回 400。
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: { type: string, minLength: 2 }
+          description: 查询串（≥2 字符）
+      responses:
+        '200':
+          description: 匹配的用户列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  users:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string, format: uuid }
+                        username: { type: string }
+                        email: { type: string, format: email }
+                        nickname: { type: string, nullable: true }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
   /me:
     get:
       tags: [Users]
@@ -1019,6 +1077,65 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /me/open-with:
+    get:
+      tags: [Users]
+      operationId: listOpenWith
+      summary: 默认打开方式偏好列表
+      description: >-
+        返回当前用户按扩展名记录的「默认打开方式」偏好（user_open_with，
+        每 ext 一行，按 ext 排序；无记录返回空列表）。
+      responses:
+        '200':
+          description: 偏好列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  open_with:
+                    type: array
+                    items: { $ref: '#/components/schemas/OpenWithPreference' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    put:
+      tags: [Users]
+      operationId: updateOpenWith
+      summary: 设置默认打开方式偏好（upsert）
+      description: >-
+        upsert 一条偏好。ext 规范化：去前置点、转小写、1..16 个 [a-z0-9]
+        字符；opener 枚举校验（office/drawio/excalidraw/text/markdown/
+        code/web/default）。非法请求 400。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OpenWithPreference' }
+      responses:
+        '200':
+          description: 已保存的偏好
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OpenWithPreference' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    delete:
+      tags: [Users]
+      operationId: deleteOpenWith
+      summary: 删除默认打开方式偏好（幂等）
+      parameters:
+        - name: ext
+          in: query
+          required: true
+          schema: { type: string }
+          description: 扩展名（规范化规则同 PUT；非法 400）
+      responses:
+        '204': { description: 已删除（或本就不存在） }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
         '429': { $ref: '#/components/responses/RateLimited' }
 
   /search:
@@ -1560,6 +1677,83 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
         '429': { $ref: '#/components/responses/RateLimited' }
 
+  /files/{id}/download.zip:
+    get:
+      tags: [Files]
+      operationId: downloadFolderZip
+      summary: 目录打包下载（流式 zip）
+      description: >-
+        id 须为目录（否则 400）。服务端递归遍历子树（soft-delete 排除；当前
+        版本非 available 的文件跳过），以 zip 流式写出（不落盘不缓存）：
+        entry 名为相对根目录的路径（目录含尾斜杠），文件内容从对象存储整
+        对象流式拷贝；Content-Disposition: attachment 文件名=<目录名>.zip。
+        规模限制：子树条目数 ≤2000、文件总大小 ≤2GB，超限 413（响应体写出
+        前完成预遍历）。权限同文件读取（authorizeFileRead：个人 owner、
+        团队在册成员/ACL）。不支持 Range（整包流式生成）。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: zip 归档流
+          headers:
+            Content-Disposition:
+              description: attachment; filename=<目录名>.zip（RFC 5987）
+              schema: { type: string }
+          content:
+            application/zip:
+              schema: { type: string, format: binary }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '413':
+          description: 子树规模超限（条目数 >2000 或总大小 >2GB）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /files/{id}/convert-markdown:
+    post:
+      tags: [Files]
+      operationId: convertToMarkdown
+      summary: XMind 转 Markdown（产物落库）
+      description: >-
+        源文件须为 .xmind（否则 422）；解析 content.json（新格式，老版
+        content.xml 返回明确不支持错误）生成 Markdown（每 sheet 一个
+        `# 标题`，topic 树转嵌套 `- ` 列表，notes 转缩进 `> ` 引用），以
+        <同名>.md 写入源文件所在目录（重名自动加 -converted-N 后缀），经
+        上传管线落库（校验/配额生效），返回新 file_id。解析失败 422 附原因。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '201':
+          description: 转换完成（新文件已创建）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  file_id: { type: string, format: uuid }
+                  name: { type: string, description: 产物文件名（含 -converted-N 后缀如有） }
+                  size: { type: integer, description: Markdown 字节数 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422':
+          description: 源非 .xmind 或解析失败（附原因）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
   /files/{id}/preview:
     get:
       tags: [Files]
@@ -1660,6 +1854,70 @@ paths:
         '429': { $ref: '#/components/responses/RateLimited' }
         '500':
           description: 存储级解包失败（status=failed，原因见 200 语义或服务器日志）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /files/{id}/unpack:
+    post:
+      tags: [Zip Import]
+      operationId: unpackZip
+      summary: zip 解为真实文件树（导入目录树）
+      description: >-
+        对 zip 文件（id）执行解包导入：在其所在父目录下以 zip 名（去扩展）
+        创建目录（已存在同名目录则复用，幂等），逐条目经上传管线落库
+        （office 内容校验、扩展名黑名单、扫描与配额自然生效；HTML/CSS/JS
+        等 MIME 按扩展映射）。安全限制：条目数 ≤500、展开总量 ≤500MB、
+        路径清洗复用 webpkg sanitize 规则（Zip Slip/控制字符/保留名/深度），
+        结构类失败（穿越条目/超限/空 zip/非 zip）整体拒绝（400
+        code=UNPACK_INVALID，不产生半提交）；单条目失败聚合进 failures
+        返回（同名条目按已存在跳过并计入 skipped）。权限：文件读权限 +
+        父目录写权限（个人 owner / 团队 CanWrite+ACL）。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 解包结果（部分成功语义：失败条目见 failures 明细）
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [root_folder_id, created_files, created_folders, skipped, failures]
+                properties:
+                  root_folder_id: { type: string, format: uuid }
+                  created_files: { type: integer }
+                  created_folders: { type: integer }
+                  skipped: { type: integer, description: 同名已存在而幂等跳过的条目数 }
+                  failures:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        path: { type: string }
+                        error: { type: string }
+        '400':
+          description: 安全校验未通过（code=UNPACK_INVALID：穿越条目/超限/空 zip/非 zip）或非法 id
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: 无父目录写权限或对象不可用
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 目标目录被同名文件占用 / 文件无当前版本
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500':
+          description: 存储读取等内部错误
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -2782,6 +3040,58 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
         '429': { $ref: '#/components/responses/RateLimited' }
 
+  /public/shares/{token}/download.zip:
+    get:
+      tags: [Public Shares]
+      operationId: publicShareDownloadZip
+      summary: 目录分享打包下载（流式 zip，无认证）
+      description: >-
+        分享根须为目录（单文件分享 400）且分享具 download 权限（view 403，
+        不消耗计数）。子树遍历与 zip 流式写出规则同 GET /files/{id}/download.zip
+        （soft-delete 排除、entry 为相对分享根路径、目录含尾斜杠、≤2000 条目
+        /≤2GB 超限 413）。成功消耗一次下载额度（原子消费与限额语义同单文件
+        下载：达上限/撤销/过期 410）。密码保护分享须先经 verify 取得会话
+        cookie（未携带时 401 code=PASSWORD_REQUIRED）。
+      security: []
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: zip 归档流
+          headers:
+            Content-Disposition:
+              description: attachment; filename=<分享根目录名>.zip（RFC 5987）
+              schema: { type: string }
+          content:
+            application/zip:
+              schema: { type: string, format: binary }
+        '400':
+          description: 分享根不是目录
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401':
+          description: 分享受密码保护且未携带有效会话 cookie
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: 分享不允许下载（permission=view）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '410': { $ref: '#/components/responses/Gone' }
+        '413':
+          description: 子树规模超限（条目数 >2000 或总大小 >2GB）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
   /public/shares/{token}/preview:
     get:
       tags: [Public Shares]
@@ -2841,6 +3151,77 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
         '429': { $ref: '#/components/responses/RateLimited' }
+
+  /public/shares/{token}/tree/*path:
+    get:
+      tags: [Public Shares]
+      operationId: publicShareTree
+      summary: 目录分享树（无认证）——子路径清单/文件元数据 + raw grant 签发
+      description: >-
+        目录分享（根为 folder 的公开分享，创建入口同 POST /shares）的树
+        访问：path 为空（或尾斜杠）返回分享根目录清单；命中子目录返回该
+        目录直接子项（name/type/path/size/mime_type，path 为相对分享根的
+        canonical 路径）；命中文件返回元数据。撤销/过期/达上限 410；根已
+        删除 410；子路径不存在/穿越段统一 404。密码保护分享复用既有
+        verify 会话 cookie（未携带时 401 code=PASSWORD_REQUIRED）。
+        响应附 raw_base（/raw/share/{token}/{grant}：purpose=raw-share、
+        绑定 share_id 的 10 分钟 HMAC grant）与 grant_expires_at；子资源
+        内容经 GET /raw/share/{token}/{grant}/{path} 获取（契约外内容域
+        端点，见文件头说明；每请求复查分享有效性与 blob 可用，不消耗
+        download_count——显式下载仍走 download 端点）。
+      security: []
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { type: string }
+        - name: path
+          in: path
+          required: true
+          description: 分享根内相对路径（"/"分隔；空路径即分享根）
+          schema: { type: string }
+      responses:
+        '200':
+          description: 目录清单（type=folder）或文件元数据（type=file）
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [name, type, permission, raw_base, grant_expires_at]
+                properties:
+                  name: { type: string }
+                  type: { type: string, enum: [file, folder] }
+                  path: { type: string, description: 相对分享根的 canonical 路径（根目录为空） }
+                  permission: { type: string, enum: [view, download] }
+                  expires_at: { type: [string, 'null'], format: date-time }
+                  entries:
+                    type: array
+                    description: type=folder 时的直接子项清单
+                    items:
+                      type: object
+                      properties:
+                        name: { type: string }
+                        type: { type: string, enum: [file, folder] }
+                        path: { type: string }
+                        size: { type: integer }
+                        mime_type: { type: string }
+                  size: { type: integer, description: type=file 时的当前版本大小 }
+                  mime_type: { type: string }
+                  raw_base: { type: string, description: '/raw/share/{token}/{grant}（grant 已含）' }
+                  grant_expires_at: { type: string, format: date-time }
+        '401':
+          description: 分享受密码保护且未携带有效会话 cookie
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '410': { $ref: '#/components/responses/Gone' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503':
+          description: raw 授权签发器未配置
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
 
   /teams:
     post:
@@ -3267,6 +3648,86 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '429': { $ref: '#/components/responses/RateLimited' }
 
+  /resolve/{nsType}/{nsScope}/*path:
+    get:
+      tags: [Paths]
+      operationId: resolvePath
+      summary: 路径解析（登录）——返回文件元数据与 view/edit/raw 短期授权 URL
+      description: >-
+        按命名空间（personal：scopeID 必须等于当前用户，取其个人根目录；
+        team：须为团队成员，取团队根目录）解析 "/" 分隔的相对路径：段校验
+        与上传建名一致（NFC、拒绝空/.././斜杠/反斜杠/控制字符/Cf/二次编码
+        变体，≤32 段），逐段按 parent_id+lower(name) 匹配（大小写不敏感、
+        软删除不可见、中间段须目录、环防御）。mode=view 按读权限（个人
+        owner / 团队成员或 ACL read）；mode=edit 额外按写权限（CanWrite/
+        ACL write，viewer 403）。响应附 view_url（/view/... 前端路由）与
+        edit_url（/edit/... 前端路由）、raw_url（/raw/auth/{grant}/...，
+        10 分钟 HMAC grant 绑定 purpose=raw/user/ns/scope；目录以尾斜杠
+        结尾供 index.html 解析；目录且 origin_content=1 时以
+        CONTENT_PUBLIC_BASE_URL 绝对化）与 grant_expires_at。raw_url 由
+        前端查看器直接使用（/raw/* 为契约外内容域端点，见文件头说明；
+        不提供 /raw/view 登录态端点）。mime_type 为文件当前版本 MIME
+        （目录或无版本时为 null）。
+      parameters:
+        - name: nsType
+          in: path
+          required: true
+          schema: { type: string, enum: [personal, team] }
+        - name: nsScope
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: path
+          in: path
+          required: true
+          description: 命名空间内的相对路径（"/"分隔；空路径即根目录）
+          schema: { type: string }
+        - name: mode
+          in: query
+          required: false
+          schema: { type: string, enum: [view, edit], default: view }
+        - name: origin_content
+          in: query
+          required: false
+          description: '1 时 raw_url 以 CONTENT_PUBLIC_BASE_URL 绝对化（未配置回退相对路径）'
+          schema: { type: string, enum: ['1'] }
+      responses:
+        '200':
+          description: 解析结果
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [file_id, name, type, canonical_path, view_url, edit_url, raw_url, grant_expires_at]
+                properties:
+                  file_id: { type: string, format: uuid }
+                  name: { type: string }
+                  type: { type: string, enum: [file, folder] }
+                  mime_type: { type: [string, 'null'] }
+                  canonical_path: { type: string, description: 按实际存储名称重建的相对路径 }
+                  view_url: { type: string }
+                  edit_url: { type: string }
+                  raw_url: { type: string }
+                  grant_expires_at: { type: string, format: date-time }
+        '400':
+          description: 非法命名空间/scope/路径段（含穿越与二次编码变体）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: mode=edit 且无写权限（团队 viewer 等）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503':
+          description: 路径解析能力未配置（RAW_URL 签发器未注入）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
   /files/{id}/ai/summary:
     post:
       tags: [AI]
@@ -3407,6 +3868,31 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
         '429': { $ref: '#/components/responses/RateLimited' }
 
+  /files/from-template:
+    post:
+      tags: [Files]
+      operationId: createOfficeTemplate
+      summary: 创建空白 Office 模板
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind]
+              properties:
+                kind: { type: string, enum: [word, spreadsheet, presentation, docx, xlsx, pptx] }
+                name: { type: string }
+                parent_id: { type: string, format: uuid }
+      responses:
+        '201': { description: 创建成功 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
   /onlyoffice/download/{fileId}:
     get:
       tags: [onlyoffice]
@@ -3474,6 +3960,35 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /onlyoffice/download/{fileId}/{filename}:
+    get:
+      tags: [onlyoffice]
+      operationId: onlyofficeDownloadNamed
+      summary: DocumentServer 回源下载（带文件名兼容路由）
+      security: []
+      parameters:
+        - name: fileId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: filename
+          in: path
+          required: true
+          schema: { type: string }
+        - name: v
+          in: query
+          required: true
+          schema: { type: string, format: uuid }
+        - name: token
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: 文件内容 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
         '429': { $ref: '#/components/responses/RateLimited' }
 
   /onlyoffice/callback:
@@ -4236,6 +4751,18 @@ components:
         status:
           type: string
           description: 上传相关错误附带的会话状态（仅 uploads complete 端点）
+    OpenWithPreference:
+      type: object
+      description: 默认打开方式偏好（/me/open-with）；ext 已规范化（小写、去点）
+      required: [ext, opener]
+      properties:
+        ext:
+          type: string
+          description: 文件扩展名（1..16 个 [a-z0-9] 字符，无前置点）
+        opener:
+          type: string
+          enum: [office, drawio, excalidraw, text, markdown, code, web, default]
+        updated_at: { type: string, format: date-time }
     Setting:
       type: object
       description: 系统设置条目（GET /admin/settings）；value 为按类型解析后的标量

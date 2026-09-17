@@ -12,9 +12,11 @@ import (
 	"github.com/docflow/docflow/internal/audit"
 	"github.com/docflow/docflow/internal/auth"
 	"github.com/docflow/docflow/internal/caddytls"
+	"github.com/docflow/docflow/internal/contenturl"
 	"github.com/docflow/docflow/internal/files"
 	"github.com/docflow/docflow/internal/invite"
 	"github.com/docflow/docflow/internal/mail"
+	"github.com/docflow/docflow/internal/mcp"
 	"github.com/docflow/docflow/internal/metrics"
 	"github.com/docflow/docflow/internal/notify"
 	"github.com/docflow/docflow/internal/oidc"
@@ -39,6 +41,8 @@ import (
 type userDirectory interface {
 	FindActiveByIdentifier(identifier string) (auth.User, error)
 	Lookup(q string, limit int) ([]auth.User, error)
+	// Search 为成员/ACL 主体选择器的用户检索（username/nickname 子串）。
+	Search(q string, limit int) ([]auth.User, error)
 	Username(id uuid.UUID) (string, error)
 	Status(id uuid.UUID) (string, error)
 	// GetByID 完整用户记录（/me、管理端；不存在返回 auth.ErrUserNotFound）。
@@ -184,15 +188,46 @@ type Handler struct {
 	// csrfStrict 控制 refresh/logout 同源严格校验（C10，CSRF_STRICT 默认
 	// true）：true 时缺失 Origin/Referer 一律 403，见 csrf.go。
 	csrfStrict bool
+	// resolver 为路径型访问（/resolve 与 /raw/auth）的最小依赖（NewHandler
+	// 以 *files.Store 装配，接口化便于单测注入内存实现，模式同 versionReader）。
+	resolver resolveAPI
+	// unpacker 为 zip 解包导入的最小文件依赖（NewHandler 以 *files.Store
+	// 装配，接口化便于单测注入内存实现）。
+	unpacker unpackAPI
+	// contentSigner 为 /raw/* 短期授权（HMAC grant）签发器（SetContentSigner
+	// 注入）；nil 时 resolve 端点 503、raw 端点 404（生产恒注入）。
+	contentSigner *contenturl.Signer
+	// contentBaseURL 为受控原始内容的对外基地址（CONTENT_PUBLIC_BASE_URL，
+	// 可选）：resolve 以 origin_content=1 请求时拼接绝对 raw_url。
+	contentBaseURL string
 	// loginMaxRetries / loginLockDuration 为 C9 连续登录失败锁定策略
 	//（LOGIN_MAX_RETRIES 默认 5 / LOGIN_LOCK_MINUTES 默认 15m）。
 	loginMaxRetries   int
 	loginLockDuration time.Duration
 	backupDir         string
+	// mcpDeps 为 MCP 端点（POST /mcp）的服务依赖：NewHandler 以 files/
+	// upload/share/team/storage 装配，search 于 Register 时并入（SetSearch
+	// 后注册）；测试可直接改写注入内存实现（模式同 resolver/unpacker）。
+	mcpDeps *mcp.Deps
+	// mcpServer 为 Register 时构建的 MCP 服务端实例（mcpPost 消费）。
+	mcpServer *mcp.Server
+	// zipper 为目录打包下载（download.zip）的最小文件依赖（NewHandler 以
+	// *files.Store 装配，接口化便于单测注入内存实现，模式同 unpacker）。
+	zipper zipDownloadAPI
+	// openWith 为「默认打开方式」偏好存取（NewHandler 以 *auth.UserStore
+	// 装配，接口化便于单测注入内存实现）；未注入时端点返回 503。
+	openWith openWithStore
 }
 
 func NewHandler(authService *auth.Service, users *auth.UserStore, fileStore *files.Store, shares *share.Service, teams *team.Service, uploads *upload.Service, storage upload.Storage, cookieSecure bool, cookieDomain string, refreshTokenTTL time.Duration) *Handler {
-	return &Handler{auth: authService, users: users, files: fileStore, shares: shares, teams: teams, uploads: uploads, storage: storage, cookieSecure: cookieSecure, cookieDomain: cookieDomain, refreshTokenTTL: refreshTokenTTL, audit: audit.NopRecorder{}, mailer: mail.NewNoopMailer(), idem: newIdemCache(idempotencyTTL), versionReader: fileStore, usage: fileStore, aiFiles: fileStore, csrfStrict: true, loginMaxRetries: 5, loginLockDuration: 15 * time.Minute}
+	h := &Handler{auth: authService, users: users, files: fileStore, shares: shares, teams: teams, uploads: uploads, storage: storage, cookieSecure: cookieSecure, cookieDomain: cookieDomain, refreshTokenTTL: refreshTokenTTL, audit: audit.NopRecorder{}, mailer: mail.NewNoopMailer(), idem: newIdemCache(idempotencyTTL), versionReader: fileStore, usage: fileStore, aiFiles: fileStore, resolver: fileStore, unpacker: fileStore, csrfStrict: true, loginMaxRetries: 5, loginLockDuration: 15 * time.Minute, mcpDeps: &mcp.Deps{Files: fileStore, Uploads: uploads, Storage: storage, Shares: shares, Teams: teams}}
+	if fileStore != nil {
+		h.zipper = fileStore
+	}
+	if users != nil {
+		h.openWith = users
+	}
+	return h
 }
 
 // SetCSRFStrict 控制 refresh/logout 的同源严格校验（CSRF_STRICT，幂等；
@@ -369,6 +404,10 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	//（nickname/department/position/phone/bio/language/timezone）。
 	api.GET("/me", h.me)
 	api.PATCH("/me", h.updateMe)
+	// 默认打开方式偏好（按扩展名，user_open_with）：列表、upsert 与删除。
+	api.GET("/me/open-with", h.listOpenWith)
+	api.PUT("/me/open-with", h.updateOpenWith)
+	api.DELETE("/me/open-with", h.deleteOpenWith)
 	// 修改密码（认证）：成功撤销其他会话并轮换当前会话。
 	api.POST("/auth/change-password", h.changePassword)
 	// 两步验证（TOTP，v2）：状态、开始设置、确认启用（返回一次性恢复码）
@@ -401,6 +440,7 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	api.PATCH("/webhooks/:id", h.updateWebhook)
 	api.DELETE("/webhooks/:id", h.deleteWebhook)
 	api.GET("/files", auth.RequireScope("files:read"), h.listFiles)
+	api.POST("/files/from-template", auth.RequireScope("files:write"), h.createOfficeTemplate)
 	api.POST("/files/:id/copy", auth.RequireScope("files:write"), h.copyFile)
 	// 全文检索（文件名 + 文本内容）：高频读端点，不记录审计；
 	// 访问判定与 /files 检索模式一致（个人 owner + 团队在册成员）。
@@ -416,6 +456,10 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	api.PATCH("/files/:id", h.renameFile)
 	api.DELETE("/files/:id", h.deleteFile)
 	api.GET("/files/:id/download", h.downloadFile)
+	// 目录打包下载（流式 zip）：子树预遍历限 2000 条目/2GB（超限 413）。
+	api.GET("/files/:id/download.zip", auth.RequireScope("files:read"), h.downloadFolderZip)
+	// XMind → Markdown 转换：源须 .xmind，产物经上传管线落库同目录。
+	api.POST("/files/:id/convert-markdown", auth.RequireScope("files:write"), h.convertToMarkdown)
 	api.GET("/files/:id/preview", h.previewFile)
 	// AI 摘要（OpenAI 兼容 /chat/completions）：读权限 + 文本类 + 当前版本
 	// available；高频端点不记审计；AI 禁用时 503 AI_DISABLED。
@@ -460,6 +504,8 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	api.GET("/shares/:id/files/:fid/preview", h.shareFilePreview)
 	// 用户目录查找（邀请场景）：任何登录用户可用，仅返回 id 与 username。
 	api.GET("/users/lookup", h.lookupUsers)
+	// 用户检索（成员/ACL 主体选择器）：任何登录用户可用。
+	api.GET("/users/search", h.searchUsers)
 	// 团队与团队空间。
 	api.POST("/teams", h.createTeam)
 	api.GET("/teams", h.listTeams)
@@ -495,6 +541,17 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 		r.GET("/content/:pid/*filepath", publicLimiter(NewRateLimiter(h.webpkgRateLimitPerMin)), h.webpkgContent)
 		api.POST("/files/:id/webpkg/extract", h.extractWebpkg)
 	}
+	// 路径型访问（v1.1）：登录 resolve API 换取短期 grant 后经 /raw/* 取
+	// 受控原始内容。raw 域挂根路由（在 /api/v1 之外，无 Bearer、不携带主站
+	// refresh cookie），授权完全由 HMAC grant + 每请求实时读校验保证；
+	// 独立按 IP 轻限流。/raw/share 为公开目录分享子资源入口（token+grant）。
+	api.GET("/resolve/:nsType/:nsScope/*path", auth.RequireScope("files:read"), h.resolvePath)
+	api.POST("/files/:id/unpack", auth.RequireScope("files:write"), h.unpackZip)
+	rawLimiter := publicLimiter(NewRateLimiter(rawRateLimitPerMin))
+	r.GET("/raw/auth/:grant/:nsType/:nsScope/*path", rawLimiter, h.serveRawAuth)
+	r.HEAD("/raw/auth/:grant/:nsType/:nsScope/*path", rawLimiter, h.serveRawAuth)
+	r.GET("/raw/share/:token/:grant/*path", rawLimiter, h.serveRawShare)
+	r.HEAD("/raw/share/:token/:grant/*path", rawLimiter, h.serveRawShare)
 	// 管理端（admin 组）：RequireAccessToken 之后叠加 RequireRole(admin)。
 	admin := api.Group("/admin", auth.RequireRole(auth.RoleAdmin, h.roles))
 	admin.GET("/settings", h.listAdminSettings)
@@ -531,8 +588,16 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	public := r.Group("/api/v1/public", publicLimiter(NewRateLimiter(publicRateLimit)))
 	public.GET("/shares/:token", h.publicShareInfo)
 	public.GET("/shares/:token/download", h.publicShareDownload)
+	// 目录分享打包下载（流式 zip）：成功消耗一次下载额度（原子消费+限额）。
+	public.GET("/shares/:token/download.zip", h.publicShareDownloadZip)
 	public.GET("/shares/:token/preview", h.publicSharePreview)
+	// 目录分享树（清单/子文件元数据 + raw grant 签发；密码分享先 verify）。
+	public.GET("/shares/:token/tree/*path", h.publicShareTree)
 	public.POST("/shares/:token/verify", shareVerifyLimiter(NewRateLimiter(shareVerifyRateLimitPerMin)), h.publicShareVerify)
+	// MCP（Model Context Protocol）：JSON-RPC 2.0 over HTTP，挂根级 /mcp
+	//（不经 /api/v1 的 CSRF；独立按 IP 轻限流）。依赖经 NewHandler 装配
+	//（files/upload/share/team/storage），search 经 SetSearch 注入。
+	h.registerMCP(r, jwtSecret)
 }
 
 type loginRequest struct {
@@ -729,6 +794,31 @@ func (h *Handler) lookupUsers(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, out)
 }
+
+// searchUsers GET /api/v1/users/search?q=：成员/ACL 主体选择器的用户检索。
+// q 至少 2 个字符（防误触全量枚举）；匹配策略见 auth.UserStore.Search
+// （username/nickname 子串，q 含 @ 时也匹配 email）。
+// 权限与 lookupUsers 相同：任何登录用户可用（添加团队成员/ACL 场景需要），
+// 固定 LIMIT 20；返回 id/username/email/nickname（团队协作场景需 email 辅助
+// 区分同名用户，自托管环境内属可接受暴露面）。
+func (h *Handler) searchUsers(c *gin.Context) {
+	q := strings.TrimSpace(c.Query("q"))
+	if len([]rune(q)) < 2 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "query too short"})
+		return
+	}
+	users, err := h.users.Search(q, 20)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to search users"})
+		return
+	}
+	out := make([]gin.H, 0, len(users))
+	for _, u := range users {
+		out = append(out, gin.H{"id": u.ID, "username": u.Username, "email": u.Email, "nickname": u.Nickname})
+	}
+	c.JSON(http.StatusOK, gin.H{"users": out})
+}
+
 func parseID(c *gin.Context, value string) (uuid.UUID, bool) {
 	id, err := uuid.Parse(value)
 	if err != nil {
@@ -799,9 +889,25 @@ func (h *Handler) listFiles(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to list files"})
 		return
 	}
+	// 网页目录标记：目录直接子级含 index.html 时 has_index_web=true，
+	// 前端把该目录默认点击行为切换为"网页打开"。查询失败不阻塞列举。
+	folderIDs := make([]uuid.UUID, 0, len(out))
+	for _, f := range out {
+		if f.Type == "folder" {
+			folderIDs = append(folderIDs, f.ID)
+		}
+	}
+	indexWeb, ierr := h.files.HasIndexWebChildren(folderIDs)
+	if ierr != nil {
+		indexWeb = nil
+	}
 	result := make([]gin.H, 0, len(out))
 	for _, f := range out {
-		result = append(result, fileJSON(f))
+		item := fileJSON(f)
+		if f.Type == "folder" {
+			item["has_index_web"] = indexWeb[f.ID]
+		}
+		result = append(result, item)
 	}
 	c.JSON(http.StatusOK, gin.H{"files": result})
 }

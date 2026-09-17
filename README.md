@@ -6,6 +6,15 @@
 - 前端：React 18 + TypeScript + Vite（PWA），构建产物并入 Caddy 镜像，无独立前端容器
 - 部署：docker compose 一键起，caddy 为唯一宿主端口（80/443）
 
+## 界面预览
+
+| | |
+|---|---|
+| ![登录](docs/screenshots/login.png) | ![文件管理](docs/screenshots/files.png) |
+| ![Wiki 视图](docs/screenshots/wiki.png) | ![富文本编辑](docs/screenshots/richtext.png) |
+| ![在线查看](docs/screenshots/viewer.png) | ![管理后台-审计](docs/screenshots/admin-audit.png) |
+| ![管理后台-TLS](docs/screenshots/admin-tls.png) | ![设置-安全](docs/screenshots/settings-security.png) |
+
 ## 功能特性
 
 **文件管理**

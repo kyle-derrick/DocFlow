@@ -185,6 +185,10 @@ func (h *Handler) completeUpload(c *gin.Context) {
 	}
 	v, err := h.uploads.Complete(id)
 	if err != nil {
+		if errors.Is(err, upload.ErrInvalidOffice) {
+			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error(), "status": v.Status})
+			return
+		}
 		if errors.Is(err, upload.ErrBlockedExtension) {
 			// 扩展名黑名单复检（会话期间黑名单可能变更）：400。
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "status": v.Status})

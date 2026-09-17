@@ -292,8 +292,8 @@ func (s *Service) NewSessionConfig(user, fileID uuid.UUID, opts SessionOptions) 
 		"fileType": fileExt(f.Name),
 		"key":      documentKey(fileID, version.ID),
 		"title":    f.Name,
-		"url": fmt.Sprintf("%s/api/v1/onlyoffice/download/%s?v=%s&token=%s",
-			base, fileID, version.ID, url.QueryEscape(token)),
+		"url": fmt.Sprintf("%s/api/v1/onlyoffice/download/%s/%s?v=%s&token=%s",
+			base, fileID, url.PathEscape(f.Name), version.ID, url.QueryEscape(token)),
 		"permissions": map[string]any{"edit": canEdit, "print": true, "download": true},
 	}
 	name := user.String()

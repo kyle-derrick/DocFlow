@@ -18,7 +18,7 @@ type PersonalDashboard struct {
 	// TeamFileCount 当前用户可访问团队空间的未软删文件数（在册成员实时
 	// 判定，EXISTS team_members，与检索/分享的权限口径一致）。
 	TeamFileCount int64
-	// RecentFiles 个人空间最近更新的文件（updated_at 倒序）。
+	// RecentFiles 用户可访问的个人/团队文件（updated_at 倒序）。
 	RecentFiles []File
 }
 
@@ -51,8 +51,9 @@ func (s *Store) PersonalDashboardStats(owner uuid.UUID, recentLimit int) (Person
 		Count(&out.TeamFileCount).Error; err != nil {
 		return PersonalDashboard{}, err
 	}
-	if err := s.db.
-		Where(personalFileScope+" AND current_version_id IS NOT NULL", owner).
+	if err := s.db.Model(&File{}).
+		Where("deleted_at IS NULL AND is_root = false AND type = 'file' AND current_version_id IS NOT NULL").
+		Where("(scope_type = 'personal' AND owner_id = ?) OR (scope_type = 'team' AND team_id IS NOT NULL AND EXISTS (SELECT 1 FROM team_members tm WHERE tm.team_id = files.team_id AND tm.user_id = ?))", owner, owner).
 		Where("EXISTS (SELECT 1 FROM file_versions fv JOIN object_blobs ob ON ob.id = fv.object_blob_id WHERE fv.id = files.current_version_id AND fv.file_id = files.id AND ob.status = ?)", BlobStatusAvailable).
 		Order("updated_at DESC, id DESC").
 		Limit(recentLimit).

@@ -294,7 +294,11 @@ services:
   # 版本锁定 8.2.3（设计文档 16.5 风险 4：8.2.x 内可平滑升级，跨大版本需评估
   # API 变更）。
   onlyoffice:
-    image: onlyoffice/documentserver:8.2.3
+    # 官方镜像 + 中文字体（deploy/onlyoffice/Dockerfile）：无 CJK 字体时
+    # 中文文档渲染为方块乱码。镜像内容与 8.2.3 完全一致，仅叠加 fonts-noto-cjk。
+    build:
+      context: ./deploy/onlyoffice
+    image: docflow/onlyoffice:8.2.3-cjk
     profiles: ["full"]
     environment:
       - JWT_ENABLED=true

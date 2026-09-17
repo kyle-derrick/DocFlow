@@ -114,6 +114,9 @@ func (f *fakeUserDirectory) Lookup(q string, limit int) ([]auth.User, error) {
 	f.lookupQ, f.lookupLimit = q, limit
 	return f.results, f.lookupErr
 }
+func (f *fakeUserDirectory) Search(q string, limit int) ([]auth.User, error) {
+	return f.results, f.lookupErr
+}
 func (f *fakeUserDirectory) Username(id uuid.UUID) (string, error) {
 	if n, ok := f.names[id]; ok {
 		return n, nil
@@ -307,6 +310,54 @@ func TestLookupUsersEmailQueryPassedThrough(t *testing.T) {
 	}
 	if fake.lookupQ != "alice@example.com" {
 		t.Fatalf("lookup q = %q, want unchanged email query", fake.lookupQ)
+	}
+}
+
+// searchUsers：q 少于 2 个字符返回 400；正常查询返回 {users:[...]}
+// （id/username/email/nickname），绝不返回 password/status 等敏感字段；
+// 目录层错误返回 500。
+func TestSearchUsers(t *testing.T) {
+	nick := "Alice Liddell"
+	alice := auth.User{ID: uuid.New(), Username: "alice", Email: "alice@example.com", Nickname: &nick}
+	fake := &fakeUserDirectory{results: []auth.User{alice}}
+	h := &Handler{users: fake}
+
+	for _, q := range []string{"", " ", "a"} {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/users/search?q="+url.QueryEscape(q), nil)
+		h.searchUsers(c)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("q=%q status = %d, want 400", q, w.Code)
+		}
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/users/search?q=ali", nil)
+	h.searchUsers(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	for _, want := range []string{`"users":`, `"username":"alice"`, `"email":"alice@example.com"`, `"nickname":"Alice Liddell"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("body = %s, want contains %q", body, want)
+		}
+	}
+	for _, forbidden := range []string{"password", "password_hash", "status"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("body %q must not contain %q", body, forbidden)
+		}
+	}
+
+	h = &Handler{users: &fakeUserDirectory{lookupErr: errors.New("db down")}}
+	w = httptest.NewRecorder()
+	c, _ = gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/users/search?q=ali", nil)
+	h.searchUsers(c)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("error status = %d, want 500", w.Code)
 	}
 }
 

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -45,7 +47,22 @@ type callbackRequest struct {
 func (s *Service) HandleCallback(body []byte, authorization, ip, userAgent string) error {
 	status, err := s.processCallback(body, authorization, ip, userAgent)
 	metrics.IncOnlyOfficeCallback(CallbackStatusLabel(status), CallbackResultLabel(err))
+	if err != nil {
+		var req callbackRequest
+		_ = json.Unmarshal(body, &req)
+		fileID, _ := fileIDFromKey(req.Key)
+		log.Printf("[onlyoffice] callback failed (file=%s key=%s status=%d): %s", fileID, req.Key, status, redactCallbackError(err.Error()))
+	}
 	return err
+}
+
+func redactCallbackError(message string) string {
+	for _, marker := range []string{"token=", "access_token=", "jwt="} {
+		if i := strings.Index(strings.ToLower(message), marker); i >= 0 {
+			return message[:i] + marker + "[redacted]"
+		}
+	}
+	return message
 }
 
 // processCallback 执行回调主逻辑，返回归一化前的原始 status（校验失败且
@@ -251,7 +268,7 @@ func (s *Service) downloadAndStore(f files.File, url string, userID uuid.UUID) (
 		return 0, 0, err
 	}
 	sum := hex.EncodeToString(hash.Sum(nil))
-	version, newBlob, err := s.files.AddVersion(f, finalKey, sum, counter.n, normalizeContentType(contentType), userID)
+	version, newBlob, err := s.files.AddVersion(f, finalKey, sum, counter.n, normalizeContentType(contentType, f.Name), userID)
 	if err != nil {
 		_ = s.storage.Delete(finalKey)
 		return 0, 0, err
@@ -263,13 +280,17 @@ func (s *Service) downloadAndStore(f files.File, url string, userID uuid.UUID) (
 	return version.Version, counter.n, nil
 }
 
-// normalizeContentType 归一化回调下载的 Content-Type（空或带参数回退 octet-stream）。
-func normalizeContentType(contentType string) string {
+// normalizeContentType normalizes callback MIME and falls back to the original
+// file extension because Document Server commonly responds with octet-stream.
+func normalizeContentType(contentType, name string) string {
 	contentType = strings.TrimSpace(strings.Split(contentType, ";")[0])
-	if contentType == "" || strings.EqualFold(contentType, "application/octet-stream") {
-		return "application/octet-stream"
+	if contentType != "" && !strings.EqualFold(contentType, "application/octet-stream") {
+		return contentType
 	}
-	return contentType
+	if detected := mime.TypeByExtension(strings.ToLower(filepath.Ext(name))); detected != "" {
+		return strings.TrimSpace(strings.Split(detected, ";")[0])
+	}
+	return "application/octet-stream"
 }
 
 // callbackUser 取回调 users 中首个合法 UUID 作为版本归属用户，缺省回退 fallback。

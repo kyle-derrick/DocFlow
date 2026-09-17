@@ -5,9 +5,9 @@
 // 模式（Mode）：
 //   - http      站点 {$APP_DOMAIN::80}（env 驱动，本地验证默认，明文）；
 //   - auto      站点 = 管理员填写的域名，Caddy 自动 ACME 签发受信证书
-//               （要求公网域名 DNS 指向本机，80 端口做挑战/重定向）；
+//     （要求公网域名 DNS 指向本机，80 端口做挑战/重定向）；
 //   - internal  站点 = 域名或 IP + tls internal（Caddy 内部 CA 自签，
-//               流量加密但浏览器不受信告警，适合内网/IP 部署）。
+//     流量加密但浏览器不受信告警，适合内网/IP 部署）。
 //
 // 模板中 {$VAR} 占位符（APP_DOMAIN/CONTENT_DOMAIN/ONLYOFFICE_UPSTREAM 等）
 // 保持原样下发，由 caddy 容器自身的 env 展开——backend 无需复制这些配置。

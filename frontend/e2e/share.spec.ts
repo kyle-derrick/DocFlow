@@ -13,7 +13,8 @@ let shareToken = ''
 test.describe.serial('公开分享', () => {
   test('创建公开分享、复制链接并退出登录', async ({ page }) => {
     await loginViaUI(page)
-    await page.locator('input[type="file"]').setInputFiles({
+    // 普通文件上传 input（工具栏另有「上传目录」的 webkitdirectory input，取第一个）。
+    await page.locator('input[type="file"]').first().setInputFiles({
       name: fileName,
       mimeType: 'text/plain',
       buffer: Buffer.from(fileBody, 'utf8'),
@@ -23,8 +24,9 @@ test.describe.serial('公开分享', () => {
     ).toHaveText('已完成', { timeout: 60_000 })
     await expect(fileRow(page, fileName)).toBeVisible()
 
-    // 创建公开分享（默认：公开链接 + 可下载 + 永久）。
-    await fileRow(page, fileName).getByRole('button', { name: '分享', exact: true }).click()
+    // 创建公开分享（默认：公开链接 + 可下载 + 永久）。操作在「⋯」菜单内。
+    await fileRow(page, fileName).getByRole('button', { name: '操作' }).click()
+    await page.locator('.ctx-menu').getByRole('button', { name: '分享', exact: true }).click()
     await page.getByRole('button', { name: '创建链接', exact: true }).click()
     const linkInput = page.locator('.share-link input')
     const link = await linkInput.inputValue()

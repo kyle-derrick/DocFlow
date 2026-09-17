@@ -3,6 +3,9 @@ dist/
 .npm-cache/
 storage/
 
+# 本地构建缓存（Go/npm，迁出 C 盘）
+.cache/
+
 # Playwright E2E 产物（frontend）
 frontend/test-results/
 frontend/playwright-report/

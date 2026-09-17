@@ -35,7 +35,8 @@ test.describe.serial('文件全流程', () => {
 
   test('重命名文件夹', async ({ page }) => {
     await loginViaUI(page)
-    await fileRow(page, folder).getByRole('button', { name: '重命名', exact: true }).click()
+    await fileRow(page, folder).getByRole('button', { name: '操作' }).click()
+    await page.locator('.ctx-menu').getByRole('button', { name: '重命名', exact: true }).click()
     await page.getByLabel('新名称').fill(folderRenamed)
     await page.getByRole('button', { name: '保存', exact: true }).click()
     await expect(fileRow(page, folderRenamed)).toBeVisible()
@@ -57,7 +58,8 @@ test.describe.serial('文件全流程', () => {
     await loginViaUI(page)
     await openSubFolder(page)
 
-    await page.locator('input[type="file"]').setInputFiles({
+    // 普通文件上传 input（工具栏另有「上传目录」的 webkitdirectory input，取第一个）。
+    await page.locator('input[type="file"]').first().setInputFiles({
       name: fileName,
       mimeType: 'text/plain',
       buffer: Buffer.from(fileBody, 'utf8'),
@@ -89,7 +91,13 @@ test.describe.serial('文件全流程', () => {
         page.getByRole('button', { name, exact: true }).click(),
       ])
       await editor.waitForLoadState()
-      await expect(editor.locator('textarea')).toBeVisible()
+      if (name === 'Markdown 笔记') {
+        // Markdown 默认富文本编辑器（Tiptap 懒加载 chunk）：ProseMirror 画布
+        // 是 contenteditable div，不再是源码模式的 textarea。
+        await expect(editor.locator('.rich-text-content')).toBeVisible()
+      } else {
+        await expect(editor.locator('textarea')).toBeVisible()
+      }
       await editor.close()
     }
 
@@ -112,7 +120,10 @@ test.describe.serial('文件全流程', () => {
     await openSubFolder(page)
     const [download] = await Promise.all([
       page.waitForEvent('download'),
-      fileRow(page, fileName).getByRole('button', { name: '下载', exact: true }).click(),
+      (async () => {
+        await fileRow(page, fileName).getByRole('button', { name: '操作' }).click()
+        await page.locator('.ctx-menu').getByRole('button', { name: '下载', exact: true }).click()
+      })(),
     ])
     expect(download.suggestedFilename()).toBe(fileName)
   })
@@ -121,7 +132,8 @@ test.describe.serial('文件全流程', () => {
     autoAcceptDialogs(page)
     await loginViaUI(page)
     await openSubFolder(page)
-    await fileRow(page, fileName).getByRole('button', { name: '删除', exact: true }).click()
+    await fileRow(page, fileName).getByRole('button', { name: '操作' }).click()
+    await page.locator('.ctx-menu').getByRole('button', { name: '删除', exact: true }).click()
     await expect(fileRow(page, fileName)).toHaveCount(0)
 
     await page.goto('/trash')
@@ -144,7 +156,8 @@ test.describe.serial('文件全流程', () => {
     autoAcceptDialogs(page)
     await loginViaUI(page)
     await openSubFolder(page)
-    await fileRow(page, fileName).getByRole('button', { name: '删除', exact: true }).click()
+    await fileRow(page, fileName).getByRole('button', { name: '操作' }).click()
+    await page.locator('.ctx-menu').getByRole('button', { name: '删除', exact: true }).click()
     await expect(fileRow(page, fileName)).toHaveCount(0)
 
     await page.goto('/trash')

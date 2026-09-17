@@ -269,7 +269,7 @@ func TestOnlyOfficeSessionAndCallbackEndpoints(t *testing.T) {
 		t.Fatalf("document.key = %v, want %s", document["key"], wantKey)
 	}
 	docURL := document["url"].(string)
-	if !strings.HasPrefix(docURL, "http://backend:8080/api/v1/onlyoffice/download/") {
+	if !strings.HasPrefix(docURL, "http://backend:8080/api/v1/onlyoffice/download/"+store.file.ID.String()+"/PRD.docx?") {
 		t.Fatalf("document.url = %q", docURL)
 	}
 	// 未接线写授权器（SetWriteAuthorizer）：session 保守降级只读会话。

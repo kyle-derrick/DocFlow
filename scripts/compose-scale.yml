@@ -6,11 +6,11 @@ services:
   backend:
     ports:
       - "18081-18082:8080"
-    # OIDC issuer 主机名（与 .env OIDC_ISSUER 一致）：容器内解析到宿主网关
-    #（host-gateway = Docker Desktop 宿主），Windows/WSL 侧由各自 hosts 指向
-    # 127.0.0.1（Docker Desktop 发布端口对两者均在 localhost 可达）。
-    extra_hosts:
-      - "docflow-idp.local:host-gateway"
+    # OIDC issuer 主机名 docflow-idp.local 的容器内解析改走 keycloak 的
+    # 网络 alias（见下方 keycloak 服务）：原 host-gateway（192.168.65.254）
+    # 在 Docker Desktop WSL2 下容器不可达，backend 访问 :18090 超时导致
+    # oidc discovery Fatal 无限重启（实测 wget 超时、RestartCount 468）。
+    # 浏览器侧仍经宿主端口 18090 访问（Windows/WSL hosts 指向 127.0.0.1）。
   mailpit:
     image: axllent/mailpit:v1.21
     restart: unless-stopped
@@ -19,20 +19,28 @@ services:
     ports:
       - "18025:8025"
     profiles: ["minimal", "full", "antivirus"]
-  # keycloak：OIDC IdP（宿主 18090，backend 经网关 172.18.0.1:18090 访问，
-  # issuer 两端一致）。dev-file 的 H2 落在 /opt/keycloak/data，挂 named
+  # keycloak：OIDC IdP。dev-file 的 H2 落在 /opt/keycloak/data，挂 named
   # volume 防容器 recreate 丢 realm/client/user。验证专用，不并入生产编排。
+  # issuer 主机名 docflow-idp.local 直接以网络别名发布到 compose 内网，容器
+  # 进程监听 18090（= issuer 端口），宿主映射同端口 18090：backend 经别名
+  # DNS 访问 docflow-idp.local:18090，浏览器经 Windows/WSL hosts →
+  # 127.0.0.1:18090 访问，两端 issuer 一致且不再依赖 host-gateway 回环
+  #（Docker Desktop WSL2 容器 -> 192.168.65.254 不可达，实测超时）。
   keycloak:
     image: quay.io/keycloak/keycloak:26.0
-    command: ["start-dev", "--http-port=8080"]
+    command: ["start-dev", "--http-port=18090"]
     restart: unless-stopped
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
       KC_BOOTSTRAP_ADMIN_PASSWORD: admin
     volumes:
       - keycloak_dev_data:/opt/keycloak/data
+    networks:
+      default:
+        aliases:
+          - docflow-idp.local
     ports:
-      - "18090:8080"
+      - "18090:18090"
     profiles: ["minimal", "full", "antivirus"]
 volumes:
   keycloak_dev_data:

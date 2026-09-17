@@ -31,6 +31,10 @@ type ClamAVScanner struct {
 
 const (
 	clamavDefaultTimeout = 5 * time.Minute
+	// clamavDialTimeoutCap 拨号阶段超时上限：与传输超时解耦——ClamAV
+	// 不可达（fail closed 场景）时快速失败，避免同步 complete 请求
+	// 挂满整个 CLAMAV_TIMEOUT（默认 5 分钟）导致前端一直"提交处理..."。
+	clamavDialTimeoutCap = 5 * time.Second
 	// clamavChunkSize 单个 INSTREAM 分块大小，取保守安全值以兼容各版本 clamd。
 	clamavChunkSize = 1024
 )
@@ -56,7 +60,13 @@ func clamavDial(addr string, timeout time.Duration) (net.Conn, error) {
 }
 
 func (s *ClamAVScanner) Scan(r io.Reader) error {
-	conn, err := s.dial(s.addr, s.timeout)
+	// 拨号用短超时（cap 5s）：不可达时快速失败；建连后的会话仍用完整
+	// timeout（大文件 INSTREAM 传输可能确实需要分钟级）。
+	dialTimeout := s.timeout
+	if dialTimeout > clamavDialTimeoutCap || dialTimeout <= 0 {
+		dialTimeout = clamavDialTimeoutCap
+	}
+	conn, err := s.dial(s.addr, dialTimeout)
 	if err != nil {
 		if s.required {
 			return fmt.Errorf("clamav unreachable at %s: %w", s.addr, err)

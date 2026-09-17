@@ -41,6 +41,8 @@ func TestDashboardPersonal(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	user := uuid.New()
 	updated := time.Date(2026, 9, 1, 8, 0, 0, 0, time.UTC)
+	parentID := uuid.New()
+	versionID := uuid.New()
 	fake := &fakeDashboardSource{summary: DashboardSummary{
 		Files:        12,
 		StorageBytes: 2048,
@@ -48,7 +50,7 @@ func TestDashboardPersonal(t *testing.T) {
 		Shares:       4,
 		Uploads7d:    7,
 		RecentFiles: []files.File{
-			{ID: uuid.New(), Name: "a.txt", UpdatedAt: updated},
+			{ID: uuid.New(), Name: "a.txt", ParentID: &parentID, CurrentVersionID: &versionID, ScopeType: "personal", UpdatedAt: updated},
 		},
 	}}
 	// 非 admin：无全局统计节。
@@ -71,8 +73,10 @@ func TestDashboardPersonal(t *testing.T) {
 	if strings.Contains(body, `"admin"`) {
 		t.Fatalf("non-admin body must not contain admin section: %s", body)
 	}
-	if !strings.Contains(body, `"name":"a.txt"`) || !strings.Contains(body, updated.Format(time.RFC3339Nano)) {
-		t.Fatalf("body %s must contain recent file name/updated_at", body)
+	for _, want := range []string{`"name":"a.txt"`, `"parent_id":"` + parentID.String() + `"`, `"current_version_id":"` + versionID.String() + `"`, `"scope_type":"personal"`, updated.Format(time.RFC3339Nano)} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("body %s must contain recent file field %s", body, want)
+		}
 	}
 }
 

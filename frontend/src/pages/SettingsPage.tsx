@@ -13,7 +13,7 @@
 // 会话列表不标记「当前会话」（实现取舍：当前会话由 refresh cookie 识别，
 // 凭据哈希不出服务端）。
 import { FormEvent, useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { NavLink, Navigate, useNavigate, useParams } from 'react-router-dom'
 import {
   ApiError,
   ApiTokenItem,
@@ -1162,43 +1162,50 @@ function NotificationsPanel({ onError, onNotice }: { onError: (msg: string) => v
   )
 }
 
+const settingsSections = [['profile', '资料'], ['appearance', '外观'], ['security', '安全'], ['notifications', '通知'], ['developer', '开发者']] as const
+
 export default function SettingsPage() {
+  const { section = 'profile' } = useParams()
   const locale = useLocale()
   const msg = (key: MessageKey) => t(locale, key)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  if (!settingsSections.some(([key]) => key === section)) return <Navigate to="/settings/profile" replace />
   return (
-    <div className="page">
+    <div className="page section-page">
+      <aside className="section-sidebar"><h3>设置</h3>{settingsSections.map(([key, label]) => <NavLink key={key} to={`/settings/${key}`} className={({ isActive }) => isActive ? 'active' : ''}>{label}</NavLink>)}</aside>
+      <div className="section-content">
       <div className="page-head">
         <h2>{msg('settings')}</h2>
       </div>
       {notice && <div className="banner ok">{notice}</div>}
       {error && <div className="banner error">{error}</div>}
-      <ProfilePanel
+      {section === 'profile' && <ProfilePanel
         onError={(msg) => { setError(msg); setNotice('') }}
         onNotice={(msg) => { setNotice(msg); setError('') }}
-      />
-      <AppearancePanel />
-      <NotificationsPanel
+      />}
+      {section === 'appearance' && <AppearancePanel />}
+      {section === 'notifications' && <NotificationsPanel
         onError={(msg) => { setError(msg); setNotice('') }}
         onNotice={(msg) => { setNotice(msg); setError('') }}
-      />
-      <TotpPanel
+      />}
+      {section === 'security' && <TotpPanel
         onError={(msg) => { setError(msg); setNotice('') }}
         onNotice={(msg) => { setNotice(msg); setError('') }}
-      />
-      <WebhooksPanel
+      />}
+      {section === 'developer' && <WebhooksPanel
         onError={(msg) => { setError(msg); setNotice('') }}
         onNotice={(msg) => { setNotice(msg); setError('') }}
-      />
-      <SessionsPanel
+      />}
+      {section === 'security' && <SessionsPanel
         onError={(msg) => { setError(msg); setNotice('') }}
         onNotice={(msg) => { setNotice(msg); setError('') }}
-      />
-      <TokensPanel
+      />}
+      {section === 'developer' && <TokensPanel
         onError={(msg) => { setError(msg); setNotice('') }}
         onNotice={(msg) => { setNotice(msg); setError('') }}
-      />
+      />}
+      </div>
     </div>
   )
 }

@@ -4,8 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
+	"path/filepath"
 	"strings"
+
+	"golang.org/x/text/unicode/norm"
 
 	"github.com/docflow/docflow/internal/files"
 	"github.com/docflow/docflow/internal/onlyoffice"
@@ -56,6 +60,7 @@ func (h *Handler) registerOnlyOfficeRoutes(api *gin.RouterGroup, r *gin.Engine) 
 	}
 	group := r.Group("/api/v1/onlyoffice", publicLimiter(NewRateLimiter(limit)))
 	group.GET("/download/:fileId", h.onlyofficeDownload)
+	group.GET("/download/:fileId/:filename", h.onlyofficeDownload)
 	group.POST("/callback", h.onlyofficeCallback)
 }
 
@@ -104,6 +109,10 @@ func (h *Handler) onlyofficeDownload(c *gin.Context) {
 	if onlyofficeError(c, err) {
 		return
 	}
+	if filename := c.Param("filename"); filename != "" && norm.NFC.String(filename) != norm.NFC.String(f.Name) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
+		return
+	}
 	r, hasRange, err := parseRange(c.GetHeader("Range"), blob.Size)
 	if err != nil {
 		c.Header("Content-Range", fmt.Sprintf("bytes */%d", blob.Size))
@@ -131,7 +140,13 @@ func (h *Handler) onlyofficeDownload(c *gin.Context) {
 	}
 	c.Header("Content-Disposition", contentDisposition(f.Name))
 	c.Header("Accept-Ranges", "bytes")
-	c.DataFromReader(status, contentLength, blob.MimeType, reader, nil)
+	contentType := blob.MimeType
+	if contentType == "" || strings.EqualFold(contentType, "application/octet-stream") {
+		if detected := mime.TypeByExtension(strings.ToLower(filepath.Ext(f.Name))); detected != "" {
+			contentType = detected
+		}
+	}
+	c.DataFromReader(status, contentLength, contentType, reader, nil)
 }
 
 // onlyofficeCallback POST /api/v1/onlyoffice/callback：DocumentServer 保存回调

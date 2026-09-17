@@ -1,14 +1,11 @@
 import { ReactElement, useEffect, useRef, useState } from 'react'
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import {
-  FileItem,
-  PreviewContent,
-  PreviewKind,
   SearchResultItem,
-  downloadFile,
-  fetchPreview,
   hasAccessToken,
   isAdmin,
+  getMe,
+  MeData,
   listNotifications,
   logout,
   markAllNotificationsRead,
@@ -19,7 +16,7 @@ import {
   SESSION_EXPIRED_EVENT,
   websocketToken,
 } from './api'
-import { Modal, formatTime } from './components/FileBrowser'
+import { formatTime } from './components/FileBrowser'
 import HotkeysHelp from './components/HotkeysHelp'
 import { OfflineBadge, UpdateToast } from './components/PwaStatus'
 import { useHotkeys } from './useHotkeys'
@@ -41,6 +38,8 @@ import ExcalidrawPage from './pages/ExcalidrawPage'
 import TextEditorPage from './pages/TextEditorPage'
 import SettingsPage from './pages/SettingsPage'
 import DashboardPage from './pages/DashboardPage'
+import ViewerPage from './pages/ViewerPage'
+import { EditByPathPage, ViewByPathPage } from './pages/ByPathPage'
 import { messages, saveLocale, t, useLocale } from './i18n'
 
 /** 铃铛未读数轮询间隔（毫秒）。 */
@@ -266,14 +265,6 @@ function TopBarSearch() {
   const [error, setError] = useState('')
   const wrapRef = useRef<HTMLDivElement | null>(null)
 
-  // 预览对话框状态（与 FileBrowser 的预览渲染保持一致）。
-  const [previewTarget, setPreviewTarget] = useState<SearchResultItem | null>(null)
-  const [previewLoading, setPreviewLoading] = useState(false)
-  const [previewKind, setPreviewKind] = useState<PreviewKind | null>(null)
-  const [previewUrl, setPreviewUrl] = useState('')
-  const [previewText, setPreviewText] = useState('')
-  const [previewError, setPreviewError] = useState('')
-
   const doSearch = async (query: string) => {
     setLoading(true)
     setError('')
@@ -311,36 +302,12 @@ function TopBarSearch() {
     return () => document.removeEventListener('mousedown', onDocClick)
   }, [open])
 
-  const closePreview = () => {
-    if (previewUrl) URL.revokeObjectURL(previewUrl)
-    setPreviewUrl('')
-    setPreviewText('')
-    setPreviewKind(null)
-    setPreviewError('')
-    setPreviewLoading(false)
-    setPreviewTarget(null)
-  }
-
-  const openPreview = async (item: SearchResultItem) => {
+  const openViewer = (item: SearchResultItem) => {
     setOpen(false)
     if (item.type !== 'file') return
-    if (previewUrl) URL.revokeObjectURL(previewUrl)
-    setPreviewTarget(item)
-    setPreviewLoading(true)
-    setPreviewKind(null)
-    setPreviewUrl('')
-    setPreviewText('')
-    setPreviewError('')
-    try {
-      const content: PreviewContent = await fetchPreview(item.id)
-      setPreviewKind(content.kind)
-      setPreviewUrl(content.url ?? '')
-      setPreviewText(content.text ?? '')
-    } catch (err) {
-      setPreviewError(err instanceof Error ? err.message : '预览加载失败')
-    } finally {
-      setPreviewLoading(false)
-    }
+    const url = new URL(`/view/${item.id}`, window.location.origin)
+    url.searchParams.set('returnTo', `${window.location.pathname}${window.location.search}`)
+    window.open(`${url.pathname}${url.search}`, '_blank', 'noopener')
   }
 
   const onInputKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -377,7 +344,7 @@ function TopBarSearch() {
           {!loading && !error && results.length > 0 && (
             <div className="search-list">
               {results.map((r) => (
-                <button key={r.id} className="search-item" onClick={() => void openPreview(r)}>
+                <button key={r.id} className="search-item" onClick={() => openViewer(r)}>
                   <span className="search-item-name">
                     <span className="icon">{r.type === 'folder' ? '📁' : '📄'}</span>
                     <Highlight parts={highlightParts(r.name, q.trim())} />
@@ -398,47 +365,6 @@ function TopBarSearch() {
         </div>
       )}
 
-      {previewTarget && (
-        <Modal wide title={`预览「${previewTarget.name}」`} onClose={closePreview}>
-          {previewLoading ? (
-            <p className="hint">加载预览…</p>
-          ) : previewError ? (
-            <div>
-              <div className="error-text">{previewError}</div>
-              <div className="preview-foot">
-                <button className="btn primary" onClick={() => void downloadFile({ id: previewTarget.id, name: previewTarget.name } as FileItem)}>
-                  下载
-                </button>
-              </div>
-            </div>
-          ) : previewKind === 'unsupported' ? (
-            <div>
-              <div className="empty">该文件类型暂不支持在线预览，请下载后查看</div>
-              <div className="preview-foot">
-                <button className="btn primary" onClick={() => void downloadFile({ id: previewTarget.id, name: previewTarget.name } as FileItem)}>
-                  下载
-                </button>
-              </div>
-            </div>
-          ) : previewKind === 'image' ? (
-            <div className="preview-box">
-              <img className="preview-image" src={previewUrl} alt={previewTarget.name} />
-            </div>
-          ) : previewKind === 'pdf' ? (
-            <div className="preview-box">
-              <iframe className="preview-frame" src={previewUrl} title={previewTarget.name} />
-            </div>
-          ) : previewKind === 'webpkg' ? (
-            <div className="preview-box">
-              <iframe className="preview-frame" sandbox="allow-scripts" src={previewUrl} title={previewTarget.name} />
-            </div>
-          ) : previewKind === 'text' ? (
-            <div className="preview-box">
-              <pre className="preview-text">{previewText}</pre>
-            </div>
-          ) : null}
-        </Modal>
-      )}
     </div>
   )
 }
@@ -485,6 +411,12 @@ function TopBar() {
   // admin 探测：JWT 无 role 声明，降级为请求 /admin/stats（200/403）判定，
   // 结果按会话缓存（登录/登出后失效）；非 admin 隐藏「管理」入口。
   const [admin, setAdmin] = useState(false)
+  const [me, setMe] = useState<MeData | null>(null)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const userMenuRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    void getMe().then(setMe).catch(() => setMe(null))
+  }, [])
   useEffect(() => {
     let alive = true
     void isAdmin().then((v) => {
@@ -494,6 +426,15 @@ function TopBar() {
       alive = false
     }
   }, [])
+  // 用户菜单点击外部收起：capture 阶段监听，先于菜单内按钮的冒泡处理。
+  useEffect(() => {
+    if (!menuOpen) return
+    const onDocClick = (e: MouseEvent) => {
+      if (userMenuRef.current && !userMenuRef.current.contains(e.target as Node)) setMenuOpen(false)
+    }
+    document.addEventListener('click', onDocClick, true)
+    return () => document.removeEventListener('click', onDocClick, true)
+  }, [menuOpen])
   const handleLogout = async () => {
     await logout()
     navigate('/login', { replace: true })
@@ -504,17 +445,20 @@ function TopBar() {
       <nav className="nav">
         <Link to="/dashboard" className={location.pathname === '/dashboard' ? 'active' : ''}>{msg('overview')}</Link>
         <Link to="/" className={location.pathname === '/' ? 'active' : ''}>{msg('files')}</Link>
-        <Link to="/teams" className={location.pathname.startsWith('/teams') ? 'active' : ''}>{msg('teams')}</Link>
-        <Link to="/shared" className={location.pathname === '/shared' ? 'active' : ''}>{msg('shared')}</Link>
-        <Link to="/trash" className={location.pathname === '/trash' ? 'active' : ''}>{msg('trash')}</Link>
-        {admin && <Link to="/admin" className={location.pathname === '/admin' ? 'active' : ''}>{msg('admin')}</Link>}
-        <Link to="/settings" className={location.pathname === '/settings' ? 'active' : ''}>{msg('settings')}</Link>
+          <Link to="/shared" className={location.pathname === '/shared' ? 'active' : ''}>{msg('shared')}</Link>
       </nav>
       <TopBarSearch />
       <OfflineBadge />
       <NotificationBell />
-      <button className="btn ghost" onClick={switchLocale} aria-label={msg('language')}>{msg('switchLanguage')}</button>
-      <button className="btn ghost" onClick={handleLogout}>{msg('logout')}</button>
+      <button className="btn ghost language-btn" onClick={switchLocale} title={msg('language')}>🌐 {locale === 'zh-CN' ? '中' : 'EN'}</button>
+      <div className="user-menu" ref={userMenuRef}>
+        <button className="btn ghost user-menu-trigger" aria-expanded={menuOpen} onClick={() => setMenuOpen(!menuOpen)}><span className="avatar">{(me?.profile.nickname || me?.username || '?').slice(0, 1).toUpperCase()}</span>{me?.profile.nickname || me?.username || '用户'}<span className="user-menu-arrow" aria-hidden="true">▾</span></button>
+        {menuOpen && <div className="user-menu-panel">
+          <Link to="/settings/profile">资料</Link><Link to="/settings/security">设置</Link>
+          {admin && <Link to="/admin/overview">管理</Link>}
+          <button onClick={() => void handleLogout()}>{msg('logout')}</button>
+        </div>}
+      </div>
     </header>
   )
 }
@@ -573,20 +517,29 @@ export default function App() {
         <Route path="/teams" element={<RequireAuth><TeamsPage /></RequireAuth>} />
         <Route path="/teams/:id" element={<RequireAuth><TeamSpacePage /></RequireAuth>} />
         <Route path="/shared" element={<RequireAuth><SharedPage /></RequireAuth>} />
-        {/* ONLYOFFICE 在线编辑页（集成启用时由文件行「编辑」按钮进入）。 */}
+        {/* 按路径访问（v1.1，登录）：resolve 现取 grant/file_id 后复用查看与
+            编辑器分发；须置于 /view/:fileId、/edit/:fileId 之前匹配。 */}
+        <Route path="/view/by-path/:nsType/:nsScope/*" element={<RequireAuth bare><ViewByPathPage /></RequireAuth>} />
+        <Route path="/edit/by-path/:nsType/:nsScope/*" element={<RequireAuth bare><EditByPathPage /></RequireAuth>} />
+        {/* 按文件类型分发的独立只读查看页；不挂 DocFlow 顶栏。 */}
+        <Route path="/view/:fileId" element={<RequireAuth bare><ViewerPage /></RequireAuth>} />
+        {/* ONLYOFFICE 在线编辑页（仅显式「编辑 Office」入口进入）。 */}
         <Route path="/edit/:fileId" element={<RequireAuth bare><EditorPage /></RequireAuth>} />
         {/* draw.io 图表编辑页（集成启用时由文件行「图表」按钮进入，iframe embed）。 */}
         <Route path="/drawio/:fileId" element={<RequireAuth bare><DrawioPage /></RequireAuth>} />
         {/* Excalidraw 白板编辑页（.excalidraw 文件行「白板」按钮进入；
             编辑器包经 React.lazy 动态加载独立 chunk）。 */}
         <Route path="/excalidraw/:fileId" element={<RequireAuth bare><ExcalidrawPage /></RequireAuth>} />
-        {/* 文本与 Markdown 使用不带站点顶栏的独立编辑窗口。 */}
+        {/* 文本与源码使用不带站点顶栏的独立编辑窗口。 */}
         <Route path="/text/:fileId" element={<RequireAuth bare><TextEditorPage kind="text" /></RequireAuth>} />
         <Route path="/markdown/:fileId" element={<RequireAuth bare><TextEditorPage kind="markdown" /></RequireAuth>} />
-        <Route path="/admin" element={<RequireAuth><AdminPage /></RequireAuth>} />
+        <Route path="/code/:fileId" element={<RequireAuth bare><TextEditorPage kind="text" /></RequireAuth>} />
+        <Route path="/admin" element={<Navigate to="/admin/overview" replace />} />
+        <Route path="/admin/:section" element={<RequireAuth><AdminPage /></RequireAuth>} />
         <Route path="/trash" element={<RequireAuth><TrashPage /></RequireAuth>} />
+        <Route path="/settings" element={<Navigate to="/settings/profile" replace />} />
         {/* 账户设置：登录会话与个人访问令牌（PAT）管理。 */}
-        <Route path="/settings" element={<RequireAuth><SettingsPage /></RequireAuth>} />
+        <Route path="/settings/:section" element={<RequireAuth><SettingsPage /></RequireAuth>} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </BrowserRouter>

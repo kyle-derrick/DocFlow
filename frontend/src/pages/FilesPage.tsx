@@ -8,6 +8,7 @@ import {
   copyFile,
   createFolder,
   createShare,
+  currentUserId,
   deleteFile,
   getFileMeta,
   listFiles,
@@ -16,16 +17,24 @@ import {
   uploadFile,
   restoreFile,
 } from '../api'
-import FileBrowser, { Modal, formatTime } from '../components/FileBrowser'
+import { Modal, formatTime } from '../components/FileBrowser'
+import { FileBrowserWithTree } from '../components/FolderTreeNav'
 import VersionHistoryModal from '../components/VersionHistoryModal'
+import SpaceSwitcher from '../components/SpaceSwitcher'
 import { useHotkeys } from '../useHotkeys'
 import { t, useLocale } from '../i18n'
 
-/** 个人空间：文件浏览复用 FileBrowser，本页仅保留重命名 / 删除 / 分享 / 版本历史对话框。 */
+/** 个人空间：文件浏览复用 FileBrowser（左侧目录树见 FolderTreeNav），本页仅保留
+ * 重命名 / 删除 / 分享 / 版本历史对话框。视图（全部/收藏/最近）状态由本页
+ * 持有，经 SpaceSwitcher 切换、透传 FileBrowser 的 activeView 受控入口。 */
 export default function FilesPage() {
   const locale = useLocale()
   const [reloadKey, setReloadKey] = useState(0)
   const refresh = () => setReloadKey((k) => k + 1)
+  // 全局视图（全部 / 收藏 / 最近）：驱动 FileBrowser 的检索模式。
+  const [spaceView, setSpaceView] = useState<'all' | 'starred' | 'recent'>('all')
+  // 个人空间命名空间（「作为网页打开」resolve 用）：scope = 自己 user UUID（JWT sub）。
+  const meId = currentUserId()
 
   const [historyTarget, setHistoryTarget] = useState<FileItem | null>(null)
 
@@ -207,7 +216,8 @@ export default function FilesPage() {
   })
 
   return (
-    <div className="page">
+    <div className="page wide-page">
+      <SpaceSwitcher activeView={spaceView} onViewChange={setSpaceView} />
       {deleteError && <div className="banner error">{deleteError}</div>}
       {recentlyDeletedId && undoSeconds > 0 && (
         <div className="banner ok">
@@ -216,22 +226,21 @@ export default function FilesPage() {
         </div>
       )}
 
-      <FileBrowser
-        title="文件"
+      <FileBrowserWithTree
+        title=""
         rootLabel="我的文件"
         reloadKey={reloadKey}
         listItems={async (parentId, opts) => ({ items: await listFiles(parentId, opts), folderId: parentId })}
         createFolderFn={createFolder}
         uploadFn={uploadFile}
         rootTargetLabel="我的文件（根目录）"
-        viewTabs
+        activeView={spaceView}
         copyFn={(fileId, parentId) => copyFile(fileId, parentId)}
         fileMetaFn={(fileId) => getFileMeta(fileId).catch(() => null)}
+        ns={meId ? { type: 'personal', scope: meId } : undefined}
         rowActions={(item) => (
           <>
-            {item.type === 'file' && (
-              <button type="button" className="btn small" onClick={() => openShare(item)}>分享</button>
-            )}
+            <button type="button" className="btn small" onClick={() => openShare(item)}>分享</button>
             {item.type === 'file' && (
               <button type="button" className="btn small" onClick={() => setHistoryTarget(item)}>历史</button>
             )}
@@ -301,6 +310,11 @@ export default function FilesPage() {
                   <option value="view">仅查看</option>
                 </select>
               </label>
+              {shareTarget.type === 'folder' && (
+                <p className="hint share-vis-hint">
+                  目录分享：访问者可浏览整个子树，在线预览或下载其中的文件（链接 /s/&lt;token&gt;）。
+                </p>
+              )}
 
               {shareVisibility === 'public' ? (
                 <p className="hint share-vis-hint">公开分享生成链接，任何拿到链接的人无需登录即可访问。</p>

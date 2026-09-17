@@ -8,6 +8,7 @@ import (
 	"github.com/docflow/docflow/internal/audit"
 	"github.com/docflow/docflow/internal/files"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 // listTrash GET /api/v1/trash 列出当前用户软删除文件（limit 简单分页）。
@@ -25,8 +26,25 @@ func (h *Handler) listTrash(c *gin.Context) {
 			limit = 1000
 		}
 	}
-	out, err := h.files.ListTrash(userID(c), limit)
+	scope := c.DefaultQuery("scope", "personal")
+	var teamID *uuid.UUID
+	if scope == "team" {
+		id, err := uuid.Parse(c.Query("team_id"))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid team_id"})
+			return
+		}
+		teamID = &id
+	} else if scope != "personal" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid scope"})
+		return
+	}
+	out, err := h.files.ListTrashScope(userID(c), scope, teamID, limit)
 	if err != nil {
+		if errors.Is(err, files.ErrForbidden) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to list trash"})
 		return
 	}
