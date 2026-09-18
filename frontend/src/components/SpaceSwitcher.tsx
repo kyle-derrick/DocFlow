@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
+import { Users } from 'lucide-react'
 import { Team, createTeam, currentUserId, deleteTeam, listTeams, updateTeam } from '../api'
 import { Modal, formatTime } from './FileBrowser'
 import { MessageKey, formatMessage, t, useLocale } from '../i18n'
@@ -7,8 +8,8 @@ import { MessageKey, formatMessage, t, useLocale } from '../i18n'
 /**
  * 空间切换行（文件页 / 团队空间页共用）：
  * - 空间下拉（我的文件 + 各团队）；
- * - 全局视图（全部 / 收藏 / 最近）分段按钮——受控组件，状态由页面持有
- *   并透传给 FileBrowser 的 activeView；
+ * - 全局视图（全部 / 收藏 / 最近）下拉选择——受控组件，状态由页面持有
+ *   并透传给 FileBrowser 的 activeView（v1.3 由三段按钮改为下拉，省宽）；
  * - 团队管理弹窗（创建 / 改名 / 删除，不再跳转 /teams 页）；
  * - 回收站入口。
  */
@@ -18,7 +19,7 @@ export default function SpaceSwitcher({
 }: {
   /** 当前视图（受控）：FilesPage / TeamSpacePage 持有并传给 FileBrowser。 */
   activeView?: 'all' | 'starred' | 'recent'
-  /** 视图切换回调；提供时渲染 全部/收藏/最近 分段按钮。 */
+  /** 视图切换回调；提供时渲染 全部/收藏/最近 下拉选择。 */
   onViewChange?: (view: 'all' | 'starred' | 'recent') => void
 }) {
   const navigate = useNavigate()
@@ -95,22 +96,18 @@ export default function SpaceSwitcher({
         {teams.map((team) => <option key={team.id} value={`/teams/${team.id}`}>{team.name}</option>)}
       </select>
       {onViewChange && (
-        <div className="seg-group space-view-tabs" role="tablist" aria-label={locale === 'zh-CN' ? '视图' : 'View'}>
-          {(['all', 'starred', 'recent'] as const).map((view) => (
-            <button
-              key={view}
-              type="button"
-              role="tab"
-              aria-selected={activeView === view}
-              className={`seg${activeView === view ? ' active' : ''}`}
-              onClick={() => onViewChange(view)}
-            >
-              {view === 'all' ? msg('viewAll') : view === 'starred' ? msg('viewStarred') : msg('viewRecent')}
-            </button>
-          ))}
-        </div>
+        <select
+          className="form-select space-view-select"
+          aria-label={locale === 'zh-CN' ? '视图' : 'View'}
+          value={activeView}
+          onChange={(e) => onViewChange(e.target.value as 'all' | 'starred' | 'recent')}
+        >
+          <option value="all">{msg('viewAll')}</option>
+          <option value="starred">{msg('viewStarred')}</option>
+          <option value="recent">{msg('viewRecent')}</option>
+        </select>
       )}
-      <button type="button" className="btn small" onClick={() => setManageOpen(true)}>团队 / 空间管理</button>
+      <button type="button" className="btn small" onClick={() => setManageOpen(true)}>团队管理</button>
       <button type="button" className="btn small ghost" onClick={() => navigate('/trash')}>回收站</button>
 
       {manageOpen && (
@@ -143,7 +140,7 @@ export default function SpaceSwitcher({
                     navigate(`/teams/${team.id}`)
                   }}
                 >
-                  <span aria-hidden="true">👥</span>
+                  <span aria-hidden="true"><Users size={14} strokeWidth={2} aria-hidden="true" /></span>
                   <span className="space-manage-name-text">{team.name}</span>
                   <span className="muted space-manage-time">{formatTime(team.created_at)}</span>
                 </button>

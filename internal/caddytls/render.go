@@ -23,6 +23,14 @@ func Render(mode Mode, domain string) string {
 		// Caddy 无 SNI 时证书匹配失败（TLS internal error alert）。全局
 		// default_sni 兜底到本站点后握手成功（域名站点亦无害）。
 		defaultSNI = strings.Split(domain, ":")[0]
+	case ModeCustom:
+		site = domain
+		// 自定义证书：tls 指令指向共享卷内的证书/私钥文件。路径经
+		// CADDY_TLS_CERT/KEY env 由 caddy 容器展开（compose 已挂载同一
+		// 卷并设置默认值 /data/tls/cert.pem、/data/tls/key.pem）。
+		tlsLine = "\ttls {$CADDY_TLS_CERT:/data/tls/cert.pem} {$CADDY_TLS_KEY:/data/tls/key.pem}\n"
+		// 同 internal：custom 证书亦允许 IP 站点，default_sni 兜底握手。
+		defaultSNI = strings.Split(domain, ":")[0]
 	}
 
 	var b strings.Builder

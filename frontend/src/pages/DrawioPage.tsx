@@ -28,12 +28,21 @@ import { closeEditorWithFallback, safeReturnTo } from '../editorNavigation'
 
 /**
  * draw.io embed 编辑器/查看器 iframe URL（proto=json postMessage 协议）。
- * lang 跟随界面语言（drawio 资源名 zh/en）；view=true 为只读查看器
- * （viewer=1，隐藏编辑工具与保存），否则编辑模式（保存并退出按钮）。
+ * lang 跟随界面语言（drawio 资源名 zh/en）；ui 跟随站点明暗（浅色 min /
+ * 深色 dark，编辑器界面主题与站点一致，避免深色站点里白闪编辑器）；
+ * view=true 为只读查看器（viewer=1，隐藏编辑工具与保存），否则编辑模式
+ * （保存并退出按钮）。
  */
-function drawioEditorURL(base: string, lang: string, view: boolean): string {
+function drawioEditorURL(base: string, lang: string, view: boolean, dark: boolean): string {
   const trimmed = base.replace(/\/+$/, '')
-  const params = new URLSearchParams({ embed: '1', proto: 'json', spin: '1', libraries: '1', lang })
+  const params = new URLSearchParams({
+    embed: '1',
+    proto: 'json',
+    spin: '1',
+    libraries: '1',
+    lang,
+    ui: dark ? 'dark' : 'min',
+  })
   if (view) params.set('viewer', '1')
   else {
     params.set('saveAndExit', '1')
@@ -102,7 +111,9 @@ export default function DrawioPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
         if (!alive) return
         setFile(meta)
         xmlRef.current = text.trim() ? text : EMPTY_DRAWIO_XML
-        setEditorURL(viewMode ? status.url.replace(/\/+$/, '') : drawioEditorURL(status.url, locale === 'zh-CN' ? 'zh' : 'en', false))
+        // ui 主题取当前明暗（效应不依赖 colorMode，切换主题不重载编辑器 iframe，
+        // 避免编辑中途丢失未保存内容；下次进入生效）。
+        setEditorURL(viewMode ? status.url.replace(/\/+$/, '') : drawioEditorURL(status.url, locale === 'zh-CN' ? 'zh' : 'en', false, colorMode === 'dark'))
       } catch (err) {
         if (alive) setError(err instanceof Error ? err.message : '图表编辑器加载失败')
       } finally {

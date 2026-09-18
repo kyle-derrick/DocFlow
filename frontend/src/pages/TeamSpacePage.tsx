@@ -62,6 +62,12 @@ function memberRoleValue(m: TeamMember): string {
   return m.role === 'owner' ? 'owner' : m.role
 }
 
+/** 成员显示名：nickname 优先，回退 username，再回退 UUID 前 8 位（后端
+ * 成员列表已 JOIN users 补齐 username/nickname）。 */
+function memberDisplayName(m: TeamMember): string {
+  return m.nickname || m.username || `${m.user_id.slice(0, 8)}…`
+}
+
 /** 权限摘要（角色卡片展示）：勾选动作 + deny 列表。 */
 function permSummary(p: RolePermissions, label: (key: MessageKey) => string): string {
   const allowed = PERM_ACTIONS.filter((a) => p[a])
@@ -430,7 +436,6 @@ export default function TeamSpacePage() {
           {/* 中区：团队文件浏览（左侧目录树 + 文件列表，复用 FileBrowser）。 */}
           <div className="team-workspace-main">
             <FileBrowserWithTree
-              title={team.name}
               rootLabel={team.name}
               listItems={listItems}
               createFolderFn={(name, parentId) => createTeamFolder(id, name, parentId)}
@@ -520,7 +525,7 @@ export default function TeamSpacePage() {
               {members.map((m) => (
                 <li key={m.user_id} className="member-row">
                   <div className="member-info">
-                    <span className="member-id" title={m.user_id}>{m.user_id.slice(0, 8)}…</span>
+                    <span className="member-id" title={m.user_id}>{memberDisplayName(m)}</span>
                     {isOwner && m.role !== 'owner' ? (
                       <select
                         className="member-role-select"

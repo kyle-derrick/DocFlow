@@ -6,12 +6,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/docflow/docflow/internal/audit"
 	"github.com/docflow/docflow/internal/auth"
 	"github.com/docflow/docflow/internal/backup"
+	"github.com/docflow/docflow/internal/group"
 	"github.com/docflow/docflow/internal/metrics"
 	"github.com/docflow/docflow/internal/settings"
 	"github.com/gin-gonic/gin"
@@ -34,19 +36,39 @@ type AdminStats struct {
 	Sessions int64 `json:"sessions"`
 	Shares   int64 `json:"shares"`
 	Tokens   int64 `json:"tokens"`
+	// Teams/Groups 为团队（未软删）与用户组计数；StorageBytes 为对象存储
+	// 用量（object_blobs.size 合计，字节）——概览页统计卡片展示。
+	Teams        int64 `json:"teams"`
+	Groups       int64 `json:"groups"`
+	StorageBytes int64 `json:"storage_bytes"`
 }
 type gormStats struct{ db *gorm.DB }
 
 func NewAdminStats(db *gorm.DB) *gormStats { return &gormStats{db: db} }
 func (g *gormStats) Stats() (AdminStats, error) {
 	var s AdminStats
+	// teams 软删除（migration 026 起 deleted_at），计数排除已删团队；
+	// groups 为硬删除（migration 035），直接计数。
 	for _, c := range []struct {
 		table string
+		where string
 		dst   *int64
-	}{{"users", &s.Users}, {"files", &s.Files}, {"upload_sessions", &s.Uploads}, {"sessions", &s.Sessions}, {"shares", &s.Shares}, {"api_tokens", &s.Tokens}} {
-		if err := g.db.Table(c.table).Count(c.dst).Error; err != nil {
+	}{
+		{"users", "", &s.Users}, {"files", "", &s.Files}, {"upload_sessions", "", &s.Uploads},
+		{"sessions", "", &s.Sessions}, {"shares", "", &s.Shares}, {"api_tokens", "", &s.Tokens},
+		{"teams", "deleted_at IS NULL", &s.Teams}, {"groups", "", &s.Groups},
+	} {
+		query := g.db.Table(c.table)
+		if c.where != "" {
+			query = query.Where(c.where)
+		}
+		if err := query.Count(c.dst).Error; err != nil {
 			return AdminStats{}, err
 		}
+	}
+	// 对象存储用量：全部 blob 尺寸合计（含隔离中的对象；空表归一为 0）。
+	if err := g.db.Table("object_blobs").Select("COALESCE(SUM(size), 0)").Scan(&s.StorageBytes).Error; err != nil {
+		return AdminStats{}, err
 	}
 	return s, nil
 }
@@ -63,6 +85,13 @@ func (h *Handler) SetStatsSource(s statsSource) {
 func (h *Handler) SetRoleLookup(l auth.RoleLookup) {
 	if l != nil {
 		h.roles = l
+	}
+}
+
+// SetGroups 注入管理端用户组服务（幂等）；nil 不覆盖。未注入时组端点 503。
+func (h *Handler) SetGroups(svc *group.Service) {
+	if svc != nil {
+		h.groups = svc
 	}
 }
 
@@ -86,6 +115,45 @@ func secretConfiguredStatus() map[string]bool {
 	return out
 }
 
+// mailEnvStatus 为 GET /admin/settings 附带的邮件通道只读状态：SMTP 在
+// 架构上为 env-only（邮件器启动时装配，见 internal/mail 与 config 非密钥
+// 原则），不提供运行时修改端点；此处仅回显非密钥连接参数与配置状态
+// （SMTP_PASS 只报 password_configured，不回显值），供管理页「邮件」
+// 分区展示「邮件通道由 .env 配置」的只读状态。
+type mailEnvStatus struct {
+	Enabled            bool   `json:"enabled"`
+	Host               string `json:"host"`
+	Port               int    `json:"port"`
+	User               string `json:"user"`
+	From               string `json:"from"`
+	PasswordConfigured bool   `json:"password_configured"`
+	PublicBaseURL      string `json:"public_base_url"`
+}
+
+func mailStatus() mailEnvStatus {
+	enabled := false
+	if v := strings.TrimSpace(os.Getenv("SMTP_ENABLED")); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			enabled = b
+		}
+	}
+	port := 587
+	if v := strings.TrimSpace(os.Getenv("SMTP_PORT")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			port = n
+		}
+	}
+	return mailEnvStatus{
+		Enabled:            enabled,
+		Host:               strings.TrimSpace(os.Getenv("SMTP_HOST")),
+		Port:               port,
+		User:               strings.TrimSpace(os.Getenv("SMTP_USER")),
+		From:               strings.TrimSpace(os.Getenv("SMTP_FROM")),
+		PasswordConfigured: strings.TrimSpace(os.Getenv("SMTP_PASS")) != "",
+		PublicBaseURL:      strings.TrimSpace(os.Getenv("PUBLIC_BASE_URL")),
+	}
+}
+
 func (h *Handler) listAdminSettings(c *gin.Context) {
 	if h.settings == nil {
 		c.JSON(500, gin.H{"error": "settings service is not configured"})
@@ -96,7 +164,7 @@ func (h *Handler) listAdminSettings(c *gin.Context) {
 		c.JSON(500, gin.H{"error": "unable to load settings"})
 		return
 	}
-	c.JSON(200, gin.H{"settings": views, "secrets": secretConfiguredStatus()})
+	c.JSON(200, gin.H{"settings": views, "secrets": secretConfiguredStatus(), "mail": mailStatus()})
 }
 func (h *Handler) updateAdminSetting(c *gin.Context) {
 	if h.settings == nil {

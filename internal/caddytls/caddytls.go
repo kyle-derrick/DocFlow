@@ -7,7 +7,10 @@
 //   - auto      站点 = 管理员填写的域名，Caddy 自动 ACME 签发受信证书
 //     （要求公网域名 DNS 指向本机，80 端口做挑战/重定向）；
 //   - internal  站点 = 域名或 IP + tls internal（Caddy 内部 CA 自签，
-//     流量加密但浏览器不受信告警，适合内网/IP 部署）。
+//     流量加密但浏览器不受信告警，适合内网/IP 部署）；
+//   - custom    站点 = 域名或 IP + tls <cert> <key>（管理员上传的企业/
+//     自购证书，backend 落盘共享卷、caddy 只读挂载；面向已持有受信证书
+//     的自托管用户；Caddy 自动 HTTPS 已覆盖公网域名场景）。
 //
 // 模板中 {$VAR} 占位符（APP_DOMAIN/CONTENT_DOMAIN/ONLYOFFICE_UPSTREAM 等）
 // 保持原样下发，由 caddy 容器自身的 env 展开——backend 无需复制这些配置。
@@ -39,6 +42,7 @@ const (
 	ModeHTTP     Mode = "http"
 	ModeAuto     Mode = "auto"
 	ModeInternal Mode = "internal"
+	ModeCustom   Mode = "custom"
 )
 
 // State 为 tls_state 单行（id=1）：当前生效偏好的持久化。
@@ -81,17 +85,23 @@ func (g *gormRepo) UpsertState(s State) error {
 type Service struct {
 	repo      repository
 	adminAddr string // 如 caddy:2019；空 = 未托管
+	certDir   string // custom 模式证书目录（默认 /data/tls，compose 共享卷）
 	audit     audit.Recorder
 	client    *http.Client
 	now       func() time.Time
 	retry     time.Duration // ReapplyStartup 重试间隔（默认 5s，测试注入缩短）
 }
 
-// NewService 创建服务；adminAddr 为空时 Get/Apply 返回 ErrNotManaged。
-func NewService(db *gorm.DB, adminAddr string) *Service {
+// NewService 创建服务；adminAddr 为空时 Get/Apply 返回 ErrNotManaged；
+// certDir 为空时回落 /data/tls（compose 卷默认路径）。
+func NewService(db *gorm.DB, adminAddr, certDir string) *Service {
+	if strings.TrimSpace(certDir) == "" {
+		certDir = "/data/tls"
+	}
 	return &Service{
 		repo:      &gormRepo{db: db},
 		adminAddr: strings.TrimPrefix(strings.TrimPrefix(adminAddr, "http://"), "https://"),
+		certDir:   certDir,
 		client:    &http.Client{Timeout: 10 * time.Second},
 		now:       time.Now,
 		retry:     5 * time.Second,
@@ -139,12 +149,19 @@ func (s *Service) Apply(ctx context.Context, mode Mode, domain, actor string) (S
 	mode = Mode(strings.TrimSpace(string(mode)))
 	domain = strings.TrimSpace(domain)
 	switch mode {
-	case ModeHTTP, ModeAuto, ModeInternal:
+	case ModeHTTP, ModeAuto, ModeInternal, ModeCustom:
 	default:
-		return State{}, fmt.Errorf("mode %q invalid: http|auto|internal", mode)
+		return State{}, fmt.Errorf("mode %q invalid: http|auto|internal|custom", mode)
 	}
 	if err := validateDomain(mode, domain); err != nil {
 		return State{}, err
+	}
+	// custom 模式要求证书已上传且可解析（tls 指令指向共享卷文件，
+	// 文件缺失/损坏时 caddy 拒绝配置，先在本地前置拦截给出明确错误）。
+	if mode == ModeCustom {
+		if _, err := s.ReadCert(); err != nil {
+			return State{}, fmt.Errorf("custom mode requires an uploaded certificate: %v", err)
+		}
 	}
 	if err := s.push(ctx, Render(mode, domain)); err != nil {
 		return State{}, fmt.Errorf("caddy rejected config: %w", err)

@@ -3,6 +3,7 @@
 // 文本版本对比（A/B 两版逐行 LCS diff，行级增/删着色 + 统计）。
 // 个人空间与团队空间共用；写权限由后端强制（403 统一提示「无写权限」）。
 import { useEffect, useRef, useState } from 'react'
+import { ArrowLeftRight, ArrowRightLeft, Upload } from 'lucide-react'
 import {
   ApiError,
   FileItem,
@@ -191,7 +192,7 @@ export default function VersionHistoryModal({ file, onClose, onChanged }: Props)
                 setBId(next)
               }}
             >
-              ⇄
+              <ArrowLeftRight size={14} strokeWidth={2} aria-hidden="true" />
             </button>
             <label className="compare-field">
               <span>版本 B（新）</span>
@@ -243,7 +244,7 @@ export default function VersionHistoryModal({ file, onClose, onChanged }: Props)
         <>
           <div className="version-toolbar">
             <button className="btn primary small" onClick={() => fileInputRef.current?.click()}>
-              ⬆ 上传新版本
+              <Upload size={14} strokeWidth={2} aria-hidden="true" /> 上传新版本
             </button>
             <button
               className="btn small"
@@ -251,7 +252,7 @@ export default function VersionHistoryModal({ file, onClose, onChanged }: Props)
               title={!textLike ? '非文本文件暂不支持对比' : versions.length < 2 ? '至少需要两个版本' : '对比两个文本版本'}
               onClick={enterCompare}
             >
-              ⇋ 对比版本
+              <ArrowRightLeft size={14} strokeWidth={2} aria-hidden="true" /> 对比版本
             </button>
             <input
               ref={fileInputRef}

@@ -197,11 +197,6 @@ export async function createTag(name: string): Promise<Tag> {
   return api<Tag>('/api/v1/tags', jsonInit('POST', { name }))
 }
 
-/** 删除标签并解除其全部文件关联（仅创建者）。 */
-export async function deleteTag(id: string): Promise<void> {
-  await api(`/api/v1/tags/${id}`, { method: 'DELETE' })
-}
-
 /** 文件上属于当前用户的标签。 */
 export async function listFileTags(fileId: string): Promise<Tag[]> {
   const data = await api<{ tags: Tag[] }>(`/api/v1/files/${fileId}/tags`)
@@ -417,10 +412,6 @@ export async function loginTotp(identifier: string, password: string, code: stri
     jsonInit('POST', { identifier, password, code, recovery_code: recoveryCode }),
   )
   applyLoginToken(data.access_token)
-}
-
-export async function changePassword(oldPassword: string, newPassword: string): Promise<void> {
-  await api('/api/v1/auth/change-password', jsonInit('POST', { old_password: oldPassword, new_password: newPassword }))
 }
 
 export async function logout(): Promise<void> {
@@ -844,12 +835,6 @@ export async function fetchFileArrayBuffer(fileId: string): Promise<ArrayBuffer>
   return res.arrayBuffer()
 }
 
-/** 私有分享下载（需 download 权限，成功计入分享下载次数）。 */
-export async function downloadShareFile(shareId: string, fileId: string, name: string): Promise<void> {
-  const blob = await fetchBlob(`/api/v1/shares/${shareId}/files/${fileId}/download`, '下载失败')
-  saveBlob(blob, name)
-}
-
 /** 目录打包下载（GET /files/:id/download.zip，流式 zip）：子树预遍历限 2000
  * 条目 / 2GB（超限 413 → ApiError）；权限同文件读取（个人 owner、团队成员/ACL）。 */
 export async function downloadFolderZip(id: string, name: string): Promise<void> {
@@ -916,12 +901,6 @@ async function previewFromResponse(res: Response): Promise<PreviewContent> {
 /** 认证预览：请求 /files/:id/preview，按响应 Content-Type 决定渲染方式；415 → unsupported。 */
 export async function fetchPreview(fileId: string): Promise<PreviewContent> {
   const res = await authFetch(`/api/v1/files/${fileId}/preview`)
-  return previewFromResponse(res)
-}
-
-/** 私有分享预览（view/download 权限均可，不消耗下载次数）。 */
-export async function fetchSharePreview(shareId: string, fileId: string): Promise<PreviewContent> {
-  const res = await authFetch(`/api/v1/shares/${shareId}/files/${fileId}/preview`)
   return previewFromResponse(res)
 }
 
@@ -1296,46 +1275,9 @@ export async function getShareDetail(id: string): Promise<ShareDetail> {
   return api<ShareDetail>(`/api/v1/shares/${id}`)
 }
 
-/** PATCH /shares/{id} 可更新字段；0 表示清除限制（永久 / 不限），空串恢复默认模板。 */
-export interface UpdateShareOptions {
-  expiresInHours?: number
-  maxDownloads?: number
-  watermarkEnabled?: boolean
-  watermarkText?: string
-}
-
-/** 修改分享（有效期/下载上限/水印；permission 等不可改），返回更新后的记录。 */
-export async function updateShare(id: string, opts: UpdateShareOptions): Promise<ShareItem> {
-  const body: Record<string, unknown> = {}
-  if (opts.expiresInHours !== undefined) body.expires_in = Math.round(opts.expiresInHours * 3600)
-  if (opts.maxDownloads !== undefined) body.max_downloads = opts.maxDownloads
-  if (opts.watermarkEnabled !== undefined) body.watermark_enabled = opts.watermarkEnabled
-  if (opts.watermarkText !== undefined) body.watermark_text = opts.watermarkText
-  return api<ShareItem>(`/api/v1/shares/${id}`, jsonInit('PATCH', body))
-}
-
 /** 单文件元数据（含当前版本摘要）；用于把分享记录的 file_id 解析为文件名，及版本历史的「当前版本」判定。 */
 export async function getFileMeta(id: string): Promise<FileWithVersion> {
   return api<FileWithVersion>(`/api/v1/files/${id}`)
-}
-
-// ---------- 私有分享访问（登录用户，按显式授权） ----------
-
-export interface ShareFileMeta {
-  name: string
-  size: number
-  mime_type: string
-  version: number
-  version_status: string
-  permission: 'view' | 'download'
-  expires_at: string | null
-  max_downloads: number | null
-  download_count: number
-}
-
-/** 私有分享文件元数据（分享 owner 与被授权用户可访问）。 */
-export async function getShareFileMeta(shareId: string, fileId: string): Promise<ShareFileMeta> {
-  return api<ShareFileMeta>(`/api/v1/shares/${shareId}/files/${fileId}`)
 }
 
 // ---------- 团队 ----------
@@ -1365,6 +1307,9 @@ export interface TeamMember {
   role_id?: string
   /** 自定义角色名（role=custom 时存在）。 */
   role_name?: string
+  /** 成员用户名 / 昵称（成员列表接口 JOIN users 补齐；展示用，可能缺省）。 */
+  username?: string
+  nickname?: string
   created_at: string
   team_id?: string
 }
@@ -1547,10 +1492,17 @@ async function runUploadSession(
     }
     throw err
   }
+  // complete 响应回显新建/目标文件 ID（FileID 非持久化，轮询 GET 对新文件
+  // 会话不回显）——异步处理（扫描/校验）触发轮询时保留该值，供「创建并
+  // 打开」等调用方定位文件。
+  const fileIDFromComplete = done.file_id ?? null
   while (done.status === 'uploading' || done.status === 'verifying' || done.status === 'scanning') {
     onProgress(done.status)
     await sleep(800)
     done = await api<UploadSession>(`/api/v1/uploads/${session.id}`)
+  }
+  if (!done.file_id && fileIDFromComplete && fileIDFromComplete !== '00000000-0000-0000-0000-000000000000') {
+    done.file_id = fileIDFromComplete
   }
   onProgress(done.status)
   if (done.status !== 'available') {
@@ -1638,8 +1590,11 @@ export interface OnlyOfficeStatus {
 /** 编辑器配置（POST /onlyoffice/session 响应，可直接传 DocsAPI.DocEditor）。 */
 export type OnlyOfficeEditorConfig = Record<string, unknown>
 
-/** 仅 office 文档类型显示「编辑」入口（zip/图片等不支持在线编辑）。 */
-const OFFICE_EXTS = new Set(['doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'odt', 'ods', 'odp', 'csv', 'txt'])
+/** 仅 office 文档类型显示「编辑」入口（zip/图片等不支持在线编辑）。
+ * 注意不含 txt：txt 属纯文本类，查看/编辑走文本编辑器（pre 渲染），
+ * 误纳入会让 txt 默认按 OnlyOffice 打开（曾致「txt 默认打开方式是 office」）。
+ * csv 保留：OnlyOffice 原生支持表格编辑，弹窗/独立页均走 EditorPage view。 */
+const OFFICE_EXTS = new Set(['doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'odt', 'ods', 'odp', 'csv'])
 
 export function isOfficeFile(name: string): boolean {
   const i = name.lastIndexOf('.')
@@ -1754,21 +1709,6 @@ export function isDrawioXmlContent(text: string): boolean {
   return /^\s*(<\?xml[^>]*\?>\s*)?<(mxfile|mxGraphModel)[\s>]/i.test(text)
 }
 
-// ---------- AI 摘要（文本类文件） ----------
-
-/** POST /files/{id}/ai/summary 响应：生成的摘要文本。 */
-export interface AiSummaryResult {
-  summary: string
-}
-
-/**
- * 生成文件 AI 摘要（仅文本类文件）：后端未配置 AI 时 503（AI_UNAVAILABLE），
- * 非文本类 400；均以 ApiError 抛出，由调用方映射为提示文案。
- */
-export async function aiSummarize(fileId: string): Promise<AiSummaryResult> {
-  return api<AiSummaryResult>(`/api/v1/files/${fileId}/ai/summary`, jsonInit('POST', {}))
-}
-
 // ---------- 路径级 ACL（团队空间文件夹） ----------
 
 /** ACL 主体类型：用户 / 团队 / 团队自定义角色。 */
@@ -1823,10 +1763,25 @@ export interface SettingItem {
   updated_by?: string | null
 }
 
-/** GET /admin/settings 响应：设置列表 + 密钥类配置的只读状态（只报 configured，不回显值）。 */
+/** GET /admin/settings 响应：设置列表 + 密钥类配置的只读状态（只报 configured，不回显值）
+ * + 邮件通道（SMTP）env-only 只读状态。 */
 export interface AdminSettingsResult {
   settings: SettingItem[]
   secrets: Record<string, boolean>
+  mail?: MailEnvStatus
+}
+
+/** 邮件通道（SMTP）只读状态：env-only 配置（邮件器启动时装配），管理页
+ * 仅展示「邮件通道由 .env 配置」的状态，不提供运行时修改控件。 */
+export interface MailEnvStatus {
+  enabled: boolean
+  host: string
+  port: number
+  user: string
+  from: string
+  /** SMTP_PASS 是否已配置（不回显值）。 */
+  password_configured: boolean
+  public_base_url: string
 }
 
 export interface AdminStats {
@@ -1838,6 +1793,12 @@ export interface AdminStats {
   shares: number
   /** api_tokens 表行数（v1.1 起返回）。 */
   tokens: number
+  /** 未软删团队数（概览页展示）。 */
+  teams?: number
+  /** 用户组数（migration 035）。 */
+  groups?: number
+  /** 对象存储用量（object_blobs.size 合计，字节）。 */
+  storage_bytes?: number
 }
 
 export async function adminGetSettings(): Promise<AdminSettingsResult> {
@@ -1859,14 +1820,25 @@ export async function adminGetStats(): Promise<AdminStats> {
 
 // ---------- HTTPS 运行时切换（仅 admin；经 Caddy admin API 热下发） ----------
 
-/** TLS 模式：http 明文 / auto 域名+ACME 自动签发 / internal 域名或 IP+自签。 */
-export type TlsMode = 'http' | 'auto' | 'internal'
+/** TLS 模式：http 明文 / auto 域名+ACME 自动签发 / internal 域名或 IP+自签 /
+ * custom 域名或 IP+已上传的自定义证书。 */
+export type TlsMode = 'http' | 'auto' | 'internal' | 'custom'
 
-/** GET /admin/tls 响应；managed=false 表示未配置 CADDY_ADMIN_ADDR（不可切换）。 */
+/** 已上传自定义证书的摘要（后端解析 PEM 返回；custom 模式用）。 */
+export interface TlsCert {
+  cn: string
+  not_before: string
+  not_after: string
+  dns_names?: string[]
+}
+
+/** GET /admin/tls 响应；managed=false 表示未配置 CADDY_ADMIN_ADDR（不可切换），
+ * cert 为已上传自定义证书摘要（未上传为 null / 缺省）。 */
 export interface TlsStatus {
   mode: TlsMode
   domain: string
   managed: boolean
+  cert?: TlsCert | null
 }
 
 export async function adminGetTls(): Promise<TlsStatus> {
@@ -1876,6 +1848,15 @@ export async function adminGetTls(): Promise<TlsStatus> {
 /** 切换 HTTPS 模式（caddy 拒绝或不可达时 400，旧配置保持）；返回生效状态。 */
 export async function adminPutTls(mode: TlsMode, domain: string): Promise<TlsStatus> {
   return api<TlsStatus>('/api/v1/admin/tls', jsonInit('PUT', { mode, domain }))
+}
+
+/** 上传自定义证书（multipart：cert=证书 PEM、key=私钥 PEM）：仅存储与校验，
+ * 不改变当前模式（切换由 adminPutTls('custom', domain) 完成）。 */
+export async function adminUploadTlsCert(cert: File, key: File): Promise<TlsStatus> {
+  const form = new FormData()
+  form.append('cert', cert)
+  form.append('key', key)
+  return api<TlsStatus>('/api/v1/admin/tls/cert', { method: 'POST', body: form })
 }
 
 // ---------- 隔离区管理（仅 admin；G6） ----------
@@ -1932,7 +1913,7 @@ export interface AuditEntry {
 }
 export interface AuditFilters { action?: string; userId?: string; status?: string; resourceType?: string; resourceId?: string; from?: string; to?: string }
 export interface AuditListResult { items: AuditEntry[]; next_cursor: string; total: number }
-function auditParams(filters: AuditFilters, cursor = ''): URLSearchParams {
+function auditParams(filters: AuditFilters, cursor = '', limit = 0): URLSearchParams {
   const params = new URLSearchParams()
   if (filters.action) params.set('action', filters.action)
   if (filters.userId) params.set('user_id', filters.userId)
@@ -1942,10 +1923,11 @@ function auditParams(filters: AuditFilters, cursor = ''): URLSearchParams {
   if (filters.from) params.set('from', new Date(filters.from).toISOString())
   if (filters.to) params.set('to', new Date(filters.to).toISOString())
   if (cursor) params.set('cursor', cursor)
+  if (limit > 0) params.set('limit', String(limit))
   return params
 }
-export async function adminListAuditLogs(filters: AuditFilters = {}, cursor = ''): Promise<AuditListResult> {
-  const params = auditParams(filters, cursor)
+export async function adminListAuditLogs(filters: AuditFilters = {}, cursor = '', limit = 0): Promise<AuditListResult> {
+  const params = auditParams(filters, cursor, limit)
   return api<AuditListResult>(`/api/v1/admin/audit-logs?${params.toString()}`)
 }
 export async function adminDownloadAuditCSV(filters: AuditFilters = {}): Promise<void> {
@@ -2222,6 +2204,10 @@ export interface AdminUser {
   role: 'user' | 'admin'
   status: 'active' | 'disabled' | 'locked'
   storage_quota: number
+  /** 存储用量（字节，软删文件计入；列表/详情返回）。 */
+  storage_used?: number
+  /** 所属用户组名（列表端点按页聚合；无组为空数组）。 */
+  group_names?: string[]
   failed_login_count: number
   locked_until: string | null
   profile: UserProfile
@@ -2254,26 +2240,78 @@ export interface AdminUpdateUserOptions {
   /** 存储配额（字节）。 */
   storageQuota?: number
   role?: 'user' | 'admin'
+  /** 展示昵称（空串清空）。 */
+  nickname?: string
 }
 
-/** 更新用户（禁用/启用/改配额/改角色）；返回更新后的条目。 */
-export async function adminGetUser(id: string): Promise<AdminUser> {
-  return api<AdminUser>(`/api/v1/admin/users/${id}`)
-}
-
-export async function adminDeleteUser(id: string): Promise<void> {
-  await api(`/api/v1/admin/users/${id}`, { method: 'DELETE' })
-}
-
+/** 更新用户（禁用/启用/改配额/改角色/改昵称）；返回更新后的条目。 */
 export async function adminUpdateUser(id: string, opts: AdminUpdateUserOptions): Promise<AdminUser> {
   const body: Record<string, unknown> = {}
   if (opts.status !== undefined) body.status = opts.status
   if (opts.storageQuota !== undefined) body.storage_quota = opts.storageQuota
   if (opts.role !== undefined) body.role = opts.role
+  if (opts.nickname !== undefined) body.nickname = opts.nickname
   return api<AdminUser>(`/api/v1/admin/users/${id}`, jsonInit('PATCH', body))
 }
 
 /** 重置用户密码（强度同自助改密；成功后其全部会话失效）。 */
 export async function adminResetUserPassword(id: string, newPassword: string): Promise<void> {
   await api(`/api/v1/admin/users/${id}/reset-password`, jsonInit('POST', { new_password: newPassword }))
+}
+
+// ---------- 管理端用户组（仅 admin；migration 035） ----------
+
+/** 用户组条目（纯组织维度，不挂文件空间）。 */
+export interface Group {
+  id: string
+  name: string
+  description: string
+  member_count: number
+  created_at: string
+  updated_at: string
+}
+
+/** 组成员（username/nickname 为 JOIN users 展示列，可能缺省）。 */
+export interface GroupMember {
+  user_id: string
+  username?: string
+  nickname?: string
+  joined_at: string
+}
+
+/** 全部用户组（含成员数聚合）。 */
+export async function adminListGroups(): Promise<Group[]> {
+  const data = await api<{ groups: Group[] }>('/api/v1/admin/groups')
+  return data.groups ?? []
+}
+
+/** 创建用户组（组名全局唯一，重复 409）。 */
+export async function adminCreateGroup(name: string, description: string): Promise<Group> {
+  return api<Group>('/api/v1/admin/groups', jsonInit('POST', { name, description }))
+}
+
+/** 更新用户组（指针语义：仅提供的字段被更新）。 */
+export async function adminUpdateGroup(id: string, opts: { name?: string; description?: string }): Promise<Group> {
+  return api<Group>(`/api/v1/admin/groups/${id}`, jsonInit('PATCH', opts))
+}
+
+/** 删除用户组（级联清空成员关系，不删用户）。 */
+export async function adminDeleteGroup(id: string): Promise<void> {
+  await api(`/api/v1/admin/groups/${id}`, { method: 'DELETE' })
+}
+
+/** 组成员列表（按加入时间升序）。 */
+export async function adminListGroupMembers(id: string): Promise<GroupMember[]> {
+  const data = await api<{ members: GroupMember[] }>(`/api/v1/admin/groups/${id}/members`)
+  return data.members ?? []
+}
+
+/** 添加组成员（用户不存在 404、已在组 409）。 */
+export async function adminAddGroupMember(id: string, userId: string): Promise<GroupMember> {
+  return api<GroupMember>(`/api/v1/admin/groups/${id}/members`, jsonInit('POST', { user_id: userId }))
+}
+
+/** 移除组成员。 */
+export async function adminRemoveGroupMember(id: string, userId: string): Promise<void> {
+  await api(`/api/v1/admin/groups/${id}/members/${userId}`, { method: 'DELETE' })
 }

@@ -2,10 +2,20 @@ package caddytls
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -80,11 +90,48 @@ func (m *memAudit) Record(e audit.Entry) error { m.entries = append(m.entries, e
 func newTestService(adminAddr string) (*Service, *memRepo, *fakeCaddy) {
 	repo := &memRepo{rows: make(map[uint]State)}
 	fc := &fakeCaddy{}
-	s := &Service{repo: repo, adminAddr: adminAddr, client: &http.Client{}, now: func() time.Time { return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) }}
+	s := &Service{repo: repo, adminAddr: adminAddr, certDir: "/data/tls", client: &http.Client{}, now: func() time.Time { return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) }}
 	return s, repo, fc
 }
 
-// TestRenderModes 三种模式的站点地址 / tls 指令差异 + 模板锚定（关键路由
+// newTestServiceWithDir 同 newTestService，但证书目录指向临时目录
+// （cert 上传 / ReadCert / Apply(custom) 测试用）。
+func newTestServiceWithDir(t *testing.T, adminAddr string) (*Service, *memRepo, *fakeCaddy, string) {
+	t.Helper()
+	dir := t.TempDir()
+	s, repo, fc := newTestService(adminAddr)
+	s.certDir = dir
+	return s, repo, fc, dir
+}
+
+// selfSignedPEM 生成自签证书与私钥的 PEM（测试夹具；不用于生产签发）。
+func selfSignedPEM(t *testing.T, cn string, extraDNS []string) (certPEM, keyPEM []byte) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: cn},
+		DNSNames:     append([]string{cn}, extraDNS...),
+		NotBefore:    time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		NotAfter:     time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create cert: %v", err)
+	}
+	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatalf("marshal key: %v", err)
+	}
+	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
+	return certPEM, keyPEM
+}
+
+// TestRenderModes 四种模式的站点地址 / tls 指令差异 + 模板锚定（关键路由
 // 块存在，防止 deploy/Caddyfile 演进时模板漂移失忆）。
 func TestRenderModes(t *testing.T) {
 	httpConf := Render(ModeHTTP, "")
@@ -109,7 +156,16 @@ func TestRenderModes(t *testing.T) {
 		t.Fatalf("internal mode missing default_sni:\n%s", firstLines(internalConf, 4))
 	}
 
-	for name, conf := range map[string]string{"http": httpConf, "auto": autoConf, "internal": internalConf} {
+	customConf := Render(ModeCustom, "docs.example.com")
+	// custom 模式 tls 指令指向共享卷证书路径（env 展开含默认值）。
+	if !strings.Contains(customConf, "docs.example.com {\n\ttls {$CADDY_TLS_CERT:/data/tls/cert.pem} {$CADDY_TLS_KEY:/data/tls/key.pem}\n") {
+		t.Fatalf("custom mode site/tls invalid:\n%s", firstLines(customConf, 3))
+	}
+	if !strings.Contains(customConf, "default_sni docs.example.com\n") {
+		t.Fatalf("custom mode missing default_sni:\n%s", firstLines(customConf, 4))
+	}
+
+	for name, conf := range map[string]string{"http": httpConf, "auto": autoConf, "internal": internalConf, "custom": customConf} {
 		for _, anchor := range []string{
 			"admin {$CADDY_ADMIN:localhost:2019}",
 			"handle /api/*", "reverse_proxy backend:8080",
@@ -204,6 +260,7 @@ func TestApplyValidation(t *testing.T) {
 		{string(ModeAuto), "http://x.com", "domain"},
 		{string(ModeAuto), "192.168.1.1", "IP"},
 		{string(ModeInternal), "bad domain", "domain"},
+		{string(ModeCustom), "", "domain"},
 	}
 	for _, c := range cases {
 		_, err := s.Apply(context.Background(), Mode(c.mode), c.domain, "")
@@ -217,6 +274,82 @@ func TestApplyValidation(t *testing.T) {
 	}
 	if _, err := s.Apply(context.Background(), ModeHTTP, "", ""); err != nil {
 		t.Fatalf("http reset: %v", err)
+	}
+}
+
+// TestUploadCertAndApplyCustom 证书上传链路：非法 PEM / 私钥不匹配拒绝；
+// 合法证书原子落盘（0600）并返回摘要；custom 模式未上传证书时 Apply 拒绝，
+// 上传后下发成功且渲染包含证书路径指令。
+func TestUploadCertAndApplyCustom(t *testing.T) {
+	srv := httptest.NewServer(&fakeCaddy{})
+	t.Cleanup(srv.Close)
+	fc := srv.Config.Handler.(*fakeCaddy)
+	s, repo, _, dir := newTestServiceWithDir(t, strings.TrimPrefix(srv.URL, "http://"))
+	rec := &memAudit{}
+	s.SetAuditRecorder(rec)
+
+	// 未上传证书：custom 模式 Apply 前置拦截（不触达 caddy）。
+	if _, err := s.Apply(context.Background(), ModeCustom, "docs.example.com", ""); err == nil || !strings.Contains(err.Error(), "uploaded certificate") {
+		t.Fatalf("apply custom without cert: err=%v", err)
+	}
+
+	// 非法 PEM 拒绝。
+	if _, err := s.UploadCert([]byte("not a pem"), []byte("not a pem"), ""); err == nil {
+		t.Fatal("want error for non-PEM upload")
+	}
+
+	// 私钥与证书不匹配拒绝（两张不同证书的密钥）。
+	certA, keyA := selfSignedPEM(t, "a.example.com", nil)
+	_, keyB := selfSignedPEM(t, "b.example.com", nil)
+	if _, err := s.UploadCert(certA, keyB, ""); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("mismatched pair: err=%v", err)
+	}
+
+	// 合法上传：落盘 0600、返回摘要、写审计。
+	info, err := s.UploadCert(certA, keyA, uuid.New().String())
+	if err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+	if info.CN != "a.example.com" || len(info.DNSNames) != 1 || !info.NotAfter.Equal(time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("info = %+v", info)
+	}
+	for _, name := range []string{certFileName, keyFileName} {
+		fi, err := os.Stat(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatalf("stat %s: %v", name, err)
+		}
+		// Windows 文件模式不映射 POSIX 位（0600 落盘仅体现只读位），权限
+		// 断言限 Linux（生产与 CI 环境；0600 语义在 writeFileAtomic 生效）。
+		if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
+			t.Fatalf("%s perm = %v, want 0600", name, fi.Mode().Perm())
+		}
+	}
+	if got, err := s.ReadCert(); err != nil || got.CN != "a.example.com" {
+		t.Fatalf("read cert: %+v err=%v", got, err)
+	}
+	found := false
+	for _, e := range rec.entries {
+		if e.Action == "tls.cert_upload" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("audit entries = %+v, want tls.cert_upload", rec.entries)
+	}
+
+	// 上传后 Apply(custom) 成功：下发渲染包含 tls 指令与状态落库。
+	st, err := s.Apply(context.Background(), ModeCustom, "docs.example.com", "")
+	if err != nil {
+		t.Fatalf("apply custom: %v", err)
+	}
+	if st.Mode != ModeCustom {
+		t.Fatalf("state = %+v", st)
+	}
+	if len(fc.loads) != 1 || !strings.Contains(fc.loads[0], "\ttls {$CADDY_TLS_CERT:/data/tls/cert.pem} {$CADDY_TLS_KEY:/data/tls/key.pem}\n") {
+		t.Fatalf("caddy loads = %v", fc.loads)
+	}
+	if got, err := repo.GetState(); err != nil || got.Mode != ModeCustom {
+		t.Fatalf("persisted = %+v err=%v", got, err)
 	}
 }
 

@@ -2,6 +2,7 @@
 // 快捷键提示卡；admin 附全局统计卡组。统计口径为个人空间（owner 维度），
 // 团队文件单列 team_files。
 import { useEffect, useState } from 'react'
+import { FileText } from 'lucide-react'
 import { DashboardData, getDashboard } from '../api'
 import { hotkeyDocs } from '../components/HotkeysHelp'
 import { formatTime } from '../components/FileBrowser'
@@ -111,7 +112,7 @@ export default function DashboardPage() {
                       url.searchParams.set('returnTo', f.scope_type === 'team' && f.team_id ? `/teams/${f.team_id}` : '/')
                       window.open(`${url.pathname}${url.search}`, '_blank', 'noopener')
                     }} title={msg('goFiles')}>
-                      <span className="icon">📄</span>
+                      <span className="icon"><FileText size={14} strokeWidth={2} aria-hidden="true" /></span>
                       <span className="dash-recent-name">{f.name}</span>
                       <span className="muted">{formatTime(f.updated_at)}</span>
                     </button>

@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { Users } from 'lucide-react'
 import { Team, createTeam, currentUserId, deleteTeam, listTeams, updateTeam } from '../api'
 import { formatTime } from '../components/FileBrowser'
 import { MessageKey, formatMessage, t, useLocale } from '../i18n'
@@ -102,7 +103,7 @@ export default function TeamsPage() {
           {teams.map((t) => (
             <button key={t.id} className="team-card" onClick={() => navigate(`/teams/${t.id}`)}>
               <div className="team-card-head">
-                <span className="icon">👥</span>
+                <span className="icon"><Users size={14} strokeWidth={2} aria-hidden="true" /></span>
                 <span className="team-card-name">{t.name}</span>
                 {myId !== null && t.owner_id === myId && <><button className="btn ghost" onClick={(e) => { e.stopPropagation(); void rename(t) }}>{msg('edit')}</button><button className="btn ghost" onClick={(e) => { e.stopPropagation(); void remove(t) }}>{msg('delete')}</button></>}
               </div>

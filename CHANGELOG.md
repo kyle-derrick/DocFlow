@@ -2,6 +2,30 @@
 
 本项目的显著变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [1.1.1] - 2026-09-18
+
+编辑器升级 + 团队空间关键修复 + 残留清理。
+
+### 编辑器与中文体验
+- Monaco（VSCode）编辑器替换文本/源码类编辑与查看（按语言 worker、明暗主题跟随站点、独立懒加载 chunk 不进 PWA 预缓存）
+- OnlyOffice 中文字体修复（镜像叠加 fonts-noto-cjk，中文文档渲染不再方块乱码）
+- 28 项界面/交互精修（文件列表工具带、目录树导航、弹窗、上传面板等）
+
+### 运维与集成
+- 管理页 HTTPS 运行时切换新增 custom 自定义证书模式：上传 PEM 证书/私钥落盘共享卷（tls_certs），经 Caddy admin API 热下发
+- 验证栈新增邮件面板（Mailpit，宿主 18025 查看 SMTP 收件箱，配合 SMTP_ENABLED 验证邀请/重置邮件真实投递）
+- 用户组管理（另一任务进行中，本版本暂不展开）
+
+### 修复
+- 团队空间目录内新建/上传文件报「file not found」：teams 文件列表 handler 的 parent 变量被 := 遮蔽，parent_id 回传全零 UUID（同时导致子目录列表恒为空）；前端回填面包屑后上传指向不存在目录。前后端联动复现并 curl 级验证修复
+- /view 页 ?origin_content=1 参数生效：查看页读参透传 resolve，raw_url 按 CONTENT_PUBLIC_BASE_URL 绝对化（跨 origin 内容域场景；未配置回退相对路径）
+- 上传轮询（扫描/校验中）保留 complete 响应的 file_id，「创建并打开」不再丢失目标文件；新建流程对 uuid.Nil 防御
+
+### 清理
+- 移除已删 Wiki 视图（WorkspaceWikiView）残留：.wiki-* 样式整块、workspace-view-toggle 等
+- 死代码清理：api.ts 未用导出（deleteTag/changePassword/updateShare/aiSummarize/adminGetUser 等 9 个函数及随附类型）、无引用 CSS 类、openers.ts 注释遗留
+- .tmp/ 与临时诊断脚本加入 .gitignore；E2E files.spec.ts 适配新建菜单弹框交互（文本文件弹框输文件名 + Monaco 断言）
+
 ## [1.1.0] - 2026-09-17
 
 信息架构重构 + 知识工作台 + MCP。全栈真实环境验证（26 包单测 + 端到端 API 复验）。

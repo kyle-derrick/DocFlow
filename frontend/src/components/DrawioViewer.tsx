@@ -7,6 +7,9 @@
 //   1 不放大），实测按页宽等比缩放；高度撑满查看区、超出滚动由外层处理；
 // - 深浅主题：data-mxgraph 的 dark-mode 键跟随站点 data-mode，切换时重设
 //   配置并 processElements() 重建（其内部会先清空容器）；
+// - 悬停空 tooltip：内部 mxGraph TooltipHandler 默认启用，悬停图形会在
+//   <body> 挂空内容 .mxTooltip 浮层（即「悬停出现无内容小框」），脚本为
+//   自包含闭包且无配置开关可关——由 styles.css 全局隐藏 div.mxTooltip；
 // - 中文：脚本加载前设 mxLanguage=zh，加载后补拉本地 resources/dia_zh
 //   （viewer UI 文本极少，主要为提示/错误文案；同源请求无 CORS 问题）。
 import { useEffect, useRef, useState } from 'react'

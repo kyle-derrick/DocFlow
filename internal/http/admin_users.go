@@ -9,6 +9,7 @@ import (
 	"github.com/docflow/docflow/internal/audit"
 	"github.com/docflow/docflow/internal/auth"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 // 本文件实现管理端用户管理（C6，设计 6.2.1/9.1.1，仅 admin 组）：
@@ -24,12 +25,13 @@ import (
 const adminUserMaxQuota int64 = 1 << 50
 
 // adminUserJSON 序列化管理端用户视图（脱敏：不含 password_hash；全字段
-// 含 status/quota/locked）。
+// 含 status/quota/used/locked）。group_names 由列表端点按页聚合补齐。
 func adminUserJSON(u auth.User) gin.H {
 	return gin.H{
 		"id": u.ID, "username": u.Username, "email": u.Email,
 		"role": u.Role, "status": u.Status,
 		"storage_quota":      u.StorageQuota,
+		"storage_used":       u.StorageUsed,
 		"failed_login_count": u.FailedLoginCount,
 		"locked_until":       u.LockedUntil,
 		"profile": gin.H{
@@ -117,7 +119,24 @@ func (h *Handler) adminListUsers(c *gin.Context) {
 	}
 	items := make([]gin.H, 0, len(users))
 	for _, u := range users {
-		items = append(items, adminUserJSON(u))
+		item := adminUserJSON(u)
+		item["group_names"] = []string{}
+		items = append(items, item)
+	}
+	// 按页聚合所属组名（group_names；组服务未注入或聚合失败时保持空列表，
+	// 不阻塞用户列表）。
+	if h.groups != nil && len(users) > 0 {
+		ids := make([]uuid.UUID, 0, len(users))
+		for _, u := range users {
+			ids = append(ids, u.ID)
+		}
+		if names, err := h.groups.NamesForUsers(ids); err == nil {
+			for i := range items {
+				if list := names[users[i].ID]; len(list) > 0 {
+					items[i]["group_names"] = list
+				}
+			}
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{"users": items, "total": total, "limit": limit, "offset": offset})
 }
@@ -126,12 +145,15 @@ type adminUpdateUserRequest struct {
 	Status       *string `json:"status"`
 	StorageQuota *int64  `json:"storage_quota"`
 	Role         *string `json:"role"`
+	// Nickname 为展示昵称（C21a 档案字段）：空串清空（写侧归一 NULL）。
+	Nickname *string `json:"nickname"`
 }
 
-// adminUpdateUser PATCH /api/v1/admin/users/:id {status?, storage_quota?, role?}：
+// adminUpdateUser PATCH /api/v1/admin/users/:id {status?, storage_quota?, role?, nickname?}：
 // status ∈ active|disabled（禁用立即撤销其全部会话；置 active 视为解锁）；
-// storage_quota ∈ [1, 1PiB]；role ∈ user|admin。admin 不可禁用自己（400）。
-// 成功写 user.update 审计（含变更字段）并返回更新后的用户视图。
+// storage_quota ∈ [1, 1PiB]；role ∈ user|admin；nickname ≤64 字符。
+// admin 不可禁用自己（400）。成功写 user.update 审计（含变更字段）并返回
+// 更新后的用户视图。
 func (h *Handler) adminUpdateUser(c *gin.Context) {
 	id, ok := parseID(c, c.Param("id"))
 	if !ok {
@@ -158,6 +180,22 @@ func (h *Handler) adminUpdateUser(c *gin.Context) {
 	if request.Status != nil && *request.Status == auth.StatusDisabled && id == actor {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "cannot disable your own account"})
 		return
+	}
+	// 昵称走档案更新链路（ProfileUpdate 校验 + 写侧空串归一 NULL）。
+	if request.Nickname != nil {
+		update := auth.ProfileUpdate{Nickname: request.Nickname}
+		if err := update.Validate(); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if err := h.users.UpdateProfile(id, update); err != nil {
+			if errors.Is(err, auth.ErrUserNotFound) {
+				c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to update user"})
+			return
+		}
 	}
 	if err := h.users.AdminUpdateUser(id, auth.AdminUserUpdate{
 		Status:       request.Status,
@@ -193,6 +231,10 @@ func (h *Handler) adminUpdateUser(c *gin.Context) {
 	}
 	if request.Role != nil {
 		meta = append(meta, `"role":"`+*request.Role+`"`)
+	}
+	if request.Nickname != nil {
+		// 只记录变更发生，不回显昵称内容（审计噪音控制）。
+		meta = append(meta, `"nickname":true`)
 	}
 	h.recordAudit(c, audit.Entry{UserID: &actor, Action: audit.ActionUserUpdate, ResourceType: audit.ResourceUser, ResourceID: id.String(), Metadata: "{" + strings.Join(meta, ",") + "}"})
 	c.JSON(http.StatusOK, adminUserJSON(user))

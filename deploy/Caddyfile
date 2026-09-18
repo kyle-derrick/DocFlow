@@ -4,6 +4,15 @@
 # 站点地址取环境变量 APP_DOMAIN：未设置时默认 :80（本地验证，无 TLS）；
 # 设为域名（如 docflow.example.com）时自动申请/续期 HTTPS 证书
 #（ACME HTTP 挑战走 80 端口，已在 docker-compose.yml 映射）。
+#
+# HTTPS 运行时切换（管理页 → TLS）：backend 经 admin API 热下发与本文件
+# 同构的配置（internal/caddytls.Render）。除 auto（自动证书）与 internal
+#（自签）外支持 custom（自定义证书）：管理员在管理页上传 PEM 证书+私钥，
+# backend 写入共享卷 /data/tls（tls_certs 卷，本容器只读挂载），热下发的
+# tls 指令形如 `tls {$CADDY_TLS_CERT:/data/tls/cert.pem} {$CADDY_TLS_KEY:/data/tls/key.pem}`
+#（docker-compose.yml 已注入这两个 env，含默认值）。公网域名场景用 auto
+# 即可（自动 HTTPS 已覆盖）；custom 面向已持有企业证书的自托管用户。
+#
 # CONTENT_DOMAIN 为独立内容 origin；CONTENT_UPSTREAM 默认 backend:8080。
 # 若 DNS/证书暂未就绪，仍可使用主站 /content/* 路径兼容入口。
 #

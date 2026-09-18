@@ -564,9 +564,10 @@ func (s *UserStore) AdminUpdateUser(id uuid.UUID, update AdminUserUpdate) error 
 	return nil
 }
 
-// AdminListUsers 管理端用户列表（C6）：q 非空时按 username/email 前缀 ILIKE
-// 匹配（管理端场景允许邮箱前缀检索，likePrefixPattern 已转义通配符）；
-// created_at 倒序分页，返回当前过滤条件下的总数。limit<=0 或超上限取 50。
+// AdminListUsers 管理端用户列表（C6）：q 非空时按 username/email/nickname
+// 前缀 ILIKE 匹配（管理端场景允许邮箱前缀检索，likePrefixPattern 已转义
+// 通配符；nickname 可空，COALESCE 归一后参与匹配）；created_at 倒序分页，
+// 返回当前过滤条件下的总数。limit<=0 或超上限取 50。
 func (s *UserStore) AdminListUsers(q string, limit, offset int) ([]User, int64, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
@@ -580,7 +581,7 @@ func (s *UserStore) AdminListUsers(q string, limit, offset int) ([]User, int64, 
 			return db
 		}
 		pattern := likePrefixPattern(query)
-		return db.Where("username ILIKE ? ESCAPE '\\' OR email ILIKE ? ESCAPE '\\'", pattern, pattern)
+		return db.Where("username ILIKE ? ESCAPE '\\' OR email ILIKE ? ESCAPE '\\' OR COALESCE(nickname, '') ILIKE ? ESCAPE '\\'", pattern, pattern, pattern)
 	}
 	var total int64
 	if err := s.db.Model(&User{}).Scopes(filter).Count(&total).Error; err != nil {

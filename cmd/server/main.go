@@ -25,6 +25,7 @@ import (
 	"github.com/docflow/docflow/internal/config"
 	"github.com/docflow/docflow/internal/contenturl"
 	"github.com/docflow/docflow/internal/files"
+	"github.com/docflow/docflow/internal/group"
 	httpapi "github.com/docflow/docflow/internal/http"
 	"github.com/docflow/docflow/internal/invite"
 	"github.com/docflow/docflow/internal/janitor"
@@ -488,10 +489,14 @@ func main() {
 	handler.SetSettingsService(settingsStore)
 	handler.SetStatsSource(httpapi.NewAdminStats(db))
 	handler.SetRoleLookup(userStore)
+	// 用户组管理（migration 035）：组 CRUD 与成员维护（仅 admin 路由组）。
+	handler.SetGroups(group.NewService(group.NewGormStore(db)))
 	// HTTPS 运行时切换（管理页面）：CADDY_ADMIN_ADDR 配置时经 Caddy admin
 	// API 热下发；启动期对账覆盖 caddy 先于 backend 重启丢配置的窗口。
+	// custom 模式证书目录（TLS_CERT_DIR，compose 共享卷默认 /data/tls）
+	// 保存管理页上传的证书/私钥。
 	if cfg.CaddyAdminAddr != "" {
-		caddyTLS := caddytls.NewService(db, cfg.CaddyAdminAddr)
+		caddyTLS := caddytls.NewService(db, cfg.CaddyAdminAddr, cfg.TLSCertDir)
 		caddyTLS.SetAuditRecorder(auditStore)
 		handler.SetCaddyTLS(caddyTLS)
 		go caddyTLS.ReapplyStartup(ctx)

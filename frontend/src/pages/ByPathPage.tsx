@@ -4,7 +4,7 @@
 // URL 保持 by-path 不跳转。404/非法命名空间/无权限显示带返回入口的
 // 友好错误页；目录默认按整站网页打开（index.html，缺省回落 index.htm）。
 import { useCallback, useEffect, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useParams, useSearchParams } from 'react-router-dom'
 import {
   ApiError,
   ResolveNamespaceType,
@@ -53,6 +53,10 @@ function useByPathParams(): {
 /** 按路径查看：resolve(mode=view) → 文件走 ViewerPage 分发 / 目录整站 iframe。 */
 export function ViewByPathPage() {
   const { nsType, nsScope, segments, rawPath } = useByPathParams()
+  const [searchParams] = useSearchParams()
+  // ?origin_content=1：raw_url 取地址的 resolve 携带 origin_content，按
+  // CONTENT_PUBLIC_BASE_URL 绝对化（跨 origin 内容域场景；未配置回退相对）。
+  const originContent = searchParams.get('origin_content') === '1'
   const [phase, setPhase] = useState<'loading' | 'error' | 'folder' | 'file'>('loading')
   const [error, setError] = useState('')
   // 目录整站：'' = 根 index.html 解析（raw 目录尾斜杠）；'index.htm' = 以
@@ -108,13 +112,13 @@ export function ViewByPathPage() {
   const fileResolveRawUrl = useCallback(async () => {
     if (!nsType) return null
     try {
-      const r = await resolvePath(nsType, nsScope, segments.join('/'), { mode: 'view' })
+      const r = await resolvePath(nsType, nsScope, segments.join('/'), { mode: 'view', originContent })
       return r.raw_url
     } catch {
       return null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nsType, nsScope, rawPath])
+  }, [nsType, nsScope, rawPath, originContent])
 
   // 目录整站查看 / 重试入口：根 index.html 存在时用目录 raw_url（尾斜杠，
   // 相对资源按目录解析）；仅有 index.htm 时用文件 raw_url（相对资源同样
@@ -123,13 +127,13 @@ export function ViewByPathPage() {
     if (!nsType) return null
     try {
       const rel = folderMode === 'index.htm' ? [...segments, 'index.htm'].join('/') : segments.join('/')
-      const r = await resolvePath(nsType, nsScope, rel, { mode: 'view' })
+      const r = await resolvePath(nsType, nsScope, rel, { mode: 'view', originContent })
       return r.raw_url
     } catch {
       return null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nsType, nsScope, rawPath, folderMode])
+  }, [nsType, nsScope, rawPath, folderMode, originContent])
 
   if (!nsType) {
     return <ByPathError title="无效的访问路径" detail="命名空间类型仅支持 personal（个人空间）与 team（团队空间）。" />

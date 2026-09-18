@@ -11,7 +11,7 @@
 | | |
 |---|---|
 | ![登录](docs/screenshots/login.png) | ![文件管理](docs/screenshots/files.png) |
-| ![Wiki 视图](docs/screenshots/wiki.png) | ![富文本编辑](docs/screenshots/richtext.png) |
+| ![目录树文件浏览](docs/screenshots/wiki.png) | ![富文本编辑](docs/screenshots/richtext.png) |
 | ![在线查看](docs/screenshots/viewer.png) | ![管理后台-审计](docs/screenshots/admin-audit.png) |
 | ![管理后台-TLS](docs/screenshots/admin-tls.png) | ![设置-安全](docs/screenshots/settings-security.png) |
 
@@ -30,7 +30,7 @@
 
 **集成**
 - OnlyOffice Document Server（JWT 回调闭环、版本落库、防 SSRF）
-- draw.io 图表编辑、Excalidraw 白板
+- draw.io 图表编辑、Excalidraw 白板、内置 Monaco 文本/源码编辑器（VSCode 同款，明暗主题跟随）
 - ClamAV 病毒扫描（fail closed、隔离与拒收）
 - 全文搜索：PostgreSQL 原生或 Meilisearch（可切换）
 - OIDC 单点登录（授权码 + PKCE，自动开户）

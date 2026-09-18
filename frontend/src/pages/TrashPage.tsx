@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { FileText, Folder } from 'lucide-react'
 import { FileItem, Team, batchRestoreFiles, listTeams, listTrash, purgeFile, restoreFile } from '../api'
 import { describeBatchResults } from '../components/FileBrowser'
 import SpaceSwitcher from '../components/SpaceSwitcher'
@@ -153,7 +154,9 @@ export default function TrashPage() {
                   />
                 </td>
                 <td>
-                  <span className="icon">{item.type === 'folder' ? '📁' : '📄'}</span>
+                  <span className="icon">{item.type === 'folder'
+                    ? <Folder size={14} strokeWidth={2} aria-hidden="true" />
+                    : <FileText size={14} strokeWidth={2} aria-hidden="true" />}</span>
                   {item.name}
                 </td>
                 <td className="muted">{item.deleted_at ? formatTime(item.deleted_at) : '-'}</td>

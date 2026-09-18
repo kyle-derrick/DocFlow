@@ -59,6 +59,13 @@ const (
 	ActionQuarantineRescan  = "quarantine.rescan"
 	ActionQuarantineRelease = "quarantine.release"
 	ActionQuarantineDelete  = "quarantine.delete"
+	// 用户组管理（仅 admin，/admin/groups）：组 CRUD 与成员增删
+	//（migration 035；组为纯组织维度，删除不级联影响用户）。
+	ActionGroupCreate       = "group.create"
+	ActionGroupUpdate       = "group.update"
+	ActionGroupDelete       = "group.delete"
+	ActionGroupMemberAdd    = "group.member.add"
+	ActionGroupMemberRemove = "group.member.remove"
 )
 
 // resource_type 常量。
@@ -81,6 +88,8 @@ const (
 	ResourceWebhook = "webhook"
 	// ResourceBackup 为备份产物（BACKUP_DIR 下的 docflow-backup-<ts> 目录）。
 	ResourceBackup = "backup"
+	// ResourceGroup 为用户组（groups 行，migration 035）。
+	ResourceGroup = "group"
 )
 
 // status 常量。

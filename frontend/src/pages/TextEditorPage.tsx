@@ -1,11 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { isValidElement, lazy, Suspense } from 'react'
-import CodeMirror from '@uiw/react-codemirror'
-import { markdown as markdownLanguage } from '@codemirror/lang-markdown'
-import { html as htmlLanguage } from '@codemirror/lang-html'
-import { css as cssLanguage } from '@codemirror/lang-css'
-import { javascript as javascriptLanguage } from '@codemirror/lang-javascript'
+import { isValidElement } from 'react'
 import ReactMarkdown from 'react-markdown'
 import type { Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -19,6 +14,10 @@ import { useColorMode } from '../theme'
 // 富文本编辑器（Tiptap + lowlight 产物 1MB+）懒加载独立 chunk，仅 markdown
 // 编辑态进入时按需拉取。
 const RichTextEditor = lazy(() => import('../components/richtext/RichTextEditor'))
+
+// Monaco（VSCode）编辑器：本地打包 + 按语言 worker（产物 3MB+ 独立 chunk，
+// 仅编辑态进入时拉取；查看态一律 <pre> 纯渲染，不加载 Monaco）。
+const MonacoEditor = lazy(() => import('../components/MonacoEditor'))
 
 export type EditorKind = 'text' | 'markdown' | 'html' | 'css' | 'javascript'
 
@@ -36,6 +35,33 @@ const mimeTypes: Record<EditorKind, string> = {
   html: 'text/html',
   css: 'text/css',
   javascript: 'text/javascript',
+}
+
+/** editorKind → Monaco language id（text 无语法，plaintext）。 */
+const monacoLanguages: Record<EditorKind, string> = {
+  text: 'plaintext',
+  markdown: 'markdown',
+  html: 'html',
+  css: 'css',
+  javascript: 'javascript',
+}
+
+/** Monaco 明暗主题跟随站点 data-mode。 */
+function monacoTheme(dark: boolean): string {
+  return dark ? 'vs-dark' : 'vs'
+}
+
+/** Monaco 通用 options（编辑态 readOnly=false，查看态 true）。 */
+function monacoOptions(readOnly: boolean) {
+  return {
+    minimap: { enabled: false },
+    automaticLayout: true,
+    fontSize: 14,
+    wordWrap: 'on' as const,
+    readOnly,
+    scrollBeyondLastLine: false,
+    contextmenu: !readOnly,
+  }
 }
 
 /** 从 <pre> 的子节点中提取 mermaid/markmap 围栏代码块（{lang, code}）。 */
@@ -67,18 +93,23 @@ function MarkdownViewer({ source }: { source: string }) {
   return <div className="markdown-preview"><ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>{source}</ReactMarkdown></div>
 }
 
-export { MarkdownViewer }
-
 function HtmlViewer({ source, name }: { source: string; name: string }) {
   const url = useMemo(() => URL.createObjectURL(new Blob([source], { type: 'text/html' })), [source])
   useEffect(() => () => URL.revokeObjectURL(url), [url])
   return <iframe className="standalone-viewer-frame" sandbox="allow-scripts" src={url} title={name} />
 }
 
+/** 源码只读查看（txt/css/js 等纯文本类）：等宽 <pre> 直接渲染（自动换行、
+ * 铺满滚动）——查看路径不加载 Monaco（chunk 3MB+ 且在弹窗内高度不稳），
+ * Monaco 仅编辑态使用。 */
+function TextViewer({ source }: { source: string }) {
+  return <pre className="preview-text">{source}</pre>
+}
+
 function SourceViewer({ kind, source, name }: { kind: EditorKind; source: string; name: string }) {
   if (kind === 'markdown') return <MarkdownViewer source={source} />
   if (kind === 'html') return <HtmlViewer source={source} name={name} />
-  return <pre className="preview-text">{source}</pre>
+  return <TextViewer source={source} />
 }
 
 export default function TextEditorPage({
@@ -97,6 +128,7 @@ export default function TextEditorPage({
     : kind
   const locale = useLocale()
   const msg = (key: MessageKey) => t(locale, key)
+  const dark = useColorMode() === 'dark'
   const [name, setName] = useState(defaultNames[editorKind])
   const [text, setText] = useState('')
   const [loading, setLoading] = useState(true)
@@ -108,14 +140,6 @@ export default function TextEditorPage({
   // markdown 富文本/源码模式（默认富文本；往返失败自动降级源码并提示）。
   const [richMode, setRichMode] = useState(true)
   const [richKey, setRichKey] = useState(0)
-
-  const extensions = useMemo(() => {
-    if (editorKind === 'markdown') return [markdownLanguage()]
-    if (editorKind === 'html') return [htmlLanguage()]
-    if (editorKind === 'css') return [cssLanguage()]
-    if (editorKind === 'javascript') return [javascriptLanguage()]
-    return []
-  }, [editorKind])
 
   useEffect(() => {
     let alive = true
@@ -137,6 +161,7 @@ export default function TextEditorPage({
         if (alive) setLoading(false)
       })
     return () => { alive = false }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fileId])
 
   useEffect(() => {
@@ -234,17 +259,21 @@ export default function TextEditorPage({
           />
         </Suspense>
       ) : (
-        <CodeMirror
-          className="code-editor"
-          value={text}
-          height="100%"
-          extensions={extensions}
-          onChange={(value) => {
-            setText(value)
-            setNotice('')
-            dirtyRef.current = true
-          }}
-        />
+        <div className="code-editor">
+          <Suspense fallback={<div className="text-editor-state">{msg('loading')}</div>}>
+            <MonacoEditor
+              language={monacoLanguages[editorKind]}
+              theme={monacoTheme(dark)}
+              value={text}
+              options={monacoOptions(false)}
+              onChange={(value) => {
+                setText(value ?? '')
+                setNotice('')
+                dirtyRef.current = true
+              }}
+            />
+          </Suspense>
+        </div>
       )}
     </main>
   )

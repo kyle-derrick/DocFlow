@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { FormEvent, KeyboardEvent } from 'react'
+import { Lock } from 'lucide-react'
 import {
   CreatedShare,
   FileItem,
@@ -227,7 +228,6 @@ export default function FilesPage() {
       )}
 
       <FileBrowserWithTree
-        title=""
         rootLabel="我的文件"
         reloadKey={reloadKey}
         listItems={async (parentId, opts) => ({ items: await listFiles(parentId, opts), folderId: parentId })}
@@ -436,7 +436,7 @@ export default function FilesPage() {
                 <button className="btn primary" onClick={() => void copyLink()}>{copied ? '已复制 ✓' : '复制'}</button>
               </div>
               {shareResult.has_password && (
-                <p className="hint">🔒 已启用密码保护：访问者须输入密码解锁（1 小时会话）。</p>
+                <p className="hint"><Lock size={14} strokeWidth={2} aria-hidden="true" /> 已启用密码保护：访问者须输入密码解锁（1 小时会话）。</p>
               )}
               {shareResult.watermark_enabled !== false && (
                 <p className="hint">水印已开启{shareResult.watermark_text ? `（模板：${shareResult.watermark_text}）` : ''}。</p>

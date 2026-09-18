@@ -19,3 +19,7 @@ frontend/blob-report/
 
 # AI 辅助开发过程产物（设计稿等，不属于开源交付物）
 .design/
+
+# 本地调试/验证临时脚本与产物（不进 git）
+.tmp/
+.tmp-diag.sh

@@ -1,5 +1,6 @@
 import { ReactElement, useEffect, useRef, useState } from 'react'
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
+import { Bell, ChevronDown, FileText, Folder, Languages } from 'lucide-react'
 import {
   SearchResultItem,
   hasAccessToken,
@@ -159,7 +160,7 @@ function NotificationBell() {
         title="站内通知"
         aria-label={`站内通知（${unread} 条未读）`}
       >
-        🔔
+        <Bell size={16} strokeWidth={2} aria-hidden="true" />
         {unread > 0 && <span className="bell-badge">{unread > 99 ? '99+' : unread}</span>}
       </button>
       {open && (
@@ -346,7 +347,9 @@ function TopBarSearch() {
               {results.map((r) => (
                 <button key={r.id} className="search-item" onClick={() => openViewer(r)}>
                   <span className="search-item-name">
-                    <span className="icon">{r.type === 'folder' ? '📁' : '📄'}</span>
+                    <span className="icon">{r.type === 'folder'
+                      ? <Folder size={14} strokeWidth={2} aria-hidden="true" />
+                      : <FileText size={14} strokeWidth={2} aria-hidden="true" />}</span>
                     <Highlight parts={highlightParts(r.name, q.trim())} />
                   </span>
                   {r.snippet && r.snippet !== r.name && (
@@ -450,9 +453,9 @@ function TopBar() {
       <TopBarSearch />
       <OfflineBadge />
       <NotificationBell />
-      <button className="btn ghost language-btn" onClick={switchLocale} title={msg('language')}>🌐 {locale === 'zh-CN' ? '中' : 'EN'}</button>
+      <button className="btn ghost language-btn" onClick={switchLocale} title={msg('language')}><Languages size={14} strokeWidth={2} aria-hidden="true" /> {locale === 'zh-CN' ? '中' : 'EN'}</button>
       <div className="user-menu" ref={userMenuRef}>
-        <button className="btn ghost user-menu-trigger" aria-expanded={menuOpen} onClick={() => setMenuOpen(!menuOpen)}><span className="avatar">{(me?.profile.nickname || me?.username || '?').slice(0, 1).toUpperCase()}</span>{me?.profile.nickname || me?.username || '用户'}<span className="user-menu-arrow" aria-hidden="true">▾</span></button>
+        <button className="btn ghost user-menu-trigger" aria-expanded={menuOpen} onClick={() => setMenuOpen(!menuOpen)}><span className="avatar">{(me?.profile.nickname || me?.username || '?').slice(0, 1).toUpperCase()}</span>{me?.profile.nickname || me?.username || '用户'}<span className="user-menu-arrow" aria-hidden="true"><ChevronDown size={14} strokeWidth={2} aria-hidden="true" /></span></button>
         {menuOpen && <div className="user-menu-panel">
           <Link to="/settings/profile">资料</Link><Link to="/settings/security">设置</Link>
           {admin && <Link to="/admin/overview">管理</Link>}

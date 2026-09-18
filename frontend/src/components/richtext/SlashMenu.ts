@@ -1,12 +1,28 @@
 // Slash 插入菜单：@tiptap/suggestion + 原生 DOM 浮层（无 tippy 依赖）。
 // 触发：块内行首（或仅有空白前缀）输入 '/'；方向键/回车选择，Esc 关闭。
 // drawio/白板/图片/文件引用项删除 '/' 后回调上层打开文件选择器，其余项
-// 直接执行编辑器命令。
+// 直接执行编辑器命令。图标为 lucide（本文件无 React 渲染树，经
+// renderToStaticMarkup 序列化为 SVG 标记后 innerHTML 注入）。
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
 import { Extension } from '@tiptap/react'
 import Suggestion from '@tiptap/suggestion'
 import type { SuggestionKeyDownProps, SuggestionProps } from '@tiptap/suggestion'
 import type { Editor, Range } from '@tiptap/react'
+import {
+  FileText,
+  Image as ImageIcon,
+  Link2,
+  ListTodo,
+  Network,
+  PenLine,
+} from 'lucide-react'
 import type { PickerFilter } from './FilePickerModal'
+
+/** lucide 组件 → 14px SVG 标记（原生 DOM 菜单行内注入）。 */
+function lucideMarkup(icon: typeof FileText): string {
+  return renderToStaticMarkup(createElement(icon, { size: 14, strokeWidth: 2, 'aria-hidden': true }))
+}
 
 /** 上层回调（经 ref 传递，避免编辑器重建；isZh 用于菜单文案即时语言）。 */
 export interface SlashMenuCallbacks {
@@ -42,12 +58,12 @@ function getItems(callbacksRef: SlashMenuCallbacksRef): SlashItem[] {
     { key: 'h3', icon: 'H₃', zh: '标题 3', en: 'Heading 3', keywords: 'h3 heading title', command: run((c) => c.setNode('heading', { level: 3 }).run()) },
     { key: 'bullet', icon: '•', zh: '无序列表', en: 'Bullet list', keywords: 'ul list 列表', command: run((c) => c.toggleBulletList().run()) },
     { key: 'ordered', icon: '1.', zh: '有序列表', en: 'Ordered list', keywords: 'ol list 编号', command: run((c) => c.toggleOrderedList().run()) },
-    { key: 'task', icon: '☑', zh: '任务列表', en: 'Task list', keywords: 'task todo 任务 待办', command: run((c) => c.toggleTaskList().run()) },
+    { key: 'task', icon: lucideMarkup(ListTodo), zh: '任务列表', en: 'Task list', keywords: 'task todo 任务 待办', command: run((c) => c.toggleTaskList().run()) },
     { key: 'table', icon: '▦', zh: '表格', en: 'Table', keywords: 'table 表格', command: run((c) => c.insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()) },
     { key: 'code', icon: '{}', zh: '代码块', en: 'Code block', keywords: 'code 代码', command: run((c) => c.toggleCodeBlock().run()) },
     { key: 'quote', icon: '❝', zh: '引用', en: 'Quote', keywords: 'quote blockquote 引用', command: run((c) => c.toggleBlockquote().run()) },
     { key: 'hr', icon: '—', zh: '分割线', en: 'Divider', keywords: 'hr divider 分割线', command: run((c) => c.setHorizontalRule().run()) },
-    { key: 'link', icon: '🔗', zh: '链接', en: 'Link', keywords: 'link url 链接', command: (editor, range) => {
+    { key: 'link', icon: lucideMarkup(Link2), zh: '链接', en: 'Link', keywords: 'link url 链接', command: (editor, range) => {
       editor.chain().focus().deleteRange(range).run()
       const isZh = callbacksRef.current.isZh
       const url = window.prompt(isZh ? '链接地址' : 'Link URL', 'https://')
@@ -59,10 +75,10 @@ function getItems(callbacksRef: SlashMenuCallbacksRef): SlashItem[] {
         editor.chain().focus().extendMarkRange('link').setLink({ href }).run()
       }
     } },
-    { key: 'image', icon: '🖼', zh: '图片', en: 'Image', keywords: 'image picture 图片 上传', command: embed('image') },
-    { key: 'drawio', icon: '▦', zh: 'draw.io 图表', en: 'draw.io diagram', keywords: 'drawio diagram 图表 流程图', command: embed('drawio') },
-    { key: 'excalidraw', icon: '✎', zh: '白板', en: 'Whiteboard', keywords: 'excalidraw whiteboard 白板', command: embed('excalidraw') },
-    { key: 'file', icon: '📄', zh: '文件引用', en: 'File reference', keywords: 'file 文件 引用 embed', command: embed('any') },
+    { key: 'image', icon: lucideMarkup(ImageIcon), zh: '图片', en: 'Image', keywords: 'image picture 图片 上传', command: embed('image') },
+    { key: 'drawio', icon: lucideMarkup(Network), zh: 'draw.io 图表', en: 'draw.io diagram', keywords: 'drawio diagram 图表 流程图', command: embed('drawio') },
+    { key: 'excalidraw', icon: lucideMarkup(PenLine), zh: '白板', en: 'Whiteboard', keywords: 'excalidraw whiteboard 白板', command: embed('excalidraw') },
+    { key: 'file', icon: lucideMarkup(FileText), zh: '文件引用', en: 'File reference', keywords: 'file 文件 引用 embed', command: embed('any') },
   ]
 }
 
@@ -104,7 +120,8 @@ function createMenuRenderer(callbacksRef: SlashMenuCallbacksRef) {
       row.className = `rich-text-slash-item${index === selectedIndex ? ' is-selected' : ''}`
       const icon = document.createElement('span')
       icon.className = 'rich-text-slash-icon'
-      icon.textContent = item.icon
+      // icon 为自有 SVG 标记（lucideMarkup 序列化）或文本字形，非用户输入。
+      icon.innerHTML = item.icon
       const label = document.createElement('span')
       label.textContent = isZh ? item.zh : item.en
       row.appendChild(icon)

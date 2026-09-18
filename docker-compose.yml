@@ -52,10 +52,16 @@ services:
       # admin API（HTTPS 运行时切换的下发通道）：监听容器内全部接口，
       # 仅 expose 给 compose 内网（无宿主端口映射，外部不可达）。
       CADDY_ADMIN: ${CADDY_ADMIN:-:2019}
+      # 自定义证书（管理页 custom 模式）：与 backend 共享 tls_certs 卷
+      #（本容器只读）；backend 上传的 cert.pem/key.pem 落在 /data/tls，
+      # 热下发的 tls 指令经下面两个 env 指向该路径（含默认值）。
+      CADDY_TLS_CERT: ${CADDY_TLS_CERT:-/data/tls/cert.pem}
+      CADDY_TLS_KEY: ${CADDY_TLS_KEY:-/data/tls/key.pem}
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
+      - tls_certs:/data/tls:ro
     expose:
       - "2019"
     depends_on:
@@ -108,6 +114,9 @@ services:
       # HTTPS 运行时切换（管理页面 /api/v1/admin/tls）：Caddy admin API 地址；
       # 默认指向 compose 内网 caddy（开箱可用）；显式置空可关闭该功能。
       CADDY_ADMIN_ADDR: ${CADDY_ADMIN_ADDR:-caddy:2019}
+      # 自定义证书目录（custom 模式）：管理页上传的 cert.pem/key.pem 落盘
+      # 于此（0600），与 caddy 共享 tls_certs 卷（backend 可写 / caddy 只读）。
+      TLS_CERT_DIR: /data/tls
       LOGIN_RATE_LIMIT_PER_MIN: ${LOGIN_RATE_LIMIT_PER_MIN:-10}
       PUBLIC_RATE_LIMIT_PER_MIN: ${PUBLIC_RATE_LIMIT_PER_MIN:-60}
       MAX_VERSIONS_PER_FILE: ${MAX_VERSIONS_PER_FILE:-5}
@@ -196,6 +205,7 @@ services:
       retries: 3
     volumes:
       - backend_storage:/data/storage
+      - tls_certs:/data/tls
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -371,6 +381,9 @@ volumes:
   clamav_data:
   caddy_data:
   caddy_config:
+  # 自定义 TLS 证书共享卷（管理页 custom 模式）：backend 可写（上传）、
+  # caddy 只读（tls 指令读取 cert.pem/key.pem）。
+  tls_certs:
   onlyoffice_data:
   onlyoffice_logs:
   minio_data:

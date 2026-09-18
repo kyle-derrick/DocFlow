@@ -7,6 +7,7 @@
 // - 无「新建」入口（按约定只选已有文件；drawio/白板新建走文件页「新建」菜单）。
 import { useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
+import { FileText, Image as ImageIcon, Upload } from 'lucide-react'
 import {
   Team,
   UploadPhase,
@@ -230,7 +231,7 @@ export default function FilePickerModal({ open, filter, onPick, onClose, uploadP
                 >
                   {uploadPhase
                     ? (zh ? '上传中…' : 'Uploading…')
-                    : (zh ? '⬆ 上传到 assets/' : '⬆ Upload to assets/')}
+                    : (<><Upload size={14} strokeWidth={2} aria-hidden="true" /> {zh ? '上传到 assets/' : 'Upload to assets/'}</>)}
                 </button>
                 <input
                   ref={fileInputRef}
@@ -255,7 +256,9 @@ export default function FilePickerModal({ open, filter, onPick, onClose, uploadP
                 className="rich-text-picker-item"
                 onClick={() => onPick({ id: item.id, name: item.name })}
               >
-                <span className="icon">{filter === 'image' ? '🖼' : '📄'}</span>
+                <span className="icon">{filter === 'image'
+                  ? <ImageIcon size={14} strokeWidth={2} aria-hidden="true" />
+                  : <FileText size={14} strokeWidth={2} aria-hidden="true" />}</span>
                 <span className="rich-text-picker-name">{item.name}</span>
                 <span className="muted">{formatTime(item.updated_at)}</span>
               </button>

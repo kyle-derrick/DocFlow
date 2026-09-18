@@ -4081,7 +4081,8 @@ paths:
         生效方式（effect：immediate/new_session/restart）。仅非密钥类运行时
         配置；密钥类（JWT/S3/SMTP 凭据等）一律走环境变量，不经
         system_settings 暴露——另附 secrets 只读状态探针（各密钥类 env
-        是否已配置，绝不回显值）。
+        是否已配置，绝不回显值）与 mail 邮件通道只读状态（SMTP 为
+        env-only，见 MailEnvStatus）。
       responses:
         '200':
           description: 设置列表与凭据配置状态
@@ -4103,6 +4104,9 @@ paths:
                       smtp_password: false
                       s3_secret_key: false
                       onlyoffice_jwt_secret: false
+                  mail:
+                    allOf: { $ref: '#/components/schemas/MailEnvStatus' }
+                    description: 邮件通道（SMTP）env-only 只读状态
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '429': { $ref: '#/components/responses/RateLimited' }
@@ -4114,9 +4118,10 @@ paths:
       summary: 查询 HTTPS 运行时状态（仅 admin）
       description: >-
         返回当前 TLS 模式（http 明文 / auto 域名+ACME 自动签发 /
-        internal 域名或 IP+Caddy 内部 CA 自签）与站点域名。managed=false
-        表示未配置 CADDY_ADMIN_ADDR（功能关闭，TLS 由部署配置 APP_DOMAIN
-        决定），页面应降级为只读提示。
+        internal 域名或 IP+Caddy 内部 CA 自签 / custom 域名或 IP+已上传的
+        自定义证书）与站点域名；custom 模式附已上传证书摘要（CN/有效期/SAN，
+        未上传为 null）。managed=false 表示未配置 CADDY_ADMIN_ADDR（功能
+        关闭，TLS 由部署配置 APP_DOMAIN 决定），页面应降级为只读提示。
       responses:
         '200':
           description: TLS 状态
@@ -4127,13 +4132,17 @@ paths:
                 properties:
                   mode:
                     type: string
-                    enum: [http, auto, internal]
+                    enum: [http, auto, internal, custom]
                   domain:
                     type: string
-                    description: auto/internal 模式的站点域名或 IP；http 恒空
+                    description: auto/internal/custom 模式的站点域名或 IP；http 恒空
                   managed:
                     type: boolean
                     description: 是否接入运行时切换（CADDY_ADMIN_ADDR 已配置）
+                  cert:
+                    nullable: true
+                    description: 已上传自定义证书的摘要（custom 模式用；未上传为 null）
+                    allOf: { $ref: '#/components/schemas/TlsCert' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '429': { $ref: '#/components/responses/RateLimited' }
@@ -4145,8 +4154,10 @@ paths:
         渲染与 deploy/Caddyfile 同构的配置并经 Caddy admin API（POST /load）
         热下发，立即生效且无需重启容器。原子性：Caddy 拒绝配置（非法域名、
         ACME 不可达等）时保持旧配置、不落库。auto 模式要求公网域名（公共
-        CA 不签发 IP）；internal 允许域名或 IP（自签证书，浏览器不受信告警）。
-        持久化于 tls_state（migration 033）；caddy 容器单独重启后由 backend
+        CA 不签发 IP）；internal 允许域名或 IP（自签证书，浏览器不受信告警）；
+        custom 允许域名或 IP，要求先经 POST /admin/tls/cert 上传证书
+        （tls 指令经 CADDY_TLS_CERT/KEY 指向共享卷路径）。持久化于
+        tls_state（migration 033）；caddy 容器单独重启后由 backend
         启动对账重新下发。切换后注意 .env 的 COOKIE_SECURE 与模式匹配。
       requestBody:
         required: true
@@ -4158,10 +4169,10 @@ paths:
               properties:
                 mode:
                   type: string
-                  enum: [http, auto, internal]
+                  enum: [http, auto, internal, custom]
                 domain:
                   type: string
-                  description: auto/internal 必填；host 或 host:port，禁止 scheme/路径
+                  description: auto/internal/custom 必填；host 或 host:port，禁止 scheme/路径
             example:
               mode: internal
               domain: 192.168.1.10
@@ -4173,9 +4184,61 @@ paths:
               schema:
                 type: object
                 properties:
-                  mode: { type: string, enum: [http, auto, internal] }
+                  mode: { type: string, enum: [http, auto, internal, custom] }
                   domain: { type: string }
                   managed: { type: boolean }
+                  cert:
+                    nullable: true
+                    allOf: { $ref: '#/components/schemas/TlsCert' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503':
+          description: 未配置 CADDY_ADMIN_ADDR（功能关闭）
+
+  /admin/tls/cert:
+    post:
+      tags: [Admin]
+      operationId: uploadTlsCert
+      summary: 上传自定义证书（仅 admin，custom 模式）
+      description: >-
+        multipart/form-data 上传 PEM 证书链与私钥（字段 cert、key，各限
+        1MiB）：服务端校验可解析且私钥与证书匹配后原子落盘证书目录
+        （TLS_CERT_DIR，compose 共享卷默认 /data/tls，权限 0600；caddy 容器
+        以只读挂载同一路径），返回证书摘要（CN/有效期/SAN）。仅存储，
+        不改变当前模式——切换到自定义证书由 PUT /admin/tls mode=custom
+        完成。写 tls.cert_upload 审计（不落证书内容）。
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [cert, key]
+              properties:
+                cert:
+                  type: string
+                  format: binary
+                  description: 证书 PEM 文件（含中间证书链）
+                key:
+                  type: string
+                  format: binary
+                  description: 私钥 PEM 文件（PKCS#1/PKCS#8/EC）
+      responses:
+        '200':
+          description: 已存储的证书摘要与当前 TLS 状态
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mode: { type: string, enum: [http, auto, internal, custom] }
+                  domain: { type: string }
+                  managed: { type: boolean }
+                  cert:
+                    nullable: true
+                    allOf: { $ref: '#/components/schemas/TlsCert' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
@@ -4531,6 +4594,162 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '429': { $ref: '#/components/responses/RateLimited' }
 
+  /admin/groups:
+    get:
+      tags: [Admin]
+      operationId: adminListGroups
+      summary: 用户组列表（仅 admin）
+      description: 全部用户组（含 member_count 聚合），按创建时间升序。组为纯组织维度（不挂文件空间、不参与文件权限判定），与团队（协作空间）互补。
+      responses:
+        '200':
+          description: 组列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GroupList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    post:
+      tags: [Admin]
+      operationId: adminCreateGroup
+      summary: 创建用户组（仅 admin）
+      description: 组名全局唯一（TrimSpace、非空、无控制字符、≤100 字符）；写 group.create 审计。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, maxLength: 100, description: 非空、无控制字符 }
+                description: { type: string, description: 组用途说明（可选） }
+      responses:
+        '201':
+          description: 组已创建
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Group' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: 组名已存在
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /admin/groups/{id}:
+    patch:
+      tags: [Admin]
+      operationId: adminUpdateGroup
+      summary: 更新用户组（仅 admin）
+      description: 指针语义更新组名/描述（均缺省为无操作，返回当前组）；写 group.update 审计。
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, maxLength: 100 }
+                description: { type: string, description: 空串清空描述 }
+      responses:
+        '200':
+          description: 已更新（返回更新后的组）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Group' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 组名已被占用
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    delete:
+      tags: [Admin]
+      operationId: adminDeleteGroup
+      summary: 删除用户组（仅 admin）
+      description: 物理删除组并级联清空 group_members（组不删用户）；写 group.delete 审计。
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '204': { description: 组已删除 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /admin/groups/{id}/members:
+    get:
+      tags: [Admin]
+      operationId: adminListGroupMembers
+      summary: 组成员列表（仅 admin）
+      description: 组成员（JOIN users 补齐 username/nickname 展示列，按加入时间升序）；组不存在 404。
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200':
+          description: 成员列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GroupMemberList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    post:
+      tags: [Admin]
+      operationId: adminAddGroupMember
+      summary: 添加组成员（仅 admin）
+      description: 用户不存在 404、已在组 409；写 group.member.add 审计（metadata 记录成员用户 ID）。
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_id]
+              properties:
+                user_id: { type: string, format: uuid }
+      responses:
+        '201':
+          description: 成员已添加
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GroupMember' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 用户已是组成员
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /admin/groups/{id}/members/{uid}:
+    delete:
+      tags: [Admin]
+      operationId: adminRemoveGroupMember
+      summary: 移除组成员（仅 admin）
+      description: 组或成员不存在 404；写 group.member.remove 审计（metadata 记录成员用户 ID）。
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: uid, in: path, required: true, schema: { type: string, format: uuid }, description: 被移除成员的用户 ID }
+      responses:
+        '204': { description: 成员已移除 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
   /admin/users:
     get:
       tags: [Admin]
@@ -4538,16 +4757,17 @@ paths:
       summary: 用户列表（仅 admin）
       description: >-
         全量用户列表（含 disabled/locked，脱敏：不含密码哈希）。q 非空时按
-        username/email 前缀匹配（ILIKE，通配符已转义；管理端场景允许邮箱前缀
-        检索）；created_at 倒序分页（limit 默认 50 上限 200，offset ≥ 0），
-        total 为当前过滤条件下的总数。锁定信息（failed_login_count/locked_until）
+        username/email/nickname 前缀匹配（ILIKE，通配符已转义；管理端场景
+        允许邮箱前缀检索）；created_at 倒序分页（limit 默认 50 上限 200，
+        offset ≥ 0），total 为当前过滤条件下的总数。锁定信息
+        （failed_login_count/locked_until）与所属组名（group_names，按页聚合）
         一并返回供管理端判断。
       parameters:
         - name: q
           in: query
           required: false
           schema: { type: string }
-          description: username/email 前缀检索（空返回全部）
+          description: username/email/nickname 前缀检索（空返回全部）
         - name: limit
           in: query
           required: false
@@ -4794,6 +5014,35 @@ components:
           type: [string, 'null']
           format: uuid
           description: 最近更新者；从未设置过时缺省
+    MailEnvStatus:
+      type: object
+      description: >-
+        邮件通道只读状态（GET /admin/settings 附带 mail 字段）：SMTP 为
+        env-only 配置（邮件器启动时装配），不提供运行时修改端点；仅回显
+        非密钥连接参数与配置状态（SMTP_PASS 只报 password_configured）。
+      properties:
+        enabled:
+          type: boolean
+          description: SMTP_ENABLED 是否启用（false = Noop 日志通道）
+        host: { type: string, description: SMTP_HOST；未配置为空串 }
+        port: { type: integer, description: SMTP_PORT（默认 587） }
+        user: { type: string, description: SMTP_USER（空 = 匿名投递） }
+        from: { type: string, description: SMTP_FROM 发件人；未配置为空串 }
+        password_configured:
+          type: boolean
+          description: SMTP_PASS 是否已配置（不回显值）
+        public_base_url: { type: string, description: PUBLIC_BASE_URL（邮件内链接前缀） }
+    TlsCert:
+      type: object
+      description: 已上传自定义证书的摘要（POST /admin/tls/cert 与 GET /admin/tls 的 cert 字段）
+      properties:
+        cn: { type: string, description: 证书 Subject CN }
+        not_before: { type: string, description: 生效起始时间 }
+        not_after: { type: string, description: 过期时间 }
+        dns_names:
+          type: array
+          items: { type: string }
+          description: SAN 域名列表
     QuarantineItem:
       type: object
       description: 隔离 blob 条目（GET /admin/quarantine）；文件名经 file_versions join 取最新引用
@@ -4812,13 +5061,17 @@ components:
         created_at: { type: string, format: date-time }
     AdminStats:
       type: object
-      description: 基础统计（GET /admin/stats），各核心表行数
+      description: 基础统计（GET /admin/stats），各核心表行数与对象存储用量
       properties:
         users: { type: integer, format: int64 }
         files: { type: integer, format: int64 }
         uploads: { type: integer, format: int64, description: upload_sessions 行数 }
         sessions: { type: integer, format: int64 }
         shares: { type: integer, format: int64 }
+        tokens: { type: integer, format: int64, description: api_tokens 行数 }
+        teams: { type: integer, format: int64, description: 未软删团队数 }
+        groups: { type: integer, format: int64, description: 用户组数（migration 035） }
+        storage_bytes: { type: integer, format: int64, description: 对象存储用量（object_blobs.size 合计，字节） }
     BackupVerifyResult:
       type: object
       description: >-
@@ -4896,6 +5149,36 @@ components:
         timezone:
           type: string
           maxLength: 64
+    Group:
+      type: object
+      description: 用户组（groups 表，migration 035；仅 admin 管理，纯组织维度）
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, maxLength: 100 }
+        description: { type: string }
+        member_count: { type: integer, format: int64, description: 组成员数（列表/详情聚合） }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    GroupList:
+      type: object
+      properties:
+        groups:
+          type: array
+          items: { $ref: '#/components/schemas/Group' }
+    GroupMember:
+      type: object
+      description: 组成员（group_members 行；username/nickname 为 JOIN users 展示列，仅非空时返回）
+      properties:
+        user_id: { type: string, format: uuid }
+        username: { type: string }
+        nickname: { type: string }
+        joined_at: { type: string, format: date-time }
+    GroupMemberList:
+      type: object
+      properties:
+        members:
+          type: array
+          items: { $ref: '#/components/schemas/GroupMember' }
     AdminUser:
       type: object
       description: 管理端用户视图（GET /admin/users 与 PATCH 响应，C6）；脱敏：不含密码哈希
@@ -4960,6 +5243,10 @@ components:
         role:
           type: string
           enum: [user, admin]
+        nickname:
+          type: string
+          maxLength: 64
+          description: 展示昵称（空串清空，写侧归一 NULL）
     Invitation:
       type: object
       description: 邀请记录（invitations 表）；明文 token 不落库也不回传，仅创建时一次性返回 accept_url

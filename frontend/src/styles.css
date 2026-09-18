@@ -18,6 +18,8 @@
   /* accent 默认 = indigo（与既有蓝色一致，保持现状） */
   --primary: #4f7cff;
   --primary-hover: #6b90ff;
+  /* 控件级圆角（按钮/输入/下拉面板统一引用；面板类 8px 保持 --radius * 1.33 口径不强制改） */
+  --radius: 6px;
   color-scheme: dark;
 }
 
@@ -360,10 +362,12 @@ body {
   font-size: 12px;
 }
 
-/* 宽屏页（文件/团队/回收站等）吃满 1560px；普通窄页保持 960px 阅读宽度。 */
+/* 宽屏页（文件/团队/回收站等）吃满 1560px；普通窄页保持 960px 阅读宽度（居中）。 */
 .wide-page { max-width: none; }
-.page:not(.wide-page) { max-width: 960px; }
-.section-page, .admin-page { display: flex; align-items: flex-start; gap: 24px; max-width: 1200px; }
+.page:not(.wide-page) { max-width: 960px; margin: 0 auto; }
+/* 侧栏+内容双栏布局（管理/设置页）：放宽到 1400px 且整体水平居中，
+   主体内容区（.section-content flex:1）随之占满可用宽度，不再靠左留白。 */
+.page.section-page, .page.admin-page { display: flex; align-items: flex-start; gap: 24px; max-width: 1400px; width: 100%; margin: 0 auto; }
 .section-sidebar { flex: 0 0 190px; position: sticky; top: 16px; display: flex; flex-direction: column; gap: 4px; }
 .section-sidebar h3 { margin: 0 0 8px; }
 .section-sidebar a { padding: 8px 12px; border-radius: 6px; color: var(--muted); text-decoration: none; }
@@ -371,8 +375,8 @@ body {
 .section-content { min-width: 0; flex: 1; }
 .space-switcher { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; padding: 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
 .space-switcher .form-select { width: min(260px, 100%); height: 34px; }
-/* 全局视图（全部/收藏/最近）：与顶栏控件同高（覆盖 .seg 的 flex:1 拉伸）。 */
-.space-view-tabs .seg { flex: none; height: 34px; padding: 0 14px; font-size: 13px; border-radius: 6px; }
+/* 全局视图（全部/收藏/最近）：下拉选择（替代原三段按钮，工具带省宽）。 */
+.space-view-select { width: auto; height: 34px; padding: 4px 10px; }
 /* 团队管理弹窗：创建表单 + 团队列表（点击名称进入空间，owner 可改名/删除）。 */
 .space-manage-create { margin-bottom: 14px; }
 .space-manage-list { list-style: none; margin: 0; padding: 0; max-height: 46vh; overflow: auto; }
@@ -383,10 +387,12 @@ body {
 .space-manage-name-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .space-manage-time { font-size: 11px; margin-left: auto; flex-shrink: 0; }
 .space-manage-actions { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
-.form-control, .form-select, .form-textarea { width: 100%; box-sizing: border-box; }
+.form-control, .form-select { width: 100%; box-sizing: border-box; }
 .user-menu { position: relative; }
 .user-menu-trigger { display: inline-flex; align-items: center; gap: 8px; }
-.user-menu-arrow { font-size: 11px; transition: transform .15s ease; }
+/* 用户菜单下拉箭头：加大字号/着色，更醒目（展开时旋转 180°）。 */
+.user-menu-arrow { font-size: 12px; color: var(--muted); line-height: 1; transition: transform .15s ease; }
+.user-menu-trigger:hover .user-menu-arrow { color: var(--text); }
 .user-menu-trigger[aria-expanded='true'] .user-menu-arrow { transform: rotate(180deg); }
 .language-btn { white-space: nowrap; }
 .avatar { display: inline-flex; width: 26px; height: 26px; border-radius: 50%; align-items: center; justify-content: center; background: var(--primary); color: white; font-weight: 700; }
@@ -395,6 +401,11 @@ body {
 .user-menu-panel a:hover, .user-menu-panel button:hover { background: var(--surface-2); }
 .audit-filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
 .audit-filters > * { flex: 1 1 140px; }
+/* TLS 自定义证书上传区（管理页 TLS 面板）：摘要 + 两个文件选择 + 上传。 */
+.tls-cert-box { margin-top: 10px; padding: 12px; border: 1px dashed var(--border); border-radius: 8px; display: flex; flex-direction: column; gap: 8px; }
+.tls-cert-upload { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; }
+.tls-cert-upload .field { flex: 1 1 260px; margin-bottom: 0; }
+.tls-cert-upload input[type='file'] { width: 100%; font-size: 12px; color: var(--muted); }
 @media (max-width: 700px) { .section-page, .admin-page { display: block; } .section-sidebar { position: static; flex-direction: row; overflow-x: auto; margin-bottom: 16px; } .section-sidebar h3 { display: none; } .section-sidebar a { white-space: nowrap; } .topbar { gap: 8px; } .nav { display: none; } .topbar-search { flex: 1; width: auto; } }
 
 /* ---------- 页面 ---------- */
@@ -436,6 +447,54 @@ body {
 /* 列表/网格单按钮切换（▦/☰），方形紧凑。 */
 .page-head .toolbar .view-toggle-btn { min-width: 40px; padding: 0; font-size: 15px; line-height: 1; }
 
+/* ---------- 文件页工具带（FileBrowser 顶栏+筛选栏合并为一行，省行高） ----------
+   紧邻 SpaceSwitcher 行下方：新建 / 上传 / 视图切换 / 目录搜索 / 标签、收藏
+   过滤 / 默认打开方式入口一行排布（flex wrap 兜底窄屏）。 */
+.files-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+/* 工具带控件统一规格：高度 34px、圆角 6px、垂直居中（与 SpaceSwitcher 行一致）。 */
+.files-toolbar > .btn,
+.files-toolbar > .create-menu-wrap > .btn,
+.files-toolbar > .create-menu-wrap > .split-btn > .btn,
+.files-toolbar > .split-btn > .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 34px;
+  padding: 0 12px;
+  font-size: 13px;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+
+/* 工具带内拆分按钮保持一体圆角（覆盖上方统一 6px 圆角：主区去右、附落去左）。 */
+.files-toolbar > .split-btn > .btn:not(.split-toggle),
+.files-toolbar > .create-menu-wrap > .split-btn > .btn:not(.split-toggle) {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.files-toolbar > .split-btn > .btn.split-toggle,
+.files-toolbar > .create-menu-wrap > .split-btn > .btn.split-toggle {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+.files-toolbar .view-toggle-btn { min-width: 40px; padding: 0; font-size: 15px; line-height: 1; }
+.files-toolbar .filter-item select,
+.files-toolbar .filter-item input[type='search'] { height: 34px; }
+/* 弹性空隙：过滤区推到右侧（窄屏 wrap 后退化为普通间距）。 */
+.files-toolbar .toolbar-spacer { flex: 1 1 auto; }
+
 /* ---------- 面包屑 ---------- */
 
 .breadcrumb {
@@ -465,14 +524,14 @@ body {
   font-size: 14px;
 }
 
-/* 筛选栏控件与顶栏同规格：34px 高、6px 圆角，行内垂直居中。 */
+/* 筛选栏控件与顶栏同规格：34px 高、6px 圆角，行内垂直居中（底色统一 var(--bg)）。 */
 .filter-item select,
 .filter-item input[type='search'] {
   height: 34px;
   padding: 4px 10px;
   border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--surface);
+  border-radius: var(--radius);
+  background: var(--bg);
   color: var(--text);
   font: inherit;
   font-size: 13px;
@@ -649,8 +708,106 @@ body {
   background: var(--surface-2);
 }
 
+/* ---------- 通用数据表（管理后台审计/备份/隔离区等 panel） ----------
+   完整表格基线：表头底色加粗、行边框、斑马纹、hover 高亮、时间/状态列
+   对齐与等宽、操作列不换行；外层 .table-scroll 提供窄屏横向滚动。 */
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  font-size: 13px;
+}
+
+.data-table th,
+.data-table td {
+  text-align: left;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.data-table thead th {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  background: var(--surface-2);
+  white-space: nowrap;
+}
+
+/* 斑马纹：偶数行淡底（panel 底色上再叠 surface-2 的一层淡色）。 */
+.data-table tbody tr:nth-child(even) {
+  background: color-mix(in srgb, var(--surface-2) 45%, transparent);
+}
+
+.data-table tbody tr:hover {
+  background: var(--surface-2);
+}
+
+.data-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.data-table tr.clickable {
+  cursor: pointer;
+}
+
+/* 时间列：右对齐 + 等宽字体（数字对齐、不折行）。 */
+.data-table .col-time,
+.data-table td.col-time {
+  text-align: right;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 状态列：居中。 */
+.data-table .col-status,
+.data-table td.col-status {
+  text-align: center;
+}
+
+/* 详情展开行内的只读文本块。 */
+.data-table td pre {
+  margin: 4px 0 8px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 220px;
+  overflow: auto;
+}
+
+/* 响应式横向滚动容器：窄屏时表格不出破布局。 */
+.table-scroll {
+  width: 100%;
+  overflow-x: auto;
+}
+
+/* 简单分页条（审计日志等游标分页）。 */
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
 .icon {
   margin-right: 8px;
+}
+
+/* lucide 行内图标基线：与相邻文字垂直居中（按钮/提示/树与列表行内混排），
+   并防止 flex 容器内被压缩变形。 */
+svg.lucide {
+  vertical-align: -0.15em;
+  flex-shrink: 0;
 }
 
 .name-btn {
@@ -772,7 +929,7 @@ body {
   font-size: 12px;
 }
 
-/* 卡片「⋯」操作菜单：与列表行操作一致的纵向下拉。 */
+/* 卡片「⋯」操作菜单：与列表行操作一致的纵向下拉（统一限高 420px/60vh 内部滚动）。 */
 .file-card-menu {
   position: absolute;
   top: 36px;
@@ -785,7 +942,7 @@ body {
   width: max-content;
   min-width: 150px;
   max-width: 220px;
-  max-height: calc(100vh - 16px);
+  max-height: min(420px, 60vh);
   overflow-y: auto;
   padding: 6px;
   background: var(--surface);
@@ -803,42 +960,77 @@ body {
   text-align: left;
 }
 
-/* 右键 / 列表行「⋯」菜单：复用卡片菜单配色，视口固定定位。 */
+/* 右键 / 列表行「⋯」菜单：复用卡片菜单配色，视口固定定位（限高 420px/60vh，
+   实际位置由 JS 按实测尺寸做视口翻转/收缩，见 FileBrowser clampFixedMenu）。 */
 .ctx-menu {
   position: fixed;
   z-index: 60;
   min-width: 200px;
   max-width: 220px;
-  max-height: calc(100vh - 16px);
+  max-height: min(420px, 60vh);
   overflow-y: auto;
 }
 
 .openwith-group { border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); margin: 3px 0; padding: 3px 0; }
 .ctx-menu-label { padding: 3px 7px; color: var(--muted); font-size: 11px; line-height: 1.3; }
 .file-card-menu .btn { padding: 4px 8px; white-space: normal; line-height: 1.3; }
-.preview-open-actions { display: flex; justify-content: flex-end; gap: 6px; margin: -4px 0 10px; }
+
+/* ---------- 拆分按钮（主按钮 + 附落下拉，上传/查看/编辑共用） ----------
+   一个完整控件：主区与附落区共享一体圆角边框（主区去右圆角、附落区去
+   左圆角并叠 1px 边框），视觉与交互上是一个按钮的两半，不是两个并排按钮。 */
+.split-btn { position: relative; display: inline-flex; align-items: stretch; }
+.split-btn > .btn:not(.split-toggle) {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.split-btn > .btn.split-toggle {
+  padding: 0 8px;
+  margin-left: -1px;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+.split-btn .split-menu { top: calc(100% + 4px); right: 0; left: auto; z-index: 50; }
 
 /* ---------- 弹窗内嵌查看器（FileViewerDispatch） ----------
-   查看弹窗加宽加高成准全屏；内嵌的是独立查看页组件（text-editor-page /
-   editor-page 等按 100vh 整页设计），在此去视口化并撑满弹窗内容区。 */
+   查看弹窗加宽加高成准全屏（内容区 78vh）；内嵌的是独立查看页组件
+   （text-editor-page / editor-page 等按 100vh 整页设计），在此去视口化
+   并撑满弹窗内容区。 */
 .modal-viewer {
-  width: min(1180px, 96vw);
+  width: min(1280px, 96vw);
   max-height: 94vh;
   display: flex;
   flex-direction: column;
 }
 
-.modal-viewer .modal-head { flex-shrink: 0; }
+.modal-viewer .modal-head { flex-shrink: 0; gap: 8px; }
+/* 弹窗场景标题字号调小，长文件名省略；标题左、操作按钮组右（与标题同行）。 */
+.modal-viewer .modal-head h3 {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.modal-head-extra { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 
 .preview-embed {
   flex: 1;
-  min-height: 0;
+  /* 内容区定高 78vh（查看=纯渲染，内容尽量占满弹窗；较少内容也撑住）。 */
+  min-height: 78vh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--bg);
+}
+
+/* 矮视口（<750px 高）：78vh 会顶破弹窗 max-height，降为 60vh。 */
+@media (max-height: 750px) {
+  .preview-embed { min-height: 60vh; }
 }
 
 /* 独立页组件在弹窗内：去掉 100vh/padding，撑满弹窗内容区。 */
@@ -856,7 +1048,6 @@ body {
   padding: 6px;
 }
 
-.preview-embed .text-editor-input,
 .preview-embed .markdown-preview,
 .preview-embed .code-editor {
   min-height: 0;
@@ -872,11 +1063,21 @@ body {
 
 .preview-embed .standalone-viewer-frame { min-height: 0; }
 .preview-embed .drawio-viewer { flex: 1; }
-.preview-embed .preview-text { max-height: none; flex: 1; }
+/* 查看态纯文本 <pre>（txt/css/js）：撑满内容区、去自框线（弹窗外框已够）。 */
+.preview-embed .preview-text {
+  max-height: none;
+  flex: 1;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
 
 .web-folder-badge { display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 999px; color: var(--primary); background: color-mix(in srgb, var(--primary) 14%, transparent); font-size: 10px; }
 .user-search-field { position: relative; }
-.user-search-options { position: absolute; left: 0; right: 0; z-index: 20; max-height: 220px; overflow: auto; padding: 4px; background: var(--surface); border: 1px solid var(--border); border-radius: 7px; box-shadow: 0 8px 20px rgba(0,0,0,.25); }
+/* 下拉浮层面板统一规格（与 file-card-menu/ctx-menu/user-search-options 同源）：
+   var(--surface) 底 + 1px var(--border) 边 + 8px 圆角 + 深浅各自投影。 */
+.user-search-options { position: absolute; left: 0; right: 0; z-index: 20; max-height: 220px; overflow: auto; padding: 4px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.35); }
+:root[data-mode='light'] .user-search-options { box-shadow: 0 8px 24px rgba(24,30,42,.16); }
 .user-search-options button { display: flex; flex-direction: column; width: 100%; padding: 7px 8px; border: 0; border-radius: 5px; background: transparent; color: var(--text); text-align: left; cursor: pointer; }
 .user-search-options button:hover { background: var(--surface-2); }
 .user-search-options button span { margin: 1px 0 0; font-size: 11px; }
@@ -896,11 +1097,13 @@ body {
 
 /* ---------- 按钮 ---------- */
 
+/* 按钮基线统一：primary/ghost/danger/small 共用同一 padding/圆角（--radius），
+   尺寸差异只来自 .small 的字号与紧凑 padding。 */
 .btn {
   background: var(--surface-2);
   color: var(--text);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius);
   padding: 7px 14px;
   font: inherit;
   cursor: pointer;
@@ -959,15 +1162,17 @@ body {
 
 /* ---------- 表单 ---------- */
 
+/* 控件底色统一：全部 input/select/textarea 一律 var(--bg)——与所在 surface
+   面板形成对比（原 filter 下拉 var(--surface) 与其余 var(--bg) 混杂，已归一）；
+   原生 option 面板由浏览器按 color-scheme 渲染明暗，不再单独铺色。 */
 input:not([type='checkbox']):not([type='radio']):not([type='file']),
 select,
 textarea,
 .form-control,
-.form-select,
-.form-textarea {
+.form-select {
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius);
   color: var(--text);
   font: inherit;
   padding: 7px 10px;
@@ -998,7 +1203,7 @@ textarea { resize: vertical; }
   width: 100%;
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius);
   color: var(--text);
   font: inherit;
   padding: 8px 10px;
@@ -1352,22 +1557,34 @@ textarea { resize: vertical; }
 }
 
 /* 团队空间布局：中区文件浏览（内部嵌 files-tree-layout：左目录树 + 文件区）
-   + 右侧成员面板（280px，可折叠）。 */
+   + 右侧成员面板（280px，可折叠）。三栏等高（stretch）：整体高度自适应
+   视口（预算 180px：站点导航+工具带+面包屑+页边距，底部尽量不留空），
+   各栏内部滚动；min-height 定值保证内容少时三栏也撑住等高不缩。 */
 .team-workspace {
   display: flex;
   gap: 12px;
-  align-items: flex-start;
+  align-items: stretch;
+  max-height: calc(100vh - 180px);
+  min-height: 480px;
 }
 
 .team-workspace-main {
   flex: 1;
   min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* 内嵌的文件布局不再独立预算视口（由外层 team-workspace 统一约束，
+   双重 max-height 会把中区额外压矮一截）。 */
+.team-workspace-main .files-tree-layout {
+  max-height: none;
 }
 
 .team-member-panel {
   flex: 0 0 280px;
   width: 280px;
-  max-height: calc(100vh - 120px);
+  max-height: 100%;
   overflow-y: auto;
 }
 
@@ -1393,6 +1610,7 @@ textarea { resize: vertical; }
 @media (max-width: 1100px) {
   .team-workspace {
     flex-direction: column;
+    max-height: none;
   }
 
   .team-member-panel {
@@ -2128,7 +2346,6 @@ textarea { resize: vertical; }
   font-size: 20px;
 }
 
-.text-editor-input,
 .markdown-preview {
   flex: 1;
   width: 100%;
@@ -2140,9 +2357,40 @@ textarea { resize: vertical; }
   color: var(--text);
 }
 
-.text-editor-input {
-  resize: none;
-  font: 14px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace;
+/* Monaco 编辑器容器（编辑态 / 只读源码查看态共用）：flex 撑满页面剩余高度，
+   高度不再随内容行数变化（旧 CodeMirror「有多少行多高」的根因即编辑器
+   根节点无定高）；内部 Monaco 由 automaticLayout 自适应容器尺寸。 */
+.code-editor {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+/* 查看态（viewer-only 独立页）铺满视口、去外框。 */
+.text-editor-page.viewer-only .code-editor {
+  border: 0;
+  border-radius: 0;
+  background: var(--bg);
+}
+
+/* 查看态纯文本 <pre>（txt/css/js）：铺满视口、等宽、自动换行、去框线
+   （查看=纯渲染，无多余边框；Monaco 仅编辑态使用）。 */
+.text-editor-page.viewer-only .preview-text {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+  overflow: auto;
+  margin: 0;
+  padding: 14px 16px;
+  border: 0;
+  border-radius: 0;
+  background: var(--bg);
 }
 
 .text-editor-state {
@@ -2221,13 +2469,14 @@ textarea { resize: vertical; }
 
 /* ---------- draw.io 图表编辑页（复用 editor-page/editor-shell 布局） ---------- */
 
-/* embed 模式编辑器 iframe：吃满 editor-shell 剩余高度。 */
+/* embed 模式编辑器 iframe：吃满 editor-shell 剩余高度。底色随站点主题
+   （深色 ui=dark 下 drawio 自绘深色界面，容器避免白底闪烁；浅色即白）。 */
 .drawio-frame {
   display: block;
   width: 100%;
   height: 100%;
   border: none;
-  background: #fff;
+  background: var(--surface);
 }
 
 .viewer-only {
@@ -2244,6 +2493,15 @@ textarea { resize: vertical; }
   overflow: auto;
   background: var(--surface);
   border-radius: 0;
+}
+
+/* draw.io 悬停「无内容小框」根因：viewer-static.min.js 内部 mxGraph 的
+   TooltipHandler 默认启用，悬停图形时把一个空内容的 .mxTooltip 浮层挂到
+   <body>（该 div 带 viewer 注入的边框/背景样式，即用户看到的空框）。脚本
+   为自包含闭包且 data-mxgraph 无 tooltip 开关，无法从外部 setTooltips(false)，
+   以全局 CSS 隐藏该浮层（应用内仅 drawio 查看器会创建 .mxTooltip 元素）。 */
+div.mxTooltip {
+  display: none !important;
 }
 
 .drawio-viewer-content {
@@ -2358,22 +2616,31 @@ textarea { resize: vertical; }
 
 /* ---------- 文件管理左侧目录树（FolderTreeNav，替代 Wiki 视图） ---------- */
 
+/* 左树 + 右文件区两栏等高（stretch）：整体高度自适应视口（预算与
+   team-workspace 一致的 180px，减小底部空隙），整页不被最长列撑高；
+   min-height 定值（480px）保证内容少时两栏也撑住等高；文件区与树各自
+   内部滚动（团队空间内在 team-workspace-main 内再嵌一层，同规则生效）。 */
 .files-tree-layout {
   display: flex;
   gap: 12px;
-  align-items: flex-start;
+  align-items: stretch;
+  max-height: calc(100vh - 180px);
+  min-height: 480px;
 }
 
 .files-tree-main {
   flex: 1;
   min-width: 0;
+  min-height: 0;
+  overflow: auto;
 }
 
-/* 目录树：240px 宽、与右侧文件区顶部对齐（不做 sticky 吸顶，容器超高时内部滚动）。 */
+/* 目录树：240px 宽、与右侧文件区等高（stretch 拉伸），超高时内部滚动；
+   行 min-width:max-content 支持横向滚动查看长文件名。 */
 .folder-tree-nav {
   width: 240px;
   flex: 0 0 240px;
-  max-height: calc(100vh - 120px);
+  max-height: 100%;
   overflow: auto;
   background: var(--surface);
   border: 1px solid var(--border);
@@ -2410,7 +2677,8 @@ textarea { resize: vertical; }
   word-break: break-all;
 }
 
-/* 行高加大（padding 5px + 行间距 2px），hover/active 反馈保持。 */
+/* 行高加大（padding 5px + 行间距 2px）；hover 高亮加强（主色淡染）；
+   width:max-content + min-width:100% 支持容器横向滚动且行铺满可视宽。 */
 .folder-tree-row {
   display: flex;
   align-items: center;
@@ -2418,18 +2686,20 @@ textarea { resize: vertical; }
   margin: 2px 0;
   border-radius: 6px;
   font-size: 13px;
+  width: max-content;
+  min-width: 100%;
 }
 
 .folder-tree-row:hover {
-  background: var(--surface-2);
+  background: color-mix(in srgb, var(--primary) 12%, var(--surface));
 }
 
 .folder-tree-row.active {
-  background: var(--surface-2);
+  background: color-mix(in srgb, var(--primary) 14%, var(--surface));
   box-shadow: inset 2px 0 0 var(--primary);
 }
 
-/* 文件叶子：淡色展示，可点（无 ns 时禁用灰显）。 */
+/* 文件叶子：淡色展示，可点（点击弹窗查看）。 */
 .folder-tree-row.file-leaf {
   color: var(--muted);
 }
@@ -2437,10 +2707,6 @@ textarea { resize: vertical; }
 .folder-tree-row.file-leaf .folder-tree-name:disabled {
   cursor: default;
   opacity: 0.6;
-}
-
-.folder-tree-row.file-leaf:hover {
-  background: none;
 }
 
 .folder-tree-row.file-leaf:hover .folder-tree-name:not(:disabled) {
@@ -2451,16 +2717,27 @@ textarea { resize: vertical; }
   opacity: 0.7;
 }
 
+/* 展开/收起箭头（▶/▼）：加大热区与字号，点击更易命中。 */
 .folder-tree-caret {
   flex: 0 0 auto;
-  width: 18px;
-  padding: 2px 0;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
   background: none;
   border: none;
+  border-radius: 4px;
   color: var(--muted);
   cursor: pointer;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1;
+}
+
+.folder-tree-caret:hover {
+  color: var(--text);
+  background: var(--surface-2);
 }
 
 .folder-tree-name {
@@ -2487,6 +2764,12 @@ textarea { resize: vertical; }
 @media (max-width: 860px) {
   .files-tree-layout {
     flex-direction: column;
+    max-height: none;
+    min-height: 0;
+  }
+
+  .files-tree-main {
+    overflow: visible;
   }
 
   .folder-tree-nav {
@@ -2583,14 +2866,6 @@ kbd {
   font-size: 12px;
   text-align: center;
   line-height: 1.4;
-}
-
-.hotkey-hint {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--muted);
-  font-size: 12px;
 }
 
 /* ---------- v1.1 仪表盘 ---------- */
@@ -2707,30 +2982,6 @@ kbd {
 /* 编辑器根节点吃满 shell 高度（明暗由组件 theme prop 控制）。 */
 .excalidraw-shell .excalidraw {
   height: 100%;
-}
-
-/* ---------- AI 摘要（预览对话框内，文本类文件） ---------- */
-
-.ai-summary {
-  margin-top: 10px;
-}
-
-.ai-summary .preview-foot {
-  margin-top: 0;
-}
-
-.ai-summary-box {
-  margin-top: 8px;
-  padding: 12px 14px;
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--primary);
-  border-radius: 6px;
-  background: var(--bg);
-  white-space: pre-wrap;
-  word-break: break-word;
-  line-height: 1.6;
-  max-height: 30vh;
-  overflow: auto;
 }
 
 /* ---------- 路径级 ACL 管理对话框（团队空间） ---------- */
@@ -2954,7 +3205,7 @@ kbd {
 
 /* ---------- 富文本编辑器（Tiptap v2，.rich-text-*） ---------- */
 
-/* 编辑器整体：独立窗口编辑页内占满剩余高度（同 .text-editor-input 口径）。 */
+/* 编辑器整体：独立窗口编辑页内占满剩余高度。 */
 .rich-text-wrap {
   display: flex;
   flex-direction: column;
@@ -3489,12 +3740,6 @@ kbd {
   color: #e45649;
 }
 
-/* ---------- 工作区视图切换（文件 | Wiki，FilesPage / TeamSpacePage 共用） ---------- */
-
-.workspace-view-toggle {
-  margin-bottom: 12px;
-}
-
 /* ---------- 打开方式（条目菜单子菜单 + 管理弹窗） ---------- */
 
 .openwith-group {
@@ -3557,6 +3802,19 @@ kbd {
   color: var(--muted);
 }
 
+/* 新增偏好行：输入框与列表扩展名列同宽对齐，顶部细分隔与已配置项区分。 */
+.openwith-mgr-add {
+  margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+}
+
+.openwith-mgr-ext-input {
+  min-width: 80px;
+  width: 90px;
+  font-family: ui-monospace, Consolas, 'Courier New', monospace;
+}
+
 /* ---------- 目录上传结果 banner（成功/失败明细 + 关闭） ---------- */
 
 .dir-upload-result {
@@ -3583,210 +3841,6 @@ kbd {
 
 .xmind-toolbar-note {
   font-size: 12px;
-}
-
-/* ---------- Wiki 视图（WorkspaceWikiView，.wiki-*） ---------- */
-
-.wiki-view {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  min-height: 60vh;
-}
-
-/* 窄屏目录下拉：默认隐藏，窄屏时替代树面板。 */
-.wiki-tree-select {
-  display: none;
-  width: 100%;
-  margin-bottom: 4px;
-  padding: 6px 8px;
-  background: var(--surface);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-}
-
-.wiki-body {
-  display: grid;
-  grid-template-columns: 260px minmax(0, 1fr);
-  gap: 16px;
-  align-items: start;
-}
-
-.wiki-tree {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 8px 6px;
-  max-height: 74vh;
-  overflow-y: auto;
-}
-
-.wiki-tree-row {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  border-radius: 6px;
-}
-
-.wiki-tree-row.active {
-  background: color-mix(in srgb, var(--primary) 16%, transparent);
-}
-
-.wiki-tree-toggle {
-  width: 20px;
-  flex-shrink: 0;
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--muted);
-  cursor: pointer;
-  text-align: center;
-}
-
-.wiki-tree-name {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 6px;
-  border: 0;
-  background: none;
-  color: var(--text);
-  text-align: left;
-  cursor: pointer;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.wiki-tree-name:hover {
-  color: var(--primary-hover);
-}
-
-.wiki-content {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 14px 16px;
-  min-height: 320px;
-}
-
-.wiki-crumb {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 2px;
-  margin-bottom: 14px;
-  font-size: 13px;
-}
-
-.wiki-crumb .sep {
-  color: var(--muted);
-  margin: 0 4px;
-}
-
-.wiki-crumb button,
-.wiki-crumb .current {
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--text);
-  cursor: pointer;
-}
-
-.wiki-crumb button:hover {
-  color: var(--primary-hover);
-}
-
-.wiki-crumb .current {
-  color: var(--muted);
-  cursor: default;
-}
-
-/* 目录快捷网格：子目录 + 文件卡片（Markdown 文件以主色描边突出）。 */
-.wiki-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-  gap: 10px;
-}
-
-.wiki-card {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-  padding: 10px 12px;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  color: var(--text);
-  text-align: left;
-  cursor: pointer;
-}
-
-.wiki-card:hover {
-  border-color: color-mix(in srgb, var(--primary) 55%, transparent);
-}
-
-.wiki-card.md {
-  border-color: color-mix(in srgb, var(--primary) 40%, transparent);
-}
-
-.wiki-card-icon {
-  flex-shrink: 0;
-}
-
-.wiki-card-name {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* Markdown 只读渲染区（RichTextEditor readonly，回退 MarkdownViewer 同容器）。 */
-.wiki-md {
-  max-width: 860px;
-}
-
-/* 非 md 文件卡片。 */
-.wiki-file-card {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-  padding: 40px 20px;
-  text-align: center;
-}
-
-.wiki-file-card h3 {
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-
-.wiki-file-icon {
-  font-size: 40px;
-}
-
-.wiki-file-actions {
-  display: flex;
-  gap: 10px;
-}
-
-/* 窄屏（≤760px）：树面板折叠为下拉。 */
-@media (max-width: 760px) {
-  .wiki-tree {
-    display: none;
-  }
-
-  .wiki-tree-select {
-    display: block;
-  }
-
-  .wiki-body {
-    grid-template-columns: 1fr;
-  }
 }
 
 /* 目录上传进行中进度 banner（中性信息样式）。 */

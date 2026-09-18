@@ -7,6 +7,7 @@
 // - 密码保护分享先解锁（HttpOnly 会话 cookie），水印开启时叠加全屏覆盖层。
 import { FormEvent, useCallback, useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
+import { FileQuestion, FileText, Folder, Lock } from 'lucide-react'
 import {
   ApiError,
   PASSWORD_REQUIRED_CODE,
@@ -39,7 +40,7 @@ function ErrorCard({ title, detail }: { title: string; detail?: string }) {
   return (
     <div className="share-error">
       <div className="share-error-card">
-        <h1 className="share-title">😕</h1>
+        <h1 className="share-title"><FileQuestion size={44} strokeWidth={2} aria-hidden="true" /></h1>
         <h2>{title}</h2>
         <p className="hint">{detail ?? '请向分享者确认链接是否有效'}</p>
       </div>
@@ -75,7 +76,7 @@ function PasswordCard({ busy, error, onSubmit }: {
   return (
     <div className="share-error">
       <form className="share-error-card password-card" onSubmit={submit}>
-        <h1 className="share-title">🔒</h1>
+        <h1 className="share-title"><Lock size={44} strokeWidth={2} aria-hidden="true" /></h1>
         <h2>该分享受密码保护</h2>
         <p className="hint">请输入分享者提供的访问密码</p>
         <input
@@ -331,7 +332,9 @@ function FolderShareView({ token, info }: { token: string; info: PublicShareInfo
                 return (
                   <li key={entry.path} className="share-tree-row">
                     <button className="share-tree-name" onClick={() => openEntry(entry)} title={entry.name}>
-                      <span className="icon">{entry.type === 'folder' ? '📁' : '📄'}</span>
+                      <span className="icon">{entry.type === 'folder'
+                        ? <Folder size={14} strokeWidth={2} aria-hidden="true" />
+                        : <FileText size={14} strokeWidth={2} aria-hidden="true" />}</span>
                       <span>{entry.name}</span>
                     </button>
                     <span className="muted share-tree-size">
@@ -511,7 +514,7 @@ export default function SharePage() {
           <span className="brand">DocFlow</span>
         </header>
         <main className="share-card share-card-wide">
-          <h1 className="share-title">📁 {info.name}</h1>
+          <h1 className="share-title"><Folder size={22} strokeWidth={2} aria-hidden="true" /> {info.name}</h1>
           <div className="share-meta">
             <span>目录分享</span>
             <span className="badge">{info.permission === 'download' ? '可下载' : '仅查看'}</span>

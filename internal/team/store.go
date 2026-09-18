@@ -103,10 +103,13 @@ func (s *GormStore) RemoveMember(teamID, userID uuid.UUID) error {
 
 func (s *GormStore) ListMembers(teamID uuid.UUID) ([]Member, error) {
 	var out []Member
-	// LEFT JOIN roles 解析自定义角色名（role_name，系统角色为空）。
+	// LEFT JOIN roles 解析自定义角色名（role_name，系统角色为空）；
+	// JOIN users 补齐成员 username/nickname（成员列表展示用户名，替代 UUID；
+	// 用户行随账户删除时成员关系亦不保留，JOIN 不会引入丢行）。
 	err := s.db.Model(&Member{}).
-		Select("team_members.*, r.name AS role_name").
+		Select("team_members.*, r.name AS role_name, u.username AS username, COALESCE(u.nickname, '') AS nickname").
 		Joins("LEFT JOIN roles r ON r.id = team_members.role_id").
+		Joins("JOIN users u ON u.id = team_members.user_id").
 		Where("team_members.team_id = ?", teamID).
 		Order("team_members.created_at, team_members.user_id").Find(&out).Error
 	return out, err

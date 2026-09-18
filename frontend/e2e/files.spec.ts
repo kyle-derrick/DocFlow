@@ -1,6 +1,8 @@
 // 文件全流程 E2E（serial：同一测试账号下按业务顺序串联）：
 // 新建文件夹 → 重命名 → 进入并创建二级目录 → 上传文本文件（轮询 available）
+// → 新建文本/Markdown（v1.1 新建菜单弹框输文件名，创建后新窗口打开编辑器）
 // → 预览 → 下载 → 删除 → 回收站出现 → 恢复 → 彻底删除。
+// 文本类编辑/查看为 Monaco（.monaco-editor 容器，不再是 textarea）。
 import { test, expect, type Page } from '@playwright/test'
 import { autoAcceptDialogs, fileRow, loginViaUI } from './helpers'
 
@@ -11,8 +13,8 @@ const folderRenamed = `e2eB_${stamp}`
 const subFolder = `e2eC_${stamp}`
 const fileName = `e2eD_${stamp}.txt`
 const fileBody = `DocFlow E2E ${stamp}\nhello playwright\n`
-const createdTextPrefix = 'text-'
-const createdMarkdownPrefix = 'note-'
+const createdTxt = `e2eE_${stamp}.txt`
+const createdMd = `e2eF_${stamp}.md`
 
 /** 登录后进入二级目录（根 → folderRenamed → subFolder）。 */
 async function openSubFolder(page: Page): Promise<void> {
@@ -26,7 +28,7 @@ async function openSubFolder(page: Page): Promise<void> {
 test.describe.serial('文件全流程', () => {
   test('新建文件夹后出现在列表', async ({ page }) => {
     await loginViaUI(page)
-    await page.getByRole('button', { name: '＋ 新建' }).click()
+    await page.getByRole('button', { name: '新建', exact: true }).click()
     await page.getByRole('button', { name: '文件夹', exact: true }).click()
     await page.getByLabel('名称').fill(folder)
     await page.getByRole('button', { name: '创建', exact: true }).click()
@@ -47,7 +49,7 @@ test.describe.serial('文件全流程', () => {
     await fileRow(page, folderRenamed).locator('.name-btn').click()
     await expect(page.locator('.breadcrumb')).toContainText(folderRenamed)
 
-    await page.getByRole('button', { name: '＋ 新建' }).click()
+    await page.getByRole('button', { name: '新建', exact: true }).click()
     await page.getByRole('button', { name: '文件夹', exact: true }).click()
     await page.getByLabel('名称').fill(subFolder)
     await page.getByRole('button', { name: '创建', exact: true }).click()
@@ -80,39 +82,48 @@ test.describe.serial('文件全流程', () => {
     await expect(fileRow(page, fileName)).toBeVisible()
   })
 
-  test('新建文本和 Markdown，并通过菜单在独立编辑页打开', async ({ page, context }) => {
+  test('新建文本和 Markdown，并通过菜单在独立页打开', async ({ page, context }) => {
     await loginViaUI(page)
     await openSubFolder(page)
 
-    for (const name of ['文本文件', 'Markdown 笔记']) {
-      await page.getByRole('button', { name: '＋ 新建' }).click()
-      const [editor] = await Promise.all([
-        context.waitForEvent('page'),
-        page.getByRole('button', { name, exact: true }).click(),
-      ])
-      await editor.waitForLoadState()
-      if (name === 'Markdown 笔记') {
-        // Markdown 默认富文本编辑器（Tiptap 懒加载 chunk）：ProseMirror 画布
-        // 是 contenteditable div，不再是源码模式的 textarea。
-        await expect(editor.locator('.rich-text-content')).toBeVisible()
-      } else {
-        await expect(editor.locator('textarea')).toBeVisible()
-      }
-      await editor.close()
-    }
+    // 新建文本文件：新建菜单「文本文件」弹框输文件名 → 创建并打开（新窗口）。
+    await page.getByRole('button', { name: '新建', exact: true }).click()
+    await page.getByRole('button', { name: /文本文件/ }).click()
+    await page.getByLabel('文件名').fill(createdTxt)
+    const [txtEditor] = await Promise.all([
+      context.waitForEvent('page'),
+      page.getByRole('button', { name: '创建并打开', exact: true }).click(),
+    ])
+    await expect(txtEditor).toHaveURL(/\/text\//)
+    // Monaco 编辑器（.monaco-editor 容器；懒加载 chunk 需要等待）。
+    await expect(txtEditor.locator('.monaco-editor')).toBeVisible({ timeout: 30_000 })
+    await txtEditor.close()
 
-    await expect(fileRow(page, createdTextPrefix)).toBeVisible()
-    await expect(fileRow(page, createdMarkdownPrefix)).toBeVisible()
+    // 新建 Markdown：默认名弹框确认 → 富文本编辑器（Tiptap 画布）。
+    await page.getByRole('button', { name: '新建', exact: true }).click()
+    await page.getByRole('button', { name: 'Markdown / 富文本', exact: true }).click()
+    await page.getByLabel('文件名').fill(createdMd)
+    const [mdEditor] = await Promise.all([
+      context.waitForEvent('page'),
+      page.getByRole('button', { name: '创建并打开', exact: true }).click(),
+    ])
+    await expect(mdEditor).toHaveURL(/\/markdown\//)
+    await expect(mdEditor.locator('.rich-text-content')).toBeVisible({ timeout: 30_000 })
+    await mdEditor.close()
 
+    await expect(fileRow(page, createdTxt)).toBeVisible()
+    await expect(fileRow(page, createdMd)).toBeVisible()
+
+    // 上传的文件经行菜单「新窗口查看」在独立查看页打开（Monaco 只读）。
     const row = fileRow(page, fileName)
     await row.getByRole('button', { name: '操作' }).click()
-    const [editor] = await Promise.all([
+    const [viewer] = await Promise.all([
       context.waitForEvent('page'),
-      page.locator('.ctx-menu').getByRole('button', { name: '打开', exact: true }).click(),
+      page.locator('.ctx-menu').getByRole('button', { name: '新窗口查看', exact: true }).click(),
     ])
-    await expect(editor).toHaveURL(/\/text\//)
-    await expect(editor.locator('textarea')).toHaveValue(fileBody)
-    await editor.close()
+    await expect(viewer).toHaveURL(/\/view\//)
+    await expect(viewer.locator('.monaco-editor')).toBeVisible({ timeout: 30_000 })
+    await viewer.close()
   })
 
   test('下载文件', async ({ page }) => {

@@ -1193,6 +1193,15 @@ export default function SettingsPage() {
         onError={(msg) => { setError(msg); setNotice('') }}
         onNotice={(msg) => { setNotice(msg); setError('') }}
       />}
+      {section === 'developer' && (
+        <div className="panel setting-group" style={{ padding: '12px 16px' }}>
+          <div className="setting-desc muted" style={{ marginBottom: 0 }}>
+            开发者工具：个人访问令牌（PAT，供脚本/CI 以 Bearer dfpat_… 调用 API）与
+            Webhook（事件发生时向回调 URL 推送 HMAC 签名的 JSON）。两者均为本人维度，
+            一次性凭据仅在创建时展示一次。
+          </div>
+        </div>
+      )}
       {section === 'developer' && <WebhooksPanel
         onError={(msg) => { setError(msg); setNotice('') }}
         onNotice={(msg) => { setNotice(msg); setError('') }}

@@ -55,13 +55,17 @@ type Role struct {
 // Member 对应 team_members 表，复合主键 (team_id, user_id)。
 // Role 为系统角色（owner/editor/viewer）或 'custom'；RoleID 非空时表示
 // 自定义角色（migration 029 的 CHECK 保证 custom 与 role_id 一一对应）。
-// RoleName 为列表查询的关联列（roles.name，只读），供前端展示自定义角色名。
+// RoleName 为列表查询的关联列（roles.name，只读），供前端展示自定义角色名；
+// Username/Nickname 为列表查询的关联列（users 表，只读），供成员列表展示
+// 用户名（替代 UUID，见 GormStore.ListMembers 的 JOIN）。
 type Member struct {
 	TeamID    uuid.UUID  `gorm:"type:uuid;primaryKey" json:"-"`
 	UserID    uuid.UUID  `gorm:"type:uuid;primaryKey" json:"user_id"`
 	Role      string     `gorm:"size:16;not null" json:"role"`
 	RoleID    *uuid.UUID `gorm:"type:uuid" json:"role_id,omitempty"`
 	RoleName  string     `gorm:"->" json:"role_name,omitempty"`
+	Username  string     `gorm:"->" json:"username,omitempty"`
+	Nickname  string     `gorm:"->" json:"nickname,omitempty"`
 	CreatedAt time.Time  `json:"created_at"`
 }
 

@@ -1,4 +1,4 @@
-// 默认打开方式分发（个人 / 团队文件列表与 Wiki 视图共用）：
+// 默认打开方式分发（个人 / 团队文件列表共用）：
 // - 偏好（/me/open-with，按 ext）优先，未配置时按扩展名给出内置默认打开器；
 // - opener → 前端路由（新窗口）：各打开器对应既有编辑/查看路由，集成
 //   （ONLYOFFICE / draw.io）未启用时回退只读查看 /view/:id。
@@ -41,7 +41,7 @@ export function extOf(name: string): string {
 }
 
 /** Markdown 文件（.md / .markdown）。 */
-export function isMarkdownFile(name: string): boolean {
+function isMarkdownFile(name: string): boolean {
   const ext = extOf(name)
   return ext === 'md' || ext === 'markdown'
 }
@@ -59,7 +59,7 @@ export function isCodeFile(name: string): boolean {
 }
 
 /** 内置默认打开器（无用户偏好时按扩展名自动选择；其余类型走 default 只读查看）。 */
-export function smartOpenerFor(name: string): OpenWithOpener {
+function smartOpenerFor(name: string): OpenWithOpener {
   if (isMarkdownFile(name)) return 'markdown'
   if (extOf(name) === 'txt') return 'text'
   if (isCodeFile(name)) return 'code'
@@ -73,32 +73,6 @@ export function smartOpenerFor(name: string): OpenWithOpener {
 /** 生效打开器：用户偏好（按 ext）优先，否则内置默认。 */
 export function resolveOpener(name: string, prefs: OpenWithMap): OpenWithOpener {
   return prefs[extOf(name)] ?? smartOpenerFor(name)
-}
-
-/** 集成可用性（office/drawio 未启用时回退 /view 只读查看）。 */
-export interface OpenerIntegrations {
-  office: boolean
-  drawio: boolean
-}
-
-/** opener → 前端路由（新窗口打开；web/default 均进入 /view 按类型分发，html 即网页查看）。 */
-export function openerRoute(opener: OpenWithOpener, fileId: string, integrations: OpenerIntegrations): string {
-  switch (opener) {
-    case 'office':
-      return integrations.office ? `/edit/${fileId}` : `/view/${fileId}`
-    case 'drawio':
-      return integrations.drawio ? `/drawio/${fileId}` : `/view/${fileId}`
-    case 'excalidraw':
-      return `/excalidraw/${fileId}`
-    case 'text':
-      return `/text/${fileId}`
-    case 'markdown':
-      return `/markdown/${fileId}`
-    case 'code':
-      return `/code/${fileId}`
-    default:
-      return `/view/${fileId}`
-  }
 }
 
 /** 「打开方式」子菜单候选（按文件类型给出相关项，default 恒在末位）。 */

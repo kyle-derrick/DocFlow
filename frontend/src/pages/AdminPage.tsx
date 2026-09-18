@@ -5,32 +5,46 @@
 // 会话）、改配额、改角色与重置密码（C6；删除以软禁用替代，见 openapi 取舍）。
 // 非 admin（403）显示无权限页；保存成功后刷新列表并提示。
 import { Fragment, FormEvent, useEffect, useMemo, useState } from 'react'
-import { NavLink, Navigate, useParams } from 'react-router-dom'
+import { Link, NavLink, Navigate, useParams } from 'react-router-dom'
 import {
   AdminStats,
   AdminUser,
   ApiError,
+  AuditEntry,
   BackupStatus,
   BackupVerifyResult,
+  Group,
+  GroupMember,
   Invitation,
+  MailEnvStatus,
   QuarantineAction,
   QuarantineItem,
   SettingItem,
   SettingType,
   SettingValue,
+  TlsCert,
   TlsMode,
   TlsStatus,
+  UserSearchResult,
+  adminAddGroupMember,
+  adminCreateGroup,
   adminCreateInvitation,
+  adminDeleteGroup,
   adminDownloadAuditCSV,
   adminGetBackupStatus,
   adminVerifyBackup,
   adminGetSettings,
   adminGetTls,
   adminListAuditLogs,
+  adminListGroupMembers,
+  adminListGroups,
   adminListQuarantine,
   adminPutTls,
   adminQuarantineAction,
+  adminRemoveGroupMember,
   adminRunBackup,
+  adminUpdateGroup,
+  adminUploadTlsCert,
   adminGetStats,
   adminListInvitations,
   adminListUsers,
@@ -39,8 +53,9 @@ import {
   adminRevokeInvitation,
   adminUpdateUser,
   currentUserId,
+  searchUsers,
 } from '../api'
-import { formatTime } from '../components/FileBrowser'
+import { Modal, formatTime } from '../components/FileBrowser'
 import { MessageKey, t, useLocale } from '../i18n'
 
 /** 设置键前缀 → 分组标题（未知前缀回退原样）。 */
@@ -76,12 +91,16 @@ const secretLabels: Array<{ key: string; env: string; label: string }> = [
   { key: 'onlyoffice_jwt_secret', env: 'ONLYOFFICE_JWT_SECRET', label: 'ONLYOFFICE JWT 密钥' },
 ]
 
-const statCards: Array<{ key: keyof AdminStats; label: string }> = [
+/** 概览统计卡片（key 对应 AdminStats 字段；format 缺省为数字直显）。 */
+const statCards: Array<{ key: keyof AdminStats; label: string; format?: (v: number) => string }> = [
   { key: 'users', label: '用户' },
   { key: 'files', label: '文件' },
+  { key: 'storage_bytes', label: '存储用量', format: formatBytes },
+  { key: 'teams', label: '团队' },
+  { key: 'groups', label: '用户组' },
+  { key: 'shares', label: '分享' },
   { key: 'uploads', label: '上传会话' },
   { key: 'sessions', label: '登录会话' },
-  { key: 'shares', label: '分享' },
   { key: 'tokens', label: 'API 令牌' },
 ]
 
@@ -103,17 +122,39 @@ const tlsModeOptions: Array<{ value: TlsMode; label: string; desc: string }> = [
   { value: 'http', label: 'HTTP（明文）', desc: '仅限本地/内网验证；127.0.0.1 等无域名场景' },
   { value: 'auto', label: 'HTTPS（自动证书）', desc: '公网域名 DNS 指向本机，自动签发受信证书（Let\u0027s Encrypt）' },
   { value: 'internal', label: 'HTTPS（自签）', desc: '内网域名或 IP 可用，流量加密但浏览器会提示不受信' },
+  { value: 'custom', label: 'HTTPS（自定义证书）', desc: '已有企业/自购证书：上传 PEM 证书+私钥，受信且无需公网 DNS' },
 ]
+
+/** 证书摘要展示（CN / SAN / 有效期；未上传时提示先上传）。 */
+function TlsCertInfo({ cert }: { cert: TlsCert | null | undefined }) {
+  if (!cert) {
+    return <div className="setting-desc muted">尚未上传证书——选择「自定义证书」模式前请先在下方上传 PEM 证书与私钥</div>
+  }
+  return (
+    <div className="setting-desc">
+      <div>CN <code className="setting-value-mono">{cert.cn || '（无 CN，以 SAN 为准）'}</code></div>
+      {cert.dns_names && cert.dns_names.length > 0 && (
+        <div className="muted">SAN：{cert.dns_names.join('、')}</div>
+      )}
+      <div className="muted">有效期：{cert.not_before} ~ {cert.not_after}</div>
+    </div>
+  )
+}
 
 /** HTTPS 运行时切换卡片：模式选择 + 域名，保存后经 Caddy admin API 热下发
  * （立即生效，无需重启容器；caddy 拒绝时原子回退）。未托管（managed=false）
- * 时降级为提示。切换到 HTTPS 后提示 COOKIE_SECURE 联动。 */
+ * 时降级为提示。切换到 HTTPS 后提示 COOKIE_SECURE 联动。custom 模式附
+ * 证书上传（multipart cert/key，后端解析校验并落盘共享卷）与摘要展示。 */
 function TlsPanel({ onNotice }: { onNotice: (msg: string) => void }) {
   const [status, setStatus] = useState<TlsStatus | null>(null)
   const [mode, setMode] = useState<TlsMode>('http')
   const [domain, setDomain] = useState('')
   const [saving, setSaving] = useState(false)
   const [rowError, setRowError] = useState('')
+  // 证书上传：文件选择 + 上传中标记。
+  const [certFile, setCertFile] = useState<File | null>(null)
+  const [keyFile, setKeyFile] = useState<File | null>(null)
+  const [uploading, setUploading] = useState(false)
 
   useEffect(() => {
     adminGetTls()
@@ -125,6 +166,23 @@ function TlsPanel({ onNotice }: { onNotice: (msg: string) => void }) {
       .catch(() => setStatus(null))
   }, [])
 
+  const uploadCert = async () => {
+    if (!certFile || !keyFile || uploading) return
+    setUploading(true)
+    setRowError('')
+    try {
+      const st = await adminUploadTlsCert(certFile, keyFile)
+      setStatus(st)
+      setCertFile(null)
+      setKeyFile(null)
+      onNotice(`证书已上传（CN：${st.cert?.cn ?? '未知'}，到期 ${st.cert?.not_after ?? '?'}）；如需启用请在上方选择「自定义证书」并保存`)
+    } catch (err) {
+      setRowError(err instanceof Error ? err.message : '证书上传失败')
+    } finally {
+      setUploading(false)
+    }
+  }
+
   const submit = async (e: FormEvent) => {
     e.preventDefault()
     setRowError('')
@@ -135,7 +193,7 @@ function TlsPanel({ onNotice }: { onNotice: (msg: string) => void }) {
       const notice =
         st.mode === 'http'
           ? '已切换为 HTTP 明文模式'
-          : `HTTPS 已生效（${st.mode === 'auto' ? '自动证书' : '自签证书'}：${st.domain || '默认'}）`
+          : `HTTPS 已生效（${st.mode === 'auto' ? '自动证书' : st.mode === 'internal' ? '自签证书' : '自定义证书'}：${st.domain || '默认'}）`
       onNotice(`${notice}。若 .env 的 COOKIE_SECURE 与当前模式不符，请调整后重启 backend。`)
     } catch (err) {
       setRowError(err instanceof Error ? err.message : '保存失败')
@@ -166,7 +224,9 @@ function TlsPanel({ onNotice }: { onNotice: (msg: string) => void }) {
                   ? 'HTTP 明文'
                   : status.mode === 'auto'
                     ? `HTTPS 自动证书${status.domain ? `（${status.domain}）` : ''}`
-                    : `HTTPS 自签${status.domain ? `（${status.domain}）` : ''}`}
+                    : status.mode === 'internal'
+                      ? `HTTPS 自签${status.domain ? `（${status.domain}）` : ''}`
+                      : `HTTPS 自定义证书${status.domain ? `（${status.domain}）` : ''}`}
               </div>
             </div>
           </div>
@@ -205,8 +265,49 @@ function TlsPanel({ onNotice }: { onNotice: (msg: string) => void }) {
             <div className="setting-desc muted">
               {mode === 'auto'
                 ? '要求：域名公网 DNS 指向本机、80/443 端口可达（ACME 挑战与重定向）。'
-                : '自签证书：浏览器将提示不受信（可信任导入 Caddy 根证书消除）；切换后请用 https:// 访问。'}
+                : mode === 'internal'
+                  ? '自签证书：浏览器将提示不受信（可信任导入 Caddy 根证书消除）；切换后请用 https:// 访问。'
+                  : '使用已上传的自定义证书（下方上传区）；私钥仅存服务器（权限 600），不经数据库。'}
             </div>
+          )}
+          {/* 自定义证书：仅 custom（自定义证书）模式显示上传区——auto/internal
+              无需用户证书；已上传过证书（status.cert 存在）时也显示摘要供查看。 */}
+          {(mode === 'custom' || status.cert) && (
+          <div className="tls-cert-box">
+            <div className="setting-key">自定义证书（custom 模式）</div>
+            <TlsCertInfo cert={status.cert} />
+            {mode === 'custom' && (
+            <div className="tls-cert-upload">
+              <label className="field">
+                <span>证书 PEM（.pem / .crt，可含中间证书链）</span>
+                <input
+                  type="file"
+                  accept=".pem,.crt,.cer,text/plain"
+                  onChange={(e) => setCertFile(e.target.files?.[0] ?? null)}
+                />
+              </label>
+              <label className="field">
+                <span>私钥 PEM（.key / .pem）</span>
+                <input
+                  type="file"
+                  accept=".key,.pem,text/plain"
+                  onChange={(e) => setKeyFile(e.target.files?.[0] ?? null)}
+                />
+              </label>
+              <button
+                type="button"
+                className="btn small"
+                disabled={!certFile || !keyFile || uploading}
+                onClick={() => void uploadCert()}
+              >
+                {uploading ? '上传校验中…' : '上传证书'}
+              </button>
+              <span className="setting-desc muted" style={{ marginLeft: 8 }}>
+                服务端校验 PEM 可解析且私钥匹配后原子落盘（替换旧证书）
+              </span>
+            </div>
+            )}
+          </div>
           )}
         </form>
       )}
@@ -379,20 +480,22 @@ function quotaToGib(quota: number): string {
   return String(Math.round((quota / GIB) * 100) / 100)
 }
 
-/** 用户管理卡片（C6）：检索/分页列表 + 禁用启用/改配额/改角色/重置密码。 */
+/** 用户管理卡片（C6）：检索/分页列表 + 编辑弹窗（昵称/角色/状态/配额）+
+ * 组归属管理 + 禁用/启用 + 重置密码。 */
 function UsersPanel({ onError, onNotice }: { onError: (msg: string) => void; onNotice: (msg: string) => void }) {
   const locale = useLocale()
   const msg = (key: MessageKey) => t(locale, key)
   const [users, setUsers] = useState<AdminUser[]>([])
+  const [groups, setGroups] = useState<Group[]>([])
   const [total, setTotal] = useState(0)
   const [offset, setOffset] = useState(0)
   const [q, setQ] = useState('')
   const [query, setQuery] = useState('')
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
-  /** 行内编辑状态：配额草稿 / 重置密码草稿 / 状态流转中。 */
-  const [editingQuota, setEditingQuota] = useState('')
-  const [editingQuotaId, setEditingQuotaId] = useState<string | null>(null)
+  /** 弹窗状态：编辑用户 / 用户组归属 / 重置密码行内表单。 */
+  const [editingUser, setEditingUser] = useState<AdminUser | null>(null)
+  const [groupsUser, setGroupsUser] = useState<AdminUser | null>(null)
   const [resetPasswordId, setResetPasswordId] = useState<string | null>(null)
   const [newPassword, setNewPassword] = useState('')
   const pageLimit = 20
@@ -413,8 +516,18 @@ function UsersPanel({ onError, onNotice }: { onError: (msg: string) => void; onN
     }
   }
 
+  const loadGroups = async () => {
+    try {
+      setGroups(await adminListGroups())
+    } catch {
+      // 组列表加载失败不阻塞用户列表（组操作入口仍可用，弹窗内重试）。
+      setGroups([])
+    }
+  }
+
   useEffect(() => {
     void load(0, '')
+    void loadGroups()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -439,16 +552,9 @@ function UsersPanel({ onError, onNotice }: { onError: (msg: string) => void; onN
     }
   }
 
-  const submitQuota = async (e: FormEvent, user: AdminUser) => {
-    e.preventDefault()
-    if (editingQuotaId !== user.id) return
-    const gib = Number(editingQuota)
-    if (editingQuota === '' || !Number.isFinite(gib) || gib <= 0) {
-      onError('请输入大于 0 的配额数字（GiB）')
-      return
-    }
-    await update(user.id, { storageQuota: Math.round(gib * GIB) }, `已将 ${user.username} 的配额调整为 ${gib} GiB`)
-    setEditingQuotaId(null)
+  /** 弹窗操作完成后的统一刷新（用户列表聚合 group_names + 组成员计数）。 */
+  const refreshAll = async () => {
+    await Promise.all([load(), loadGroups()])
   }
 
   const submitResetPassword = async (e: FormEvent, user: AdminUser) => {
@@ -476,19 +582,20 @@ function UsersPanel({ onError, onNotice }: { onError: (msg: string) => void; onN
     <div className="panel setting-group">
       <h3>{msg('usersTitle')}</h3>
       <div className="setting-desc muted" style={{ marginBottom: 12 }}>
-        检索（用户名/邮箱前缀）与分页浏览全部用户；禁用账号立即撤销其全部登录会话，
-        启用同时解除登录失败锁定。账号不支持删除——以禁用替代（保留其名下文件与审计记录）。
+        检索（用户名/邮箱/昵称前缀）与分页浏览全部用户；「编辑」弹窗可改昵称/角色/状态/配额，
+        「组」管理其用户组归属。禁用账号立即撤销其全部登录会话，启用同时解除登录失败锁定；
+        账号不支持删除——以禁用替代（保留其名下文件与审计记录）。
       </div>
       <form className="team-create-row" style={{ marginBottom: 12 }} onSubmit={(e) => void submitSearch(e)}>
         <label className="field">
-          <span>检索（用户名 / 邮箱前缀）</span>
+          <span>检索（用户名 / 邮箱 / 昵称前缀）</span>
           <input
             type="text"
             autoCapitalize="none"
             spellCheck={false}
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="如：alice 或 alice@"
+            placeholder="如：alice、alice@ 或昵称前缀"
           />
         </label>
         <button className="btn primary" type="submit">搜索</button>
@@ -509,8 +616,9 @@ function UsersPanel({ onError, onNotice }: { onError: (msg: string) => void; onN
       ) : (
         users.map((user) => {
           const isSelf = user.id === selfId
-          const editing = editingQuotaId === user.id
           const resetting = resetPasswordId === user.id
+          const used = user.storage_used ?? 0
+          const quotaPercent = user.storage_quota > 0 ? Math.min(100, Math.round((used * 100) / user.storage_quota)) : 0
           return (
             <div key={user.id} className="setting-row">
               <div className="setting-main">
@@ -519,48 +627,37 @@ function UsersPanel({ onError, onNotice }: { onError: (msg: string) => void; onN
                   <span className={userStatusBadge[user.status]} style={{ marginLeft: 8 }}>
                     {userStatusText[user.status]}
                   </span>
-                  {user.role === 'admin' && <span className="badge role-owner" style={{ marginLeft: 4 }}>admin</span>}
+                  <span className={`badge ${user.role === 'admin' ? 'role-owner' : ''}`} style={{ marginLeft: 4 }}>
+                    {user.role}
+                  </span>
                   {isSelf && <span className="badge" style={{ marginLeft: 4 }}>本人</span>}
+                  {(user.group_names?.length ?? 0) > 0 && user.group_names!.map((name) => (
+                    <span key={name} className="badge" style={{ marginLeft: 4 }} title="所属用户组">{name}</span>
+                  ))}
                 </div>
                 <div className="setting-meta muted" title={user.email}>
-                  {user.username} · {user.email} · 配额 {quotaToGib(user.storage_quota)} GiB
+                  {user.username} · {user.email} · 已用 {formatBytes(used)} / {quotaToGib(user.storage_quota)} GiB（{quotaPercent}%）
                   {user.locked_until && ` · 锁定至 ${formatTime(user.locked_until)}`}
                 </div>
                 <div className="setting-desc muted">注册于 {formatTime(user.created_at)}</div>
               </div>
               <div className="setting-control">
-                {editing ? (
-                  <form className="setting-edit" onSubmit={(e) => void submitQuota(e, user)}>
-                    <input
-                      type="number"
-                      step="0.01"
-                      min="0.01"
-                      autoFocus
-                      value={editingQuota}
-                      onChange={(e) => setEditingQuota(e.target.value)}
-                      title="新配额（GiB）"
-                    />
-                    <button type="submit" className="btn small primary" disabled={busy}>保存</button>
-                    <button type="button" className="btn small" disabled={busy} onClick={() => setEditingQuotaId(null)}>取消</button>
-                  </form>
-                ) : (
-                  <button
-                    className="btn small"
-                    disabled={busy}
-                    onClick={() => { setEditingQuotaId(user.id); setEditingQuota(quotaToGib(user.storage_quota)) }}
-                  >
-                    改配额
-                  </button>
-                )}
-                <select
-                  value={user.role}
-                  disabled={busy || isSelf}
-                  title="角色（不可修改本人角色以防误操作）"
-                  onChange={(e) => void update(user.id, { role: e.target.value === 'admin' ? 'admin' : 'user' }, `已将 ${user.username} 的角色调整为 ${e.target.value}`)}
+                <button
+                  className="btn small"
+                  disabled={busy}
+                  title="编辑昵称 / 角色 / 状态 / 配额"
+                  onClick={() => setEditingUser(user)}
                 >
-                  <option value="user">user</option>
-                  <option value="admin">admin</option>
-                </select>
+                  编辑
+                </button>
+                <button
+                  className="btn small"
+                  disabled={busy}
+                  title="管理所属用户组（加入 / 移出）"
+                  onClick={() => setGroupsUser(user)}
+                >
+                  组
+                </button>
                 {user.status === 'active' ? (
                   <button
                     className="btn small danger"
@@ -616,6 +713,26 @@ function UsersPanel({ onError, onNotice }: { onError: (msg: string) => void; onN
           )
         })
       )}
+      {editingUser && (
+        <UserEditModal
+          user={editingUser}
+          groups={groups}
+          onClose={() => setEditingUser(null)}
+          onError={onError}
+          onNotice={onNotice}
+          onChanged={refreshAll}
+        />
+      )}
+      {groupsUser && (
+        <UserGroupsModal
+          user={groupsUser}
+          groups={groups}
+          onClose={() => setGroupsUser(null)}
+          onError={onError}
+          onNotice={onNotice}
+          onChanged={refreshAll}
+        />
+      )}
       {pages > 1 && (
         <div className="setting-control" style={{ marginTop: 12 }}>
           <button className="btn small" disabled={busy || page <= 1} onClick={() => void load((page - 2) * pageLimit)}>
@@ -644,7 +761,7 @@ function AuditPanel({ onError }: { onError: (msg: string) => void }) {
   }
   useEffect(() => { void load() }, [])
   const field = (key: keyof import('../api').AuditFilters, placeholder: string, type = 'text') => <input className="form-control" type={type} placeholder={placeholder} value={filters[key] ?? ''} onChange={(e) => setFilters({ ...filters, [key]: e.target.value })} />
-  return <div className="panel setting-group audit-panel"><h3>审计日志</h3><form className="audit-filters" onSubmit={(e) => { e.preventDefault(); setHistory([]); void load() }}>{field('action', 'Action')}{field('userId', '用户 UUID')}<select className="form-select" value={filters.status ?? ''} onChange={(e) => setFilters({ ...filters, status: e.target.value })}><option value="">全部状态</option><option value="success">success</option><option value="failure">failure</option></select>{field('resourceType', '资源类型')}{field('resourceId', '资源 ID')}{field('from', '开始时间', 'datetime-local')}{field('to', '结束时间', 'datetime-local')}<button className="btn primary">筛选</button><button type="button" className="btn" onClick={() => void adminDownloadAuditCSV(filters)}>按当前筛选导出 CSV</button></form>{data && <><div className="setting-meta muted">共 {data.total} 条</div><div className="table-scroll"><table><thead><tr><th>用户</th><th>IP</th><th>操作</th><th>资源</th><th>状态</th><th>时间</th></tr></thead><tbody>{data.items.map((entry) => <Fragment key={entry.id}>{<tr className="clickable" onClick={() => setExpanded(expanded === entry.id ? null : entry.id)}><td>{entry.user_id || '系统/匿名'}</td><td>{entry.ip || '-'}</td><td>{entry.action}</td><td>{entry.resource_type} {entry.resource_id}</td><td><span className={`badge ${entry.status === 'success' ? 'available' : 'failed'}`}>{entry.status}</span></td><td>{formatTime(entry.created_at)}</td></tr>}{expanded === entry.id && <tr key={`${entry.id}-detail`}><td colSpan={6}><strong>User-Agent</strong><pre>{entry.user_agent || '-'}</pre><strong>Metadata</strong><pre>{entry.metadata || '{}'}</pre></td></tr>}</Fragment>)}</tbody></table></div><div className="pager"><button className="btn small" disabled={history.length === 0} onClick={() => { const next = history.slice(0, -1); setHistory(next); void load(next[next.length - 1] ?? '') }}>上一页</button><button className="btn small" disabled={!data.next_cursor} onClick={() => void load(data.next_cursor, true)}>下一页</button></div></>}</div>
+  return <div className="panel setting-group audit-panel"><h3>审计日志</h3><form className="audit-filters" onSubmit={(e) => { e.preventDefault(); setHistory([]); void load() }}>{field('action', 'Action')}{field('userId', '用户 UUID')}<select className="form-select" value={filters.status ?? ''} onChange={(e) => setFilters({ ...filters, status: e.target.value })}><option value="">全部状态</option><option value="success">success</option><option value="failure">failure</option></select>{field('resourceType', '资源类型')}{field('resourceId', '资源 ID')}{field('from', '开始时间', 'datetime-local')}{field('to', '结束时间', 'datetime-local')}<button className="btn primary">筛选</button><button type="button" className="btn" onClick={() => void adminDownloadAuditCSV(filters)}>按当前筛选导出 CSV</button></form>{data && <><div className="setting-meta muted">共 {data.total} 条</div><div className="table-scroll"><table className="data-table"><thead><tr><th>用户</th><th>IP</th><th>操作</th><th>资源</th><th className="col-status">状态</th><th className="col-time">时间</th></tr></thead><tbody>{data.items.map((entry) => <Fragment key={entry.id}>{<tr className="clickable" onClick={() => setExpanded(expanded === entry.id ? null : entry.id)}><td>{entry.user_id || '系统/匿名'}</td><td>{entry.ip || '-'}</td><td>{entry.action}</td><td>{entry.resource_type} {entry.resource_id}</td><td className="col-status"><span className={`badge ${entry.status === 'success' ? 'available' : 'failed'}`}>{entry.status}</span></td><td className="col-time">{formatTime(entry.created_at)}</td></tr>}{expanded === entry.id && <tr key={`${entry.id}-detail`}><td colSpan={6}><strong>User-Agent</strong><pre>{entry.user_agent || '-'}</pre><strong>Metadata</strong><pre>{entry.metadata || '{}'}</pre></td></tr>}</Fragment>)}</tbody></table></div><div className="pager"><button className="btn small" disabled={history.length === 0} onClick={() => { const next = history.slice(0, -1); setHistory(next); void load(next[next.length - 1] ?? '') }}>上一页</button><button className="btn small" disabled={!data.next_cursor} onClick={() => void load(data.next_cursor, true)}>下一页</button></div></>}</div>
 }
 
 /** 字节数的人类可读表示（备份文件/总大小展示）。 */
@@ -744,7 +861,7 @@ function BackupPanel({ onError, onNotice }: { onError: (msg: string) => void; on
             </div>
           </div>
           <div className="table-scroll" style={{ marginBottom: 12 }}>
-            <table>
+            <table className="data-table">
               <thead>
                 <tr><th>文件</th><th>类型</th><th>大小</th><th>sha256</th></tr>
               </thead>
@@ -775,6 +892,86 @@ function BackupPanel({ onError, onNotice }: { onError: (msg: string) => void; on
           {verifying ? '校验中…' : '校验最近备份'}
         </button>
       </div>
+    </div>
+  )
+}
+
+/** 邮件（SMTP）卡片：只读状态展示。SMTP 在架构上为 env-only（邮件器启动
+ * 时装配、凭据不入库——settings 非密钥原则），本页不提供任何可编辑控件，
+ * 仅回显 /admin/settings 附带的 mail 状态（连接参数 + 配置探针），说明
+ * 修改入口在部署的 .env。 */
+function MailPanel({ mail }: { mail?: MailEnvStatus }) {
+  return (
+    <div className="panel setting-group">
+      <h3>邮件（SMTP）</h3>
+      <div className="setting-desc muted" style={{ marginBottom: 12 }}>
+        邮件通道（邀请注册、密码重置、通知副本）由部署环境变量（.env）配置，
+        运行时不可在此修改：SMTP_ENABLED=true 且 SMTP_HOST / SMTP_FROM 必填
+        （认证 SMTP_USER / SMTP_PASS 按需），调整后重启 backend 生效；
+        未启用时使用日志通道（链接输出到 backend 日志，不发送邮件）。
+      </div>
+      {!mail ? (
+        <div className="empty">邮件通道状态加载中…</div>
+      ) : (
+        <>
+          <div className="setting-row">
+            <div className="setting-main">
+              <div className="setting-key">通道状态 <code className="setting-desc muted">SMTP_ENABLED</code></div>
+              <div className="setting-desc muted">启用时经 SMTP 投递；未启用为 Noop 日志通道</div>
+            </div>
+            <div className="setting-control">
+              <span className={mail.enabled ? 'badge available' : 'badge failed'}>
+                {mail.enabled ? 'SMTP 已启用' : '未启用（日志通道）'}
+              </span>
+            </div>
+          </div>
+          <div className="setting-row">
+            <div className="setting-main">
+              <div className="setting-key">服务器 <code className="setting-desc muted">SMTP_HOST / SMTP_PORT</code></div>
+              <div className="setting-desc muted">投递服务器地址（STARTTLS 由服务器协商自动启用）</div>
+            </div>
+            <div className="setting-control">
+              {mail.host ? <span className="setting-value-mono">{mail.host}:{mail.port}</span> : <span className="badge failed">未配置</span>}
+            </div>
+          </div>
+          <div className="setting-row">
+            <div className="setting-main">
+              <div className="setting-key">发件人 <code className="setting-desc muted">SMTP_FROM</code></div>
+              <div className="setting-desc muted">启用 SMTP 时必填</div>
+            </div>
+            <div className="setting-control">
+              {mail.from ? <span className="setting-value-mono">{mail.from}</span> : <span className="badge failed">未配置</span>}
+            </div>
+          </div>
+          <div className="setting-row">
+            <div className="setting-main">
+              <div className="setting-key">认证 <code className="setting-desc muted">SMTP_USER / SMTP_PASS</code></div>
+              <div className="setting-desc muted">账号为空表示匿名投递；密码只报配置状态，不回显</div>
+            </div>
+            <div className="setting-control">
+              {mail.user ? (
+                <>
+                  <span className="setting-value-mono">{mail.user}</span>
+                  <span className={mail.password_configured ? 'badge available' : 'badge failed'} style={{ marginLeft: 8 }}>
+                    {mail.password_configured ? '密码已配置' : '密码未配置'}
+                  </span>
+                </>
+              ) : (
+                <span className="badge">匿名投递</span>
+              )}
+            </div>
+          </div>
+          <div className="setting-row">
+            <div className="setting-main">
+              <div className="setting-key">站点地址 <code className="setting-desc muted">PUBLIC_BASE_URL</code></div>
+              <div className="setting-desc muted">邮件内邀请/重置链接的前缀；为空时链接退化为相对路径（仅日志可见）</div>
+            </div>
+            <div className="setting-control">
+              {mail.public_base_url ? <span className="setting-value-mono">{mail.public_base_url}</span> : <span className="badge">未设置</span>}
+            </div>
+          </div>
+        </>
+      )}
     </div>
   )
 }
@@ -874,7 +1071,7 @@ function QuarantinePanel({ onError, onNotice }: { onError: (msg: string) => void
         <div className="empty">当前没有隔离中的内容对象</div>
       ) : (
         <div className="table-scroll">
-          <table>
+          <table className="data-table">
             <thead>
               <tr><th>文件 / SHA-256</th><th>大小</th><th>引用</th><th>隔离时间</th><th className="col-actions">操作</th></tr>
             </thead>
@@ -918,8 +1115,567 @@ function QuarantinePanel({ onError, onNotice }: { onError: (msg: string) => void
   )
 }
 
+/** 成员选择器的展示名（昵称优先，回退 username）。 */
+function searchResultLabel(user: UserSearchResult): string {
+  return (user.nickname ?? user.profile?.nickname) || user.username
+}
+
+/** 用户搜索选择器（复用 /users/search，≥2 字符防误触全量枚举）：
+ * 300ms 防抖检索 + 下拉候选；选中后向上回调 user 对象。 */
+function UserPickerField({ onSelect }: { onSelect: (user: UserSearchResult) => void }) {
+  const [query, setQuery] = useState('')
+  const [options, setOptions] = useState<UserSearchResult[]>([])
+  const [searching, setSearching] = useState(false)
+  const [picked, setPicked] = useState<UserSearchResult | null>(null)
+
+  useEffect(() => {
+    const q = query.trim()
+    if (picked && searchResultLabel(picked) === q) return
+    setPicked(null)
+    if (q.length < 2) {
+      setOptions([])
+      return
+    }
+    setSearching(true)
+    const timer = window.setTimeout(() => {
+      void searchUsers(q)
+        .then(setOptions)
+        .catch(() => setOptions([]))
+        .finally(() => setSearching(false))
+    }, 300)
+    return () => window.clearTimeout(timer)
+  }, [query, picked])
+
+  return (
+    <div className="field" style={{ position: 'relative' }}>
+      <span>用户（昵称 / 用户名 / 邮箱，至少 2 字）</span>
+      <input
+        type="text"
+        value={query}
+        autoCapitalize="none"
+        spellCheck={false}
+        onChange={(e) => setQuery(e.target.value)}
+        placeholder="输入昵称、用户名或邮箱检索"
+      />
+      {searching && <span className="hint">搜索中…</span>}
+      {!picked && options.length > 0 && (
+        <div className="user-search-options">
+          {options.map((user) => (
+            <button
+              type="button"
+              key={user.id}
+              onClick={() => {
+                setPicked(user)
+                setQuery(searchResultLabel(user))
+                setOptions([])
+                onSelect(user)
+              }}
+            >
+              <strong>{searchResultLabel(user)}</strong>
+              <span>{user.username} · {user.email}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** 组成员管理弹窗：搜索添加成员 + 成员列表移除（操作后刷新组列表计数）。 */
+function GroupMembersModal({
+  group,
+  onClose,
+  onError,
+  onNotice,
+  onChanged,
+}: {
+  group: Group
+  onClose: () => void
+  onError: (msg: string) => void
+  onNotice: (msg: string) => void
+  onChanged: () => Promise<void> | void
+}) {
+  const [members, setMembers] = useState<GroupMember[] | null>(null)
+  const [picked, setPicked] = useState<UserSearchResult | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const load = async () => {
+    try {
+      setMembers(await adminListGroupMembers(group.id))
+    } catch (err) {
+      onError(err instanceof Error ? err.message : '组成员加载失败')
+    }
+  }
+
+  useEffect(() => {
+    void load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [group.id])
+
+  const add = async () => {
+    if (!picked || busy) return
+    setBusy(true)
+    try {
+      await adminAddGroupMember(group.id, picked.id)
+      onNotice(`已将 ${searchResultLabel(picked)} 加入「${group.name}」`)
+      setPicked(null)
+      await load()
+      await onChanged()
+    } catch (err) {
+      onError(err instanceof Error ? err.message : '添加成员失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const remove = async (member: GroupMember) => {
+    if (busy) return
+    if (!window.confirm(`确定将 ${member.nickname || member.username || member.user_id.slice(0, 8)} 移出「${group.name}」？`)) return
+    setBusy(true)
+    try {
+      await adminRemoveGroupMember(group.id, member.user_id)
+      onNotice('已移除组成员')
+      await load()
+      await onChanged()
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 404) {
+        await load()
+        await onChanged()
+      } else {
+        onError(err instanceof Error ? err.message : '移除成员失败')
+      }
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Modal title={`管理组成员：${group.name}`} onClose={onClose}>
+      <div className="team-create-row" style={{ marginBottom: 12, alignItems: 'flex-end' }}>
+        <UserPickerField onSelect={setPicked} />
+        <button className="btn primary" type="button" disabled={busy || !picked} onClick={() => void add()}>
+          {busy ? '处理中…' : '加入组'}
+        </button>
+      </div>
+      {picked && <div className="setting-desc muted" style={{ marginBottom: 8 }}>已选择：{searchResultLabel(picked)}（{picked.username}）</div>}
+      {members === null ? (
+        <div className="hint">加载中…</div>
+      ) : members.length === 0 ? (
+        <div className="empty">该组暂无成员</div>
+      ) : (
+        <ul className="member-list">
+          {members.map((m) => (
+            <li key={m.user_id} className="member-row">
+              <div className="member-info">
+                <span className="member-id" title={m.user_id}>{m.nickname || m.username || m.user_id}</span>
+                {m.username && m.nickname && <span className="muted" style={{ marginLeft: 8 }}>{m.username}</span>}
+              </div>
+              <div className="member-side">
+                <span className="muted member-time" title={`加入于 ${formatTime(m.joined_at)}`}>{formatTime(m.joined_at)}</span>
+                <button className="btn small danger" disabled={busy} onClick={() => void remove(m)}>移除</button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Modal>
+  )
+}
+
+/** 用户组管理卡片：创建表单 + 组列表（data-table：名称/描述/成员数/操作），
+ * 成员管理与改名/描述编辑经弹窗完成；删除需确认（级联清成员关系）。 */
+function GroupsPanel({ onError, onNotice }: { onError: (msg: string) => void; onNotice: (msg: string) => void }) {
+  const [groups, setGroups] = useState<Group[] | null>(null)
+  const [name, setName] = useState('')
+  const [desc, setDesc] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [membersGroup, setMembersGroup] = useState<Group | null>(null)
+  const [editing, setEditing] = useState<Group | null>(null)
+  const [editName, setEditName] = useState('')
+  const [editDesc, setEditDesc] = useState('')
+
+  const load = async () => {
+    try {
+      setGroups(await adminListGroups())
+      onError('')
+    } catch (err) {
+      onError(err instanceof Error ? err.message : '用户组加载失败')
+    }
+  }
+
+  useEffect(() => {
+    void load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault()
+    if (busy || !name.trim()) return
+    setBusy(true)
+    try {
+      await adminCreateGroup(name.trim(), desc.trim())
+      setName('')
+      setDesc('')
+      onNotice('用户组已创建')
+      await load()
+    } catch (err) {
+      onError(err instanceof Error ? err.message : '创建用户组失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const saveEdit = async (e: FormEvent) => {
+    e.preventDefault()
+    if (!editing || busy) return
+    setBusy(true)
+    try {
+      await adminUpdateGroup(editing.id, { name: editName.trim(), description: editDesc.trim() })
+      setEditing(null)
+      onNotice('用户组已更新')
+      await load()
+    } catch (err) {
+      onError(err instanceof Error ? err.message : '更新用户组失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const remove = async (g: Group) => {
+    if (!window.confirm(`确定删除用户组「${g.name}」？其 ${g.member_count} 名成员的归属关系将被清除（用户本身不受影响）。`)) return
+    setBusy(true)
+    try {
+      await adminDeleteGroup(g.id)
+      onNotice(`已删除用户组「${g.name}」`)
+      await load()
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 404) await load()
+      else onError(err instanceof Error ? err.message : '删除用户组失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="panel setting-group">
+      <h3>用户组</h3>
+      <div className="setting-desc muted" style={{ marginBottom: 12 }}>
+        用户组为组织维度的人员集合（仅 admin 管理）：用于给用户打组织标签，
+        不挂文件空间、不影响文件权限（协作空间请使用「团队」）。删除组会清除其成员归属，不会删除用户。
+      </div>
+      <form className="team-create-row" style={{ marginBottom: 12 }} onSubmit={(e) => void submit(e)}>
+        <label className="field">
+          <span>组名（≤100 字符，全局唯一）</span>
+          <input type="text" maxLength={100} value={name} onChange={(e) => setName(e.target.value)} placeholder="如：研发部" />
+        </label>
+        <label className="field">
+          <span>描述（可选）</span>
+          <input type="text" value={desc} onChange={(e) => setDesc(e.target.value)} placeholder="组用途说明" />
+        </label>
+        <button className="btn primary" type="submit" disabled={busy || !name.trim()}>
+          {busy ? '创建中…' : '创建用户组'}
+        </button>
+      </form>
+      {groups === null ? (
+        <div className="hint">加载中…</div>
+      ) : groups.length === 0 ? (
+        <div className="empty">尚未创建用户组</div>
+      ) : (
+        <div className="table-scroll">
+          <table className="data-table">
+            <thead>
+              <tr><th>名称</th><th>描述</th><th>成员数</th><th className="col-time">创建时间</th><th className="col-actions">操作</th></tr>
+            </thead>
+            <tbody>
+              {groups.map((g) => (
+                <tr key={g.id}>
+                  <td>{g.name}</td>
+                  <td className="muted">{g.description || '—'}</td>
+                  <td className="muted">{g.member_count}</td>
+                  <td className="muted">{formatTime(g.created_at)}</td>
+                  <td className="col-actions">
+                    <button className="btn small" disabled={busy} onClick={() => setMembersGroup(g)}>成员</button>
+                    <button
+                      className="btn small"
+                      disabled={busy}
+                      onClick={() => { setEditing(g); setEditName(g.name); setEditDesc(g.description) }}
+                    >
+                      编辑
+                    </button>
+                    <button className="btn small danger" disabled={busy} onClick={() => void remove(g)}>删除</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {membersGroup && (
+        <GroupMembersModal
+          group={membersGroup}
+          onClose={() => setMembersGroup(null)}
+          onError={onError}
+          onNotice={onNotice}
+          onChanged={load}
+        />
+      )}
+      {editing && (
+        <Modal title={`编辑用户组：${editing.name}`} onClose={() => setEditing(null)}>
+          <form className="team-create-row" style={{ flexDirection: 'column', alignItems: 'stretch' }} onSubmit={(e) => void saveEdit(e)}>
+            <label className="field">
+              <span>组名</span>
+              <input type="text" maxLength={100} required value={editName} onChange={(e) => setEditName(e.target.value)} />
+            </label>
+            <label className="field">
+              <span>描述</span>
+              <input type="text" value={editDesc} onChange={(e) => setEditDesc(e.target.value)} placeholder="组用途说明（留空清除）" />
+            </label>
+            <div className="setting-control" style={{ marginTop: 8 }}>
+              <button className="btn primary" type="submit" disabled={busy || !editName.trim()}>{busy ? '保存中…' : '保存'}</button>
+              <button className="btn" type="button" disabled={busy} onClick={() => setEditing(null)}>取消</button>
+            </div>
+          </form>
+        </Modal>
+      )}
+    </div>
+  )
+}
+
+/** 用户编辑弹窗（people 区行操作）：昵称 / 角色 / 状态 / 配额一次提交。 */
+function UserEditModal({
+  user,
+  groups,
+  onClose,
+  onError,
+  onNotice,
+  onChanged,
+}: {
+  user: AdminUser
+  groups: Group[]
+  onClose: () => void
+  onError: (msg: string) => void
+  onNotice: (msg: string) => void
+  onChanged: () => Promise<void> | void
+}) {
+  const [nickname, setNickname] = useState(user.profile.nickname ?? '')
+  const [role, setRole] = useState<'user' | 'admin'>(user.role)
+  const [status, setStatus] = useState<'active' | 'disabled'>(user.status === 'active' ? 'active' : 'disabled')
+  const [quotaGib, setQuotaGib] = useState(quotaToGib(user.storage_quota))
+  const [busy, setBusy] = useState(false)
+  const selfId = currentUserId()
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault()
+    if (busy) return
+    const gib = Number(quotaGib)
+    if (quotaGib === '' || !Number.isFinite(gib) || gib <= 0) {
+      onError('请输入大于 0 的配额数字（GiB）')
+      return
+    }
+    if (status === 'disabled' && user.id === selfId) {
+      onError('不可禁用自己的账号')
+      return
+    }
+    setBusy(true)
+    try {
+      await adminUpdateUser(user.id, {
+        nickname,
+        role,
+        status,
+        storageQuota: Math.round(gib * GIB),
+      })
+      onNotice(`已更新 ${user.username}`)
+      onClose()
+      await onChanged()
+    } catch (err) {
+      onError(err instanceof Error ? err.message : '更新失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Modal title={`编辑用户：${user.profile.nickname || user.username}`} onClose={onClose}>
+      <form className="team-create-row" style={{ flexDirection: 'column', alignItems: 'stretch' }} onSubmit={(e) => void submit(e)}>
+        <label className="field">
+          <span>昵称（≤64 字符，留空清除）</span>
+          <input type="text" maxLength={64} value={nickname} onChange={(e) => setNickname(e.target.value)} />
+        </label>
+        <div className="team-create-row">
+          <label className="field">
+            <span>角色</span>
+            <select value={role} disabled={user.id === selfId} onChange={(e) => setRole(e.target.value === 'admin' ? 'admin' : 'user')}>
+              <option value="user">user</option>
+              <option value="admin">admin</option>
+            </select>
+          </label>
+          <label className="field">
+            <span>状态（禁用立即撤销全部会话；启用解除锁定）</span>
+            <select value={status} disabled={user.id === selfId} onChange={(e) => setStatus(e.target.value === 'disabled' ? 'disabled' : 'active')}>
+              <option value="active">active（正常）</option>
+              <option value="disabled">disabled（禁用）</option>
+            </select>
+          </label>
+          <label className="field">
+            <span>存储配额（GiB）</span>
+            <input type="number" step="0.01" min="0.01" value={quotaGib} onChange={(e) => setQuotaGib(e.target.value)} />
+          </label>
+        </div>
+        {groups.length > 0 && (
+          <div className="setting-desc muted">
+            所属组：{user.group_names?.length ? user.group_names.join('、') : '（无）'}
+          </div>
+        )}
+        <div className="setting-control" style={{ marginTop: 8 }}>
+          <button className="btn primary" type="submit" disabled={busy}>{busy ? '保存中…' : '保存'}</button>
+          <button className="btn" type="button" disabled={busy} onClick={onClose}>取消</button>
+        </div>
+      </form>
+    </Modal>
+  )
+}
+
+/** 用户组归属弹窗（people 区行操作「组」）：查看/移出所属组 + 加入新组。 */
+function UserGroupsModal({
+  user,
+  groups,
+  onClose,
+  onError,
+  onNotice,
+  onChanged,
+}: {
+  user: AdminUser
+  groups: Group[]
+  onClose: () => void
+  onError: (msg: string) => void
+  onNotice: (msg: string) => void
+  onChanged: () => Promise<void> | void
+}) {
+  const current = user.group_names ?? []
+  const [picked, setPicked] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const add = async () => {
+    if (!picked || busy) return
+    setBusy(true)
+    try {
+      await adminAddGroupMember(picked, user.id)
+      onNotice(`已将 ${user.username} 加入「${groups.find((g) => g.id === picked)?.name ?? picked}」`)
+      setPicked('')
+      await onChanged()
+    } catch (err) {
+      onError(err instanceof Error ? err.message : '加入组失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const remove = async (name: string) => {
+    const group = groups.find((g) => g.name === name)
+    if (!group || busy) return
+    setBusy(true)
+    try {
+      await adminRemoveGroupMember(group.id, user.id)
+      onNotice(`已将 ${user.username} 移出「${name}」`)
+      await onChanged()
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 404) await onChanged()
+      else onError(err instanceof Error ? err.message : '移出组失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Modal title={`所属用户组：${user.profile.nickname || user.username}`} onClose={onClose}>
+      {current.length === 0 ? (
+        <div className="empty">该用户尚未加入任何用户组</div>
+      ) : (
+        <ul className="member-list" style={{ marginBottom: 12 }}>
+          {current.map((name) => {
+            const group = groups.find((g) => g.name === name)
+            return (
+              <li key={name} className="member-row">
+                <div className="member-info">
+                  <span className="member-id">{name}</span>
+                  {group && <span className="muted" style={{ marginLeft: 8 }}>{group.description || `${group.member_count} 名成员`}</span>}
+                </div>
+                <div className="member-side">
+                  <button className="btn small danger" disabled={busy || !group} onClick={() => void remove(name)}>移出</button>
+                </div>
+              </li>
+            )
+          })}
+        </ul>
+      )}
+      <div className="team-create-row" style={{ alignItems: 'flex-end' }}>
+        <label className="field">
+          <span>加入组</span>
+          <select value={picked} onChange={(e) => setPicked(e.target.value)}>
+            <option value="">选择用户组…</option>
+            {groups.filter((g) => !current.includes(g.name)).map((g) => (
+              <option key={g.id} value={g.id}>{g.name}（{g.member_count} 人）</option>
+            ))}
+          </select>
+        </label>
+        <button className="btn primary" type="button" disabled={busy || !picked} onClick={() => void add()}>
+          {busy ? '处理中…' : '加入组'}
+        </button>
+      </div>
+      {groups.length === 0 && <div className="setting-desc muted" style={{ marginTop: 8 }}>尚未创建任何用户组，可先在「用户组」页创建。</div>}
+    </Modal>
+  )
+}
+
+/** 概览页近期审计事件摘要（最近 5 条，点击跳转审计页查看全文）。 */
+function RecentAuditPanel({ onError }: { onError: (msg: string) => void }) {
+  const [items, setItems] = useState<AuditEntry[] | null>(null)
+
+  useEffect(() => {
+    adminListAuditLogs({}, '', 5)
+      .then((r) => setItems(r.items ?? []))
+      .catch(() => onError('近期审计事件加载失败'))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  return (
+    <div className="panel setting-group">
+      <div className="setting-row" style={{ borderBottom: 0, paddingBottom: 0 }}>
+        <div className="setting-main">
+          <h3 style={{ margin: 0 }}>近期审计事件</h3>
+        </div>
+        <div className="setting-control">
+          <Link className="btn small" to="/admin/audit">查看全部 →</Link>
+        </div>
+      </div>
+      {items === null ? (
+        <div className="hint">加载中…</div>
+      ) : items.length === 0 ? (
+        <div className="empty">暂无审计事件</div>
+      ) : (
+        <ul className="member-list">
+          {items.map((entry) => (
+            <li key={entry.id} className="member-row">
+              <div className="member-info">
+                <span className="member-id">
+                  {entry.action}
+                  {entry.resource_type && <span className="muted" style={{ marginLeft: 8 }}>{entry.resource_type} {entry.resource_id?.slice(0, 8)}</span>}
+                </span>
+              </div>
+              <div className="member-side">
+                <span className={`badge ${entry.status === 'success' ? 'available' : 'failed'}`}>{entry.status}</span>
+                <span className="muted member-time" title={entry.user_id ?? '系统/匿名'}>{formatTime(entry.created_at)}</span>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
 const adminSections = [
-  ['overview', '概览'], ['people', '人员'], ['audit', '审计日志'], ['security', '安全'],
+  ['overview', '概览'], ['people', '人员'], ['groups', '用户组'], ['audit', '审计日志'], ['security', '安全'],
   ['tls', 'TLS'], ['mail', '邮件'], ['backup', '备份'], ['system', '系统设置'],
 ] as const
 
@@ -930,6 +1686,8 @@ export default function AdminPage() {
   const [stats, setStats] = useState<AdminStats | null>(null)
   const [settings, setSettings] = useState<SettingItem[]>([])
   const [secrets, setSecrets] = useState<Record<string, boolean>>({})
+  // 邮件通道（SMTP）env-only 只读状态（邮件分区展示用）。
+  const [mail, setMail] = useState<MailEnvStatus | undefined>(undefined)
   const [loading, setLoading] = useState(true)
   const [forbidden, setForbidden] = useState(false)
   const [error, setError] = useState('')
@@ -940,6 +1698,9 @@ export default function AdminPage() {
   const [draft, setDraft] = useState<string | boolean>('')
   const [savingKey, setSavingKey] = useState<string | null>(null)
   const [rowError, setRowError] = useState('')
+  // 系统设置页：搜索框过滤键 + 分组折叠状态（prefix → 折叠；过滤时自动展开）。
+  const [settingsQuery, setSettingsQuery] = useState('')
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
 
   const load = async () => {
     setLoading(true)
@@ -948,6 +1709,7 @@ export default function AdminPage() {
       const [result, st] = await Promise.all([adminGetSettings(), adminGetStats()])
       setSettings(result.settings ?? [])
       setSecrets(result.secrets ?? {})
+      setMail(result.mail)
       setStats(st)
       setForbidden(false)
     } catch (err) {
@@ -966,23 +1728,47 @@ export default function AdminPage() {
     void load()
   }, [])
 
-  /** 按键前缀分组（保持 Definitions 输出顺序）。 */
-  const groups = useMemo(() => {
+  /** 按键前缀分组（保持 Definitions 输出顺序），支持按 key/描述过滤（系统设置页搜索框）。 */
+  const settingGroups = useMemo(() => {
+    const needle = settingsQuery.trim().toLowerCase()
     const map = new Map<string, SettingItem[]>()
     for (const item of settings) {
+      if (needle !== '' && !item.key.toLowerCase().includes(needle) && !item.description.toLowerCase().includes(needle)) {
+        continue
+      }
       const prefix = item.key.split('.')[0]
       const list = map.get(prefix) ?? []
       list.push(item)
       map.set(prefix, list)
     }
     return Array.from(map.entries())
-  }, [settings])
+  }, [settings, settingsQuery])
 
   const startEdit = (item: SettingItem) => {
     setEditingKey(item.key)
     setDraft(item.type === 'bool' ? Boolean(item.value) : String(item.value))
     setRowError('')
     setNotice('')
+  }
+
+  /** bool 设置行直开直关（不进编辑态）：切换即保存并刷新列表（含生效方式徽章）。 */
+  const toggleBool = async (item: SettingItem) => {
+    if (savingKey !== null) return
+    setRowError('')
+    setSavingKey(item.key)
+    try {
+      const normalized = await adminPutSetting(item.key, !item.value)
+      setNotice(`已保存 ${item.key}（当前值：${normalized ? '开启' : '关闭'}）`)
+      const refreshed = await adminGetSettings()
+      setSettings(refreshed.settings ?? [])
+      setSecrets(refreshed.secrets ?? {})
+      setMail(refreshed.mail)
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 403) setRowError('无权限')
+      else setRowError(err instanceof Error ? err.message : '保存失败')
+    } finally {
+      setSavingKey(null)
+    }
   }
 
   const handleSave = async (e: FormEvent, item: SettingItem) => {
@@ -1012,6 +1798,7 @@ export default function AdminPage() {
         const refreshed = await adminGetSettings()
         setSettings(refreshed.settings ?? [])
         setSecrets(refreshed.secrets ?? {})
+        setMail(refreshed.mail)
       } catch {
         // 列表刷新失败不打断，保留本地已保存状态
       }
@@ -1053,18 +1840,28 @@ export default function AdminPage() {
       {loading && <div className="hint">{msg('loading')}</div>}
 
       {section === 'overview' && !loading && stats && (
-        <div className="stats-grid">
-          {statCards.map(({ key, label }) => (
-            <div key={key} className="stat-card">
-              <div className="stat-value">{stats[key]}</div>
-              <div className="stat-label">{label}</div>
-            </div>
-          ))}
-        </div>
+        <>
+          <div className="stats-grid">
+            {statCards.map(({ key, label, format }) => (
+              <div key={key} className="stat-card">
+                <div className="stat-value">{format ? format(Number(stats[key] ?? 0)) : stats[key]}</div>
+                <div className="stat-label">{label}</div>
+              </div>
+            ))}
+          </div>
+          <RecentAuditPanel onError={(m) => { setError(m); setNotice('') }} />
+        </>
       )}
 
       {section === 'people' && !loading && !forbidden && (
         <UsersPanel
+          onError={(msg) => { setError(msg); setNotice('') }}
+          onNotice={(msg) => { setNotice(msg); setError('') }}
+        />
+      )}
+
+      {section === 'groups' && !loading && !forbidden && (
+        <GroupsPanel
           onError={(msg) => { setError(msg); setNotice('') }}
           onNotice={(msg) => { setNotice(msg); setError('') }}
         />
@@ -1075,6 +1872,7 @@ export default function AdminPage() {
       {section === 'security' && !loading && !forbidden && <QuarantinePanel onError={(msg) => { setError(msg); setNotice('') }} onNotice={(msg) => { setNotice(msg); setError('') }} />}
       {section === 'security' && !loading && !forbidden && <SecretsPanel secrets={secrets} />}
        {section === 'tls' && !loading && !forbidden && <TlsPanel onNotice={(msg) => { setNotice(msg); setError('') }} />}
+      {section === 'mail' && !loading && !forbidden && <MailPanel mail={mail} />}
 
       {section === 'people' && !loading && !forbidden && (
         <InvitationsPanel
@@ -1083,10 +1881,50 @@ export default function AdminPage() {
         />
       )}
 
-      {section === 'system' && !loading && groups.map(([prefix, items]) => (
+      {section === 'system' && !loading && (
+        <div className="panel setting-group" style={{ padding: '12px 16px' }}>
+          <form className="team-create-row" style={{ marginBottom: 0 }} onSubmit={(e) => e.preventDefault()}>
+            <label className="field" style={{ flex: 1 }}>
+              <span>过滤设置键（按 key 或描述匹配；过滤时分组自动展开）</span>
+              <input
+                type="text"
+                autoCapitalize="none"
+                spellCheck={false}
+                value={settingsQuery}
+                onChange={(e) => setSettingsQuery(e.target.value)}
+                placeholder="如：upload、share.default 或“配额”"
+              />
+            </label>
+            {settingsQuery && (
+              <button className="btn" type="button" style={{ alignSelf: 'flex-end' }} onClick={() => setSettingsQuery('')}>清除</button>
+            )}
+          </form>
+        </div>
+      )}
+
+      {section === 'system' && !loading && settingGroups.length === 0 && (
+        <div className="empty">没有匹配的设置项</div>
+      )}
+
+      {section === 'system' && !loading && settingGroups.map(([prefix, items]) => {
+        const searching = settingsQuery.trim() !== ''
+        const isCollapsed = !searching && collapsed[prefix]
+        return (
         <div key={prefix} className="panel setting-group">
-          <h3>{groupTitles[prefix] ?? prefix}</h3>
-          {items.map((item) => {
+          <h3 style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <button
+              type="button"
+              className="btn ghost"
+              style={{ padding: '2px 8px' }}
+              title={isCollapsed ? '展开分组' : '折叠分组'}
+              onClick={() => setCollapsed((prev) => ({ ...prev, [prefix]: !isCollapsed }))}
+            >
+              {isCollapsed ? '▸' : '▾'}
+            </button>
+            {groupTitles[prefix] ?? prefix}
+            <span className="setting-meta muted">（{items.length} 项）</span>
+          </h3>
+          {!isCollapsed && items.map((item) => {
             const editing = editingKey === item.key
             return (
               <div key={item.key} className="setting-row">
@@ -1149,11 +1987,19 @@ export default function AdminPage() {
                         取消
                       </button>
                     </form>
+                  ) : item.type === 'bool' ? (
+                    <label className="setting-bool" title="bool 行直开直关：切换后立即保存">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(item.value)}
+                        disabled={savingKey !== null}
+                        onChange={() => void toggleBool(item)}
+                      />
+                      <span>{savingKey === item.key ? '保存中…' : item.value ? '开启' : '关闭'}</span>
+                    </label>
                   ) : (
                     <>
-                      <span className={item.type === 'bool' ? `badge ${item.value ? 'available' : 'failed'}` : 'setting-value-mono'}>
-                        {item.type === 'bool' ? (item.value ? '开启' : '关闭') : formatSettingValue(item.value)}
-                      </span>
+                      <span className="setting-value-mono">{formatSettingValue(item.value)}</span>
                       <button className="btn small" onClick={() => startEdit(item)}>编辑</button>
                     </>
                   )}
@@ -1163,7 +2009,8 @@ export default function AdminPage() {
             )
           })}
         </div>
-      ))}
+        )
+      })}
       </div>
     </div>
   )

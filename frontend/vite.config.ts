@@ -49,12 +49,17 @@ export default defineConfig({
         // 时才需要：不进 SW 预缓存（避免首装全量下载），在线按需拉取。
         // 富文本编辑器（Tiptap + lowlight，~640KB）同例：仅编辑 markdown 时
         // 懒加载（RichTextEditor-*.js 独立 chunk），不进预缓存。
+        // Monaco（VSCode）编辑器同例：本地打包产物 3MB+（MonacoEditor-*.js
+        // 懒加载 chunk 与按语言 worker：*.worker-*.js），仅文本/源码编辑与
+        // 查看时需要，不进预缓存。
         globIgnores: [
           'assets/*-*-*.js',
           'assets/mermaid*.js',
           'assets/cytoscape*.js',
           'assets/katex-*.js',
           'assets/RichTextEditor*.js',
+          'assets/MonacoEditor*.js',
+          'assets/*.worker-*.js',
         ],
       },
     }),

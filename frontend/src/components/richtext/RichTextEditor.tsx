@@ -8,9 +8,11 @@
 //   （见 markdownRoundtrip.ts 约定）；slash 菜单插入，图片另支持粘贴/拖拽
 //   上传到 md 所在目录的 assets/ 子目录。
 import { useEffect, useMemo, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 import { EditorContent, useEditor } from '@tiptap/react'
 import type { Editor } from '@tiptap/react'
 import type { Transaction } from '@tiptap/pm/state'
+import { Link2, ListTodo } from 'lucide-react'
 import StarterKit from '@tiptap/starter-kit'
 import Underline from '@tiptap/extension-underline'
 import Link from '@tiptap/extension-link'
@@ -233,7 +235,7 @@ export default function RichTextEditor({
   const chain = () => editor!.chain().focus()
   const toolbarBtn = (
     key: string,
-    label: string,
+    label: ReactNode,
     title: string,
     active: boolean,
     disabled: boolean,
@@ -297,12 +299,12 @@ export default function RichTextEditor({
           <div className="rich-text-toolbar-group">
             {toolbarBtn('ul', '•', zh ? '无序列表' : 'Bullet list', editor.isActive('bulletList'), false, () => chain().toggleBulletList().run())}
             {toolbarBtn('ol', '1.', zh ? '有序列表' : 'Ordered list', editor.isActive('orderedList'), false, () => chain().toggleOrderedList().run())}
-            {toolbarBtn('task', '☑', zh ? '任务列表' : 'Task list', editor.isActive('taskList'), false, () => chain().toggleTaskList().run())}
+            {toolbarBtn('task', <ListTodo size={14} strokeWidth={2} aria-hidden="true" />, zh ? '任务列表' : 'Task list', editor.isActive('taskList'), false, () => chain().toggleTaskList().run())}
             {toolbarBtn('quote', '❝', zh ? '引用' : 'Quote', editor.isActive('blockquote'), false, () => chain().toggleBlockquote().run())}
           </div>
           <div className="rich-text-toolbar-group">
             {toolbarBtn('codeblock', '{}', zh ? '代码块' : 'Code block', editor.isActive('codeBlock'), false, () => chain().toggleCodeBlock().run())}
-            {toolbarBtn('link', '🔗', zh ? '链接' : 'Link', editor.isActive('link'), false, onToolbarLink)}
+            {toolbarBtn('link', <Link2 size={14} strokeWidth={2} aria-hidden="true" />, zh ? '链接' : 'Link', editor.isActive('link'), false, onToolbarLink)}
             {toolbarBtn('table', '▦', zh ? '插入表格' : 'Insert table', false, false, () =>
               chain().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run(),
             )}

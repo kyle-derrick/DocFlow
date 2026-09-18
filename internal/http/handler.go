@@ -14,6 +14,7 @@ import (
 	"github.com/docflow/docflow/internal/caddytls"
 	"github.com/docflow/docflow/internal/contenturl"
 	"github.com/docflow/docflow/internal/files"
+	"github.com/docflow/docflow/internal/group"
 	"github.com/docflow/docflow/internal/invite"
 	"github.com/docflow/docflow/internal/mail"
 	"github.com/docflow/docflow/internal/mcp"
@@ -90,12 +91,15 @@ type ReadinessChecker interface {
 }
 
 type Handler struct {
-	readiness       ReadinessChecker
-	auth            *auth.Service
-	users           userDirectory
-	files           *files.Store
-	shares          *share.Service
-	teams           *team.Service
+	readiness ReadinessChecker
+	auth      *auth.Service
+	users     userDirectory
+	files     *files.Store
+	shares    *share.Service
+	teams     *team.Service
+	// groups 为管理端用户组服务（migration 035，SetGroups 注入）：组 CRUD
+	// 与成员管理（仅 admin 路由组）；未注入时组端点返回 503（生产恒注入）。
+	groups          *group.Service
 	uploads         *upload.Service
 	storage         upload.Storage
 	cookieSecure    bool
@@ -557,9 +561,11 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	admin.GET("/settings", h.listAdminSettings)
 	admin.PUT("/settings/:key", h.updateAdminSetting)
 	// HTTPS 运行时切换（热下发 Caddy admin API）：GET 恒注册（未托管时
-	// managed=false 供页面降级展示）；PUT 未托管时 503。
+	// managed=false 供页面降级展示）；PUT 未托管时 503；POST /tls/cert
+	// 上传自定义证书（custom 模式，multipart cert+key）。
 	admin.GET("/tls", h.adminGetTLS)
 	admin.PUT("/tls", h.adminUpdateTLS)
+	admin.POST("/tls/cert", h.adminUploadTLSCert)
 	// 隔离区管理（G6，仅 admin）：隔离 blob 列表与 rescan/release/delete 处置
 	//（release 须显式 confirm=true；全部动作写审计）。
 	admin.GET("/quarantine", h.listQuarantine)
@@ -582,6 +588,15 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	admin.POST("/invitations", h.createInvitation)
 	admin.GET("/invitations", h.listInvitations)
 	admin.DELETE("/invitations/:id", h.revokeInvitation)
+	// 用户组管理（migration 035，仅 admin）：组 CRUD 与成员增删；删除组级联
+	// 清 group_members（组不删用户）。组为纯组织维度，不挂文件空间。
+	admin.GET("/groups", h.adminListGroups)
+	admin.POST("/groups", h.adminCreateGroup)
+	admin.PATCH("/groups/:id", h.adminUpdateGroup)
+	admin.DELETE("/groups/:id", h.adminDeleteGroup)
+	admin.GET("/groups/:id/members", h.adminListGroupMembers)
+	admin.POST("/groups/:id/members", h.adminAddGroupMember)
+	admin.DELETE("/groups/:id/members/:uid", h.adminRemoveGroupMember)
 	// 公开分享接口：无认证、不设 cookie，单独按 IP 限流。
 	// 密码校验端点（verify）额外叠加独立按 IP+token 的更严限流（5/min），
 	// 防无认证暴力猜测分享密码。

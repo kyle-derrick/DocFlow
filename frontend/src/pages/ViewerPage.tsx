@@ -9,7 +9,7 @@
 // FileViewerDispatch / RawHtmlViewer 同时供按路径查看页（/view/by-path）
 // 复用：fileId 由 resolve 结果提供（各编辑器页支持 fileId prop）。
 import { useCallback, useEffect, useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { useParams, useSearchParams } from 'react-router-dom'
 import {
   FileWithVersion,
   PreviewContent,
@@ -164,9 +164,11 @@ function XMindFileViewer({ fileId, name }: { fileId: string; name: string }) {
 }
 
 /**
- * 按文件名/扩展名分发的只读查看器（/view/:fileId 与 /view/by-path 共用）：
- * fileId 由调用方提供（路由参数或 resolve 结果）；resolveRawUrl 供 .html
- * 网页查看现取 raw_url（重试时复用）。
+ * 按文件名/扩展名分发的只读查看器（/view/:fileId 与 /view/by-path 共用，
+ * FileBrowser 查看弹窗亦经此内嵌）：fileId 由调用方提供（路由参数或
+ * resolve 结果）；resolveRawUrl 供 .html 网页查看现取 raw_url（重试时
+ * 复用）。office 文档统一内嵌 OnlyOffice 只读视图（EditorPage mode=view，
+ * 弹窗与独立页渲染一致；EditorPage 在 .preview-embed 内已去视口化自适应）。
  */
 export function FileViewerDispatch({
   fileId,
@@ -213,6 +215,10 @@ export function FileViewerDispatch({
 
 export default function ViewerPage() {
   const { fileId = '' } = useParams()
+  const [searchParams] = useSearchParams()
+  // ?origin_content=1：resolve 携带 origin_content，raw_url 按
+  // CONTENT_PUBLIC_BASE_URL 绝对化（跨 origin 内容域场景；未配置回退相对）。
+  const originContent = searchParams.get('origin_content') === '1'
   const [file, setFile] = useState<FileWithVersion | null>(null)
   const [error, setError] = useState('')
 
@@ -228,12 +234,12 @@ export default function ViewerPage() {
   // resolve 现取 raw_url；grant 10 分钟，失败可重试。
   const resolveRawUrl = useCallback(async () => {
     try {
-      const r = await resolveFileById(fileId, { mode: 'view' })
+      const r = await resolveFileById(fileId, { mode: 'view', originContent })
       return r.raw_url
     } catch {
       return null
     }
-  }, [fileId])
+  }, [fileId, originContent])
 
   if (error) return <main className="text-editor-page"><div className="banner error">{error}</div></main>
   if (!file) return <main className="text-editor-page"><div className="text-editor-state">正在加载…</div></main>

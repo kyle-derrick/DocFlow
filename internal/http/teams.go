@@ -197,7 +197,9 @@ func parseMemberRole(c *gin.Context, req teamMemberRequest) (string, *uuid.UUID,
 }
 
 // memberJSON 序列化成员安全字段：role（owner/editor/viewer/custom）、
-// role_id/role_name（自定义角色时返回，供前端展示与改派）。
+// role_id/role_name（自定义角色时返回，供前端展示与改派）、
+// username/nickname（成员列表 JOIN users 补齐，展示用户名替代 UUID；
+// 仅非空时返回，兼容 MemoryStore 等无用户数据的实现）。
 func memberJSON(m team.Member) gin.H {
 	out := gin.H{"user_id": m.UserID, "role": m.Role, "created_at": m.CreatedAt}
 	if m.RoleID != nil {
@@ -205,6 +207,12 @@ func memberJSON(m team.Member) gin.H {
 	}
 	if m.RoleName != "" {
 		out["role_name"] = m.RoleName
+	}
+	if m.Username != "" {
+		out["username"] = m.Username
+	}
+	if m.Nickname != "" {
+		out["nickname"] = m.Nickname
 	}
 	return out
 }
@@ -368,12 +376,15 @@ func (h *Handler) listTeamFiles(c *gin.Context) {
 		if !ok {
 			return
 		}
-		parent, err := h.files.Get(actor, parentID)
+		// 注意用 = 而非 :=：:= 会在 if 块内重新声明 parent（遮蔽外层零值），
+		// 导致下方 ListTeam 拿到 uuid.Nil（子目录列表恒空）且响应 parent_id
+		// 为全零 UUID（前端回填后上传报 file not found，v1.1.1 修复）。
+		var err error
+		parent, err = h.files.Get(actor, parentID)
 		if err != nil {
 			// 团队目录不以 actor 为 owner，改按团队作用域查询。
-			var ferr error
-			parent, ferr = h.files.GetTeamFolder(teamID, parentID)
-			if ferr != nil {
+			parent, err = h.files.GetTeamFolder(teamID, parentID)
+			if err != nil {
 				c.JSON(http.StatusNotFound, gin.H{"error": "folder not found"})
 				return
 			}

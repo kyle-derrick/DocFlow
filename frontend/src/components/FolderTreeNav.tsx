@@ -1,18 +1,21 @@
 // 文件管理左侧目录树（替代 Wiki 视图的空间内导航价值）：
 // - FolderTreeNav：当前空间的目录树 UI（根 = 空间根；子目录懒加载，
-//   目录下同时展示文件叶子节点——不可展开、点击经 by-path 查看页新窗口
-//   打开；当前目录高亮 + 自动展开祖先；点击目录节点切换 FileBrowser
-//   当前目录）。
+//   目录下同时展示文件叶子节点——不可展开、点击经 fileOpenSignal 触发
+//   FileBrowser 查看弹窗（不再新窗口）；当前目录高亮 + 自动展开祖先；
+//   点击目录节点切换 FileBrowser 当前目录；文件/目录节点右键菜单
+//   （查看 / 新窗口查看 / 作为网页打开 / 展开、收起，复用 .ctx-menu）。
 // - FileBrowserWithTree：FilesPage / TeamSpacePage 布局层包装器——在
 //   FileBrowser 外面包左侧树栏（240px，可折叠），不修改 FileBrowser 内部
 //   实现：FileBrowser 未暴露受控当前目录 prop，故用「key 重挂载回到根 +
 //   逐段点击其自身渲染的目录行/卡片按钮」最小侵入方式驱动面包屑导航；
 //   同时经注入的 listItems 包装感知每次目录列表结果，完成树节点登记、
 //   当前目录高亮同步（用户在 FileBrowser 内点击目录/面包屑时树跟随）。
-import { useCallback, useEffect, useRef, useState } from 'react'
+//   文件节点点击经 fileOpenSignal 受控信号触达 FileBrowser 的查看弹窗。
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
+import { ChevronDown, ChevronRight, FileText, Folder, Home } from 'lucide-react'
 import { FileItem, FileQueryOptions, encodePathSegments } from '../api'
-import FileBrowser from './FileBrowser'
+import FileBrowser, { clampFixedMenu } from './FileBrowser'
 import type { FileBrowserProps } from './FileBrowser'
 import { useLocale } from '../i18n'
 
@@ -30,6 +33,8 @@ interface TreeNode {
   childIds: string[] | null
   /** 直接子文件 id 列表（树内叶子展示）。仅目录有意义。 */
   fileIds: string[]
+  /** 目录下存在 index.html/index.htm（作为网页打开入口用）。 */
+  hasIndexWeb: boolean
 }
 
 /** 在 FileBrowser 渲染结果里按名称查找目录入口（列表视图 .name-btn 无
@@ -65,6 +70,8 @@ export default function FolderTreeNav({
   onToggleExpand,
   onSelect,
   onSelectFile,
+  onOpenFileNewWindow,
+  onOpenFolderAsWebsite,
   collapsed,
   onToggleCollapse,
   errorText,
@@ -76,32 +83,64 @@ export default function FolderTreeNav({
   currentKey: string
   onToggleExpand: (key: string) => void
   onSelect: (key: string) => void
-  /** 文件叶子点击（新窗口 by-path 查看）；缺省时文件节点仅展示不可点。 */
+  /** 文件叶子点击（查看弹窗，经包装器 fileOpenSignal 触达 FileBrowser）；缺省时文件节点不可点。 */
   onSelectFile?: (key: string) => void
+  /** 文件右键菜单「新窗口查看」（by-path 查看页）；缺省时菜单项隐藏。 */
+  onOpenFileNewWindow?: (key: string) => void
+  /** has_index_web 目录右键菜单「作为网页打开（新窗口）」；缺省时菜单项隐藏。 */
+  onOpenFolderAsWebsite?: (key: string) => void
   collapsed: boolean
   onToggleCollapse: () => void
   errorText: string
 }) {
   const locale = useLocale()
   const zh = locale === 'zh-CN'
+  // 右键菜单：目标节点 key + 视口坐标（null = 关闭）；点击外部/动作后收口。
+  const [ctx, setCtx] = useState<{ key: string; x: number; y: number } | null>(null)
+  const ctxRef = useRef<HTMLDivElement | null>(null)
+  const ctxNode = ctx ? nodes[ctx.key] : undefined
+  useEffect(() => {
+    if (!ctx) return
+    const onDown = (e: MouseEvent) => {
+      const el = e.target as HTMLElement | null
+      if (el?.closest?.('.ctx-menu')) return
+      setCtx(null)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [ctx])
+  // 渲染后按实测尺寸把菜单收进视口（复用 FileBrowser 的收缩定位）。
+  useLayoutEffect(() => {
+    if (!ctx || !ctxRef.current) return
+    clampFixedMenu(ctxRef.current, ctx.x, ctx.y)
+  }, [ctx])
 
   const renderRow = (key: string, depth: number): ReactNode => {
     const node = nodes[key]
     if (!node) return null
-    // 文件叶子：不可展开，点击经 onSelectFile 新窗口打开查看页。
+    // 文件叶子：不可展开，点击触发查看弹窗（onSelectFile → fileOpenSignal）。
     if (node.type === 'file') {
       const clickable = Boolean(onSelectFile)
       return (
-        <div key={key} className="folder-tree-row file-leaf">
+        <div
+          key={key}
+          className="folder-tree-row file-leaf"
+          style={{ paddingLeft: 4 + depth * 14 }}
+          onContextMenu={(e) => {
+            if (!clickable && !onOpenFileNewWindow) return
+            e.preventDefault()
+            setCtx({ key, x: e.clientX, y: e.clientY })
+          }}
+        >
           <span className="folder-tree-caret" aria-hidden="true" />
           <button
             type="button"
             className="folder-tree-name"
-            title={clickable ? (zh ? '在新窗口查看' : 'View in new window') : node.name}
+            title={clickable ? (zh ? '查看' : 'View') : node.name}
             disabled={!clickable}
             onClick={() => onSelectFile?.(key)}
           >
-            <span className="folder-tree-file-icon" aria-hidden="true">📄</span>
+            <span className="folder-tree-file-icon" aria-hidden="true"><FileText size={14} strokeWidth={2} aria-hidden="true" /></span>
             <span className="folder-tree-name-text">{node.name}</span>
           </button>
         </div>
@@ -115,6 +154,10 @@ export default function FolderTreeNav({
         <div
           className={`folder-tree-row${key === currentKey ? ' active' : ''}`}
           style={{ paddingLeft: 4 + depth * 14 }}
+          onContextMenu={(e) => {
+            e.preventDefault()
+            setCtx({ key, x: e.clientX, y: e.clientY })
+          }}
         >
           <button
             type="button"
@@ -122,7 +165,13 @@ export default function FolderTreeNav({
             aria-label={isExpanded ? '收起' : '展开'}
             onClick={() => hasChildren && onToggleExpand(key)}
           >
-            {isLoading ? '⋯' : !hasChildren ? '·' : isExpanded ? '▾' : '▸'}
+            {isLoading
+              ? '⋯'
+              : !hasChildren
+                ? '·'
+                : isExpanded
+                  ? <ChevronDown size={14} strokeWidth={2} aria-hidden="true" />
+                  : <ChevronRight size={14} strokeWidth={2} aria-hidden="true" />}
           </button>
           <button
             type="button"
@@ -130,10 +179,14 @@ export default function FolderTreeNav({
             title={node.name}
             onClick={() => onSelect(key)}
           >
-            <span aria-hidden="true">{key === ROOT_KEY ? '🏠' : '📁'}</span>
+            <span aria-hidden="true">{key === ROOT_KEY
+              ? <Home size={14} strokeWidth={2} aria-hidden="true" />
+              : <Folder size={14} strokeWidth={2} aria-hidden="true" />}</span>
             <span className="folder-tree-name-text">{key === ROOT_KEY ? rootLabel : node.name}</span>
           </button>
         </div>
+        {/* 子目录与文件叶子同为 depth+1 缩进（文件行也带 paddingLeft，修复
+            文件与目录同级显示的问题）。 */}
         {isExpanded && node.childIds?.map((id) => renderRow(id, depth + 1))}
         {isExpanded && node.fileIds.map((id) => renderRow(id, depth + 1))}
       </div>
@@ -172,6 +225,44 @@ export default function FolderTreeNav({
       </div>
       {errorText && <div className="folder-tree-error">{errorText}</div>}
       {renderRow(ROOT_KEY, 0)}
+      {/* 节点右键菜单：文件列表 itemMenuContent 的精简版（包装层无重命名/
+          删除等操作权限上下文，仅保留 查看 / 新窗口查看（文件）、作为网页
+          打开（has_index_web 目录）、展开、收起（目录））。 */}
+      {ctx && ctxNode && (
+        <div
+          ref={ctxRef}
+          className="ctx-menu file-card-menu"
+          role="menu"
+          style={{ left: `${ctx.x}px`, top: `${ctx.y}px` }}
+          onClick={() => setCtx(null)}
+        >
+          {ctxNode.type === 'file' && onSelectFile && (
+            <button type="button" className="btn small" onClick={() => onSelectFile?.(ctx.key)}>
+              {zh ? '查看' : 'View'}
+            </button>
+          )}
+          {ctxNode.type === 'file' && onOpenFileNewWindow && (
+            <button type="button" className="btn small" onClick={() => onOpenFileNewWindow?.(ctx.key)}>
+              {zh ? '新窗口查看' : 'View in new window'}
+            </button>
+          )}
+          {ctxNode.type === 'folder' && ctxNode.hasIndexWeb && onOpenFolderAsWebsite && (
+            <button
+              type="button"
+              className="btn small"
+              title={zh ? '在独立窗口打开该目录（index.html）' : 'Open this folder as a website'}
+              onClick={() => onOpenFolderAsWebsite?.(ctx.key)}
+            >
+              {zh ? '作为网页打开（新窗口）' : 'Open as website'}
+            </button>
+          )}
+          {ctxNode.type === 'folder' && (ctxNode.childIds === null || ctxNode.childIds.length > 0) && (
+            <button type="button" className="btn small" onClick={() => onToggleExpand(ctx.key)}>
+              {expanded.has(ctx.key) ? (zh ? '收起' : 'Collapse') : zh ? '展开' : 'Expand'}
+            </button>
+          )}
+        </div>
+      )}
     </aside>
   )
 }
@@ -191,7 +282,7 @@ export function FileBrowserWithTree({ listChildren, ...browserProps }: FileBrows
 }) {
   const rootLabel = browserProps.rootLabel
   const [nodes, setNodes] = useState<Record<string, TreeNode>>(() => ({
-    [ROOT_KEY]: { id: ROOT_KEY, name: rootLabel, type: 'folder', parentId: ROOT_KEY, childIds: null, fileIds: [] },
+    [ROOT_KEY]: { id: ROOT_KEY, name: rootLabel, type: 'folder', parentId: ROOT_KEY, childIds: null, fileIds: [], hasIndexWeb: false },
   }))
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set([ROOT_KEY]))
   const [loadingKeys, setLoadingKeys] = useState<Set<string>>(new Set())
@@ -233,10 +324,11 @@ export function FileBrowserWithTree({ listChildren, ...browserProps }: FileBrows
         next[it.id] = {
           id: it.id, name: it.name, type: 'folder', parentId: parentKey,
           childIds: next[it.id]?.childIds ?? null, fileIds: next[it.id]?.fileIds ?? [],
+          hasIndexWeb: Boolean(it.has_index_web),
         }
       }
       for (const it of files) {
-        next[it.id] = { id: it.id, name: it.name, type: 'file', parentId: parentKey, childIds: [], fileIds: [] }
+        next[it.id] = { id: it.id, name: it.name, type: 'file', parentId: parentKey, childIds: [], fileIds: [], hasIndexWeb: false }
       }
       next[parentKey] = { ...parent, childIds: folders.map((it) => it.id), fileIds: files.map((it) => it.id) }
       return next
@@ -361,26 +453,60 @@ export function FileBrowserWithTree({ listChildren, ...browserProps }: FileBrows
     })
   }
 
-  /**
-   * 文件叶子点击：新窗口打开 by-path 查看页（查看弹窗在 FileBrowser 内部、
-   * 无法从树触达，退而求其次走独立查看页）。树内路径已知，包装器自行拼接；
-   * ns 缺失时（未传命名空间）不传本回调，文件节点灰显不可点。
-   */
-  const openFileFromTree = (key: string) => {
-    const node: TreeNode | undefined = nodesRef.current[key]
-    const ns = browserProps.ns
-    if (!node || node.type !== 'file' || !ns) return
-    const segs: string[] = []
-    const seen = new Set<string>()
+  // ---- 外部「打开文件」信号（树文件节点点击 → FileBrowser 查看弹窗） ----
+
+  // 信号序列号：每次点击自增，保证 FileBrowser 侧 effect 依 seq 变化触发。
+  const fileOpenSeqRef = useRef(0)
+  const [fileOpenSignal, setFileOpenSignal] = useState<FileBrowserProps['fileOpenSignal']>(undefined)
+
+  /** 拼装节点的命名空间相对路径段（不含根节点；含节点自身）。 */
+  const nodeSegmentsOf = (key: string): string[] | null => {
+    const node = nodesRef.current[key]
+    if (!node) return null
+    const segs: string[] = [node.name]
+    const seen = new Set<string>([key])
     let k: string | undefined = node.parentId
     while (k && k !== ROOT_KEY && !seen.has(k)) {
       seen.add(k)
       const parent: TreeNode | undefined = nodesRef.current[k]
-      if (!parent) return
+      if (!parent) return null
       segs.unshift(parent.name)
       k = parent.parentId
     }
-    segs.push(node.name)
+    return segs
+  }
+
+  /**
+   * 文件叶子点击：向 FileBrowser 发 fileOpenSignal 受控信号，打开其内部
+   * 的查看弹窗（不再新窗口）；pathSegments 由包装器拼装随信号传去，弹窗
+   * 内 by-path 路由（新窗口查看/编辑）按路径构建。
+   */
+  const openFileFromTree = (key: string) => {
+    const node: TreeNode | undefined = nodesRef.current[key]
+    if (!node || node.type !== 'file') return
+    setFileOpenSignal({ fileId: node.id, seq: ++fileOpenSeqRef.current, pathSegments: nodeSegmentsOf(key) ?? undefined })
+  }
+
+  /** 右键菜单「新窗口查看」：by-path 查看页（独立窗口）。 */
+  const openFileNewWindowFromTree = (key: string) => {
+    const ns = browserProps.ns
+    const segs = nodeSegmentsOf(key)
+    const node = nodesRef.current[key]
+    if (!ns || !segs || !node || node.type !== 'file') return
+    const url = new URL(
+      `/view/by-path/${ns.type}/${encodeURIComponent(ns.scope)}/${encodePathSegments(segs)}/`,
+      window.location.origin,
+    )
+    url.searchParams.set('returnTo', `${window.location.pathname}${window.location.search}`)
+    window.open(`${url.pathname}${url.search}`, '_blank', 'noopener')
+  }
+
+  /** has_index_web 目录右键菜单「作为网页打开（新窗口）」：by-path 查看页
+   *（查看页在目录路径上 resolve index.html，与文件列表菜单行为一致）。 */
+  const openFolderAsWebsiteFromTree = (key: string) => {
+    const ns = browserProps.ns
+    const segs = nodeSegmentsOf(key)
+    if (!ns || !segs) return
     const url = new URL(
       `/view/by-path/${ns.type}/${encodeURIComponent(ns.scope)}/${encodePathSegments(segs)}/`,
       window.location.origin,
@@ -421,13 +547,15 @@ export function FileBrowserWithTree({ listChildren, ...browserProps }: FileBrows
         currentKey={currentKey}
         onToggleExpand={toggleExpand}
         onSelect={selectFromTree}
-        onSelectFile={browserProps.ns ? openFileFromTree : undefined}
+        onSelectFile={openFileFromTree}
+        onOpenFileNewWindow={browserProps.ns ? openFileNewWindowFromTree : undefined}
+        onOpenFolderAsWebsite={browserProps.ns ? openFolderAsWebsiteFromTree : undefined}
         collapsed={collapsed}
         onToggleCollapse={() => setCollapsed((v) => !v)}
         errorText={treeError}
       />
       <div className="files-tree-main" ref={hostRef}>
-        <FileBrowser key={navKey} {...browserProps} listItems={drivenListItems} />
+        <FileBrowser key={navKey} {...browserProps} listItems={drivenListItems} fileOpenSignal={fileOpenSignal} />
       </div>
     </div>
   )

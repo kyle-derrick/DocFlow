@@ -7,7 +7,9 @@
 // returnTo=当前编辑路径）与刷新（重新拉当前版本并重挂载查看器）；
 // readonly 态（editor 不可编辑）隐藏工具条。
 import { useEffect, useState } from 'react'
+import type { ReactNode } from 'react'
 import type { NodeViewProps } from '@tiptap/react'
+import { FileSpreadsheet, FileText, Globe, Image, Network, PenLine } from 'lucide-react'
 import {
   fetchFileText,
   fetchPreview,
@@ -66,13 +68,15 @@ function targetPath(kind: string, fileId: string): string {
   return `/view/${fileId}`
 }
 
-function embedIcon(kind: string, name: string): string {
-  if (kind === 'drawio') return '▦'
-  if (kind === 'excalidraw') return '✎'
-  if (kind === 'web') return '🌐'
-  if (kind === 'office') return '📊'
-  if (kind === 'file') return isImageName(name) ? '🖼' : '📄'
-  return '📄'
+/** 嵌入块类型图标（lucide，14px 线性）。 */
+function embedIcon(kind: string, name: string): ReactNode {
+  const props = { size: 14, strokeWidth: 2, 'aria-hidden': true } as const
+  if (kind === 'drawio') return <Network {...props} />
+  if (kind === 'excalidraw') return <PenLine {...props} />
+  if (kind === 'web') return <Globe {...props} />
+  if (kind === 'office') return <FileSpreadsheet {...props} />
+  if (kind === 'file') return isImageName(name) ? <Image {...props} /> : <FileText {...props} />
+  return <FileText {...props} />
 }
 
 export default function EmbedView({ node, editor, selected }: NodeViewProps) {
