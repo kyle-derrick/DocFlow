@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
+import { Button, Input } from 'antd'
 import { ApiError, OIDC_LOGIN_PATH, TOTP_REQUIRED_CODE, getOIDCStatus, login, loginTotp } from '../api'
 import { messages, saveLocale, t, useLocale } from '../i18n'
 
@@ -70,15 +71,15 @@ export default function LoginPage() {
     <div className="login-wrap">
       <form className="login-card" onSubmit={submit}>
         <h1 className="login-title">DocFlow</h1>
-        <button type="button" className="btn ghost" onClick={switchLocale}>{msg('switchLanguage')}</button>
+        <Button type="text" onClick={switchLocale}>{msg('switchLanguage')}</Button>
         <p className="hint">{locale === 'zh-CN' ? '登录以访问你的文件' : 'Log in to access your files'}</p>
         <label className="field">
           <span>邮箱或用户名</span>
-          <input
-            type="text"
+          <Input
             required
             autoCapitalize="none"
             spellCheck={false}
+            allowClear
             value={identifier}
             onChange={(e) => setIdentifier(e.target.value)}
             placeholder="you@example.com 或 username"
@@ -87,8 +88,7 @@ export default function LoginPage() {
         </label>
         <label className="field">
           <span>密码</span>
-          <input
-            type="password"
+          <Input.Password
             required
             value={password}
             onChange={(e) => setPassword(e.target.value)}
@@ -103,9 +103,9 @@ export default function LoginPage() {
             </div>
             <label className="field">
               <span>两步验证码 / 恢复码</span>
-              <input
-                type="text"
+              <Input
                 required
+                allowClear
                 value={totpInput}
                 onChange={(e) => setTotpInput(e.target.value)}
                 placeholder="123456 或 abcd-efgh"
@@ -116,22 +116,21 @@ export default function LoginPage() {
           </>
         )}
         {error && <div className="error-text">{error}</div>}
-        <button className="btn primary block" type="submit" disabled={busy}>
+        <Button className="login-submit" type="primary" htmlType="submit" block disabled={busy}>
           {busy ? `${msg('login')}…` : totpRequired ? (locale === 'zh-CN' ? '验证并登录' : 'Verify and log in') : msg('login')}
-        </button>
+        </Button>
         {ssoEnabled && (
           <>
             <div className="login-divider">或</div>
-            <button
-              className="btn block"
-              type="button"
+            <Button
+              block
               // 整页跳转到后端 /auth/oidc/login（302 → IdP；回调后落地 /sso）。
               onClick={() => {
                 window.location.href = OIDC_LOGIN_PATH
               }}
             >
               使用 SSO 登录
-            </button>
+            </Button>
           </>
         )}
         <p className="hint">

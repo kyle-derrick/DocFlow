@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useState } from 'react'
+import { App as AntdApp, Button } from 'antd'
 import {
   ApiError,
   ShareDetail,
@@ -22,6 +23,7 @@ import { MessageKey, t, useLocale } from '../i18n'
  */
 export default function SharedPage() {
   const locale = useLocale()
+  const { modal: antdModal } = AntdApp.useApp()
   const msg = (key: MessageKey) => t(locale, key)
   const [shares, setShares] = useState<ShareItem[]>([])
   const [names, setNames] = useState<Record<string, string>>({})
@@ -89,22 +91,30 @@ export default function SharedPage() {
     }
   }
 
-  const handleRevoke = async (s: ShareItem) => {
-    if (!window.confirm(msg('revokeConfirm'))) return
-    setError('')
-    try {
-      await revokeShare(s.id)
-      setNotice(msg('shareRevoked'))
-      setStatsOpen((prev) => {
-        const next = { ...prev }
-        delete next[s.id]
-        return next
-      })
-      await load()
-    } catch (err) {
-      setNotice('')
-      setError(err instanceof Error ? err.message : msg('revokeFailed'))
-    }
+  const handleRevoke = (s: ShareItem) => {
+    antdModal.confirm({
+      title: msg('revoke'),
+      content: msg('revokeConfirm'),
+      okText: msg('revoke'),
+      okButtonProps: { danger: true },
+      cancelText: locale === 'zh-CN' ? '取消' : 'Cancel',
+      onOk: async () => {
+        setError('')
+        try {
+          await revokeShare(s.id)
+          setNotice(msg('shareRevoked'))
+          setStatsOpen((prev) => {
+            const next = { ...prev }
+            delete next[s.id]
+            return next
+          })
+          await load()
+        } catch (err) {
+          setNotice('')
+          setError(err instanceof Error ? err.message : msg('revokeFailed'))
+        }
+      },
+    })
   }
 
   const copyLink = async (s: ShareItem, token: string) => {
@@ -122,7 +132,7 @@ export default function SharedPage() {
     <div className="page">
       <div className="page-head">
         <h2>{msg('sharedTitle')}</h2>
-        <button className="btn ghost" onClick={() => void load()}>{msg('refresh')}</button>
+        <Button type="text" onClick={() => void load()}>{msg('refresh')}</Button>
       </div>
 
       {error && <div className="banner error">{error}</div>}
@@ -169,13 +179,13 @@ export default function SharedPage() {
                     </td>
                     <td className="col-link">
                       {publicToken ? (
-                        <button
-                          className="btn small"
+                        <Button
+                          size="small"
                           title={`${window.location.origin}/s/${publicToken}`}
                           onClick={() => void copyLink(s, publicToken)}
                         >
                           {copiedId === s.id ? msg('copied') : msg('copyLink')}
-                        </button>
+                        </Button>
                       ) : visibility === 'public' ? (
                         <span className="muted">{msg('linkShownOnCreate')}</span>
                       ) : visibility === 'private' ? (
@@ -198,11 +208,11 @@ export default function SharedPage() {
                       )}
                     </td>
                     <td className="col-actions">
-                      <button className="btn small" onClick={() => void toggleStats(s)}>
+                      <Button size="small" onClick={() => void toggleStats(s)}>
                         {stats ? msg('hideStats') : msg('stats')}
-                      </button>
+                      </Button>
                       {!revoked && (
-                        <button className="btn small danger" onClick={() => void handleRevoke(s)}>{msg('revoke')}</button>
+                        <Button size="small" danger onClick={() => handleRevoke(s)}>{msg('revoke')}</Button>
                       )}
                     </td>
                   </tr>

@@ -9,6 +9,7 @@
 // - 顶部「转为 Markdown」：POST convert-markdown 生成 .md 落同目录，
 //   成功后新窗口打开 /markdown/:newId 编辑。
 import { useEffect, useState } from 'react'
+import { Button } from 'antd'
 import { convertMarkdown, fetchFileArrayBuffer } from '../api'
 import { useLocale } from '../i18n'
 import MarkmapDiagram from './MarkmapDiagram'
@@ -154,9 +155,9 @@ export default function XMindViewer({ fileId, title }: XMindViewerProps) {
   return (
     <div className="xmind-viewer" title={title}>
       <div className="xmind-toolbar">
-        <button type="button" className="btn" disabled={converting} onClick={() => void handleConvert()}>
+        <Button size="small" disabled={converting} loading={converting} onClick={() => void handleConvert()}>
           {converting ? (zh ? '转换中…' : 'Converting…') : (zh ? '转为 Markdown' : 'Convert to Markdown')}
-        </button>
+        </Button>
         {convertNotice && <span className="muted xmind-toolbar-note">{convertNotice}</span>}
         {convertError && <span className="error-text">{convertError}</span>}
       </div>

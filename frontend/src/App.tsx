@@ -1,6 +1,8 @@
 import { ReactElement, useEffect, useRef, useState } from 'react'
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
-import { Bell, ChevronDown, FileText, Folder, Languages } from 'lucide-react'
+import { Bell, FileText, Folder, Languages } from 'lucide-react'
+import { Badge, Button, Dropdown, Popover, Tooltip } from 'antd'
+import type { MenuProps } from 'antd'
 import {
   SearchResultItem,
   hasAccessToken,
@@ -50,16 +52,14 @@ const NOTIFICATION_POLL_INTERVAL = 15_000
 const NOTIFICATION_PANEL_LIMIT = 20
 
 /**
- * 顶栏通知铃铛：未读数徽标（页面加载拉取 + 15s 轮询 + 打开面板手动刷新），
- * 下拉面板展示最近 20 条（标题/时间/已读态）；「全部已读」一键清理，
- * 点击条目标记已读并关闭面板（v1.0 跳转简化为关闭）。
- */
+ * 顶栏通知铃铛（antd Badge + Popover）：未读数徽标（页面加载拉取 + 15s 轮询
+ * 失败回退 + 打开面板手动刷新），面板展示最近 20 条（标题/时间/已读态）；
+ * 「全部已读」一键清理，点击条目标记已读并关闭面板（v1.0 跳转简化为关闭） */
 function NotificationBell() {
   const [open, setOpen] = useState(false)
   const [unread, setUnread] = useState(0)
   const [items, setItems] = useState<NotificationItem[]>([])
   const [loading, setLoading] = useState(false)
-  const wrapRef = useRef<HTMLDivElement | null>(null)
 
   // 未读数轮询：加载即拉取，此后每 15s 刷新；面板打开时由 loadPanel 拉取。
   useEffect(() => {
@@ -103,16 +103,6 @@ function NotificationBell() {
     }
   }, [])
 
-  // 点击面板外关闭。
-  useEffect(() => {
-    if (!open) return
-    const onDocClick = (e: MouseEvent) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener('mousedown', onDocClick)
-    return () => document.removeEventListener('mousedown', onDocClick)
-  }, [open])
-
   const refreshPanel = async () => {
     setLoading(true)
     try {
@@ -124,12 +114,6 @@ function NotificationBell() {
     } finally {
       setLoading(false)
     }
-  }
-
-  const toggle = async () => {
-    const next = !open
-    setOpen(next)
-    if (next) await refreshPanel()
   }
 
   const markOne = async (id: string, isRead: boolean) => {
@@ -152,48 +136,57 @@ function NotificationBell() {
     await refreshPanel()
   }
 
-  return (
-    <div className="bell-wrap" ref={wrapRef}>
-      <button
-        className="btn ghost bell-btn"
-        onClick={() => void toggle()}
-        title="站内通知"
-        aria-label={`站内通知（${unread} 条未读）`}
-      >
-        <Bell size={16} strokeWidth={2} aria-hidden="true" />
-        {unread > 0 && <span className="bell-badge">{unread > 99 ? '99+' : unread}</span>}
-      </button>
-      {open && (
-        <div className="notif-panel">
-          <div className="notif-head">
-            <span>通知</span>
-            <div className="notif-head-actions">
-              <button className="btn small ghost" disabled={loading} onClick={() => void refreshPanel()}>
-                {loading ? '刷新中…' : '刷新'}
-              </button>
-              <button className="btn small" disabled={loading || unread === 0} onClick={() => void markAll()}>
-                全部已读
-              </button>
-            </div>
-          </div>
-          <div className="notif-list">
-            {items.length === 0 ? (
-              <div className="notif-empty">暂无通知</div>
-            ) : (
-              items.map((n) => (
-                <button key={n.id} className={`notif-item${n.is_read ? '' : ' unread'}`} onClick={() => void markOne(n.id, n.is_read)}>
-                  <span className="notif-title">
-                    {!n.is_read && <span className="notif-dot" />}
-                    {n.title}
-                  </span>
-                  <span className="notif-time muted">{formatTime(n.created_at)}</span>
-                </button>
-              ))
-            )}
-          </div>
+  const panel = (
+    <div className="notif-panel notif-panel-popover">
+      <div className="notif-head">
+        <span>通知</span>
+        <div className="notif-head-actions">
+          <Button size="small" type="text" disabled={loading} onClick={() => void refreshPanel()}>
+            {loading ? '刷新中…' : '刷新'}
+          </Button>
+          <Button size="small" disabled={loading || unread === 0} onClick={() => void markAll()}>
+            全部已读
+          </Button>
         </div>
-      )}
+      </div>
+      <div className="notif-list">
+        {items.length === 0 ? (
+          <div className="notif-empty">暂无通知</div>
+        ) : (
+          items.map((n) => (
+            <button key={n.id} className={`notif-item${n.is_read ? '' : ' unread'}`} onClick={() => void markOne(n.id, n.is_read)}>
+              <span className="notif-title">
+                {!n.is_read && <span className="notif-dot" />}
+                {n.title}
+              </span>
+              <span className="notif-time muted">{formatTime(n.created_at)}</span>
+            </button>
+          ))
+        )}
+      </div>
     </div>
+  )
+
+  return (
+    <Popover
+      trigger="click"
+      placement="bottomRight"
+      arrow={false}
+      content={panel}
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next)
+        if (next) void refreshPanel()
+      }}
+    >
+      <Tooltip title="站内通知" mouseEnterDelay={0.5}>
+        <Button type="text" className="bell-btn" aria-label={`站内通知（${unread} 条未读）`}>
+          <Badge count={unread} size="small" offset={[2, -2]}>
+            <Bell size={16} strokeWidth={2} aria-hidden="true" />
+          </Badge>
+        </Button>
+      </Tooltip>
+    </Popover>
   )
 }
 
@@ -415,8 +408,6 @@ function TopBar() {
   // 结果按会话缓存（登录/登出后失效）；非 admin 隐藏「管理」入口。
   const [admin, setAdmin] = useState(false)
   const [me, setMe] = useState<MeData | null>(null)
-  const [menuOpen, setMenuOpen] = useState(false)
-  const userMenuRef = useRef<HTMLDivElement | null>(null)
   useEffect(() => {
     void getMe().then(setMe).catch(() => setMe(null))
   }, [])
@@ -429,18 +420,25 @@ function TopBar() {
       alive = false
     }
   }, [])
-  // 用户菜单点击外部收起：capture 阶段监听，先于菜单内按钮的冒泡处理。
-  useEffect(() => {
-    if (!menuOpen) return
-    const onDocClick = (e: MouseEvent) => {
-      if (userMenuRef.current && !userMenuRef.current.contains(e.target as Node)) setMenuOpen(false)
-    }
-    document.addEventListener('click', onDocClick, true)
-    return () => document.removeEventListener('click', onDocClick, true)
-  }, [menuOpen])
   const handleLogout = async () => {
     await logout()
     navigate('/login', { replace: true })
+  }
+  // 用户菜单（antd Dropdown）：资料 / 设置 / 管理（admin）/ 退出。
+  const userMenuItems: MenuProps['items'] = [
+    { key: 'profile', label: '资料' },
+    { key: 'settings', label: '设置' },
+    ...(admin ? [{ key: 'admin', label: '管理' }] : []),
+    { type: 'divider' },
+    { key: 'logout', label: msg('logout'), danger: true },
+  ]
+  const onUserMenuClick: MenuProps['onClick'] = ({ key }) => {
+    if (key === 'logout') {
+      void handleLogout()
+      return
+    }
+    const target = key === 'profile' ? '/settings/profile' : key === 'settings' ? '/settings/security' : key === 'admin' ? '/admin/overview' : null
+    if (target) navigate(target)
   }
   return (
     <header className="topbar">
@@ -453,15 +451,17 @@ function TopBar() {
       <TopBarSearch />
       <OfflineBadge />
       <NotificationBell />
-      <button className="btn ghost language-btn" onClick={switchLocale} title={msg('language')}><Languages size={14} strokeWidth={2} aria-hidden="true" /> {locale === 'zh-CN' ? '中' : 'EN'}</button>
-      <div className="user-menu" ref={userMenuRef}>
-        <button className="btn ghost user-menu-trigger" aria-expanded={menuOpen} onClick={() => setMenuOpen(!menuOpen)}><span className="avatar">{(me?.profile.nickname || me?.username || '?').slice(0, 1).toUpperCase()}</span>{me?.profile.nickname || me?.username || '用户'}<span className="user-menu-arrow" aria-hidden="true"><ChevronDown size={14} strokeWidth={2} aria-hidden="true" /></span></button>
-        {menuOpen && <div className="user-menu-panel">
-          <Link to="/settings/profile">资料</Link><Link to="/settings/security">设置</Link>
-          {admin && <Link to="/admin/overview">管理</Link>}
-          <button onClick={() => void handleLogout()}>{msg('logout')}</button>
-        </div>}
-      </div>
+      <Tooltip title={msg('language')}>
+        <Button type="text" onClick={switchLocale} icon={<Languages size={14} strokeWidth={2} aria-hidden="true" />}>
+          {locale === 'zh-CN' ? '中' : 'EN'}
+        </Button>
+      </Tooltip>
+      <Dropdown menu={{ items: userMenuItems, onClick: onUserMenuClick }} trigger={['click']} placement="bottomRight">
+        <Button type="text" className="user-menu-trigger">
+          <span className="avatar">{(me?.profile.nickname || me?.username || '?').slice(0, 1).toUpperCase()}</span>
+          {me?.profile.nickname || me?.username || '用户'}
+        </Button>
+      </Dropdown>
     </header>
   )
 }

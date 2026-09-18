@@ -1,6 +1,7 @@
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { isValidElement } from 'react'
+import { Button } from 'antd'
 import ReactMarkdown from 'react-markdown'
 import type { Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -209,9 +210,8 @@ export default function TextEditorPage({
         </div>
         <div className="editor-head-actions">
           {editorKind === 'markdown' && (
-            <button
-              type="button"
-              className="btn"
+            <Button
+              size="small"
               onClick={() => {
                 setRichMode((value) => !value)
                 setRichKey((key) => key + 1)
@@ -221,16 +221,16 @@ export default function TextEditorPage({
               {richMode
                 ? (locale === 'zh-CN' ? '源码' : 'Source')
                 : (locale === 'zh-CN' ? '富文本' : 'Rich text')}
-            </button>
+            </Button>
           )}
           {canPreview && (
-            <button type="button" className="btn" onClick={() => setPreview((value) => !value)}>
+            <Button size="small" onClick={() => setPreview((value) => !value)}>
               {preview ? msg('editMode') : msg('previewMode')}
-            </button>
+            </Button>
           )}
-          <button type="button" className="btn primary" disabled={loading || saving} onClick={() => void save()}>
-            {saving ? msg('saving') : msg('save')}
-          </button>
+          <Button type="primary" size="small" disabled={loading || saving} loading={saving} onClick={() => void save()}>
+            {msg('save')}
+          </Button>
         </div>
       </header>
       {error && <div className="banner error">{error}</div>}

@@ -12,6 +12,7 @@
 //   通知父页脏态，autosave:0 亦不产生自动保存事件）。
 // - 集成禁用或探测失败显示「图表服务不可用」。
 import { useEffect, useRef, useState } from 'react'
+import { Button } from 'antd'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import {
   EMPTY_DRAWIO_XML,
@@ -218,7 +219,7 @@ export default function DrawioPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
   return (
     <div className={`editor-page${viewMode ? ' viewer-only' : ''}`}>
       {!viewMode && <div className="editor-head">
-        <button type="button" className="btn ghost small" onClick={closeEditor}>← 返回</button>
+        <Button type="text" size="small" onClick={closeEditor}>← 返回</Button>
         <h2 className="editor-title">{file?.name ?? '加载中…'}</h2>
         {versionNo !== undefined && <span className="badge current">当前版本 v{versionNo}</span>}
         {saving && <span className="badge uploading">保存中…</span>}

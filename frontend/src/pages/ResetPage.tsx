@@ -1,5 +1,6 @@
 import { FormEvent, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
+import { Button, Input } from 'antd'
 import { ApiError, resetPassword } from '../api'
 
 /** 密码重置页（无需登录）：凭邮件中的一次性链接 /reset/<token> 设置新密码，
@@ -42,15 +43,16 @@ export default function ResetPage() {
         {done ? (
           <>
             <p className="hint">密码已重置，所有登录会话均已失效。</p>
-            <Link className="btn primary block" to="/login">去登录</Link>
+            <Button type="primary" block>
+              <Link to="/login" className="login-link-btn">去登录</Link>
+            </Button>
           </>
         ) : (
           <>
             <p className="hint">设置新密码（重置后需重新登录）</p>
             <label className="field">
               <span>新密码</span>
-              <input
-                type="password"
+              <Input.Password
                 required
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
@@ -60,8 +62,7 @@ export default function ResetPage() {
             </label>
             <label className="field">
               <span>确认新密码</span>
-              <input
-                type="password"
+              <Input.Password
                 required
                 value={confirm}
                 onChange={(e) => setConfirm(e.target.value)}
@@ -70,9 +71,9 @@ export default function ResetPage() {
               />
             </label>
             {error && <div className="error-text">{error}</div>}
-            <button className="btn primary block" type="submit" disabled={busy || !token}>
+            <Button className="login-submit" type="primary" htmlType="submit" block disabled={busy || !token}>
               {busy ? '提交中…' : '重置密码'}
-            </button>
+            </Button>
           </>
         )}
       </form>

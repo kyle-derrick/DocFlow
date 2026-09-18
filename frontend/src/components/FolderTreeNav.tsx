@@ -14,6 +14,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { ChevronDown, ChevronRight, FileText, Folder, Home } from 'lucide-react'
+import { Button, Menu } from 'antd'
 import { FileItem, FileQueryOptions, encodePathSegments } from '../api'
 import FileBrowser, { clampFixedMenu } from './FileBrowser'
 import type { FileBrowserProps } from './FileBrowser'
@@ -196,15 +197,16 @@ export default function FolderTreeNav({
   if (collapsed) {
     return (
       <aside className="folder-tree-nav collapsed">
-        <button
-          type="button"
-          className="btn ghost small folder-tree-collapse-btn"
+        <Button
+          type="text"
+          size="small"
+          className="folder-tree-collapse-btn"
           title={zh ? '展开目录树' : 'Expand folder tree'}
           aria-label={zh ? '展开目录树' : 'Expand folder tree'}
           onClick={onToggleCollapse}
         >
           »
-        </button>
+        </Button>
       </aside>
     )
   }
@@ -213,54 +215,55 @@ export default function FolderTreeNav({
     <aside className="folder-tree-nav">
       <div className="folder-tree-head">
         <span>{zh ? '目录' : 'Folders'}</span>
-        <button
-          type="button"
-          className="btn ghost small folder-tree-collapse-btn"
+        <Button
+          type="text"
+          size="small"
+          className="folder-tree-collapse-btn"
           title={zh ? '收起目录树' : 'Collapse folder tree'}
           aria-label={zh ? '收起目录树' : 'Collapse folder tree'}
           onClick={onToggleCollapse}
         >
           «
-        </button>
+        </Button>
       </div>
       {errorText && <div className="folder-tree-error">{errorText}</div>}
       {renderRow(ROOT_KEY, 0)}
-      {/* 节点右键菜单：文件列表 itemMenuContent 的精简版（包装层无重命名/
+      {/* 节点右键菜单：文件列表条目菜单的精简版（antd Menu；包装层无重命名/
           删除等操作权限上下文，仅保留 查看 / 新窗口查看（文件）、作为网页
           打开（has_index_web 目录）、展开、收起（目录））。 */}
       {ctx && ctxNode && (
         <div
           ref={ctxRef}
-          className="ctx-menu file-card-menu"
+          className="ctx-menu"
           role="menu"
           style={{ left: `${ctx.x}px`, top: `${ctx.y}px` }}
           onClick={() => setCtx(null)}
         >
-          {ctxNode.type === 'file' && onSelectFile && (
-            <button type="button" className="btn small" onClick={() => onSelectFile?.(ctx.key)}>
-              {zh ? '查看' : 'View'}
-            </button>
-          )}
-          {ctxNode.type === 'file' && onOpenFileNewWindow && (
-            <button type="button" className="btn small" onClick={() => onOpenFileNewWindow?.(ctx.key)}>
-              {zh ? '新窗口查看' : 'View in new window'}
-            </button>
-          )}
-          {ctxNode.type === 'folder' && ctxNode.hasIndexWeb && onOpenFolderAsWebsite && (
-            <button
-              type="button"
-              className="btn small"
-              title={zh ? '在独立窗口打开该目录（index.html）' : 'Open this folder as a website'}
-              onClick={() => onOpenFolderAsWebsite?.(ctx.key)}
-            >
-              {zh ? '作为网页打开（新窗口）' : 'Open as website'}
-            </button>
-          )}
-          {ctxNode.type === 'folder' && (ctxNode.childIds === null || ctxNode.childIds.length > 0) && (
-            <button type="button" className="btn small" onClick={() => onToggleExpand(ctx.key)}>
-              {expanded.has(ctx.key) ? (zh ? '收起' : 'Collapse') : zh ? '展开' : 'Expand'}
-            </button>
-          )}
+          <Menu
+            className="ctx-antd-menu"
+            mode="vertical"
+            selectable={false}
+            onClick={({ key }) => {
+              if (key === 'view') onSelectFile?.(ctx.key)
+              else if (key === 'view-new') onOpenFileNewWindow?.(ctx.key)
+              else if (key === 'open-web') onOpenFolderAsWebsite?.(ctx.key)
+              else if (key === 'toggle') onToggleExpand(ctx.key)
+            }}
+            items={[
+              ...(ctxNode.type === 'file' && onSelectFile
+                ? [{ key: 'view', label: zh ? '查看' : 'View' }]
+                : []),
+              ...(ctxNode.type === 'file' && onOpenFileNewWindow
+                ? [{ key: 'view-new', label: zh ? '新窗口查看' : 'View in new window' }]
+                : []),
+              ...(ctxNode.type === 'folder' && ctxNode.hasIndexWeb && onOpenFolderAsWebsite
+                ? [{ key: 'open-web', label: zh ? '作为网页打开（新窗口）' : 'Open as website' }]
+                : []),
+              ...(ctxNode.type === 'folder' && (ctxNode.childIds === null || ctxNode.childIds.length > 0)
+                ? [{ key: 'toggle', label: expanded.has(ctx.key) ? (zh ? '收起' : 'Collapse') : zh ? '展开' : 'Expand' }]
+                : []),
+            ]}
+          />
         </div>
       )}
     </aside>

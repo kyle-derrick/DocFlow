@@ -1,5 +1,6 @@
 /// <reference types="vite-plugin-pwa/vanillajs" />
 import { useEffect, useState } from 'react'
+import { Button } from 'antd'
 import { registerSW } from 'virtual:pwa-register'
 
 // PWA 状态组件（v1.1）：
@@ -54,12 +55,12 @@ export function UpdateToast() {
   return (
     <div className="update-toast" role="status">
       <span>新版本可用，点击刷新</span>
-      <button className="btn small" onClick={() => window.location.reload()}>
+      <Button size="small" type="primary" onClick={() => window.location.reload()}>
         刷新
-      </button>
-      <button className="btn small ghost" onClick={() => setNeedReload(false)} aria-label="关闭">
+      </Button>
+      <Button size="small" type="text" onClick={() => setNeedReload(false)} aria-label="关闭">
         ×
-      </button>
+      </Button>
     </div>
   )
 }

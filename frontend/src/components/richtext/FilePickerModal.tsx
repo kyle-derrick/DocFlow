@@ -7,6 +7,7 @@
 // - 无「新建」入口（按约定只选已有文件；drawio/白板新建走文件页「新建」菜单）。
 import { useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
+import { Button, Input, Select } from 'antd'
 import { FileText, Image as ImageIcon, Upload } from 'lucide-react'
 import {
   Team,
@@ -21,7 +22,7 @@ import {
   uploadFile,
 } from '../../api'
 import { useLocale } from '../../i18n'
-import { formatTime } from '../FileBrowser'
+import { Modal, formatTime } from '../FileBrowser'
 
 export type PickerFilter = 'drawio' | 'excalidraw' | 'image' | 'any'
 
@@ -198,74 +199,68 @@ export default function FilePickerModal({ open, filter, onPick, onClose, uploadP
   }
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal wide" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-head">
-          <h3>{title}</h3>
-          <button type="button" className="btn ghost" onClick={onClose} aria-label="关闭">×</button>
-        </div>
-        <form className="rich-text-picker" onSubmit={onSubmit}>
-          <div className="rich-text-picker-toolbar">
-            <select value={scope} onChange={(e) => setScope(e.target.value)} aria-label={zh ? '范围' : 'Scope'}>
-              <option value="mine">{zh ? '我的文件' : 'My files'}</option>
-              {teams.map((team) => (
-                <option key={team.id} value={team.id}>{zh ? '团队' : 'Team'} · {team.name}</option>
-              ))}
-            </select>
-            <input
-              type="search"
-              autoFocus
-              value={query}
-              placeholder={scope === 'mine'
-                ? (zh ? '按名称搜索（空 = 最近文件）' : 'Search by name (empty = recent)')
-                : (zh ? '在团队空间根目录筛选名称' : 'Filter names in team root')}
-              onChange={(e) => setQuery(e.target.value)}
-            />
-            {filter === 'image' && (
-              <>
-                <button
-                  type="button"
-                  className="btn"
-                  disabled={uploadPhase !== ''}
-                  onClick={() => fileInputRef.current?.click()}
-                >
-                  {uploadPhase
-                    ? (zh ? '上传中…' : 'Uploading…')
-                    : (<><Upload size={14} strokeWidth={2} aria-hidden="true" /> {zh ? '上传到 assets/' : 'Upload to assets/'}</>)}
-                </button>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept="image/*"
-                  hidden
-                  onChange={(e) => void handleUpload(e.target.files)}
-                />
-              </>
-            )}
-          </div>
-          {error && <div className="error-text">{error}</div>}
-          <div className="rich-text-picker-list">
-            {loading && <div className="hint">{zh ? '加载中…' : 'Loading…'}</div>}
-            {!loading && items.length === 0 && !error && (
-              <div className="empty">{zh ? '没有匹配的文件' : 'No matching files'}</div>
-            )}
-            {!loading && items.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                className="rich-text-picker-item"
-                onClick={() => onPick({ id: item.id, name: item.name })}
+    <Modal wide title={title} onClose={onClose}>
+      <form className="rich-text-picker" onSubmit={onSubmit}>
+        <div className="rich-text-picker-toolbar">
+          <Select
+            value={scope}
+            onChange={(v) => setScope(v)}
+            aria-label={zh ? '范围' : 'Scope'}
+            options={[
+              { value: 'mine', label: zh ? '我的文件' : 'My files' },
+              ...teams.map((team) => ({ value: team.id, label: `${zh ? '团队' : 'Team'} · ${team.name}` })),
+            ]}
+          />
+          <Input
+            autoFocus
+            allowClear
+            value={query}
+            placeholder={scope === 'mine'
+              ? (zh ? '按名称搜索（空 = 最近文件）' : 'Search by name (empty = recent)')
+              : (zh ? '在团队空间根目录筛选名称' : 'Filter names in team root')}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+          {filter === 'image' && (
+            <>
+              <Button
+                disabled={uploadPhase !== ''}
+                loading={uploadPhase !== ''}
+                onClick={() => fileInputRef.current?.click()}
               >
-                <span className="icon">{filter === 'image'
-                  ? <ImageIcon size={14} strokeWidth={2} aria-hidden="true" />
-                  : <FileText size={14} strokeWidth={2} aria-hidden="true" />}</span>
-                <span className="rich-text-picker-name">{item.name}</span>
-                <span className="muted">{formatTime(item.updated_at)}</span>
-              </button>
-            ))}
-          </div>
-        </form>
-      </div>
-    </div>
+                <Upload size={14} strokeWidth={2} aria-hidden="true" /> {zh ? '上传到 assets/' : 'Upload to assets/'}
+              </Button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                hidden
+                onChange={(e) => void handleUpload(e.target.files)}
+              />
+            </>
+          )}
+        </div>
+        {error && <div className="error-text">{error}</div>}
+        <div className="rich-text-picker-list">
+          {loading && <div className="hint">{zh ? '加载中…' : 'Loading…'}</div>}
+          {!loading && items.length === 0 && !error && (
+            <div className="empty">{zh ? '没有匹配的文件' : 'No matching files'}</div>
+          )}
+          {!loading && items.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className="rich-text-picker-item"
+              onClick={() => onPick({ id: item.id, name: item.name })}
+            >
+              <span className="icon">{filter === 'image'
+                ? <ImageIcon size={14} strokeWidth={2} aria-hidden="true" />
+                : <FileText size={14} strokeWidth={2} aria-hidden="true" />}</span>
+              <span className="rich-text-picker-name">{item.name}</span>
+              <span className="muted">{formatTime(item.updated_at)}</span>
+            </button>
+          ))}
+        </div>
+      </form>
+    </Modal>
   )
 }

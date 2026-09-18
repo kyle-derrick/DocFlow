@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
+import { App as AntdApp, Button, Input, Select } from 'antd'
 import {
   ACLAction,
   FileItem,
@@ -119,6 +120,7 @@ function formToPermissions(f: RoleFormState): RolePermissions {
 export default function TeamSpacePage() {
   const { id = '' } = useParams()
   const locale = useLocale()
+  const { modal: antdModal } = AntdApp.useApp()
   const msg = (key: MessageKey) => t(locale, key)
 
   const [team, setTeam] = useState<Team | null>(null)
@@ -341,16 +343,24 @@ export default function TeamSpacePage() {
     }
   }
 
-  const handleRemoveMember = async (m: TeamMember) => {
-    if (!window.confirm(`确定移除该成员（${m.user_id.slice(0, 8)}…）？`)) return
-    setMemberError('')
-    try {
-      await removeTeamMember(id, m.user_id)
-      await loadMembers()
-      await loadRoles()
-    } catch (err) {
-      setMemberError(err instanceof Error ? err.message : msg('removeMemberFailed'))
-    }
+  const handleRemoveMember = (m: TeamMember) => {
+    antdModal.confirm({
+      title: msg('delete'),
+      content: `确定移除该成员（${m.user_id.slice(0, 8)}…）？`,
+      okText: msg('delete'),
+      okButtonProps: { danger: true },
+      cancelText: locale === 'zh-CN' ? '取消' : 'Cancel',
+      onOk: async () => {
+        setMemberError('')
+        try {
+          await removeTeamMember(id, m.user_id)
+          await loadMembers()
+          await loadRoles()
+        } catch (err) {
+          setMemberError(err instanceof Error ? err.message : msg('removeMemberFailed'))
+        }
+      },
+    })
   }
 
   /** 改派成员角色：下拉含系统角色（owner 除外）与全部自定义角色。 */
@@ -403,16 +413,24 @@ export default function TeamSpacePage() {
     }
   }
 
-  const handleDeleteRole = async (r: TeamRoleDef) => {
-    if (!window.confirm(`确定删除角色「${r.name}」？仍有成员引用时将被拒绝。`)) return
-    setRoleError('')
-    try {
-      await deleteTeamRole(id, r.id)
-      if (editingRoleId === r.id) resetRoleForm()
-      await loadRoles()
-    } catch (err) {
-      setRoleError(err instanceof Error ? err.message : msg('operationFailed'))
-    }
+  const handleDeleteRole = (r: TeamRoleDef) => {
+    antdModal.confirm({
+      title: msg('delete'),
+      content: `确定删除角色「${r.name}」？仍有成员引用时将被拒绝。`,
+      okText: msg('delete'),
+      okButtonProps: { danger: true },
+      cancelText: locale === 'zh-CN' ? '取消' : 'Cancel',
+      onOk: async () => {
+        setRoleError('')
+        try {
+          await deleteTeamRole(id, r.id)
+          if (editingRoleId === r.id) resetRoleForm()
+          await loadRoles()
+        } catch (err) {
+          setRoleError(err instanceof Error ? err.message : msg('operationFailed'))
+        }
+      },
+    })
   }
 
   const listItems = async (parentId: string | null, opts?: FileQueryOptions): Promise<DirListing> => {
@@ -424,7 +442,7 @@ export default function TeamSpacePage() {
     <div className="page wide-page">
       <SpaceSwitcher activeView={spaceView} onViewChange={setSpaceView} />
       <div className="team-back">
-        <Link className="btn ghost small" to="/teams">{msg('backToTeams')}</Link>
+        <Button type="text" size="small"><Link to="/teams" className="plain-link">{msg('backToTeams')}</Link></Button>
       </div>
 
       {error && <div className="banner error">{error}</div>}
@@ -444,14 +462,14 @@ export default function TeamSpacePage() {
               activeView={spaceView}
               ns={{ type: 'team', scope: id }}
               rowActions={(item) => (
-                <>
+                <div className="row-actions-group">
                   {item.type === 'folder' && isOwner && (
-                    <button type="button" className="btn small" onClick={() => void openAcl(item)}>{msg('acl')}</button>
+                    <Button size="small" onClick={() => void openAcl(item)}>{msg('acl')}</Button>
                   )}
                   {item.type === 'file' && (
-                    <button type="button" className="btn small" onClick={() => setHistoryTarget(item)}>历史</button>
+                    <Button size="small" onClick={() => setHistoryTarget(item)}>历史</Button>
                   )}
-                </>
+                </div>
               )}
               emptyHint={msg('teamSpaceEmpty')}
             />
@@ -460,62 +478,90 @@ export default function TeamSpacePage() {
           {/* 右侧：成员管理面板（280px 可折叠；添加成员 / 成员列表 / 角色管理）。 */}
           <aside className={`member-panel team-member-panel${memberCollapsed ? ' collapsed' : ''}`}>
             {memberCollapsed ? (
-              <button
-                type="button"
-                className="btn ghost small team-member-collapse-btn"
+              <Button
+                type="text"
+                size="small"
+                className="team-member-collapse-btn"
                 title={locale === 'zh-CN' ? '展开成员面板' : 'Expand members panel'}
                 aria-label={locale === 'zh-CN' ? '展开成员面板' : 'Expand members panel'}
                 onClick={() => setMemberCollapsed(false)}
               >
                 «
-              </button>
+              </Button>
             ) : (
               <>
             <div className="team-member-head">
               <h3>{formatMessage(msg('membersTitle'), { n: members.length })}</h3>
-              <button
-                type="button"
-                className="btn ghost small team-member-collapse-btn"
+              <Button
+                type="text"
+                size="small"
+                className="team-member-collapse-btn"
                 title={locale === 'zh-CN' ? '收起成员面板' : 'Collapse members panel'}
                 aria-label={locale === 'zh-CN' ? '收起成员面板' : 'Collapse members panel'}
                 onClick={() => setMemberCollapsed(true)}
               >
                 »
-              </button>
+              </Button>
             </div>
             {isOwner ? (
               <form className="member-add" onSubmit={handleAddMember}>
                 <div className="field user-search-field">
                   <span>搜索用户</span>
-                  <input
-                    value={memberQuery}
-                    onChange={(e) => { setMemberQuery(e.target.value); setMemberUserId('') }}
+                  {/* antd Select 远程搜索模式：输入即触发 memberQuery 搜索
+                      （防抖见上方 effect），选中后以 memberUserId 提交。 */}
+                  <Select
+                    className="user-search-select"
+                    showSearch
+                    allowClear
+                    filterOption={false}
+                    value={memberUserId || undefined}
+                    searchValue={memberQuery}
+                    loading={memberSearching}
                     placeholder="输入昵称、用户名或邮箱（至少 2 字）"
-                  />
-                  {memberSearching && <span className="hint">搜索中…</span>}
-                  {memberOptions.length > 0 && <div className="user-search-options">
-                    {memberOptions.map((user) => {
+                    notFoundContent={memberSearching ? '搜索中…' : null}
+                    onSearch={(v) => {
+                      setMemberQuery(v)
+                      setMemberUserId('')
+                    }}
+                    onClear={() => {
+                      setMemberQuery('')
+                      setMemberUserId('')
+                    }}
+                    onSelect={(value, option) => {
+                      setMemberUserId(String(value))
+                      setMemberQuery(String(option.searchText ?? ''))
+                    }}
+                    options={memberOptions.map((user) => {
                       const nickname = user.nickname ?? user.profile?.nickname
-                      return <button type="button" key={user.id} onClick={() => { setMemberUserId(user.id); setMemberQuery(nickname || user.username); setMemberOptions([]) }}>
-                        <strong>{nickname || user.username}</strong><span>{user.username} · {user.email}</span>
-                      </button>
+                      return {
+                        value: user.id,
+                        searchText: nickname || user.username,
+                        label: (
+                          <span className="user-search-option">
+                            <strong>{nickname || user.username}</strong>
+                            <span className="muted">{user.username} · {user.email}</span>
+                          </span>
+                        ),
+                      }
                     })}
-                  </div>}
+                  />
                   {memberUserId && <span className="hint">已选择：{memberQuery}</span>}
                 </div>
                 <label className="field">
                   <span>{msg('roleLabel')}</span>
-                  <select value={memberRole} onChange={(e) => setMemberRole(e.target.value)}>
-                    <option value="viewer">viewer（只读）</option>
-                    <option value="editor">editor（可上传/建目录）</option>
-                    {roles.map((r) => (
-                      <option key={r.id} value={`role:${r.id}`}>{r.name}（custom）</option>
-                    ))}
-                  </select>
+                  <Select
+                    value={memberRole}
+                    onChange={(v) => setMemberRole(v)}
+                    options={[
+                      { value: 'viewer', label: 'viewer（只读）' },
+                      { value: 'editor', label: 'editor（可上传/建目录）' },
+                      ...roles.map((r) => ({ value: `role:${r.id}`, label: `${r.name}（custom）` })),
+                    ]}
+                  />
                 </label>
-                <button type="submit" className="btn primary block" disabled={memberBusy || !UUID_RE.test(memberUserId.trim())}>
+                <Button className="member-add-submit" type="primary" htmlType="submit" block disabled={memberBusy || !UUID_RE.test(memberUserId.trim())}>
                   {memberBusy ? msg('creating') : msg('addMember')}
-                </button>
+                </Button>
               </form>
             ) : (
               <p className="hint member-hint">{msg('ownerOnlyHint')}</p>
@@ -527,18 +573,18 @@ export default function TeamSpacePage() {
                   <div className="member-info">
                     <span className="member-id" title={m.user_id}>{memberDisplayName(m)}</span>
                     {isOwner && m.role !== 'owner' ? (
-                      <select
+                      <Select
                         className="member-role-select"
+                        size="small"
                         value={memberRoleValue(m)}
-                        onChange={(e) => void handleChangeRole(m, e.target.value)}
+                        onChange={(v) => void handleChangeRole(m, v)}
                         title="修改成员角色"
-                      >
-                        <option value="viewer">viewer（只读）</option>
-                        <option value="editor">editor（可上传/建目录）</option>
-                        {roles.map((r) => (
-                          <option key={r.id} value={`role:${r.id}`}>{r.name}（custom）</option>
-                        ))}
-                      </select>
+                        options={[
+                          { value: 'viewer', label: 'viewer（只读）' },
+                          { value: 'editor', label: 'editor（可上传/建目录）' },
+                          ...roles.map((r) => ({ value: `role:${r.id}`, label: `${r.name}（custom）` })),
+                        ]}
+                      />
                     ) : (
                       <span className={`badge role-${m.role}`}>{m.role === 'custom' ? (m.role_name ?? 'custom') : m.role}</span>
                     )}
@@ -548,7 +594,7 @@ export default function TeamSpacePage() {
                       {formatTime(m.created_at)}
                     </span>
                     {isOwner && m.role !== 'owner' && (
-                      <button className="btn small danger" onClick={() => void handleRemoveMember(m)}>{msg('delete')}</button>
+                      <Button size="small" danger onClick={() => handleRemoveMember(m)}>{msg('delete')}</Button>
                     )}
                   </div>
                 </li>
@@ -568,8 +614,8 @@ export default function TeamSpacePage() {
                         <span className="muted role-count">{r.member_count}</span>
                       </div>
                       <div className="member-side">
-                        <button className="btn small" onClick={() => startEditRole(r)}>{msg('edit')}</button>
-                        <button className="btn small danger" onClick={() => void handleDeleteRole(r)}>{msg('delete')}</button>
+                        <Button size="small" onClick={() => startEditRole(r)}>{msg('edit')}</Button>
+                        <Button size="small" danger onClick={() => handleDeleteRole(r)}>{msg('delete')}</Button>
                       </div>
                     </li>
                   ))}
@@ -578,7 +624,8 @@ export default function TeamSpacePage() {
                 <form className="role-form" onSubmit={handleSaveRole}>
                   <label className="field">
                     <span>{editingRoleId ? '修改角色名称' : '新建角色名称'}</span>
-                    <input
+                    <Input
+                      allowClear
                       value={roleForm.name}
                       onChange={(e) => setRoleForm({ ...roleForm, name: e.target.value })}
                       placeholder="例如 审计员"
@@ -612,11 +659,11 @@ export default function TeamSpacePage() {
                     </div>
                   </div>
                   <div className="member-side role-form-actions">
-                    <button type="submit" className="btn primary small" disabled={roleBusy || !roleForm.name.trim()}>
+                    <Button type="primary" size="small" htmlType="submit" disabled={roleBusy || !roleForm.name.trim()}>
                       {roleBusy ? '保存中…' : editingRoleId ? '保存修改' : '创建角色'}
-                    </button>
+                    </Button>
                     {editingRoleId && (
-                      <button type="button" className="btn ghost small" onClick={resetRoleForm}>取消</button>
+                      <Button type="text" size="small" onClick={resetRoleForm}>取消</Button>
                     )}
                   </div>
                 </form>
@@ -657,15 +704,17 @@ export default function TeamSpacePage() {
                 {aclEntries.map((entry, index) => (
                   <div key={index} className="acl-row">
                     <span className="acl-type">{msg(ACL_SUBJECT_KEYS[entry.subject_type] ?? 'aclSubjectUser')}</span>
-                    <input className="acl-uuid" readOnly value={entry.subject_id} title={entry.subject_id} />
-                    <select
+                    <Input className="acl-uuid" readOnly value={entry.subject_id} title={entry.subject_id} />
+                    <Select
+                      className="acl-effect-select"
                       value={entry.effect}
                       disabled={aclBusy}
-                      onChange={(e) => setAclEntryEffect(index, e.target.value as FolderACLEntry['effect'])}
-                    >
-                      <option value="allow">{msg('aclAllow')}</option>
-                      <option value="deny">{msg('aclDeny')}</option>
-                    </select>
+                      onChange={(v) => setAclEntryEffect(index, v as FolderACLEntry['effect'])}
+                      options={[
+                        { value: 'allow', label: msg('aclAllow') },
+                        { value: 'deny', label: msg('aclDeny') },
+                      ]}
+                    />
                     <span className="acl-perms">
                       {ACL_ACTIONS.map((a) => (
                         <label key={a} className="check-item">
@@ -678,33 +727,38 @@ export default function TeamSpacePage() {
                         </label>
                       ))}
                     </span>
-                    <button className="btn small danger" disabled={aclBusy} onClick={() => removeAclEntry(index)}>
+                    <Button size="small" danger disabled={aclBusy} onClick={() => removeAclEntry(index)}>
                       {msg('delete')}
-                    </button>
+                    </Button>
                   </div>
                 ))}
               </div>
               <form className="acl-add" onSubmit={addAclEntry}>
-                <select
+                <Select
+                  className="acl-type-select"
                   value={aclNewType}
-                  onChange={(e) => setAclNewType(e.target.value as FolderACLEntry['subject_type'])}
-                >
-                  <option value="user">{msg('aclSubjectUser')}</option>
-                  <option value="team">{msg('aclSubjectTeam')}</option>
-                  <option value="role">{msg('aclSubjectRole')}</option>
-                </select>
-                <input
+                  onChange={(v) => setAclNewType(v as FolderACLEntry['subject_type'])}
+                  options={[
+                    { value: 'user', label: msg('aclSubjectUser') },
+                    { value: 'team', label: msg('aclSubjectTeam') },
+                    { value: 'role', label: msg('aclSubjectRole') },
+                  ]}
+                />
+                <Input
+                  allowClear
                   value={aclNewId}
                   onChange={(e) => setAclNewId(e.target.value)}
                   placeholder="3f0c9c2e-…"
                 />
-                <select
+                <Select
+                  className="acl-effect-select"
                   value={aclNewEffect}
-                  onChange={(e) => setAclNewEffect(e.target.value as FolderACLEntry['effect'])}
-                >
-                  <option value="allow">{msg('aclAllow')}</option>
-                  <option value="deny">{msg('aclDeny')}</option>
-                </select>
+                  onChange={(v) => setAclNewEffect(v as FolderACLEntry['effect'])}
+                  options={[
+                    { value: 'allow', label: msg('aclAllow') },
+                    { value: 'deny', label: msg('aclDeny') },
+                  ]}
+                />
                 <span className="acl-perms">
                   {ACL_ACTIONS.map((a) => (
                     <label key={a} className="check-item">
@@ -717,16 +771,16 @@ export default function TeamSpacePage() {
                     </label>
                   ))}
                 </span>
-                <button type="submit" className="btn small" disabled={aclBusy || !UUID_RE.test(aclNewId.trim())}>
+                <Button size="small" htmlType="submit" disabled={aclBusy || !UUID_RE.test(aclNewId.trim())}>
                   {msg('aclAdd')}
-                </button>
+                </Button>
               </form>
               {aclError && <div className="error-text">{aclError}</div>}
               <div className="modal-actions">
-                <button className="btn" disabled={aclBusy} onClick={closeAcl}>{msg('close')}</button>
-                <button className="btn primary" disabled={aclBusy} onClick={() => void handleSaveAcl()}>
+                <Button disabled={aclBusy} onClick={closeAcl}>{msg('close')}</Button>
+                <Button type="primary" disabled={aclBusy} onClick={() => void handleSaveAcl()}>
                   {aclBusy ? msg('loading') : msg('save')}
-                </button>
+                </Button>
               </div>
             </>
           )}

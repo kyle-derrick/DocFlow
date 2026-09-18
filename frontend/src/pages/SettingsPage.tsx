@@ -14,6 +14,7 @@
 // 凭据哈希不出服务端）。
 import { FormEvent, useEffect, useState } from 'react'
 import { NavLink, Navigate, useNavigate, useParams } from 'react-router-dom'
+import { Button, Input, Segmented, Select } from 'antd'
 import {
   ApiError,
   ApiTokenItem,
@@ -174,39 +175,39 @@ function ProfilePanel({ onError, onNotice }: { onError: (msg: string) => void; o
       <form className="team-create-row" style={{ marginTop: 12 }} onSubmit={(e) => void submit(e)}>
         <label className="field">
           <span>昵称（≤64 字符）</span>
-          <input type="text" maxLength={64} value={nickname} onChange={(e) => setNickname(e.target.value)} placeholder="展示名称" />
+          <Input maxLength={64} allowClear value={nickname} onChange={(e) => setNickname(e.target.value)} placeholder="展示名称" />
         </label>
         <label className="field">
           <span>部门（≤128 字符）</span>
-          <input type="text" maxLength={128} value={department} onChange={(e) => setDepartment(e.target.value)} placeholder="如：工程部" />
+          <Input maxLength={128} allowClear value={department} onChange={(e) => setDepartment(e.target.value)} placeholder="如：工程部" />
         </label>
         <label className="field">
           <span>职位（≤128 字符）</span>
-          <input type="text" maxLength={128} value={position} onChange={(e) => setPosition(e.target.value)} placeholder="如：工程师" />
+          <Input maxLength={128} allowClear value={position} onChange={(e) => setPosition(e.target.value)} placeholder="如：工程师" />
         </label>
         <label className="field">
           <span>电话（≤32 字符）</span>
-          <input type="text" maxLength={32} value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="13800000000" />
+          <Input maxLength={32} allowClear value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="13800000000" />
         </label>
         <label className="field">
           <span>语言</span>
-          <select value={language} onChange={(e) => setLanguage(e.target.value)}>
-            {PROFILE_LANGUAGES.map((l) => (
-              <option key={l.value} value={l.value}>{l.label}</option>
-            ))}
-          </select>
+          <Select
+            value={language}
+            onChange={(v) => setLanguage(v)}
+            options={PROFILE_LANGUAGES.map((l) => ({ value: l.value, label: l.label }))}
+          />
         </label>
         <label className="field">
           <span>时区（IANA 名称）</span>
-          <input type="text" maxLength={64} required value={timezone} onChange={(e) => setTimezone(e.target.value)} placeholder="Asia/Shanghai" />
+          <Input maxLength={64} required allowClear value={timezone} onChange={(e) => setTimezone(e.target.value)} placeholder="Asia/Shanghai" />
         </label>
         <label className="field">
           <span>简介（≤512 字符）</span>
-          <textarea rows={3} maxLength={512} value={bio} onChange={(e) => setBio(e.target.value)} placeholder="个人简介" />
+          <Input.TextArea rows={3} maxLength={512} value={bio} onChange={(e) => setBio(e.target.value)} placeholder="个人简介" />
         </label>
-        <button className="btn primary" type="submit" disabled={busy || timezone.trim() === ''}>
+        <Button type="primary" htmlType="submit" disabled={busy || timezone.trim() === ''}>
           {busy ? '保存中…' : '保存资料'}
-        </button>
+        </Button>
       </form>
     </div>
   )
@@ -297,21 +298,22 @@ function SessionsPanel({ onError, onNotice }: { onError: (msg: string) => void; 
               </div>
             </div>
             <div className="setting-control">
-              <button
-                className="btn small danger"
+              <Button
+                size="small"
+                danger
                 disabled={revoking !== null || revokingAll}
                 onClick={() => void revokeOne(s.id)}
               >
                 {revoking === s.id ? '撤销中…' : '撤销'}
-              </button>
+              </Button>
             </div>
           </div>
         ))
       )}
       <div style={{ marginTop: 12 }}>
-        <button className="btn danger" disabled={revokingAll || loading || sessions.length === 0} onClick={() => void revokeAll()}>
+        <Button danger disabled={revokingAll || loading || sessions.length === 0} onClick={() => void revokeAll()}>
           {revokingAll ? '撤销中…' : '撤销全部会话并登出'}
-        </button>
+        </Button>
       </div>
     </div>
   )
@@ -419,10 +421,10 @@ function TokensPanel({ onError, onNotice }: { onError: (msg: string) => void; on
       {oneTimeToken && (
         <>
           <div className="share-link" style={{ marginBottom: 8 }}>
-            <input type="text" readOnly value={oneTimeToken} onFocus={(e) => e.currentTarget.select()} />
-            <button className="btn small" type="button" onClick={() => void copyToken()}>
+            <Input readOnly value={oneTimeToken} onFocus={(e) => e.currentTarget.select()} />
+            <Button size="small" onClick={() => void copyToken()}>
               {copied ? '已复制' : '复制令牌'}
-            </button>
+            </Button>
           </div>
           <div className="setting-desc muted" style={{ marginBottom: 12 }}>
             该令牌明文仅显示这一次，请立即复制保存；关闭后无法再次查看。
@@ -433,10 +435,10 @@ function TokensPanel({ onError, onNotice }: { onError: (msg: string) => void; on
         <form className="team-create-row" style={{ marginBottom: 12 }} onSubmit={(e) => void submit(e)}>
           <label className="field">
             <span>名称</span>
-            <input
-              type="text"
+            <Input
               required
               maxLength={100}
+              allowClear
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="如：备份脚本"
@@ -444,20 +446,18 @@ function TokensPanel({ onError, onNotice }: { onError: (msg: string) => void; on
           </label>
           <label className="field">
             <span>有效期</span>
-            <select value={expiry} onChange={(e) => setExpiry(Number(e.target.value))}>
-              {EXPIRY_OPTIONS.map((opt) => (
-                <option key={opt.value} value={opt.value}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
+            <Select
+              value={expiry}
+              onChange={(v) => setExpiry(v)}
+              options={EXPIRY_OPTIONS.map((opt) => ({ value: opt.value, label: opt.label }))}
+            />
           </label>
-          <button className="btn primary" type="submit" disabled={busy || name.trim() === ''}>
+          <Button type="primary" htmlType="submit" disabled={busy || name.trim() === ''}>
             {busy ? '创建中…' : '创建'}
-          </button>
-          <button className="btn" type="button" disabled={busy} onClick={() => { setShowCreate(false); setName('') }}>
+          </Button>
+          <Button disabled={busy} onClick={() => { setShowCreate(false); setName('') }}>
             取消
-          </button>
+          </Button>
         </form>
       )}
       {loading ? (
@@ -470,7 +470,7 @@ function TokensPanel({ onError, onNotice }: { onError: (msg: string) => void; on
             <div className="setting-main">
               {editing === t.id ? (
                 <div className="team-create-row">
-                  <input value={editName} onChange={(e) => setEditName(e.target.value)} />
+                  <Input allowClear value={editName} onChange={(e) => setEditName(e.target.value)} />
                   {['files:read', 'files:write'].map((scope) => <label key={scope} className="check-item"><input type="checkbox" checked={editScopes.includes(scope)} onChange={(e) => setEditScopes(e.target.checked ? [...editScopes, scope] : editScopes.filter((s) => s !== scope))} /> {scope}</label>)}
                 </div>
               ) : <div className="setting-key">{t.name}</div>}
@@ -481,28 +481,29 @@ function TokensPanel({ onError, onNotice }: { onError: (msg: string) => void; on
               </div>
             </div>
             <div className="setting-control">
-              {editing === t.id ? <><button className="btn small primary" onClick={() => void saveEdit(t.id)}>保存</button><button className="btn small" onClick={() => setEditing(null)}>取消</button></> : <button className="btn small" onClick={() => { setEditing(t.id); setEditName(t.name); setEditScopes(t.scopes ?? []) }}>修改</button>}
+              {editing === t.id ? <><Button size="small" type="primary" onClick={() => void saveEdit(t.id)}>保存</Button><Button size="small" onClick={() => setEditing(null)}>取消</Button></> : <Button size="small" onClick={() => { setEditing(t.id); setEditName(t.name); setEditScopes(t.scopes ?? []) }}>修改</Button>}
               {t.expires_at && new Date(t.expires_at).getTime() < Date.now() ? (
                 <span className="badge failed">已过期</span>
               ) : (
                 <span className="badge available">有效</span>
               )}
-              <button
-                className="btn small danger"
+              <Button
+                size="small"
+                danger
                 disabled={revoking !== null}
                 onClick={() => void revoke(t.id)}
               >
                 {revoking === t.id ? '撤销中…' : '撤销'}
-              </button>
+              </Button>
             </div>
           </div>
         ))
       )}
       {!showCreate && (
         <div style={{ marginTop: 12 }}>
-          <button className="btn primary" onClick={() => { setOneTimeToken(''); setShowCreate(true) }}>
+          <Button type="primary" onClick={() => { setOneTimeToken(''); setShowCreate(true) }}>
             创建令牌
-          </button>
+          </Button>
         </div>
       )}
     </div>
@@ -649,14 +650,14 @@ function TotpPanel({ onError, onNotice }: { onError: (msg: string) => void; onNo
           </div>
           <div className="setting-control">
             {!enabled && !setup && (
-              <button className="btn primary" disabled={busy} onClick={() => void startSetup()}>
+              <Button type="primary" disabled={busy} onClick={() => void startSetup()}>
                 {busy ? '生成中…' : '开始设置'}
-              </button>
+              </Button>
             )}
             {enabled && !showDisable && (
-              <button className="btn danger" disabled={busy} onClick={() => setShowDisable(true)}>
+              <Button danger disabled={busy} onClick={() => setShowDisable(true)}>
                 禁用
-              </button>
+              </Button>
             )}
           </div>
         </div>
@@ -668,34 +669,31 @@ function TotpPanel({ onError, onNotice }: { onError: (msg: string) => void; onNo
             然后输入认证器显示的 6 位码完成启用。
           </div>
           <div className="share-link" style={{ marginBottom: 8 }}>
-            <input type="text" readOnly value={setup.secret} onFocus={(e) => e.currentTarget.select()} />
-            <button
-              className="btn small"
-              type="button"
+            <Input readOnly value={setup.secret} onFocus={(e) => e.currentTarget.select()} />
+            <Button
+              size="small"
               onClick={() => {
                 void copyText(setup.secret).then(setCopiedSecret)
               }}
             >
               {copiedSecret ? '已复制' : '复制密钥'}
-            </button>
+            </Button>
           </div>
           <div className="share-link" style={{ marginBottom: 12 }}>
-            <input type="text" readOnly value={setup.otpauth_url} onFocus={(e) => e.currentTarget.select()} />
-            <button
-              className="btn small"
-              type="button"
+            <Input readOnly value={setup.otpauth_url} onFocus={(e) => e.currentTarget.select()} />
+            <Button
+              size="small"
               onClick={() => {
                 void copyText(setup.otpauth_url).then(setCopiedUrl)
               }}
             >
               {copiedUrl ? '已复制' : '复制链接'}
-            </button>
+            </Button>
           </div>
           <form className="team-create-row" onSubmit={(e) => void submitConfirm(e)}>
             <label className="field">
               <span>认证器 6 位验证码</span>
-              <input
-                type="text"
+              <Input
                 inputMode="numeric"
                 required
                 pattern="\d{6}"
@@ -706,12 +704,10 @@ function TotpPanel({ onError, onNotice }: { onError: (msg: string) => void; onNo
                 autoComplete="one-time-code"
               />
             </label>
-            <button className="btn primary" type="submit" disabled={busy || !/^\d{6}$/.test(code)}>
+            <Button type="primary" htmlType="submit" disabled={busy || !/^\d{6}$/.test(code)}>
               {busy ? '验证中…' : '确认启用'}
-            </button>
-            <button
-              className="btn"
-              type="button"
+            </Button>
+            <Button
               disabled={busy}
               onClick={() => {
                 setSetup(null)
@@ -719,7 +715,7 @@ function TotpPanel({ onError, onNotice }: { onError: (msg: string) => void; onNo
               }}
             >
               取消
-            </button>
+            </Button>
           </form>
         </div>
       )}
@@ -735,15 +731,14 @@ function TotpPanel({ onError, onNotice }: { onError: (msg: string) => void; onNo
             ))}
           </div>
           <div style={{ marginTop: 8 }}>
-            <button
-              className="btn small"
-              type="button"
+            <Button
+              size="small"
               onClick={() => {
                 void copyText(recoveryCodes.join('\n')).then(setCopiedAll)
               }}
             >
               {copiedAll ? '已复制全部' : '复制全部'}
-            </button>
+            </Button>
           </div>
         </div>
       )}
@@ -751,8 +746,7 @@ function TotpPanel({ onError, onNotice }: { onError: (msg: string) => void; onNo
         <form className="team-create-row" style={{ marginTop: 12 }} onSubmit={(e) => void submitDisable(e)}>
           <label className="field">
             <span>确认密码</span>
-            <input
-              type="password"
+            <Input.Password
               required
               value={disablePassword}
               onChange={(e) => setDisablePassword(e.target.value)}
@@ -760,12 +754,10 @@ function TotpPanel({ onError, onNotice }: { onError: (msg: string) => void; onNo
               autoComplete="current-password"
             />
           </label>
-          <button className="btn danger" type="submit" disabled={busy || disablePassword === ''}>
+          <Button danger htmlType="submit" disabled={busy || disablePassword === ''}>
             {busy ? '禁用中…' : '确认禁用'}
-          </button>
-          <button
-            className="btn"
-            type="button"
+          </Button>
+          <Button
             disabled={busy}
             onClick={() => {
               setShowDisable(false)
@@ -773,7 +765,7 @@ function TotpPanel({ onError, onNotice }: { onError: (msg: string) => void; onNo
             }}
           >
             取消
-          </button>
+          </Button>
         </form>
       )}
     </div>
@@ -830,17 +822,12 @@ function AppearancePanel() {
       <div className="setting-main" style={{ marginTop: 16 }}>
         <div className="setting-key">明暗模式</div>
         <div className="setting-desc muted" style={{ marginBottom: 8 }}>跟随系统时按操作系统偏好实时切换。</div>
-        <div className="seg-group" style={{ maxWidth: 360 }}>
-          {THEME_MODES.map((m) => (
-            <button
-              key={m.value}
-              type="button"
-              className={`seg${mode === m.value ? ' active' : ''}`}
-              onClick={() => update({ mode: m.value })}
-            >
-              {m.label}
-            </button>
-          ))}
+        <div style={{ maxWidth: 360 }}>
+          <Segmented
+            value={mode}
+            onChange={(v) => update({ mode: v as ThemeMode })}
+            options={THEME_MODES.map((m) => ({ value: m.value, label: m.label }))}
+          />
         </div>
       </div>
     </div>
@@ -968,10 +955,10 @@ function WebhooksPanel({ onError, onNotice }: { onError: (msg: string) => void; 
       {oneTimeSecret && (
         <>
           <div className="share-link" style={{ marginBottom: 8 }}>
-            <input type="text" readOnly value={oneTimeSecret} onFocus={(e) => e.currentTarget.select()} />
-            <button className="btn small" type="button" onClick={() => void copySecret()}>
+            <Input readOnly value={oneTimeSecret} onFocus={(e) => e.currentTarget.select()} />
+            <Button size="small" onClick={() => void copySecret()}>
               {secretCopied ? '已复制' : '复制 secret'}
-            </button>
+            </Button>
           </div>
           <div className="setting-desc muted" style={{ marginBottom: 12 }}>
             该签名 secret 仅显示这一次，请立即复制保存；接收方以其复算 HMAC 验签，关闭后无法再次查看。
@@ -982,10 +969,11 @@ function WebhooksPanel({ onError, onNotice }: { onError: (msg: string) => void; 
         <form className="team-create-row" style={{ marginBottom: 12 }} onSubmit={(e) => void submit(e)}>
           <label className="field">
             <span>回调 URL（http/https）</span>
-            <input
+            <Input
               type="url"
               required
               maxLength={2048}
+              allowClear
               value={url}
               onChange={(e) => setUrl(e.target.value)}
               placeholder="https://example.com/webhook"
@@ -1006,16 +994,14 @@ function WebhooksPanel({ onError, onNotice }: { onError: (msg: string) => void; 
               ))}
             </span>
           </label>
-          <button
-            className="btn primary"
-            type="submit"
+          <Button
+            type="primary"
+            htmlType="submit"
             disabled={busy || url.trim() === '' || selectedEvents().length === 0}
           >
             {busy ? '创建中…' : '创建'}
-          </button>
-          <button
-            className="btn"
-            type="button"
+          </Button>
+          <Button
             disabled={busy}
             onClick={() => {
               setShowCreate(false)
@@ -1024,7 +1010,7 @@ function WebhooksPanel({ onError, onNotice }: { onError: (msg: string) => void; 
             }}
           >
             取消
-          </button>
+          </Button>
         </form>
       )}
       {loading ? (
@@ -1059,28 +1045,29 @@ function WebhooksPanel({ onError, onNotice }: { onError: (msg: string) => void; 
                 />
                 {toggling === w.id ? '处理中…' : w.enabled ? '启用' : '停用'}
               </label>
-              <button
-                className="btn small danger"
+              <Button
+                size="small"
+                danger
                 disabled={deleting !== null}
                 onClick={() => void remove(w.id)}
               >
                 {deleting === w.id ? '删除中…' : '删除'}
-              </button>
+              </Button>
             </div>
           </div>
         ))
       )}
       {!showCreate && (
         <div style={{ marginTop: 12 }}>
-          <button
-            className="btn primary"
+          <Button
+            type="primary"
             onClick={() => {
               setOneTimeSecret('')
               setShowCreate(true)
             }}
           >
             注册 Webhook
-          </button>
+          </Button>
         </div>
       )}
     </div>

@@ -4,7 +4,8 @@
 // URL 保持 by-path 不跳转。404/非法命名空间/无权限显示带返回入口的
 // 友好错误页；目录默认按整站网页打开（index.html，缺省回落 index.htm）。
 import { useCallback, useEffect, useState } from 'react'
-import { Link, useParams, useSearchParams } from 'react-router-dom'
+import { Button } from 'antd'
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import {
   ApiError,
   ResolveNamespaceType,
@@ -22,12 +23,13 @@ import { FileViewerDispatch, RawHtmlViewer } from './ViewerPage'
 
 /** by-path 错误卡片：标题 + 说明 + 返回文件页。 */
 function ByPathError({ title, detail }: { title: string; detail?: string }) {
+  const navigate = useNavigate()
   return (
     <main className="text-editor-page">
       <div className="by-path-error">
         <h2>{title}</h2>
         {detail && <p className="hint">{detail}</p>}
-        <Link className="btn" to="/">返回文件页</Link>
+        <Button type="primary" onClick={() => navigate('/')}>返回文件页</Button>
       </div>
     </main>
   )

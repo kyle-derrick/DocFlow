@@ -12,7 +12,30 @@ import type { ReactNode } from 'react'
 import { EditorContent, useEditor } from '@tiptap/react'
 import type { Editor } from '@tiptap/react'
 import type { Transaction } from '@tiptap/pm/state'
-import { Link2, ListTodo } from 'lucide-react'
+import { App as AntdApp, Button, Input, Popover, Tooltip } from 'antd'
+import {
+  Bold,
+  Braces,
+  Code,
+  Heading1,
+  Heading2,
+  Heading3,
+  Image as ImageIcon,
+  Italic,
+  Link2,
+  List,
+  ListOrdered,
+  ListTodo,
+  Minus,
+  Pilcrow,
+  Redo2,
+  Strikethrough,
+  Table as TableIcon,
+  TextQuote,
+  Trash2,
+  Underline as UnderlineIcon,
+  Undo2,
+} from 'lucide-react'
 import StarterKit from '@tiptap/starter-kit'
 import Underline from '@tiptap/extension-underline'
 import Link from '@tiptap/extension-link'
@@ -29,6 +52,7 @@ import { common, createLowlight } from 'lowlight'
 import { Markdown } from 'tiptap-markdown'
 import { getFileMeta, resolveNamespaceOf, uploadFile } from '../../api'
 import { useLocale } from '../../i18n'
+import { promptViaModal } from '../FileBrowser'
 import DocflowEmbed from './DocflowEmbed'
 import { EmbedKind, markdownRoundTripMatches } from './markdownRoundtrip'
 import FilePickerModal, { PickerFilter, ensureAssetsFolder } from './FilePickerModal'
@@ -68,6 +92,7 @@ export default function RichTextEditor({
 }: RichTextEditorProps) {
   const locale = useLocale()
   const zh = locale === 'zh-CN'
+  const { modal: antdModal } = AntdApp.useApp()
   const editorRef = useRef<Editor | null>(null)
   const onChangeRef = useRef(onChange)
   const onRoundtripFailRef = useRef(onRoundtripFail)
@@ -78,9 +103,20 @@ export default function RichTextEditor({
   const [mdParentId, setMdParentId] = useState<string | null | undefined>(undefined)
   const [status, setStatus] = useState('')
   const [error, setError] = useState('')
+  // 工具栏链接 Popover：输入 URL 的受控态。
+  const [linkOpen, setLinkOpen] = useState(false)
+  const [linkUrl, setLinkUrl] = useState('https://')
 
   const callbacksRef = useRef<SlashMenuCallbacks>({
     onInsertEmbed: (filter) => setPicker(filter),
+    promptLink: () =>
+      promptViaModal(antdModal, {
+        title: zh ? '插入链接' : 'Insert link',
+        label: zh ? '链接地址（留空取消）' : 'Link URL (empty to cancel)',
+        initialValue: 'https://',
+        okText: zh ? '确定' : 'OK',
+        cancelText: zh ? '取消' : 'Cancel',
+      }),
     isZh: zh,
   })
   useEffect(() => {
@@ -230,7 +266,7 @@ export default function RichTextEditor({
     insertEmbed(kind, file.id, file.name)
   }
 
-  // ---- 工具栏 ----
+  // ---- 工具栏（antd Button + Tooltip，lucide 图标；激活态高亮） ----
 
   const chain = () => editor!.chain().focus()
   const toolbarBtn = (
@@ -241,27 +277,27 @@ export default function RichTextEditor({
     disabled: boolean,
     run: () => unknown,
   ) => (
-    <button
-      key={key}
-      type="button"
-      className={`btn small ghost${active ? ' active' : ''}`}
-      title={title}
-      disabled={disabled}
-      onMouseDown={(e) => e.preventDefault()}
-      onClick={() => run()}
-    >
-      {label}
-    </button>
+    <Tooltip key={key} title={title}>
+      <Button
+        type="text"
+        size="small"
+        className={`rich-text-tbtn${active ? ' active' : ''}`}
+        disabled={disabled}
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => run()}
+      >
+        {label}
+      </Button>
+    </Tooltip>
   )
 
-  const onToolbarLink = () => {
+  const icon = (I: typeof Bold) => <I size={14} strokeWidth={2} aria-hidden="true" />
+
+  // 链接：已有链接 → 直接移除；无选区/有选区 → Popover 输入 URL（回车或确定应用）。
+  const applyLink = () => {
     if (!editor) return
-    if (editor.isActive('link')) {
-      chain().unsetLink().run()
-      return
-    }
-    const url = window.prompt(zh ? '链接地址（留空取消）' : 'Link URL (empty to cancel)', 'https://')
-    const href = url?.trim()
+    const href = linkUrl.trim()
+    setLinkOpen(false)
     if (!href) return
     if (editor.state.selection.empty) {
       chain().insertContent({ type: 'text', text: href, marks: [{ type: 'link', attrs: { href } }] }).run()
@@ -270,51 +306,92 @@ export default function RichTextEditor({
     }
   }
 
+  const onToolbarLink = () => {
+    if (!editor) return
+    if (editor.isActive('link')) {
+      chain().unsetLink().run()
+      return
+    }
+    setLinkUrl((editor.getAttributes('link').href as string | undefined) || 'https://')
+    setLinkOpen(true)
+  }
+
   return (
     <div className={`rich-text-wrap${readonly ? ' readonly' : ''}`}>
       {!readonly && editor && (
         <div className="rich-text-toolbar" contentEditable={false}>
           <div className="rich-text-toolbar-group">
-            {toolbarBtn('undo', '↶', zh ? '撤销' : 'Undo', false, !editor.can().undo(), () => chain().undo().run())}
-            {toolbarBtn('redo', '↷', zh ? '重做' : 'Redo', false, !editor.can().redo(), () => chain().redo().run())}
+            {toolbarBtn('undo', icon(Undo2), zh ? '撤销' : 'Undo', false, !editor.can().undo(), () => chain().undo().run())}
+            {toolbarBtn('redo', icon(Redo2), zh ? '重做' : 'Redo', false, !editor.can().redo(), () => chain().redo().run())}
           </div>
           <div className="rich-text-toolbar-group">
-            {([1, 2, 3] as const).map((level) =>
-              toolbarBtn(
-                `h${level}`,
-                `H${level}`,
-                zh ? `标题 ${level}` : `Heading ${level}`,
-                editor.isActive('heading', { level }),
-                false,
-                () => chain().toggleHeading({ level }).run(),
-              ),
-            )}
+            {toolbarBtn('paragraph', icon(Pilcrow), zh ? '正文' : 'Paragraph', editor.isActive('paragraph') && !editor.isActive('heading'), false, () => chain().setParagraph().run())}
+            {toolbarBtn('h1', icon(Heading1), zh ? '标题 1' : 'Heading 1', editor.isActive('heading', { level: 1 }), false, () => chain().toggleHeading({ level: 1 }).run())}
+            {toolbarBtn('h2', icon(Heading2), zh ? '标题 2' : 'Heading 2', editor.isActive('heading', { level: 2 }), false, () => chain().toggleHeading({ level: 2 }).run())}
+            {toolbarBtn('h3', icon(Heading3), zh ? '标题 3' : 'Heading 3', editor.isActive('heading', { level: 3 }), false, () => chain().toggleHeading({ level: 3 }).run())}
           </div>
           <div className="rich-text-toolbar-group">
-            {toolbarBtn('bold', 'B', zh ? '加粗' : 'Bold', editor.isActive('bold'), false, () => chain().toggleBold().run())}
-            {toolbarBtn('italic', 'I', zh ? '斜体' : 'Italic', editor.isActive('italic'), false, () => chain().toggleItalic().run())}
-            {toolbarBtn('underline', 'U', zh ? '下划线' : 'Underline', editor.isActive('underline'), false, () => chain().toggleUnderline().run())}
-            {toolbarBtn('code', '</>', zh ? '行内代码' : 'Inline code', editor.isActive('code'), false, () => chain().toggleCode().run())}
+            {toolbarBtn('bold', icon(Bold), zh ? '加粗' : 'Bold', editor.isActive('bold'), false, () => chain().toggleBold().run())}
+            {toolbarBtn('italic', icon(Italic), zh ? '斜体' : 'Italic', editor.isActive('italic'), false, () => chain().toggleItalic().run())}
+            {toolbarBtn('underline', icon(UnderlineIcon), zh ? '下划线' : 'Underline', editor.isActive('underline'), false, () => chain().toggleUnderline().run())}
+            {toolbarBtn('strike', icon(Strikethrough), zh ? '删除线' : 'Strikethrough', editor.isActive('strike'), false, () => chain().toggleStrike().run())}
+            {toolbarBtn('code', icon(Code), zh ? '行内代码' : 'Inline code', editor.isActive('code'), false, () => chain().toggleCode().run())}
           </div>
           <div className="rich-text-toolbar-group">
-            {toolbarBtn('ul', '•', zh ? '无序列表' : 'Bullet list', editor.isActive('bulletList'), false, () => chain().toggleBulletList().run())}
-            {toolbarBtn('ol', '1.', zh ? '有序列表' : 'Ordered list', editor.isActive('orderedList'), false, () => chain().toggleOrderedList().run())}
-            {toolbarBtn('task', <ListTodo size={14} strokeWidth={2} aria-hidden="true" />, zh ? '任务列表' : 'Task list', editor.isActive('taskList'), false, () => chain().toggleTaskList().run())}
-            {toolbarBtn('quote', '❝', zh ? '引用' : 'Quote', editor.isActive('blockquote'), false, () => chain().toggleBlockquote().run())}
+            {toolbarBtn('ul', icon(List), zh ? '无序列表' : 'Bullet list', editor.isActive('bulletList'), false, () => chain().toggleBulletList().run())}
+            {toolbarBtn('ol', icon(ListOrdered), zh ? '有序列表' : 'Ordered list', editor.isActive('orderedList'), false, () => chain().toggleOrderedList().run())}
+            {toolbarBtn('task', icon(ListTodo), zh ? '任务列表' : 'Task list', editor.isActive('taskList'), false, () => chain().toggleTaskList().run())}
+            {toolbarBtn('quote', icon(TextQuote), zh ? '引用' : 'Quote', editor.isActive('blockquote'), false, () => chain().toggleBlockquote().run())}
           </div>
           <div className="rich-text-toolbar-group">
-            {toolbarBtn('codeblock', '{}', zh ? '代码块' : 'Code block', editor.isActive('codeBlock'), false, () => chain().toggleCodeBlock().run())}
-            {toolbarBtn('link', <Link2 size={14} strokeWidth={2} aria-hidden="true" />, zh ? '链接' : 'Link', editor.isActive('link'), false, onToolbarLink)}
-            {toolbarBtn('table', '▦', zh ? '插入表格' : 'Insert table', false, false, () =>
+            {toolbarBtn('table', icon(TableIcon), zh ? '插入表格（3×3）' : 'Insert table (3×3)', false, false, () =>
               chain().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run(),
             )}
+            {toolbarBtn('hr', icon(Minus), zh ? '分割线' : 'Divider', false, false, () => chain().setHorizontalRule().run())}
+            {toolbarBtn('codeblock', icon(Braces), zh ? '代码块' : 'Code block', editor.isActive('codeBlock'), false, () => chain().toggleCodeBlock().run())}
+          </div>
+          <div className="rich-text-toolbar-group">
+            <Popover
+              open={linkOpen}
+              onOpenChange={setLinkOpen}
+              trigger={[]}
+              placement="bottom"
+              content={
+                <div style={{ display: 'flex', gap: 8, padding: 4 }} contentEditable={false}>
+                  <Input
+                    size="small"
+                    autoFocus
+                    value={linkUrl}
+                    onChange={(e) => setLinkUrl(e.target.value)}
+                    placeholder="https://"
+                    onPressEnter={applyLink}
+                    style={{ width: 280 }}
+                  />
+                  <Button size="small" type="primary" onMouseDown={(e) => e.preventDefault()} onClick={applyLink}>
+                    {zh ? '应用' : 'Apply'}
+                  </Button>
+                </div>
+              }
+            >
+              <Button
+                type="text"
+                size="small"
+                className={`rich-text-tbtn${editor.isActive('link') ? ' active' : ''}`}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={onToolbarLink}
+                title={editor.isActive('link') ? (zh ? '移除链接' : 'Remove link') : zh ? '插入链接' : 'Insert link'}
+              >
+                {icon(Link2)}
+              </Button>
+            </Popover>
+            {toolbarBtn('image', icon(ImageIcon), zh ? '插入图片（上传到 assets/）' : 'Insert image (upload to assets/)', false, false, () => setPicker('image'))}
           </div>
           {editor.isActive('table') && (
             <div className="rich-text-toolbar-group">
               {toolbarBtn('row-add', zh ? '行+' : 'Row+', zh ? '下方插入行' : 'Add row below', false, false, () => chain().addRowAfter().run())}
-              {toolbarBtn('row-del', zh ? '删行' : 'Del row', zh ? '删除当前行' : 'Delete row', false, false, () => chain().deleteRow().run())}
+              {toolbarBtn('row-del', <><Trash2 size={14} strokeWidth={2} aria-hidden="true" />{zh ? '行' : ' row'}</>, zh ? '删除当前行' : 'Delete row', false, false, () => chain().deleteRow().run())}
               {toolbarBtn('col-add', zh ? '列+' : 'Col+', zh ? '右侧插入列' : 'Add column after', false, false, () => chain().addColumnAfter().run())}
-              {toolbarBtn('col-del', zh ? '删列' : 'Del col', zh ? '删除当前列' : 'Delete column', false, false, () => chain().deleteColumn().run())}
+              {toolbarBtn('col-del', <><Trash2 size={14} strokeWidth={2} aria-hidden="true" />{zh ? '列' : ' col'}</>, zh ? '删除当前列' : 'Delete column', false, false, () => chain().deleteColumn().run())}
               {toolbarBtn('table-del', zh ? '删表格' : 'Del table', zh ? '删除表格' : 'Delete table', false, false, () => chain().deleteTable().run())}
             </div>
           )}
@@ -324,7 +401,7 @@ export default function RichTextEditor({
         <div className={`rich-text-status${error ? ' error' : ''}`} contentEditable={false}>
           {error || status}
           {error && (
-            <button type="button" className="btn ghost small" onClick={() => setError('')}>×</button>
+            <Button type="text" size="small" onClick={() => setError('')} aria-label={zh ? '关闭' : 'Close'}>×</Button>
           )}
         </div>
       )}

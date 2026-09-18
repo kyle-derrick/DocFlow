@@ -8,7 +8,8 @@
 //   其他窗口经 storage 事件感知后自动刷新（跨标签页的简单实现）。
 // - 销毁时调用 docEditor.destroyEditor()；脚本加载失败提示「编辑服务不可用」。
 import { useEffect, useRef, useState } from 'react'
-import { Link, useParams, useSearchParams } from 'react-router-dom'
+import { Button } from 'antd'
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import {
   ApiError,
   FileWithVersion,
@@ -69,6 +70,7 @@ function loadDocEditorScript(serverUrl: string): { ready: Promise<void>; remove:
 }
 
 export default function EditorPage({ mode, fileId: fileIdProp }: { mode?: 'edit' | 'view'; fileId?: string } = {}) {
+  const navigate = useNavigate()
   const { fileId: routeFileId = '' } = useParams()
   // by-path 路由经 prop 传入 resolve 得到的 file_id；缺省回退路由参数。
   const fileId = fileIdProp ?? routeFileId
@@ -186,10 +188,10 @@ export default function EditorPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
   return (
     <div className={`editor-page${viewMode ? ' viewer-only' : ''}`}>
       {!viewMode && <div className="editor-head">
-        <Link className="btn ghost small" to="/">← 返回</Link>
+        <Button type="text" size="small" onClick={() => navigate('/')}>← 返回</Button>
         <h2 className="editor-title">{file?.name ?? '加载中…'}</h2>
         {versionNo !== undefined && <span className="badge current">当前版本 v{versionNo}</span>}
-        <button type="button" className="btn small" onClick={() => void refreshVersion('版本已刷新')}>刷新版本</button>
+        <Button size="small" onClick={() => void refreshVersion('版本已刷新')}>刷新版本</Button>
       </div>}
 
       {!viewMode && saveHint && <div className="banner ok editor-hint">{saveHint}</div>}

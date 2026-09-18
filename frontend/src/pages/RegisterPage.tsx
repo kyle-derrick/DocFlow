@@ -1,5 +1,6 @@
 import { FormEvent, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Button, Input } from 'antd'
 import { ApiError, register } from '../api'
 
 /** 邀请注册页（无需登录）：凭邮件中的一次性链接 /register/<token> 完成注册，
@@ -45,13 +46,13 @@ export default function RegisterPage() {
         <p className="hint">接受邀请，创建你的账号</p>
         <label className="field">
           <span>用户名</span>
-          <input
-            type="text"
+          <Input
             required
             minLength={3}
             maxLength={32}
             pattern="[A-Za-z0-9_-]+"
             title="3-32 个字符，仅限字母、数字、下划线与连字符"
+            allowClear
             value={username}
             onChange={(e) => setUsername(e.target.value)}
             placeholder="alice"
@@ -60,8 +61,7 @@ export default function RegisterPage() {
         </label>
         <label className="field">
           <span>密码</span>
-          <input
-            type="password"
+          <Input.Password
             required
             value={password}
             onChange={(e) => setPassword(e.target.value)}
@@ -71,8 +71,7 @@ export default function RegisterPage() {
         </label>
         <label className="field">
           <span>确认密码</span>
-          <input
-            type="password"
+          <Input.Password
             required
             value={confirm}
             onChange={(e) => setConfirm(e.target.value)}
@@ -81,9 +80,9 @@ export default function RegisterPage() {
           />
         </label>
         {error && <div className="error-text">{error}</div>}
-        <button className="btn primary block" type="submit" disabled={busy || !token}>
+        <Button className="login-submit" type="primary" htmlType="submit" block disabled={busy || !token}>
           {busy ? '注册中…' : '完成注册'}
-        </button>
+        </Button>
         <p className="hint">
           已有账号？<Link to="/login">返回登录</Link>
         </p>

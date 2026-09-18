@@ -27,6 +27,8 @@ function lucideMarkup(icon: typeof FileText): string {
 /** 上层回调（经 ref 传递，避免编辑器重建；isZh 用于菜单文案即时语言）。 */
 export interface SlashMenuCallbacks {
   onInsertEmbed: (filter: PickerFilter) => void
+  /** window.prompt 的替代：antd 弹窗输入链接地址，取消回传 null。 */
+  promptLink: () => Promise<string | null>
   isZh: boolean
 }
 
@@ -63,10 +65,9 @@ function getItems(callbacksRef: SlashMenuCallbacksRef): SlashItem[] {
     { key: 'code', icon: '{}', zh: '代码块', en: 'Code block', keywords: 'code 代码', command: run((c) => c.toggleCodeBlock().run()) },
     { key: 'quote', icon: '❝', zh: '引用', en: 'Quote', keywords: 'quote blockquote 引用', command: run((c) => c.toggleBlockquote().run()) },
     { key: 'hr', icon: '—', zh: '分割线', en: 'Divider', keywords: 'hr divider 分割线', command: run((c) => c.setHorizontalRule().run()) },
-    { key: 'link', icon: lucideMarkup(Link2), zh: '链接', en: 'Link', keywords: 'link url 链接', command: (editor, range) => {
+    { key: 'link', icon: lucideMarkup(Link2), zh: '链接', en: 'Link', keywords: 'link url 链接', command: async (editor, range) => {
       editor.chain().focus().deleteRange(range).run()
-      const isZh = callbacksRef.current.isZh
-      const url = window.prompt(isZh ? '链接地址' : 'Link URL', 'https://')
+      const url = await callbacksRef.current.promptLink()
       const href = url?.trim()
       if (!href) return
       if (editor.state.selection.empty) {

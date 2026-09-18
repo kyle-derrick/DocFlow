@@ -4,6 +4,7 @@
 // 个人空间与团队空间共用；写权限由后端强制（403 统一提示「无写权限」）。
 import { useEffect, useRef, useState } from 'react'
 import { ArrowLeftRight, ArrowRightLeft, Upload } from 'lucide-react'
+import { App as AntdApp, Button, Select } from 'antd'
 import {
   ApiError,
   FileItem,
@@ -51,6 +52,7 @@ interface Props {
 }
 
 export default function VersionHistoryModal({ file, onClose, onChanged }: Props) {
+  const { modal: antdModal } = AntdApp.useApp()
   const [versions, setVersions] = useState<FileVersionDetail[]>([])
   const [currentId, setCurrentId] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -123,29 +125,44 @@ export default function VersionHistoryModal({ file, onClose, onChanged }: Props)
 
   const versionLabel = (v: FileVersionDetail) => `v${v.version}${v.id === currentId ? '（当前）' : ''}`
 
-  const handleDelete = async (v: FileVersionDetail) => {
-    if (!window.confirm(`确定删除「${file.name}」版本 v${v.version}？此操作不可撤销。`)) return
-    setBusyId(v.id); setError(''); setNotice('')
-    try { await deleteFileVersion(file.id, v.id); setNotice(`已删除版本 v${v.version}`); await load(); onChanged() }
-    catch (err) { setError(writeErrorText(err, '删除版本失败')) }
-    finally { setBusyId(null) }
+  const handleDelete = (v: FileVersionDetail) => {
+    antdModal.confirm({
+      title: '删除版本',
+      content: `确定删除「${file.name}」版本 v${v.version}？此操作不可撤销。`,
+      okText: '删除',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: async () => {
+        setBusyId(v.id); setError(''); setNotice('')
+        try { await deleteFileVersion(file.id, v.id); setNotice(`已删除版本 v${v.version}`); await load(); onChanged() }
+        catch (err) { setError(writeErrorText(err, '删除版本失败')) }
+        finally { setBusyId(null) }
+      },
+    })
   }
 
-  const handleRestore = async (v: FileVersionDetail) => {
-    if (!window.confirm(`确定将「${file.name}」回滚到版本 v${v.version}？当前版本将指向该历史版本。`)) return
-    setBusyId(v.id)
-    setError('')
-    setNotice('')
-    try {
-      await restoreVersion(file.id, v.id)
-      setNotice(`已回滚到版本 v${v.version}`)
-      await load()
-      onChanged()
-    } catch (err) {
-      setError(writeErrorText(err, '回滚失败'))
-    } finally {
-      setBusyId(null)
-    }
+  const handleRestore = (v: FileVersionDetail) => {
+    antdModal.confirm({
+      title: '回滚版本',
+      content: `确定将「${file.name}」回滚到版本 v${v.version}？当前版本将指向该历史版本。`,
+      okText: '回滚',
+      cancelText: '取消',
+      onOk: async () => {
+        setBusyId(v.id)
+        setError('')
+        setNotice('')
+        try {
+          await restoreVersion(file.id, v.id)
+          setNotice(`已回滚到版本 v${v.version}`)
+          await load()
+          onChanged()
+        } catch (err) {
+          setError(writeErrorText(err, '回滚失败'))
+        } finally {
+          setBusyId(null)
+        }
+      },
+    })
   }
 
   const handleFilePicked = async (files: FileList | null) => {
@@ -174,17 +191,16 @@ export default function VersionHistoryModal({ file, onClose, onChanged }: Props)
           <div className="compare-toolbar">
             <label className="compare-field">
               <span>版本 A（旧）</span>
-              <select value={aId} onChange={(e) => setAId(e.target.value)}>
-                {versions.map((v) => (
-                  <option key={v.id} value={v.id}>
-                    {versionLabel(v)}
-                  </option>
-                ))}
-              </select>
+              <Select
+                className="compare-select"
+                value={aId}
+                onChange={(v) => setAId(v)}
+                options={versions.map((v) => ({ value: v.id, label: versionLabel(v) }))}
+              />
             </label>
-            <button
-              className="btn small ghost"
-              type="button"
+            <Button
+              type="text"
+              size="small"
               title="交换 A/B"
               onClick={() => {
                 const next = aId
@@ -193,23 +209,21 @@ export default function VersionHistoryModal({ file, onClose, onChanged }: Props)
               }}
             >
               <ArrowLeftRight size={14} strokeWidth={2} aria-hidden="true" />
-            </button>
+            </Button>
             <label className="compare-field">
               <span>版本 B（新）</span>
-              <select value={bId} onChange={(e) => setBId(e.target.value)}>
-                {versions.map((v) => (
-                  <option key={v.id} value={v.id}>
-                    {versionLabel(v)}
-                  </option>
-                ))}
-              </select>
+              <Select
+                className="compare-select"
+                value={bId}
+                onChange={(v) => setBId(v)}
+                options={versions.map((v) => ({ value: v.id, label: versionLabel(v) }))}
+              />
             </label>
-            <button className="btn primary small" type="button" disabled={diffLoading} onClick={() => void runCompare()}>
+            <Button type="primary" size="small" disabled={diffLoading} onClick={() => void runCompare()}>
               {diffLoading ? '对比中…' : '对比'}
-            </button>
-            <button
-              className="btn small"
-              type="button"
+            </Button>
+            <Button
+              size="small"
               onClick={() => {
                 setCompareMode(false)
                 setDiff(null)
@@ -217,7 +231,7 @@ export default function VersionHistoryModal({ file, onClose, onChanged }: Props)
               }}
             >
               返回列表
-            </button>
+            </Button>
           </div>
           {diffError && <div className="error-text">{diffError}</div>}
           {diff && (
@@ -243,17 +257,17 @@ export default function VersionHistoryModal({ file, onClose, onChanged }: Props)
       ) : (
         <>
           <div className="version-toolbar">
-            <button className="btn primary small" onClick={() => fileInputRef.current?.click()}>
+            <Button type="primary" size="small" onClick={() => fileInputRef.current?.click()}>
               <Upload size={14} strokeWidth={2} aria-hidden="true" /> 上传新版本
-            </button>
-            <button
-              className="btn small"
+            </Button>
+            <Button
+              size="small"
               disabled={!textLike || versions.length < 2}
               title={!textLike ? '非文本文件暂不支持对比' : versions.length < 2 ? '至少需要两个版本' : '对比两个文本版本'}
               onClick={enterCompare}
             >
               <ArrowRightLeft size={14} strokeWidth={2} aria-hidden="true" /> 对比版本
-            </button>
+            </Button>
             <input
               ref={fileInputRef}
               type="file"
@@ -304,16 +318,16 @@ export default function VersionHistoryModal({ file, onClose, onChanged }: Props)
                           <span className="muted">—</span>
                         ) : (
                           <>
-                            <button
-                              className="btn small"
+                            <Button
+                              size="small"
                               disabled={busyId !== null}
-                              onClick={() => void handleRestore(v)}
+                              onClick={() => handleRestore(v)}
                             >
                               {busyId === v.id ? '处理中…' : '回滚到此版本'}
-                            </button>
-                            <button className="btn small danger" disabled={busyId !== null} onClick={() => void handleDelete(v)}>
+                            </Button>
+                            <Button size="small" danger disabled={busyId !== null} onClick={() => handleDelete(v)}>
                               {busyId === v.id ? '删除中…' : '删除'}
-                            </button>
+                            </Button>
                           </>
                         )}
                       </td>

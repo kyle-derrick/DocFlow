@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { FormEvent, KeyboardEvent } from 'react'
 import { Lock } from 'lucide-react'
+import { App as AntdApp, Button, Input, Segmented, Select } from 'antd'
 import {
   CreatedShare,
   FileItem,
@@ -30,6 +31,7 @@ import { t, useLocale } from '../i18n'
  * 持有，经 SpaceSwitcher 切换、透传 FileBrowser 的 activeView 受控入口。 */
 export default function FilesPage() {
   const locale = useLocale()
+  const { modal: antdModal } = AntdApp.useApp()
   const [reloadKey, setReloadKey] = useState(0)
   const refresh = () => setReloadKey((k) => k + 1)
   // 全局视图（全部 / 收藏 / 最近）：驱动 FileBrowser 的检索模式。
@@ -92,16 +94,27 @@ export default function FilesPage() {
     }
   }
 
-  const handleDelete = async (item: FileItem) => {
-    if (!window.confirm(locale === 'zh-CN' ? `确定删除「${item.name}」？可在回收站中恢复。` : `Delete “${item.name}”? You can restore it from the trash.`)) return
-    setDeleteError('')
-    try {
-      await deleteFile(item.id)
-      setRecentlyDeletedId(item.id)
-      refresh()
-    } catch (err) {
-      setDeleteError(err instanceof Error ? err.message : '删除失败')
-    }
+  // 单项删除确认：antd Modal.confirm（回收站可恢复）。
+  const confirmDelete = (item: FileItem) => {
+    antdModal.confirm({
+      title: locale === 'zh-CN' ? '删除' : 'Delete',
+      content: locale === 'zh-CN'
+        ? `确定删除「${item.name}」？可在回收站中恢复。`
+        : `Delete “${item.name}”? You can restore it from the trash.`,
+      okText: locale === 'zh-CN' ? '删除' : 'Delete',
+      okButtonProps: { danger: true },
+      cancelText: locale === 'zh-CN' ? '取消' : 'Cancel',
+      onOk: async () => {
+        setDeleteError('')
+        try {
+          await deleteFile(item.id)
+          setRecentlyDeletedId(item.id)
+          refresh()
+        } catch (err) {
+          setDeleteError(err instanceof Error ? err.message : '删除失败')
+        }
+      },
+    })
   }
 
   const undoDelete = async () => {
@@ -223,7 +236,7 @@ export default function FilesPage() {
       {recentlyDeletedId && undoSeconds > 0 && (
         <div className="banner ok">
           {locale === 'zh-CN' ? `已删除，${undoSeconds} 秒内可撤销` : `Deleted. Undo within ${undoSeconds}s.`}
-          <button className="btn small" onClick={() => void undoDelete()}>{t(locale, 'undo')}</button>
+          <Button size="small" onClick={() => void undoDelete()}>{t(locale, 'undo')}</Button>
         </div>
       )}
 
@@ -239,20 +252,19 @@ export default function FilesPage() {
         fileMetaFn={(fileId) => getFileMeta(fileId).catch(() => null)}
         ns={meId ? { type: 'personal', scope: meId } : undefined}
         rowActions={(item) => (
-          <>
-            <button type="button" className="btn small" onClick={() => openShare(item)}>分享</button>
+          <div className="row-actions-group">
+            <Button size="small" onClick={() => openShare(item)}>分享</Button>
             {item.type === 'file' && (
-              <button type="button" className="btn small" onClick={() => setHistoryTarget(item)}>历史</button>
+              <Button size="small" onClick={() => setHistoryTarget(item)}>历史</Button>
             )}
-            <button
-              type="button"
-              className="btn small"
+            <Button
+              size="small"
               onClick={() => { setRenameTarget(item); setRenameValue(item.name); setRenameError('') }}
             >
               重命名
-            </button>
-            <button type="button" className="btn small danger" onClick={() => void handleDelete(item)}>删除</button>
-          </>
+            </Button>
+            <Button size="small" danger onClick={() => confirmDelete(item)}>删除</Button>
+          </div>
         )}
       />
 
@@ -269,12 +281,12 @@ export default function FilesPage() {
           <form onSubmit={handleRename}>
             <label className="field">
               <span>新名称</span>
-              <input autoFocus value={renameValue} onChange={(e) => setRenameValue(e.target.value)} />
+              <Input autoFocus allowClear value={renameValue} onChange={(e) => setRenameValue(e.target.value)} />
             </label>
             {renameError && <div className="error-text">{renameError}</div>}
             <div className="modal-actions">
-              <button type="button" className="btn" onClick={() => setRenameTarget(null)}>取消</button>
-              <button type="submit" className="btn primary" disabled={!renameValue.trim()}>保存</button>
+              <Button onClick={() => setRenameTarget(null)}>取消</Button>
+              <Button type="primary" htmlType="submit" disabled={!renameValue.trim()}>保存</Button>
             </div>
           </form>
         </Modal>
@@ -286,29 +298,25 @@ export default function FilesPage() {
             <form onSubmit={handleCreateShare}>
               <div className="field">
                 <span>可见性</span>
-                <div className="seg-group">
-                  <button
-                    type="button"
-                    className={`seg${shareVisibility === 'public' ? ' active' : ''}`}
-                    onClick={() => setShareVisibility('public')}
-                  >
-                    公开链接
-                  </button>
-                  <button
-                    type="button"
-                    className={`seg${shareVisibility === 'private' ? ' active' : ''}`}
-                    onClick={() => setShareVisibility('private')}
-                  >
-                    私有分享
-                  </button>
-                </div>
+                <Segmented
+                  value={shareVisibility}
+                  onChange={(v) => setShareVisibility(v as 'public' | 'private')}
+                  options={[
+                    { label: '公开链接', value: 'public' },
+                    { label: '私有分享', value: 'private' },
+                  ]}
+                />
               </div>
               <label className="field">
                 <span>权限</span>
-                <select value={sharePermission} onChange={(e) => setSharePermission(e.target.value as 'view' | 'download')}>
-                  <option value="download">可下载</option>
-                  <option value="view">仅查看</option>
-                </select>
+                <Select
+                  value={sharePermission}
+                  onChange={(v) => setSharePermission(v as 'view' | 'download')}
+                  options={[
+                    { value: 'download', label: '可下载' },
+                    { value: 'view', label: '仅查看' },
+                  ]}
+                />
               </label>
               {shareTarget.type === 'folder' && (
                 <p className="hint share-vis-hint">
@@ -333,20 +341,19 @@ export default function FilesPage() {
                       </div>
                     )}
                     <div className="chip-input">
-                      <input
+                      <Input
+                        allowClear
                         value={shareUserInput}
                         onChange={(e) => setShareUserInput(e.target.value)}
                         onKeyDown={onUserInputKey}
                         placeholder="输入用户 UUID 后添加"
                       />
-                      <button
-                        type="button"
-                        className="btn"
+                      <Button
                         disabled={!UUID_RE.test(shareUserInput.trim()) || shareUsers.includes(shareUserInput.trim())}
                         onClick={addUserChip}
                       >
                         添加
-                      </button>
+                      </Button>
                     </div>
                   </div>
                   <div className="field">
@@ -373,18 +380,23 @@ export default function FilesPage() {
 
               <label className="field">
                 <span>有效期</span>
-                <select value={shareHours} onChange={(e) => setShareHours(e.target.value)}>
-                  <option value="0">永久</option>
-                  <option value="1">1 小时</option>
-                  <option value="24">24 小时</option>
-                  <option value="168">7 天</option>
-                </select>
+                <Select
+                  value={shareHours}
+                  onChange={(v) => setShareHours(v)}
+                  options={[
+                    { value: '0', label: '永久' },
+                    { value: '1', label: '1 小时' },
+                    { value: '24', label: '24 小时' },
+                    { value: '168', label: '7 天' },
+                  ]}
+                />
               </label>
               <label className="field">
                 <span>最大下载次数（留空不限）</span>
-                <input
+                <Input
                   type="number"
                   min={1}
+                  allowClear
                   value={shareMax}
                   onChange={(e) => setShareMax(e.target.value)}
                   placeholder="不限"
@@ -393,8 +405,7 @@ export default function FilesPage() {
               {shareVisibility === 'public' && (
                 <label className="field">
                   <span>访问密码（留空不设密码，4-64 字符）</span>
-                  <input
-                    type="password"
+                  <Input.Password
                     value={sharePassword}
                     onChange={(e) => setSharePassword(e.target.value)}
                     placeholder="可选：访问者须输入密码"
@@ -413,7 +424,8 @@ export default function FilesPage() {
                   <span>公开访问页叠加斜排水印（防截屏外传）</span>
                 </label>
                 {shareWatermark && (
-                  <input
+                  <Input
+                    allowClear
                     value={shareWatermarkText}
                     onChange={(e) => setShareWatermarkText(e.target.value)}
                     placeholder="默认模板：{date} {name}（占位符：{email} {date} {name}）"
@@ -422,18 +434,18 @@ export default function FilesPage() {
               </div>
               {shareError && <div className="error-text">{shareError}</div>}
               <div className="modal-actions">
-                <button type="button" className="btn" onClick={() => setShareTarget(null)}>取消</button>
-                <button type="submit" className="btn primary" disabled={submitDisabled}>
+                <Button onClick={() => setShareTarget(null)}>取消</Button>
+                <Button type="primary" htmlType="submit" disabled={submitDisabled}>
                   {shareBusy ? '创建中…' : shareVisibility === 'public' ? '创建链接' : '创建私有分享'}
-                </button>
+                </Button>
               </div>
             </form>
           ) : shareVisibility === 'public' ? (
             <div>
               <p className="hint">链接已创建。该令牌仅显示一次，关闭对话框后无法再次查看，请立即复制保存。</p>
               <div className="share-link">
-                <input readOnly value={shareLink} onFocus={(e) => e.currentTarget.select()} />
-                <button className="btn primary" onClick={() => void copyLink()}>{copied ? '已复制 ✓' : '复制'}</button>
+                <Input readOnly value={shareLink} onFocus={(e) => e.currentTarget.select()} />
+                <Button type="primary" onClick={() => void copyLink()}>{copied ? '已复制 ✓' : '复制'}</Button>
               </div>
               {shareResult.has_password && (
                 <p className="hint"><Lock size={14} strokeWidth={2} aria-hidden="true" /> 已启用密码保护：访问者须输入密码解锁（1 小时会话）。</p>
@@ -448,7 +460,7 @@ export default function FilesPage() {
                 <p className="hint">最大下载次数：{shareResult.max_downloads}</p>
               )}
               <div className="modal-actions">
-                <button className="btn" onClick={() => setShareTarget(null)}>关闭</button>
+                <Button onClick={() => setShareTarget(null)}>关闭</Button>
               </div>
             </div>
           ) : (
@@ -461,7 +473,7 @@ export default function FilesPage() {
                 <p className="hint">最大下载次数：{shareResult.max_downloads}</p>
               )}
               <div className="modal-actions">
-                <button className="btn" onClick={() => setShareTarget(null)}>关闭</button>
+                <Button onClick={() => setShareTarget(null)}>关闭</Button>
               </div>
             </div>
           )}

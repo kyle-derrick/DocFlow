@@ -8,6 +8,7 @@
 import { FormEvent, useCallback, useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { FileQuestion, FileText, Folder, Lock } from 'lucide-react'
+import { Button, Input } from 'antd'
 import {
   ApiError,
   PASSWORD_REQUIRED_CODE,
@@ -79,9 +80,8 @@ function PasswordCard({ busy, error, onSubmit }: {
         <h1 className="share-title"><Lock size={44} strokeWidth={2} aria-hidden="true" /></h1>
         <h2>该分享受密码保护</h2>
         <p className="hint">请输入分享者提供的访问密码</p>
-        <input
+        <Input.Password
           className="password-input"
-          type="password"
           autoFocus
           value={password}
           onChange={(e) => setPassword(e.target.value)}
@@ -89,9 +89,9 @@ function PasswordCard({ busy, error, onSubmit }: {
         />
         {error && <div className="error-text">{error}</div>}
         <div className="modal-actions">
-          <button type="submit" className="btn primary" disabled={busy || !password}>
+          <Button type="primary" htmlType="submit" disabled={busy || !password}>
             {busy ? '校验中…' : '解锁'}
-          </button>
+          </Button>
         </div>
       </form>
     </div>
@@ -152,7 +152,7 @@ function ShareEntryPreview({ rawBase, entry }: { rawBase: string; entry: ShareTr
       <div className="share-tree-preview-head">
         <strong>{entry.name}</strong>
         {entry.size !== undefined && <span className="muted">{formatSize(entry.size)}</span>}
-        <a className="btn small" href={url} download={entry.name}>下载</a>
+        <Button size="small" href={url} download={entry.name}>下载</Button>
       </div>
       {kind === 'image' ? (
         <div className="preview-box">
@@ -279,14 +279,14 @@ function FolderShareView({ token, info }: { token: string; info: PublicShareInfo
         )}
         {/* 目录分享整包下载（公开端点直接 a[download]；view 权限分享后端 403，不展示）。 */}
         {info.permission === 'download' && (
-          <a
-            className="btn small"
+          <Button
+            size="small"
             href={`/api/v1/public/shares/${encodeURIComponent(token)}/download.zip`}
             download={`${info.name}.zip`}
             title="下载整个目录（ZIP）"
           >
             下载整包
-          </a>
+          </Button>
         )}
       </div>
 
@@ -342,17 +342,17 @@ function FolderShareView({ token, info }: { token: string; info: PublicShareInfo
                     </span>
                     <span className="share-tree-actions">
                       {entry.type === 'file' && isHtml && (
-                        <button
-                          className="btn small"
+                        <Button
+                          size="small"
                           onClick={() => window.open(rawUrlOf(rawBase, entry.path, false), '_blank', 'noopener')}
                         >
                           打开网页
-                        </button>
+                        </Button>
                       )}
                       {entry.type === 'file' && !isHtml && isRawServed(entry.name) && (
-                        <a className="btn small" href={rawUrlOf(rawBase, entry.path, false)} download={entry.name}>
+                        <Button size="small" href={rawUrlOf(rawBase, entry.path, false)} download={entry.name}>
                           下载
-                        </a>
+                        </Button>
                       )}
                       {entry.type === 'file' && !previewable && <span className="muted">不支持在线预览</span>}
                     </span>
@@ -539,7 +539,7 @@ export default function SharePage() {
           <span>大小：{formatSize(info.size ?? 0)}</span>
           <span>类型：{info.mime_type || '未知'}</span>
           {info.permission === 'download' ? (
-            <a className="btn primary" href={downloadUrl}>下载</a>
+            <Button type="primary" href={downloadUrl}>下载</Button>
           ) : (
             <span className="badge">仅预览</span>
           )}

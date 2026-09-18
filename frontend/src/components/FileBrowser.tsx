@@ -16,8 +16,9 @@
 // 独立查看页一致，FileViewerDispatch 统一分发）；树点击文件经
 // fileOpenSignal 受控信号触发本组件弹窗（见 FolderTreeNav）。
 import { FormEvent, ReactNode, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { App as AntdApp, Button, Dropdown, Input, Menu, Modal as AntdModal, Select } from 'antd'
+import type { MenuProps } from 'antd'
 import {
-  ChevronDown,
   FileText,
   Folder,
   Globe,
@@ -132,6 +133,12 @@ export function clampFixedMenu(el: HTMLElement, x: number, y: number): void {
   el.style.top = `${top}px`
 }
 
+/**
+ * 全站通用弹窗（antd Modal 薄封装，保持既有签名）：title/onClose/wide/
+ * className/headExtra/children 与旧自写 Modal 一致，40+ 调用点零改动；
+ * 视觉经 styles.css「antd Modal 适配」节对齐旧 .modal（含 modal-viewer
+ * 加宽）。onClose 映射 onCancel（mask 点击 / Esc / 关闭按钮均触发）。
+ */
 export function Modal({
   title,
   onClose,
@@ -143,24 +150,92 @@ export function Modal({
   title: string
   onClose: () => void
   wide?: boolean
-  /** 追加到 .modal 的自定义类（如查看弹窗 modal-viewer 加宽加高）。 */
+  /** 追加到弹窗根元素的自定义类（如查看弹窗 modal-viewer 加宽加高）。 */
   className?: string
   /** 标题行右侧追加内容（查看弹窗的「新窗口查看/编辑/下载」拆分按钮组）。 */
   headExtra?: ReactNode
   children: ReactNode
 }) {
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className={`modal${wide ? ' wide' : ''}${className ? ` ${className}` : ''}`} onClick={(e) => e.stopPropagation()}>
-        <div className="modal-head">
-          <h3>{title}</h3>
-          {headExtra && <div className="modal-head-extra">{headExtra}</div>}
-          <button type="button" className="btn ghost" onClick={onClose} aria-label="关闭">×</button>
-        </div>
-        {children}
-      </div>
-    </div>
+    <AntdModal
+      open
+      centered
+      footer={null}
+      width={wide ? 760 : 420}
+      onCancel={onClose}
+      title={
+        headExtra ? (
+          <div className="docflow-modal-title-row">
+            <span className="docflow-modal-title-text">{title}</span>
+            <span className="docflow-modal-head-extra">{headExtra}</span>
+          </div>
+        ) : (
+          title
+        )
+      }
+      className={className ? `docflow-modal ${className}` : 'docflow-modal'}
+    >
+      {children}
+    </AntdModal>
   )
+}
+
+/** antd modal API 类型（App.useApp().modal）。 */
+export type AntdModalApi = ReturnType<typeof AntdApp.useApp>['modal']
+
+/** modal.confirm 的 Promise 封装：确认 resolve(true)、取消 resolve(false)。 */
+export function confirmDialog(
+  modal: AntdModalApi,
+  opts: { title: string; content?: ReactNode; okText: string; danger?: boolean; cancelText: string },
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    modal.confirm({
+      title: opts.title,
+      content: opts.content,
+      okText: opts.okText,
+      okButtonProps: { danger: opts.danger },
+      cancelText: opts.cancelText,
+      onOk: () => resolve(true),
+      onCancel: () => resolve(false),
+    })
+  })
+}
+
+/** window.prompt 的 antd 替代：modal.confirm + 受控 Input，确认回传输入值、取消回传 null。 */
+export function promptViaModal(
+  modal: AntdModalApi,
+  opts: { title: string; label?: string; initialValue?: string; placeholder?: string; okText: string; cancelText: string },
+): Promise<string | null> {
+  let value = opts.initialValue ?? ''
+  const SyncedInput = () => {
+    const [text, setText] = useState(value)
+    return (
+      <div style={{ marginTop: 12 }}>
+        {opts.label && <div style={{ marginBottom: 8 }}>{opts.label}</div>}
+        <Input
+          autoFocus
+          allowClear
+          value={text}
+          placeholder={opts.placeholder}
+          onChange={(e) => {
+            setText(e.target.value)
+            value = e.target.value
+          }}
+        />
+      </div>
+    )
+  }
+  return new Promise((resolve) => {
+    modal.confirm({
+      title: opts.title,
+      icon: null,
+      content: <SyncedInput />,
+      okText: opts.okText,
+      cancelText: opts.cancelText,
+      onOk: () => resolve(value.trim()),
+      onCancel: () => resolve(null),
+    })
+  })
 }
 
 export const phaseText: Record<UploadPhase | 'error', string> = {
@@ -320,6 +395,7 @@ export default function FileBrowser({
 }: FileBrowserProps) {
   const locale = useLocale()
   const msg = (key: MessageKey) => t(locale, key)
+  const { modal: antdModal } = AntdApp.useApp()
   const doDownload = downloadFn ?? downloadFile
 
   const [crumbs, setCrumbs] = useState<Crumb[]>([{ id: null, folderId: null, name: rootLabel }])
@@ -358,27 +434,19 @@ export default function FileBrowser({
   }, [ctxMenu])
   // 「＋ 新建」下拉开关。
   const [createMenuOpen, setCreateMenuOpen] = useState(false)
-  // 「⬆ 上传」附落下拉开关（拆分按钮：主点击=上传文件，下拉含上传目录）。
-  const [uploadMenuOpen, setUploadMenuOpen] = useState(false)
-  // 查看弹窗标题行拆分按钮（新窗口查看 / 编辑）的附落下拉开关。
-  const [previewViewMenuOpen, setPreviewViewMenuOpen] = useState(false)
-  const [previewEditMenuOpen, setPreviewEditMenuOpen] = useState(false)
 
-  // 右键菜单与新建/上传/弹窗拆分下拉点击外部关闭（菜单内部动作在冒泡阶段完成后收口）。
+  // 右键菜单与新建下拉点击外部关闭（菜单内部动作在冒泡阶段完成后收口）。
   useEffect(() => {
-    if (!ctxMenu && !createMenuOpen && !uploadMenuOpen && !previewViewMenuOpen && !previewEditMenuOpen) return
+    if (!ctxMenu && !createMenuOpen) return
     const onDown = (e: MouseEvent) => {
       const el = e.target as HTMLElement | null
       if (el?.closest?.('.ctx-menu, .create-menu-wrap, .split-btn')) return
       setCtxMenu(null)
       setCreateMenuOpen(false)
-      setUploadMenuOpen(false)
-      setPreviewViewMenuOpen(false)
-      setPreviewEditMenuOpen(false)
     }
     document.addEventListener('mousedown', onDown)
     return () => document.removeEventListener('mousedown', onDown)
-  }, [ctxMenu, createMenuOpen, uploadMenuOpen, previewViewMenuOpen, previewEditMenuOpen])
+  }, [ctxMenu, createMenuOpen])
 
   const changeViewMode = (mode: ViewMode) => {
     setCardMenuFor(null)
@@ -708,19 +776,28 @@ export default function FileBrowser({
     }
   }
 
-  const handleBatchTrash = async () => {
+  // 批量删除确认：antd Modal.confirm（走 App 上下文，明暗/accent 主题一致）。
+  const handleBatchTrash = () => {
     if (selectedIds.length === 0) return
-    if (!window.confirm(formatMessage(msg('batchTrashConfirm'), { n: selectedIds.length }))) return
-    setBatchBusy(true)
-    setBatchNotice('')
-    try {
-      const results = await batchTrashFiles(selectedIds)
-      finishBatch(results)
-    } catch (err) {
-      setBatchError(writeErrorText(err, msg('deleteFailed')))
-    } finally {
-      setBatchBusy(false)
-    }
+    antdModal.confirm({
+      title: msg('delete'),
+      content: formatMessage(msg('batchTrashConfirm'), { n: selectedIds.length }),
+      okText: msg('delete'),
+      okButtonProps: { danger: true },
+      cancelText: locale === 'zh-CN' ? '取消' : 'Cancel',
+      onOk: async () => {
+        setBatchBusy(true)
+        setBatchNotice('')
+        try {
+          const results = await batchTrashFiles(selectedIds)
+          finishBatch(results)
+        } catch (err) {
+          setBatchError(writeErrorText(err, msg('deleteFailed')))
+        } finally {
+          setBatchBusy(false)
+        }
+      },
+    })
   }
 
   // ---- 批量下载（zip 流） ----
@@ -1085,16 +1162,12 @@ export default function FileBrowser({
     setPreviewTarget(item)
     setPreviewPathOverride(null)
     setWebPreviewUrl(null)
-    setPreviewViewMenuOpen(false)
-    setPreviewEditMenuOpen(false)
   }
 
   const closePreview = () => {
     setPreviewTarget(null)
     setPreviewPathOverride(null)
     setWebPreviewUrl(null)
-    setPreviewViewMenuOpen(false)
-    setPreviewEditMenuOpen(false)
   }
 
   // 外部「打开文件」受控信号（左侧目录树文件节点点击）：当前列表命中直接
@@ -1259,18 +1332,6 @@ export default function FileBrowser({
       }
       if (createMenuOpen) {
         setCreateMenuOpen(false)
-        return
-      }
-      if (uploadMenuOpen) {
-        setUploadMenuOpen(false)
-        return
-      }
-      if (previewViewMenuOpen) {
-        setPreviewViewMenuOpen(false)
-        return
-      }
-      if (previewEditMenuOpen) {
-        setPreviewEditMenuOpen(false)
         return
       }
       if (cardMenuFor) {
@@ -1491,14 +1552,13 @@ export default function FileBrowser({
   const previewHeadExtra = (item: FileItem) => {
     if (item.type === 'folder') {
       return (
-        <button
-          type="button"
-          className="btn small"
+        <Button
+          size="small"
           title={locale === 'zh-CN' ? '在独立窗口打开该静态网站' : 'Open this site in a new window'}
           onClick={() => void openAsWebsite(item)}
         >
           {locale === 'zh-CN' ? '作为网页打开（新窗口）' : 'Open as website'}
-        </button>
+        </Button>
       )
     }
     const lower = item.name.toLowerCase()
@@ -1520,183 +1580,168 @@ export default function FileBrowser({
     if (isBoard) editOptions.push({ label: locale === 'zh-CN' ? '白板编辑' : 'Edit whiteboard', run: () => openEditorWindow(routeFor('edit', item)) })
     // 默认编辑路由：office/drawio 集成未启用时回落只读查看（与 openFileWith 一致）。
     const editFallbackView = (isOffice && !ooEnabled) || (isDrawio && !drawioEnabled)
+    const menuOf = (options: Array<{ label: string; run: () => void }>): MenuProps => ({
+      items: options.map((op) => ({ key: op.label, label: op.label })),
+      onClick: ({ key }) => options.find((op) => op.label === key)?.run(),
+    })
     return (
       <>
-        <div className="split-btn">
-          <button
-            type="button"
-            className="btn small"
-            title={locale === 'zh-CN' ? '以默认方式在新窗口查看' : 'View in new window (default)'}
-            onClick={() => openEditorWindow(routeFor('view', item))}
-          >
-            {locale === 'zh-CN' ? '新窗口查看' : 'View in new window'}
-          </button>
-          <button
-            type="button"
-            className="btn small split-toggle"
-            aria-haspopup="menu"
-            aria-expanded={previewViewMenuOpen}
-            title={locale === 'zh-CN' ? '选择查看方式' : 'Choose viewer'}
-            onClick={() => { setPreviewViewMenuOpen((v) => !v); setPreviewEditMenuOpen(false) }}
-          >
-            ▾
-          </button>
-          {previewViewMenuOpen && (
-            <div className="file-card-menu create-menu split-menu" role="menu" onClick={() => setPreviewViewMenuOpen(false)}>
-              {viewOptions.map((op) => (
-                <button key={op.label} type="button" className="btn small" onClick={op.run}>{op.label}</button>
-              ))}
-            </div>
-          )}
-        </div>
+        <Dropdown.Button
+          size="small"
+          menu={menuOf(viewOptions)}
+          onClick={() => openEditorWindow(routeFor('view', item))}
+        >
+          {locale === 'zh-CN' ? '新窗口查看' : 'View in new window'}
+        </Dropdown.Button>
         {editOptions.length > 0 && (
-          <div className="split-btn">
-            <button
-              type="button"
-              className="btn small"
-              title={locale === 'zh-CN' ? '以默认方式在新窗口编辑' : 'Edit in new window (default)'}
-              onClick={() => openEditorWindow(routeFor(editFallbackView ? 'view' : 'edit', item))}
-            >
-              {locale === 'zh-CN' ? '编辑' : 'Edit'}
-            </button>
-            <button
-              type="button"
-              className="btn small split-toggle"
-              aria-haspopup="menu"
-              aria-expanded={previewEditMenuOpen}
-              title={locale === 'zh-CN' ? '选择编辑方式' : 'Choose editor'}
-              onClick={() => { setPreviewEditMenuOpen((v) => !v); setPreviewViewMenuOpen(false) }}
-            >
-              ▾
-            </button>
-            {previewEditMenuOpen && (
-              <div className="file-card-menu create-menu split-menu" role="menu" onClick={() => setPreviewEditMenuOpen(false)}>
-                {editOptions.map((op) => (
-                  <button key={op.label} type="button" className="btn small" onClick={op.run}>{op.label}</button>
-                ))}
-              </div>
-            )}
-          </div>
+          <Dropdown.Button
+            size="small"
+            menu={menuOf(editOptions)}
+            onClick={() => openEditorWindow(routeFor(editFallbackView ? 'view' : 'edit', item))}
+          >
+            {locale === 'zh-CN' ? '编辑' : 'Edit'}
+          </Dropdown.Button>
         )}
       </>
     )
   }
 
-  // 条目操作菜单（列表行「⋯」、右键菜单、网格卡片菜单共用）：
-  // 打开（按默认打开方式）/ 打开方式子菜单 / 目录「下载为 ZIP」/ 打开方式
-  // 管理入口 + 既有「查看 / 编辑 / 预览 / 下载 / 标签 / 复制」与调用方 rowActions。
-  const itemMenuContent = (item: FileItem) => (
-    <>
-      {item.type === 'folder' && <button type="button" className="btn small" onClick={() => openFolder(item)}>
-        {item.has_index_web ? (locale === 'zh-CN' ? '目录浏览' : 'Browse folder') : (locale === 'zh-CN' ? '进入' : 'Open')}
-      </button>}
-      {item.type === 'folder' && (
-        <button
-          type="button"
-          className="btn small"
-          disabled={zipBusyId !== null}
-          onClick={() => void handleZipDownload(item)}
-        >
-          {zipBusyId === item.id
-            ? (locale === 'zh-CN' ? '打包中…' : 'Zipping…')
-            : (locale === 'zh-CN' ? '下载为 ZIP' : 'Download as ZIP')}
-        </button>
-      )}
-      {item.type === 'file' && (
-        <>
-          <button type="button" className="btn small" onClick={() => openPreview(item)}>{locale === 'zh-CN' ? '查看' : 'View'}</button>
-          <button type="button" className="btn small" onClick={() => openEditorWindow(routeFor('view', item))}>{locale === 'zh-CN' ? '新窗口查看' : 'View in new window'}</button>
-        </>
-      )}
-      {item.type === 'file' && openWithOptions(item.name).some((op) => op !== 'default' && op !== 'web') && (
-        <div className="openwith-group" role="group" aria-label={locale === 'zh-CN' ? '打开方式' : 'Open with'}>
-          <div className="ctx-menu-label">{locale === 'zh-CN' ? '打开方式（选择后设为默认）' : 'Open with (sets default)'}</div>
-          {openWithOptions(item.name).map((op) => (
-            <button
-              key={op}
-              type="button"
-              className="btn small openwith-item"
-              title={openerLabel(op, locale === 'zh-CN')}
-              onClick={() => void handleOpenWithChoice(item, op)}
-            >
-              <span className={`openwith-dot${resolveOpener(item.name, openWith) === op ? ' on' : ''}`} aria-hidden="true" />
-              {openerLabel(op, locale === 'zh-CN')}
-            </button>
-          ))}
-          <button
-            type="button"
-            className="btn small ghost"
-            onClick={() => {
-              setCtxMenu(null)
-              setCardMenuFor(null)
-              setOpenWithMgrOpen(true)
-            }}
-          >
-            {locale === 'zh-CN' ? '管理默认打开方式…' : 'Manage defaults…'}
-          </button>
-        </div>
-      )}
-      {item.type === 'folder' && ns && !searchMode && (
-        <button
-          type="button"
-          className="btn small"
-          onClick={() => void openAsWebsite(item)}
-          title={locale === 'zh-CN' ? '将该目录作为静态网站打开（index.html）' : 'Open this folder as a website (index.html)'}
-        >
-          {locale === 'zh-CN' ? '作为网页打开' : 'Open as website'}
-        </button>
-      )}
-      {item.type === 'file' && item.name.toLowerCase().endsWith('.zip') && (
-        <button
-          type="button"
-          className="btn small"
-          disabled={unpackBusyId !== null}
-          onClick={() => void handleUnpack(item)}
-        >
-          {unpackBusyId === item.id
-            ? locale === 'zh-CN' ? '解包中…' : 'Unpacking…'
-            : locale === 'zh-CN' ? '解包为目录' : 'Unpack to folder'}
-        </button>
-      )}
-      {item.type === 'file' && ooEnabled && isOfficeFile(item.name) && (
-        <button type="button" className="btn small" onClick={() => openEditorWindow(routeFor('edit', item))}>
-          {locale === 'zh-CN' ? '编辑 Office' : 'Edit Office'}
-        </button>
-      )}
-      {item.type === 'file' && drawioEnabled && isDrawioFile(item.name) && (
-        <>
-          <button type="button" className="btn small" onClick={() => openEditorWindow(routeFor('edit', item))}>
-            {locale === 'zh-CN' ? '图表编辑' : 'Edit diagram'}
-          </button>
-          <button type="button" className="btn small" onClick={() => openEditorWindow(routeFor('view', item))}>
-            {locale === 'zh-CN' ? '图表查看' : 'View diagram'}
-          </button>
-        </>
-      )}
-      {item.type === 'file' && (() => {
-        return isTextEditable(item.name) ? <button type="button" className="btn small" onClick={() => openEditorWindow(routeFor('edit', item))}>
-          {locale === 'zh-CN' ? '编辑文本' : 'Edit text'}
-        </button> : null
-      })()}
-      {item.type === 'file' && isExcalidrawFile(item.name) && (
-        <>
-          <button type="button" className="btn small" onClick={() => openEditorWindow(routeFor('edit', item))}>
-            {locale === 'zh-CN' ? '白板编辑' : 'Edit whiteboard'}
-          </button>
-          <button type="button" className="btn small" onClick={() => openEditorWindow(routeFor('view', item))}>
-            {locale === 'zh-CN' ? '白板查看' : 'View whiteboard'}
-          </button>
-        </>
-      )}
-      {item.type === 'file' && (
-        <button type="button" className="btn small" onClick={() => void handleDownload(item)}>{msg('download')}</button>
-      )}
-      <button type="button" className="btn small" onClick={() => void openTagModal(item)}>{msg('tag')}</button>
-      {item.type === 'file' && copyFn && (
-        <button type="button" className="btn small" onClick={() => openCopyDialog(item)}>{msg('copy')}</button>
-      )}
-      {rowActions?.(item)}
-    </>
+  // 条目操作菜单（列表行「⋯」、右键菜单、网格卡片菜单共用，antd Menu）：
+  // 打开（按默认打开方式）/ 打开方式分组 / 目录「下载为 ZIP」/ 打开方式
+  // 管理入口 + 既有「查看 / 编辑 / 预览 / 下载 / 标签 / 复制」与调用方
+  // rowActions（作为菜单项 label 内嵌，点击行为由调用方按钮自带）。
+  const itemMenuItems = (item: FileItem): MenuProps['items'] => {
+    const items: NonNullable<MenuProps['items']> = []
+    if (item.type === 'folder') {
+      items.push({
+        key: 'open',
+        label: item.has_index_web ? (locale === 'zh-CN' ? '目录浏览' : 'Browse folder') : (locale === 'zh-CN' ? '进入' : 'Open'),
+      })
+      items.push({
+        key: 'zip',
+        disabled: zipBusyId !== null,
+        label: zipBusyId === item.id
+          ? (locale === 'zh-CN' ? '打包中…' : 'Zipping…')
+          : (locale === 'zh-CN' ? '下载为 ZIP' : 'Download as ZIP'),
+      })
+    }
+    if (item.type === 'file') {
+      items.push({ key: 'preview', label: locale === 'zh-CN' ? '查看' : 'View' })
+      items.push({ key: 'view-new', label: locale === 'zh-CN' ? '新窗口查看' : 'View in new window' })
+    }
+    if (item.type === 'file' && openWithOptions(item.name).some((op) => op !== 'default' && op !== 'web')) {
+      items.push({
+        type: 'group',
+        label: locale === 'zh-CN' ? '打开方式（选择后设为默认）' : 'Open with (sets default)',
+        children: [
+          ...openWithOptions(item.name).map((op) => ({
+            key: `openwith:${op}`,
+            label: (
+              <>
+                <span className={`openwith-dot${resolveOpener(item.name, openWith) === op ? ' on' : ''}`} aria-hidden="true" />
+                {openerLabel(op, locale === 'zh-CN')}
+              </>
+            ),
+          })),
+          { key: 'openwith-mgr', label: locale === 'zh-CN' ? '管理默认打开方式…' : 'Manage defaults…' },
+        ],
+      })
+    }
+    if (item.type === 'folder' && ns && !searchMode) {
+      items.push({ key: 'open-web', label: locale === 'zh-CN' ? '作为网页打开' : 'Open as website' })
+    }
+    if (item.type === 'file' && item.name.toLowerCase().endsWith('.zip')) {
+      items.push({
+        key: 'unpack',
+        disabled: unpackBusyId !== null,
+        label: unpackBusyId === item.id
+          ? (locale === 'zh-CN' ? '解包中…' : 'Unpacking…')
+          : (locale === 'zh-CN' ? '解包为目录' : 'Unpack to folder'),
+      })
+    }
+    if (item.type === 'file' && ooEnabled && isOfficeFile(item.name)) {
+      items.push({ key: 'edit-office', label: locale === 'zh-CN' ? '编辑 Office' : 'Edit Office' })
+    }
+    if (item.type === 'file' && drawioEnabled && isDrawioFile(item.name)) {
+      items.push({ key: 'edit-drawio', label: locale === 'zh-CN' ? '图表编辑' : 'Edit diagram' })
+      items.push({ key: 'view-drawio', label: locale === 'zh-CN' ? '图表查看' : 'View diagram' })
+    }
+    if (item.type === 'file' && isTextEditable(item.name)) {
+      items.push({ key: 'edit-text', label: locale === 'zh-CN' ? '编辑文本' : 'Edit text' })
+    }
+    if (item.type === 'file' && isExcalidrawFile(item.name)) {
+      items.push({ key: 'edit-board', label: locale === 'zh-CN' ? '白板编辑' : 'Edit whiteboard' })
+      items.push({ key: 'view-board', label: locale === 'zh-CN' ? '白板查看' : 'View whiteboard' })
+    }
+    if (item.type === 'file') {
+      items.push({ key: 'download', label: msg('download') })
+    }
+    items.push({ key: 'tag', label: msg('tag') })
+    if (item.type === 'file' && copyFn) {
+      items.push({ key: 'copy', label: msg('copy') })
+    }
+    const extra = rowActions?.(item)
+    if (extra) items.push({ key: 'row-actions', label: extra })
+    return items
+  }
+
+  /** 菜单项点击分发（key 见 itemMenuItems）。 */
+  const runItemMenuAction = (item: FileItem, key: string) => {
+    switch (key) {
+      case 'open':
+        openFolder(item)
+        return
+      case 'zip':
+        void handleZipDownload(item)
+        return
+      case 'preview':
+        openPreview(item)
+        return
+      case 'view-new':
+        openEditorWindow(routeFor('view', item))
+        return
+      case 'open-web':
+        void openAsWebsite(item)
+        return
+      case 'unpack':
+        void handleUnpack(item)
+        return
+      case 'download':
+        void handleDownload(item)
+        return
+      case 'tag':
+        void openTagModal(item)
+        return
+      case 'copy':
+        openCopyDialog(item)
+        return
+      case 'openwith-mgr':
+        setOpenWithMgrOpen(true)
+        return
+      case 'edit-office':
+      case 'edit-drawio':
+      case 'edit-board':
+      case 'edit-text':
+        openEditorWindow(routeFor('edit', item))
+        return
+      case 'view-drawio':
+      case 'view-board':
+        openEditorWindow(routeFor('view', item))
+        return
+      default:
+        if (key.startsWith('openwith:')) void handleOpenWithChoice(item, key.slice('openwith:'.length) as OpenWithOpener)
+    }
+  }
+
+  /** 渲染条目操作菜单（antd Menu，透明背景由 .ctx-antd-menu 适配）。 */
+  const renderItemMenu = (item: FileItem) => (
+    <Menu
+      className="ctx-antd-menu"
+      mode="vertical"
+      selectable={false}
+      items={itemMenuItems(item)}
+      onClick={({ key }) => runItemMenuAction(item, key)}
+    />
   )
 
   return (
@@ -1706,9 +1751,9 @@ export default function FileBrowser({
           含排序）/ 默认打开方式入口。页面级大标题已移除，仅保留面包屑行。 */}
       <div className="files-toolbar">
           {/* 列表/网格切换合一：单按钮按当前模式显示对侧图标（title 提示目标模式）。 */}
-          <button
-            type="button"
-            className="btn view-toggle-btn"
+          <Button
+            type="text"
+            className="view-toggle-btn"
             title={viewMode === 'list' ? msg('viewModeGrid') : msg('viewModeList')}
             aria-label={viewMode === 'list' ? msg('viewModeGrid') : msg('viewModeList')}
             aria-pressed={viewMode === 'grid'}
@@ -1717,75 +1762,63 @@ export default function FileBrowser({
             {viewMode === 'list'
               ? <LayoutGrid size={16} strokeWidth={2} aria-hidden="true" />
               : <List size={16} strokeWidth={2} aria-hidden="true" />}
-          </button>
+          </Button>
           {(createFolderFn || uploadFn) && !searchMode && (
-            <div className="create-menu-wrap">
-              <button type="button" className="btn" aria-haspopup="menu" aria-expanded={createMenuOpen} onClick={() => setCreateMenuOpen((v) => !v)}>
-                <Plus size={14} strokeWidth={2} aria-hidden="true" /> {locale === 'zh-CN' ? '新建' : 'New'}
-              </button>
-              {createMenuOpen && (
-                <div className="file-card-menu create-menu" role="menu" onClick={() => setCreateMenuOpen(false)}>
-                  {createFolderFn && (
-                    <button type="button" className="btn small" onClick={() => { setFolderOpen(true); setFolderName(''); setFolderError('') }}>
-                      {locale === 'zh-CN' ? '文件夹' : 'Folder'}
-                    </button>
-                  )}
-                  {uploadFn && (['md', 'textfile', 'drawio', 'whiteboard', 'word', 'spreadsheet', 'presentation'] as const).map((kind) => (
-                    <button key={kind} type="button" className="btn small" disabled={docCreating} onClick={() => beginNamedCreate(kind)}>
-                      {{ md: 'Markdown / 富文本', textfile: '文本文件（.txt/.html/.js…）', drawio: 'draw.io', whiteboard: '白板', word: 'Word', spreadsheet: 'Excel', presentation: 'PPT' }[kind]}
-                    </button>
-                  ))}
-                  <div className="ctx-menu-label">PDF 仅支持上传和查看，不能空白创建</div>
-                </div>
-              )}
-            </div>
+            <Dropdown
+              trigger={['click']}
+              open={createMenuOpen}
+              onOpenChange={setCreateMenuOpen}
+              menu={{
+                items: [
+                  ...(createFolderFn
+                    ? [{ key: 'folder', label: locale === 'zh-CN' ? '文件夹' : 'Folder' }]
+                    : []),
+                  ...uploadFn
+                    ? (['md', 'textfile', 'drawio', 'whiteboard', 'word', 'spreadsheet', 'presentation'] as const).map((kind) => ({
+                        key: kind,
+                        disabled: docCreating,
+                        label: { md: 'Markdown / 富文本', textfile: '文本文件（.txt/.html/.js…）', drawio: 'draw.io', whiteboard: '白板', word: 'Word', spreadsheet: 'Excel', presentation: 'PPT' }[kind],
+                      }))
+                    : [],
+                  { type: 'group' as const, label: 'PDF 仅支持上传和查看，不能空白创建' },
+                ],
+                onClick: ({ key }) => {
+                  if (key === 'folder') {
+                    setFolderOpen(true)
+                    setFolderName('')
+                    setFolderError('')
+                  } else {
+                    beginNamedCreate(key as NonNullable<typeof createKind>)
+                  }
+                },
+              }}
+            >
+              <Button icon={<Plus size={14} strokeWidth={2} aria-hidden="true" />}>
+                {locale === 'zh-CN' ? '新建' : 'New'}
+              </Button>
+            </Dropdown>
           )}
-          {/* 上传拆分按钮：主点击=上传文件；右侧箭头下拉提供「上传目录」
-             （目录上传依赖建目录权限）。 */}
+          {/* 上传拆分按钮（antd Dropdown.Button）：主点击=上传文件；箭头下拉
+              含「上传目录」（目录上传依赖建目录权限）。 */}
           {uploadFn && !searchMode && (
             <div className="create-menu-wrap">
-              <div className="split-btn">
-                <button
-                  type="button"
-                  className="btn primary"
-                  disabled={dirUpload !== null}
-                  title={locale === 'zh-CN' ? '上传文件到当前目录' : 'Upload files to this folder'}
-                  onClick={() => fileInputRef.current?.click()}
-                >
-                  {dirUpload !== null
-                    ? (locale === 'zh-CN' ? '上传中…' : 'Uploading…')
-                    : (<><Upload size={14} strokeWidth={2} aria-hidden="true" /> {locale === 'zh-CN' ? '上传' : 'Upload'}</>)}
-                </button>
-                <button
-                  type="button"
-                  className="btn primary split-toggle"
-                  aria-haspopup="menu"
-                  aria-expanded={uploadMenuOpen}
-                  disabled={dirUpload !== null}
-                  title={locale === 'zh-CN' ? '更多上传选项' : 'More upload options'}
-                  onClick={() => setUploadMenuOpen((v) => !v)}
-                >
-                  <ChevronDown size={14} strokeWidth={2} aria-hidden="true" />
-                </button>
-                {uploadMenuOpen && (
-                  <div className="file-card-menu create-menu split-menu" role="menu" onClick={() => setUploadMenuOpen(false)}>
-                    <button type="button" className="btn small" onClick={() => fileInputRef.current?.click()}>
-                      {locale === 'zh-CN' ? '上传文件' : 'Upload files'}
-                    </button>
-                    {createFolderFn && (
-                      <button
-                        type="button"
-                        className="btn small"
-                        disabled={dirUpload !== null}
-                        onClick={() => dirInputRef.current?.click()}
-                        title={locale === 'zh-CN' ? '选择本地目录，按原目录结构上传到当前目录下' : 'Pick a local folder and upload with its structure'}
-                      >
-                        {locale === 'zh-CN' ? '上传目录' : 'Upload folder'}
-                      </button>
-                    )}
-                  </div>
-                )}
-              </div>
+              <Dropdown.Button
+                type="primary"
+                disabled={dirUpload !== null}
+                menu={{
+                  items: [
+                    { key: 'files', label: locale === 'zh-CN' ? '上传文件' : 'Upload files' },
+                    ...(createFolderFn
+                      ? [{ key: 'folder', label: locale === 'zh-CN' ? '上传目录' : 'Upload folder', disabled: dirUpload !== null }]
+                      : []),
+                  ],
+                  onClick: ({ key }) => (key === 'files' ? fileInputRef.current?.click() : dirInputRef.current?.click()),
+                }}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                <Upload size={14} strokeWidth={2} aria-hidden="true" />{' '}
+                {dirUpload !== null ? (locale === 'zh-CN' ? '上传中…' : 'Uploading…') : locale === 'zh-CN' ? '上传' : 'Upload'}
+              </Dropdown.Button>
               <input
                 ref={fileInputRef}
                 type="file"
@@ -1805,12 +1838,13 @@ export default function FileBrowser({
               )}
             </div>
           )}
-        {/* 过滤区：目录内搜索 + 标签 / 收藏下拉（排序已表头化，网格视图无表头、
-            保留一个精简排序下拉；全部/收藏/最近视图切换在 SpaceSwitcher 行）。 */}
+        {/* 过滤区：目录内搜索（antd Input allowClear）+ 标签 / 收藏 antd Select
+            （排序已表头化，网格视图无表头、保留一个精简排序下拉；全部/收藏/最近
+            视图切换在 SpaceSwitcher 行）。 */}
         <span className="toolbar-spacer" />
         <label className="filter-item directory-search">
-          <input
-            type="search"
+          <Input
+            allowClear
             value={directoryQuery}
             placeholder={locale === 'zh-CN' ? '搜索当前目录…' : 'Search this folder…'}
             onChange={(event) => setDirectoryQuery(event.target.value)}
@@ -1818,54 +1852,61 @@ export default function FileBrowser({
         </label>
         <label className="filter-item">
           <span>{msg('tag')}</span>
-          <select data-hotkey="filter" value={tagFilter} onChange={(e) => { setTagFilter(e.target.value); setRecentView(false) }}>
-            <option value="">{msg('all')}</option>
-            {tags.map((t) => (
-              <option key={t.id} value={t.id}>#{t.name}</option>
-            ))}
-          </select>
+          <Select
+            className="filter-select"
+            value={tagFilter}
+            onChange={(v) => { setTagFilter(v); setRecentView(false) }}
+            options={[{ value: '', label: msg('all') }, ...tags.map((tg) => ({ value: tg.id, label: `#${tg.name}` }))]}
+          />
         </label>
         <label className="filter-item">
           <span>{msg('viewStarred')}</span>
-          <select value={starredFilter} onChange={(e) => { setStarredFilter(e.target.value); setRecentView(false) }}>
-            <option value="">{msg('all')}</option>
-            <option value="true">{msg('starredOnly')}</option>
-            <option value="false">{msg('starredNo')}</option>
-          </select>
+          <Select
+            className="filter-select"
+            value={starredFilter}
+            onChange={(v) => { setStarredFilter(v); setRecentView(false) }}
+            options={[
+              { value: '', label: msg('all') },
+              { value: 'true', label: msg('starredOnly') },
+              { value: 'false', label: msg('starredNo') },
+            ]}
+          />
         </label>
         {viewMode === 'grid' && (
           <label className="filter-item">
             <span>{msg('sort')}</span>
-            <select
+            <Select
+              className="filter-select"
               value={`${sortKey}:${sortOrder}`}
-              onChange={(e) => {
-                const [key, order] = e.target.value.split(':')
+              onChange={(v) => {
+                const [key, order] = v.split(':')
                 setSortKey(key as 'name' | 'updated_at' | 'size')
                 setSortOrder(order as 'asc' | 'desc')
               }}
-            >
-              <option value="name:asc">{msg('sortOrderName')} ↑</option>
-              <option value="name:desc">{msg('sortOrderName')} ↓</option>
-              <option value="updated_at:desc">{msg('sortOrderUpdated')} ↓</option>
-              <option value="updated_at:asc">{msg('sortOrderUpdated')} ↑</option>
-              <option value="size:desc">{msg('sortOrderSize')} ↓</option>
-              <option value="size:asc">{msg('sortOrderSize')} ↑</option>
-            </select>
+              options={[
+                { value: 'name:asc', label: `${msg('sortOrderName')} ↑` },
+                { value: 'name:desc', label: `${msg('sortOrderName')} ↓` },
+                { value: 'updated_at:desc', label: `${msg('sortOrderUpdated')} ↓` },
+                { value: 'updated_at:asc', label: `${msg('sortOrderUpdated')} ↑` },
+                { value: 'size:desc', label: `${msg('sortOrderSize')} ↓` },
+                { value: 'size:asc', label: `${msg('sortOrderSize')} ↑` },
+              ]}
+            />
           </label>
         )}
         {searchMode && (
-          <button className="btn ghost small" onClick={clearFilters}>{msg('clearFilters')}</button>
+          <Button type="text" size="small" onClick={clearFilters}>{msg('clearFilters')}</Button>
         )}
         {/* 默认打开方式管理入口：与右键菜单「打开方式 → 管理默认打开方式…」
             打开同一弹窗；工具带常驻提升可发现性（#21）。 */}
-        <button
-          type="button"
-          className="btn small ghost"
+        <Button
+          type="text"
+          size="small"
           title={locale === 'zh-CN' ? '管理各扩展名的默认打开方式' : 'Manage default openers'}
           onClick={() => setOpenWithMgrOpen(true)}
         >
-          {locale === 'zh-CN' ? <><Settings size={14} strokeWidth={2} aria-hidden="true" /> 默认打开方式</> : <><Settings size={14} strokeWidth={2} aria-hidden="true" /> Openers</>}
-        </button>
+          <Settings size={14} strokeWidth={2} aria-hidden="true" /> {locale === 'zh-CN' ? '默认打开方式' : 'Openers'}
+        </Button>
       </div>
 
       {!searchMode && (
@@ -1892,23 +1933,23 @@ export default function FileBrowser({
       {selected.size > 0 && (
         <div className="batch-bar">
           <span>{formatMessage(msg('selectedCount'), { n: selected.size })}</span>
-          <button className="btn small" disabled={batchBusy || batchShareBusy} onClick={openMoveDialog}>{msg('batchMove')}</button>
-          <button className="btn small" disabled={batchBusy || batchShareBusy} onClick={() => void handleBatchDownload()}>
+          <Button size="small" disabled={batchBusy || batchShareBusy} onClick={openMoveDialog}>{msg('batchMove')}</Button>
+          <Button size="small" disabled={batchBusy || batchShareBusy} onClick={() => void handleBatchDownload()}>
             {msg('batchDownload')}
-          </button>
-          <button className="btn small" disabled={batchBusy || batchShareBusy} onClick={() => void handleBatchShare()}>
+          </Button>
+          <Button size="small" disabled={batchBusy || batchShareBusy} onClick={() => void handleBatchShare()}>
             {batchShareBusy ? msg('loading') : msg('batchShare')}
-          </button>
-          <button className="btn small" disabled={batchBusy || batchShareBusy} onClick={openBatchTagDialog}>
+          </Button>
+          <Button size="small" disabled={batchBusy || batchShareBusy} onClick={openBatchTagDialog}>
             {msg('batchTag')}
-          </button>
-          <button className="btn small" disabled={batchBusy || batchShareBusy} onClick={() => void handleBatchStar()}>
+          </Button>
+          <Button size="small" disabled={batchBusy || batchShareBusy} onClick={() => void handleBatchStar()}>
             {batchBusy ? msg('loading') : allSelectedStarred ? msg('batchUnstar') : msg('batchStar')}
-          </button>
-          <button className="btn small danger" disabled={batchBusy || batchShareBusy} onClick={() => void handleBatchTrash()}>
+          </Button>
+          <Button size="small" danger disabled={batchBusy || batchShareBusy} onClick={handleBatchTrash}>
             {msg('delete')}
-          </button>
-          <button className="btn ghost small" onClick={() => setSelected(new Set())}>{msg('clearSelection')}</button>
+          </Button>
+          <Button type="text" size="small" onClick={() => setSelected(new Set())}>{msg('clearSelection')}</Button>
         </div>
       )}
       {batchNotice && <div className="banner ok">{batchNotice}</div>}
@@ -1937,7 +1978,7 @@ export default function FileBrowser({
               </>
             )}
           </span>
-          <button type="button" className="btn ghost small" onClick={() => setDirResult(null)} aria-label={msg('close')}>×</button>
+          <Button type="text" size="small" onClick={() => setDirResult(null)} aria-label={msg('close')}>×</Button>
         </div>
       )}
 
@@ -2037,8 +2078,10 @@ export default function FileBrowser({
                 <td className="muted">{formatTime(item.updated_at)}</td>
                 <td className="col-actions">
                   {/* 操作收进「⋯」/右键菜单（操作项较多，不再平铺）。 */}
-                  <button
-                    className="btn ghost small card-menu-btn"
+                  <Button
+                    type="text"
+                    size="small"
+                    className="card-menu-btn"
                     title={msg('actions')}
                     aria-haspopup="menu"
                     onClick={(e) => {
@@ -2047,7 +2090,7 @@ export default function FileBrowser({
                     }}
                   >
                     <MoreHorizontal size={16} strokeWidth={2} aria-hidden="true" />
-                  </button>
+                  </Button>
                 </td>
               </tr>
             ))}
@@ -2086,15 +2129,17 @@ export default function FileBrowser({
                     >
                       <Star size={16} strokeWidth={2} aria-hidden="true" fill={item.is_starred ? 'currentColor' : 'none'} />
                     </button>
-                    <button
-                      className="btn ghost small card-menu-btn"
+                    <Button
+                      type="text"
+                      size="small"
+                      className="card-menu-btn"
                       title={msg('actions')}
                       aria-haspopup="menu"
                       aria-expanded={cardMenuFor === item.id}
                       onClick={() => setCardMenuFor(cardMenuFor === item.id ? null : item.id)}
                     >
                       <MoreHorizontal size={16} strokeWidth={2} aria-hidden="true" />
-                    </button>
+                    </Button>
                   </span>
                 </div>
                 <button
@@ -2115,7 +2160,7 @@ export default function FileBrowser({
                 </button>
                 {cardMenuFor === item.id && (
                   <div className="file-card-menu" role="menu" onClick={() => setCardMenuFor(null)}>
-                    {itemMenuContent(item)}
+                    {renderItemMenu(item)}
                   </div>
                 )}
               </div>
@@ -2128,7 +2173,7 @@ export default function FileBrowser({
         <div className="upload-panel">
           <div className="upload-panel-head">
             <span>上传任务</span>
-            <button className="btn ghost small" onClick={() => setUploads([])}>清空</button>
+            <Button type="text" size="small" onClick={() => setUploads([])}>清空</Button>
           </div>
           {uploads.map((row) => (
             <div key={row.key} className="upload-row">
@@ -2145,12 +2190,12 @@ export default function FileBrowser({
           <form onSubmit={handleCreateFolder}>
             <label className="field">
               <span>名称</span>
-              <input autoFocus value={folderName} onChange={(e) => setFolderName(e.target.value)} placeholder="新文件夹" />
+              <Input autoFocus allowClear value={folderName} onChange={(e) => setFolderName(e.target.value)} placeholder="新文件夹" />
             </label>
             {folderError && <div className="error-text">{folderError}</div>}
             <div className="modal-actions">
-              <button type="button" className="btn" onClick={() => setFolderOpen(false)}>取消</button>
-              <button type="submit" className="btn primary" disabled={!folderName.trim()}>创建</button>
+              <Button onClick={() => setFolderOpen(false)}>取消</Button>
+              <Button type="primary" htmlType="submit" disabled={!folderName.trim()}>创建</Button>
             </div>
           </form>
         </Modal>
@@ -2161,13 +2206,13 @@ export default function FileBrowser({
           <form onSubmit={handleNamedCreate}>
             <label className="field">
               <span>文件名</span>
-              <input autoFocus value={createName} onChange={(e) => setCreateName(e.target.value)} placeholder={`名称${createSpec.ext}`} />
+              <Input autoFocus allowClear value={createName} onChange={(e) => setCreateName(e.target.value)} placeholder={`名称${createSpec.ext}`} />
             </label>
             <p className="hint">未填写 {createSpec.ext} 扩展名时会自动补全。</p>
             {createError && <div className="error-text">{createError}</div>}
             <div className="modal-actions">
-              <button type="button" className="btn" disabled={docCreating} onClick={() => setCreateKind(null)}>取消</button>
-              <button type="submit" className="btn primary" disabled={docCreating || !createName.trim()}>{docCreating ? '创建中…' : '创建并打开'}</button>
+              <Button disabled={docCreating} onClick={() => setCreateKind(null)}>取消</Button>
+              <Button type="primary" htmlType="submit" disabled={docCreating || !createName.trim()}>{docCreating ? '创建中…' : '创建并打开'}</Button>
             </div>
           </form>
         </Modal>
@@ -2178,15 +2223,16 @@ export default function FileBrowser({
           <form onSubmit={handleBatchMove}>
             <label className="field">
               <span>目标目录</span>
-              <select value={moveTarget} onChange={(e) => setMoveTarget(e.target.value)}>
-                {uniqueMoveCandidates.map((c) => (
-                  <option key={c.id || 'root'} value={c.id}>{c.label}</option>
-                ))}
-              </select>
+              <Select
+                value={moveTarget}
+                onChange={(v) => setMoveTarget(v)}
+                options={uniqueMoveCandidates.map((c) => ({ value: c.id, label: c.label }))}
+              />
             </label>
             <label className="field">
               <span>或输入目标目录 UUID</span>
-              <input
+              <Input
+                allowClear
                 value={moveManual}
                 onChange={(e) => setMoveManual(e.target.value)}
                 placeholder="可选；填写后优先生效"
@@ -2195,10 +2241,10 @@ export default function FileBrowser({
             <p className="hint">单项失败不会回滚其余项；目标目录存在同名项时该项跳过。</p>
             {moveError && <div className="error-text">{moveError}</div>}
             <div className="modal-actions">
-              <button type="button" className="btn" onClick={() => setMoveOpen(false)}>取消</button>
-              <button type="submit" className="btn primary" disabled={batchBusy || selected.size === 0}>
+              <Button onClick={() => setMoveOpen(false)}>取消</Button>
+              <Button type="primary" htmlType="submit" disabled={batchBusy || selected.size === 0}>
                 {batchBusy ? '移动中…' : '移动'}
-              </button>
+              </Button>
             </div>
           </form>
         </Modal>
@@ -2212,19 +2258,19 @@ export default function FileBrowser({
               <div key={link.url} className="share-link-item">
                 <span className="share-link-name muted">{link.name}</span>
                 <div className="share-link">
-                  <input readOnly value={link.url} onFocus={(e) => e.currentTarget.select()} />
-                  <button
-                    className="btn small"
+                  <Input readOnly value={link.url} onFocus={(e) => e.currentTarget.select()} />
+                  <Button
+                    size="small"
                     onClick={() => void copyShareLink(link.url, index)}
                   >
                     {copiedShareIdx === index ? msg('copied') : msg('copyLink')}
-                  </button>
+                  </Button>
                 </div>
               </div>
             ))}
           </div>
           <div className="modal-actions">
-            <button className="btn" onClick={() => setShareListOpen(false)}>{msg('close')}</button>
+            <Button onClick={() => setShareListOpen(false)}>{msg('close')}</Button>
           </div>
         </Modal>
       )}
@@ -2234,18 +2280,19 @@ export default function FileBrowser({
           <form onSubmit={handleBatchTag}>
             <label className="field">
               <span>{msg('tag')}</span>
-              <select autoFocus value={batchTagId} onChange={(e) => setBatchTagId(e.target.value)}>
-                {tags.map((t) => (
-                  <option key={t.id} value={t.id}>#{t.name}</option>
-                ))}
-              </select>
+              <Select
+                autoFocus
+                value={batchTagId}
+                onChange={(v) => setBatchTagId(v)}
+                options={tags.map((t) => ({ value: t.id, label: `#${t.name}` }))}
+              />
             </label>
             {batchTagError && <div className="error-text">{batchTagError}</div>}
             <div className="modal-actions">
-              <button type="button" className="btn" onClick={() => setBatchTagOpen(false)}>{msg('cancel')}</button>
-              <button type="submit" className="btn primary" disabled={batchTagBusy || !batchTagId}>
+              <Button onClick={() => setBatchTagOpen(false)}>{msg('cancel')}</Button>
+              <Button type="primary" htmlType="submit" disabled={batchTagBusy || !batchTagId}>
                 {batchTagBusy ? msg('loading') : msg('apply')}
-              </button>
+              </Button>
             </div>
           </form>
         </Modal>
@@ -2256,8 +2303,9 @@ export default function FileBrowser({
           <form onSubmit={handleCopy}>
             <label className="field">
               <span>{msg('copyTargetLabel')}</span>
-              <input
+              <Input
                 autoFocus
+                allowClear
                 value={copyParent}
                 onChange={(e) => setCopyParent(e.target.value)}
                 placeholder="3f0c9c2e-…"
@@ -2265,10 +2313,10 @@ export default function FileBrowser({
             </label>
             {copyError && <div className="error-text">{copyError}</div>}
             <div className="modal-actions">
-              <button type="button" className="btn" onClick={() => setCopyTarget(null)}>{msg('cancel')}</button>
-              <button type="submit" className="btn primary" disabled={copyBusy}>
+              <Button onClick={() => setCopyTarget(null)}>{msg('cancel')}</Button>
+              <Button type="primary" htmlType="submit" disabled={copyBusy}>
                 {copyBusy ? msg('loading') : msg('copy')}
-              </button>
+              </Button>
             </div>
           </form>
         </Modal>
@@ -2295,15 +2343,16 @@ export default function FileBrowser({
               </div>
             )}
             <form className="tag-create" onSubmit={handleCreateTagAndAttach}>
-              <input
+              <Input
+                allowClear
                 value={tagModalNewName}
                 onChange={(e) => setTagModalNewName(e.target.value)}
                 placeholder="新标签名称（≤64 字符）"
                 maxLength={64}
               />
-              <button type="submit" className="btn" disabled={tagModalBusy || !tagModalNewName.trim()}>
+              <Button htmlType="submit" disabled={tagModalBusy || !tagModalNewName.trim()}>
                 创建并打标
-              </button>
+              </Button>
             </form>
             {tagModalError && <div className="error-text">{tagModalError}</div>}
           </div>
@@ -2366,18 +2415,16 @@ export default function FileBrowser({
               .map(([ext, opener]) => (
                 <div key={ext} className="openwith-mgr-row">
                   <span className="openwith-mgr-ext">.{ext}</span>
-                  <select
+                  <Select
                     value={opener}
                     aria-label={`.${ext}`}
-                    onChange={(e) => void handleMgrChange(ext, e.target.value as OpenWithOpener)}
-                  >
-                    {ALL_OPENERS.map((op) => (
-                      <option key={op} value={op}>{openerLabel(op, locale === 'zh-CN')}</option>
-                    ))}
-                  </select>
-                  <button type="button" className="btn small danger" onClick={() => void handleMgrDelete(ext)}>
+                    className="openwith-mgr-select"
+                    onChange={(v) => void handleMgrChange(ext, v as OpenWithOpener)}
+                    options={ALL_OPENERS.map((op) => ({ value: op, label: openerLabel(op, locale === 'zh-CN') }))}
+                  />
+                  <Button size="small" danger onClick={() => void handleMgrDelete(ext)}>
                     {msg('delete')}
-                  </button>
+                  </Button>
                 </div>
               ))}
             {Object.keys(openWith).length === 0 && (
@@ -2388,46 +2435,45 @@ export default function FileBrowser({
               </p>
             )}
             <form className="openwith-mgr-row openwith-mgr-add" onSubmit={handleMgrAdd}>
-              <input
+              <Input
                 className="openwith-mgr-ext-input"
+                allowClear
                 value={mgrNewExt}
                 onChange={(e) => setMgrNewExt(e.target.value)}
                 placeholder={locale === 'zh-CN' ? '扩展名，如 docx' : 'extension, e.g. docx'}
                 aria-label={locale === 'zh-CN' ? '扩展名' : 'Extension'}
                 maxLength={17}
               />
-              <select
+              <Select
                 value={mgrNewOpener}
+                className="openwith-mgr-select"
                 aria-label={locale === 'zh-CN' ? '打开方式' : 'Opener'}
-                onChange={(e) => setMgrNewOpener(e.target.value as OpenWithOpener)}
-              >
-                {ALL_OPENERS.map((op) => (
-                  <option key={op} value={op}>{openerLabel(op, locale === 'zh-CN')}</option>
-                ))}
-              </select>
-              <button type="submit" className="btn small primary" disabled={mgrAdding || !mgrNewExt.trim()}>
+                onChange={(v) => setMgrNewOpener(v as OpenWithOpener)}
+                options={ALL_OPENERS.map((op) => ({ value: op, label: openerLabel(op, locale === 'zh-CN') }))}
+              />
+              <Button size="small" type="primary" htmlType="submit" disabled={mgrAdding || !mgrNewExt.trim()}>
                 {mgrAdding ? (locale === 'zh-CN' ? '保存中…' : 'Saving…') : (locale === 'zh-CN' ? '新增' : 'Add')}
-              </button>
+              </Button>
             </form>
           </div>
           {openWithMgrError && <div className="error-text">{openWithMgrError}</div>}
           <div className="modal-actions">
-            <button type="button" className="btn" onClick={() => setOpenWithMgrOpen(false)}>{msg('close')}</button>
+            <Button onClick={() => setOpenWithMgrOpen(false)}>{msg('close')}</Button>
           </div>
         </Modal>
       )}
 
-      {/* 右键 / 列表行「⋯」菜单：视口定位浮层（初始按点击坐标，渲染后经
-          clampFixedMenu 按实测尺寸收缩进视口），内容与网格卡片菜单一致。 */}
+      {/* 右键 / 列表行「⋯」菜单：视口定位浮层保留（初始按点击坐标，渲染后经
+          clampFixedMenu 按实测尺寸收缩进视口），菜单面板换 antd Menu 视觉。 */}
       {ctxMenu && (
         <div
           ref={ctxMenuRef}
-          className="ctx-menu file-card-menu"
+          className="ctx-menu"
           role="menu"
           style={{ left: `${ctxMenu.x}px`, top: `${ctxMenu.y}px` }}
           onClick={() => setCtxMenu(null)}
         >
-          {itemMenuContent(ctxMenu.item)}
+          {renderItemMenu(ctxMenu.item)}
         </div>
       )}
     </div>

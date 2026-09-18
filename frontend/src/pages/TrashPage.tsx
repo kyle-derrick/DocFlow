@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { FileText, Folder } from 'lucide-react'
+import { App as AntdApp, Button, Select } from 'antd'
 import { FileItem, Team, batchRestoreFiles, listTeams, listTrash, purgeFile, restoreFile } from '../api'
 import { describeBatchResults } from '../components/FileBrowser'
 import SpaceSwitcher from '../components/SpaceSwitcher'
@@ -12,6 +13,7 @@ function formatTime(iso: string): string {
 /** 回收站：单项恢复/彻底删除 + 多选批量恢复（部分成功语义，逐项结果摘要）。 */
 export default function TrashPage() {
   const locale = useLocale()
+  const { modal: antdModal } = AntdApp.useApp()
   const msg = (key: MessageKey) => t(locale, key)
   const [items, setItems] = useState<FileItem[]>([])
   const [loading, setLoading] = useState(true)
@@ -86,17 +88,25 @@ export default function TrashPage() {
     }
   }
 
-  const handlePurge = async (item: FileItem) => {
-    if (!window.confirm(formatMessage(msg('purgeConfirm'), { name: item.name }))) return
-    setError('')
-    try {
-      await purgeFile(item.id)
-      setNotice(formatMessage(msg('purgeOk'), { name: item.name }))
-      await load()
-    } catch (err) {
-      setNotice('')
-      setError(`${formatMessage(msg('purgeFailedItem'), { name: item.name })}：${err instanceof Error ? err.message : msg('unknownError')}`)
-    }
+  const handlePurge = (item: FileItem) => {
+    antdModal.confirm({
+      title: msg('purge'),
+      content: formatMessage(msg('purgeConfirm'), { name: item.name }),
+      okText: msg('purge'),
+      okButtonProps: { danger: true },
+      cancelText: locale === 'zh-CN' ? '取消' : 'Cancel',
+      onOk: async () => {
+        setError('')
+        try {
+          await purgeFile(item.id)
+          setNotice(formatMessage(msg('purgeOk'), { name: item.name }))
+          await load()
+        } catch (err) {
+          setNotice('')
+          setError(`${formatMessage(msg('purgeFailedItem'), { name: item.name })}：${err instanceof Error ? err.message : msg('unknownError')}`)
+        }
+      },
+    })
   }
 
   return (
@@ -104,14 +114,19 @@ export default function TrashPage() {
       <SpaceSwitcher />
       <div className="page-head">
         <h2>{msg('trash')}</h2>
-        <button className="btn ghost" onClick={() => void load()}>{msg('refresh')}</button>
+        <Button type="text" onClick={() => void load()}>{msg('refresh')}</Button>
       </div>
       <div className="filter-bar">
         <label className="filter-item">回收站范围
-          <select className="form-select" value={scope} onChange={(e) => { setScope(e.target.value); setSelected(new Set()); void load(e.target.value) }}>
-            <option value="personal">我的文件</option>
-            {teams.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}
-          </select>
+          <Select
+            className="trash-scope-select"
+            value={scope}
+            onChange={(v) => { setScope(v); setSelected(new Set()); void load(v) }}
+            options={[
+              { value: 'personal', label: '我的文件' },
+              ...teams.map((team) => ({ value: team.id, label: team.name })),
+            ]}
+          />
         </label>
       </div>
 
@@ -123,10 +138,10 @@ export default function TrashPage() {
       {selected.size > 0 && (
         <div className="batch-bar">
           <span>{formatMessage(msg('selectedCount'), { n: selected.size })}</span>
-          <button className="btn small" disabled={batchBusy} onClick={() => void handleBatchRestore()}>
+          <Button size="small" disabled={batchBusy} onClick={() => void handleBatchRestore()}>
             {msg('restoreSelected')}
-          </button>
-          <button className="btn ghost small" onClick={() => setSelected(new Set())}>{msg('clearSelection')}</button>
+          </Button>
+          <Button type="text" size="small" onClick={() => setSelected(new Set())}>{msg('clearSelection')}</Button>
         </div>
       )}
 
@@ -161,8 +176,8 @@ export default function TrashPage() {
                 </td>
                 <td className="muted">{item.deleted_at ? formatTime(item.deleted_at) : '-'}</td>
                 <td className="col-actions">
-                  <button className="btn small" onClick={() => void handleRestore(item)}>{msg('restore')}</button>
-                  <button className="btn small danger" onClick={() => void handlePurge(item)}>{msg('purge')}</button>
+                  <Button size="small" onClick={() => void handleRestore(item)}>{msg('restore')}</Button>
+                  <Button size="small" danger onClick={() => handlePurge(item)}>{msg('purge')}</Button>
                 </td>
               </tr>
             ))}

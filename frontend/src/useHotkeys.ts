@@ -25,9 +25,10 @@ function focusInEditable(target: EventTarget | null): boolean {
   return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable
 }
 
-/** 当前是否有弹窗打开（modal open 时页面快捷键跳过）。 */
+/** 当前是否有弹窗打开（modal open 时页面快捷键跳过）：旧自写弹窗
+ * （.modal-backdrop）与 antd 弹层（Modal/Drawer 挂 body）均检测。 */
 export function modalOpen(): boolean {
-  return document.querySelector('.modal-backdrop') !== null
+  return document.querySelector('.modal-backdrop, .ant-modal-root, .ant-drawer') !== null
 }
 
 export function useHotkeys(map: HotkeyMap, enabled = true): void {

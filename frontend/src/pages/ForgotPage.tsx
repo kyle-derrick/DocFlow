@@ -1,5 +1,6 @@
 import { FormEvent, useState } from 'react'
 import { Link } from 'react-router-dom'
+import { Button, Input } from 'antd'
 import { forgotPassword } from '../api'
 
 /** 忘记密码页（无需登录）：提交邮箱后提示已受理——无论邮箱是否存在
@@ -32,16 +33,19 @@ export default function ForgotPage() {
         {sent ? (
           <>
             <p className="hint">如果该邮箱存在账号，重置链接已发送（30 分钟内有效，仅可使用一次）。</p>
-            <Link className="btn primary block" to="/login">返回登录</Link>
+            <Button type="primary" block>
+              <Link to="/login" className="login-link-btn">返回登录</Link>
+            </Button>
           </>
         ) : (
           <>
             <p className="hint">输入账号邮箱，我们将发送密码重置链接</p>
             <label className="field">
               <span>邮箱</span>
-              <input
+              <Input
                 type="email"
                 required
+                allowClear
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="you@example.com"
@@ -49,9 +53,9 @@ export default function ForgotPage() {
               />
             </label>
             {error && <div className="error-text">{error}</div>}
-            <button className="btn primary block" type="submit" disabled={busy}>
+            <Button className="login-submit" type="primary" htmlType="submit" block disabled={busy}>
               {busy ? '发送中…' : '发送重置链接'}
-            </button>
+            </Button>
             <p className="hint">
               想起密码了？<Link to="/login">返回登录</Link>
             </p>

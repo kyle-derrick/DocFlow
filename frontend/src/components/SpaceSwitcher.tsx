@@ -1,8 +1,9 @@
 import { FormEvent, useEffect, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { Users } from 'lucide-react'
+import { App as AntdApp, Button, Input, Select } from 'antd'
 import { Team, createTeam, currentUserId, deleteTeam, listTeams, updateTeam } from '../api'
-import { Modal, formatTime } from './FileBrowser'
+import { Modal, formatTime, promptViaModal } from './FileBrowser'
 import { MessageKey, formatMessage, t, useLocale } from '../i18n'
 
 /**
@@ -25,6 +26,7 @@ export default function SpaceSwitcher({
   const navigate = useNavigate()
   const location = useLocation()
   const locale = useLocale()
+  const { modal: antdModal } = AntdApp.useApp()
   const msg = (key: MessageKey) => t(locale, key)
   const [teams, setTeams] = useState<Team[]>([])
   useEffect(() => { void listTeams().then(setTeams).catch(() => setTeams([])) }, [])
@@ -65,7 +67,14 @@ export default function SpaceSwitcher({
   }
 
   const renameTeam = async (team: Team) => {
-    const next = window.prompt(msg('teamNameLabel'), team.name)?.trim()
+    const input = await promptViaModal(antdModal, {
+      title: msg('edit'),
+      label: msg('teamNameLabel'),
+      initialValue: team.name,
+      okText: msg('save'),
+      cancelText: locale === 'zh-CN' ? '取消' : 'Cancel',
+    })
+    const next = input?.trim()
     if (!next || next === team.name) return
     setManageError('')
     try {
@@ -76,39 +85,54 @@ export default function SpaceSwitcher({
     }
   }
 
-  const removeTeam = async (team: Team) => {
-    if (!window.confirm(formatMessage(msg('deleteTeamConfirm'), { name: team.name }))) return
-    setManageError('')
-    try {
-      await deleteTeam(team.id)
-      // 删除的是当前所在团队空间时回到个人空间。
-      if (location.pathname === `/teams/${team.id}`) navigate('/')
-      await reloadTeams()
-    } catch (err) {
-      setManageError(err instanceof Error ? err.message : msg('teamDeleteFailed'))
-    }
+  const removeTeam = (team: Team) => {
+    antdModal.confirm({
+      title: msg('delete'),
+      content: formatMessage(msg('deleteTeamConfirm'), { name: team.name }),
+      okText: msg('delete'),
+      okButtonProps: { danger: true },
+      cancelText: locale === 'zh-CN' ? '取消' : 'Cancel',
+      onOk: async () => {
+        setManageError('')
+        try {
+          await deleteTeam(team.id)
+          // 删除的是当前所在团队空间时回到个人空间。
+          if (location.pathname === `/teams/${team.id}`) navigate('/')
+          await reloadTeams()
+        } catch (err) {
+          setManageError(err instanceof Error ? err.message : msg('teamDeleteFailed'))
+        }
+      },
+    })
   }
 
   return (
     <div className="space-switcher">
-      <select id="space-select" className="form-select" aria-label="选择团队空间" value={value} onChange={(e) => navigate(e.target.value)}>
-        <option value="/">我的文件</option>
-        {teams.map((team) => <option key={team.id} value={`/teams/${team.id}`}>{team.name}</option>)}
-      </select>
+      <Select
+        className="space-select"
+        aria-label="选择团队空间"
+        value={value}
+        onChange={(v) => navigate(v)}
+        options={[
+          { value: '/', label: '我的文件' },
+          ...teams.map((team) => ({ value: `/teams/${team.id}`, label: team.name })),
+        ]}
+      />
       {onViewChange && (
-        <select
-          className="form-select space-view-select"
+        <Select
+          className="space-view-select"
           aria-label={locale === 'zh-CN' ? '视图' : 'View'}
           value={activeView}
-          onChange={(e) => onViewChange(e.target.value as 'all' | 'starred' | 'recent')}
-        >
-          <option value="all">{msg('viewAll')}</option>
-          <option value="starred">{msg('viewStarred')}</option>
-          <option value="recent">{msg('viewRecent')}</option>
-        </select>
+          onChange={(v) => onViewChange(v as 'all' | 'starred' | 'recent')}
+          options={[
+            { value: 'all', label: msg('viewAll') },
+            { value: 'starred', label: msg('viewStarred') },
+            { value: 'recent', label: msg('viewRecent') },
+          ]}
+        />
       )}
-      <button type="button" className="btn small" onClick={() => setManageOpen(true)}>团队管理</button>
-      <button type="button" className="btn small ghost" onClick={() => navigate('/trash')}>回收站</button>
+      <Button size="small" onClick={() => setManageOpen(true)}>团队管理</Button>
+      <Button type="text" size="small" onClick={() => navigate('/trash')}>回收站</Button>
 
       {manageOpen && (
         <Modal wide title="团队管理" onClose={() => setManageOpen(false)}>
@@ -116,15 +140,15 @@ export default function SpaceSwitcher({
           <form className="team-create-row space-manage-create" onSubmit={handleCreateTeam}>
             <label className="field">
               <span>{msg('teamNameLabel')}</span>
-              <input autoFocus value={teamName} onChange={(e) => setTeamName(e.target.value)} placeholder="例如：平台组" maxLength={100} />
+              <Input autoFocus allowClear value={teamName} onChange={(e) => setTeamName(e.target.value)} placeholder="例如：平台组" maxLength={100} />
             </label>
             <label className="field">
               <span>{msg('teamDescLabel')}</span>
-              <input value={teamDesc} onChange={(e) => setTeamDesc(e.target.value)} placeholder="团队用途说明" />
+              <Input allowClear value={teamDesc} onChange={(e) => setTeamDesc(e.target.value)} placeholder="团队用途说明" />
             </label>
-            <button type="submit" className="btn primary" disabled={teamBusy || !teamName.trim()}>
+            <Button type="primary" htmlType="submit" disabled={teamBusy || !teamName.trim()}>
               {teamBusy ? msg('creating') : msg('createTeamTitle')}
-            </button>
+            </Button>
           </form>
           {manageError && <div className="error-text">{manageError}</div>}
           <ul className="space-manage-list">
@@ -146,8 +170,8 @@ export default function SpaceSwitcher({
                 </button>
                 {myId !== null && team.owner_id === myId && (
                   <span className="space-manage-actions">
-                    <button className="btn small" onClick={() => void renameTeam(team)}>{msg('edit')}</button>
-                    <button className="btn small danger" onClick={() => void removeTeam(team)}>{msg('delete')}</button>
+                    <Button size="small" onClick={() => void renameTeam(team)}>{msg('edit')}</Button>
+                    <Button size="small" danger onClick={() => removeTeam(team)}>{msg('delete')}</Button>
                   </span>
                 )}
               </li>

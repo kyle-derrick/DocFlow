@@ -1,4 +1,9 @@
-# 保持构建上下文最小，并避免本地 node_modules/dist 覆盖 npm ci 产物。
+# 保持构建上下文最小：node_modules/缓存不进镜像（前端产物 dist/ 由本地
+# 构建后直接 COPY 进 caddy 镜像，见 Dockerfile——容器内不再 npm ci+tsc，
+# 规避 BuildKit 在 WSL2 内编译高内存负载引发的 Docker Desktop 僵死）。
 node_modules
-dist
 .npm-cache
+src
+e2e
+playwright.config.ts
+*.md

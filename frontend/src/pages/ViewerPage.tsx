@@ -9,6 +9,7 @@
 // FileViewerDispatch / RawHtmlViewer 同时供按路径查看页（/view/by-path）
 // 复用：fileId 由 resolve 结果提供（各编辑器页支持 fileId prop）。
 import { useCallback, useEffect, useState } from 'react'
+import { Button } from 'antd'
 import { useParams, useSearchParams } from 'react-router-dom'
 import {
   FileWithVersion,
@@ -68,7 +69,7 @@ export function RawHtmlViewer({ resolveFn, title }: { resolveFn: () => Promise<s
       <main className="text-editor-page">
         <div className="banner error">{error}</div>
         <div className="preview-foot">
-          <button type="button" className="btn primary" onClick={load}>重试</button>
+          <Button type="primary" onClick={load}>重试</Button>
         </div>
       </main>
     )

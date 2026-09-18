@@ -1,13 +1,15 @@
 import { FormEvent, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Users } from 'lucide-react'
+import { App as AntdApp, Button, Input } from 'antd'
 import { Team, createTeam, currentUserId, deleteTeam, listTeams, updateTeam } from '../api'
-import { formatTime } from '../components/FileBrowser'
+import { formatTime, promptViaModal } from '../components/FileBrowser'
 import { MessageKey, formatMessage, t, useLocale } from '../i18n'
 
 /** 团队列表页：创建团队 + 我的团队卡片（点击进入团队空间）。 */
 export default function TeamsPage() {
   const locale = useLocale()
+  const { modal: antdModal } = AntdApp.useApp()
   const msg = (key: MessageKey) => t(locale, key)
   const navigate = useNavigate()
   const [teams, setTeams] = useState<Team[]>([])
@@ -58,20 +60,35 @@ export default function TeamsPage() {
   }
 
   const rename = async (t: Team) => {
-    const next = window.prompt(msg('teamNameLabel'), t.name)?.trim()
+    const input = await promptViaModal(antdModal, {
+      title: msg('edit'),
+      label: msg('teamNameLabel'),
+      initialValue: t.name,
+      okText: msg('save'),
+      cancelText: msg('cancel'),
+    })
+    const next = input?.trim()
     if (!next || next === t.name) return
     try { await updateTeam(t.id, next, t.description); await load() } catch (err) { setError(err instanceof Error ? err.message : msg('teamUpdateFailed')) }
   }
-  const remove = async (t: Team) => {
-    if (!window.confirm(formatMessage(msg('deleteTeamConfirm'), { name: t.name }))) return
-    try { await deleteTeam(t.id); await load() } catch (err) { setError(err instanceof Error ? err.message : msg('teamDeleteFailed')) }
+  const remove = (t: Team) => {
+    antdModal.confirm({
+      title: msg('delete'),
+      content: formatMessage(msg('deleteTeamConfirm'), { name: t.name }),
+      okText: msg('delete'),
+      okButtonProps: { danger: true },
+      cancelText: locale === 'zh-CN' ? '取消' : 'Cancel',
+      onOk: async () => {
+        try { await deleteTeam(t.id); await load() } catch (err) { setError(err instanceof Error ? err.message : msg('teamDeleteFailed')) }
+      },
+    })
   }
 
   return (
     <div className="page">
       <div className="page-head">
         <h2>{msg('teamsTitle')}</h2>
-        <button className="btn ghost" onClick={() => void load()}>{msg('refresh')}</button>
+        <Button type="text" onClick={() => void load()}>{msg('refresh')}</Button>
       </div>
 
       <form className="panel team-create" onSubmit={handleCreate}>
@@ -79,15 +96,15 @@ export default function TeamsPage() {
         <div className="team-create-row">
           <label className="field">
             <span>{msg('teamNameLabel')}</span>
-            <input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="例如：平台组" maxLength={100} />
+            <Input autoFocus allowClear value={name} onChange={(e) => setName(e.target.value)} placeholder="例如：平台组" maxLength={100} />
           </label>
           <label className="field">
             <span>{msg('teamDescLabel')}</span>
-            <input value={desc} onChange={(e) => setDesc(e.target.value)} placeholder="团队用途说明" />
+            <Input allowClear value={desc} onChange={(e) => setDesc(e.target.value)} placeholder="团队用途说明" />
           </label>
-          <button type="submit" className="btn primary" disabled={busy || !name.trim()}>
+          <Button type="primary" htmlType="submit" disabled={busy || !name.trim()}>
             {busy ? msg('creating') : msg('createTeamTitle')}
-          </button>
+          </Button>
         </div>
         {formError && <div className="error-text">{formError}</div>}
       </form>
@@ -105,7 +122,7 @@ export default function TeamsPage() {
               <div className="team-card-head">
                 <span className="icon"><Users size={14} strokeWidth={2} aria-hidden="true" /></span>
                 <span className="team-card-name">{t.name}</span>
-                {myId !== null && t.owner_id === myId && <><button className="btn ghost" onClick={(e) => { e.stopPropagation(); void rename(t) }}>{msg('edit')}</button><button className="btn ghost" onClick={(e) => { e.stopPropagation(); void remove(t) }}>{msg('delete')}</button></>}
+                {myId !== null && t.owner_id === myId && <><Button type="text" size="small" onClick={(e) => { e.stopPropagation(); void rename(t) }}>{msg('edit')}</Button><Button type="text" size="small" danger onClick={(e) => { e.stopPropagation(); remove(t) }}>{msg('delete')}</Button></>}
               </div>
               <p className="team-card-desc">{t.description || msg('noDesc')}</p>
               <span className="muted team-card-time">{msg('createdAt')} {formatTime(t.created_at)}</span>

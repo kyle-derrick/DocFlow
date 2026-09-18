@@ -13,6 +13,7 @@
 // - 初始挂载 onChange 以首个序列化 JSON 为基线，后续对比相同不置脏。
 import { Suspense, lazy, useEffect, useRef, useState } from 'react'
 import type { ComponentProps } from 'react'
+import { Button } from 'antd'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { FileWithVersion, fetchFileText, getFileMeta, uploadFileVersion } from '../api'
 import ExcalidrawViewer from '../components/ExcalidrawViewer'
@@ -191,19 +192,19 @@ export default function ExcalidrawPage({
   return (
     <div className={`editor-page${viewMode ? ' viewer-only' : ''}`}>
       {!viewMode && <div className="editor-head">
-        <button type="button" className="btn ghost small" onClick={closeEditor}>{msg('back')}</button>
+        <Button type="text" size="small" onClick={closeEditor}>{msg('back')}</Button>
         <h2 className="editor-title">{file?.name ?? msg('loading')}</h2>
         {versionNo !== undefined && (
           <span className="badge current">{formatMessage(msg('currentVersion'), { n: versionNo })}</span>
         )}
         {saving && <span className="badge uploading">{msg('saving')}</span>}
         <span className="editor-head-actions">
-            <button className="btn" disabled={saving || !initial} onClick={() => void save(false)}>
-              {saving ? msg('saving') : msg('save')}
-            </button>
-            <button className="btn primary" disabled={saving || !initial} onClick={() => void save(true)}>
+            <Button size="small" disabled={saving || !initial} loading={saving} onClick={() => void save(false)}>
+              {msg('save')}
+            </Button>
+            <Button type="primary" size="small" disabled={saving || !initial} onClick={() => void save(true)}>
               {msg('saveAndBack')}
-            </button>
+            </Button>
           </span>
       </div>}
 

@@ -9,6 +9,7 @@
 import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { NodeViewProps } from '@tiptap/react'
+import { Button } from 'antd'
 import { FileSpreadsheet, FileText, Globe, Image, Network, PenLine } from 'lucide-react'
 import {
   fetchFileText,
@@ -197,20 +198,21 @@ export default function EmbedView({ node, editor, selected }: NodeViewProps) {
     <div className={`rich-text-embed${selected ? ' selected' : ''}`} data-kind={kind}>
       {editable && fileId && (
         <div className="rich-text-embed-tools" contentEditable={false}>
-          <button type="button" className="btn small ghost" title={zh ? '在新窗口编辑' : 'Edit in new window'} onClick={openTarget}>
+          <Button type="text" size="small" title={zh ? '在新窗口编辑' : 'Edit in new window'} onMouseDown={(e) => e.preventDefault()} onClick={openTarget}>
             ✏ {editLabel}
-          </button>
-          <button
-            type="button"
-            className="btn small ghost"
+          </Button>
+          <Button
+            type="text"
+            size="small"
             title={zh ? '刷新（重新拉取最新版本）' : 'Refresh (reload latest version)'}
+            onMouseDown={(e) => e.preventDefault()}
             onClick={() => {
               setImageURL('')
               setVersion((v) => v + 1)
             }}
           >
             ↻
-          </button>
+          </Button>
         </div>
       )}
       {error ? (
@@ -221,9 +223,9 @@ export default function EmbedView({ node, editor, selected }: NodeViewProps) {
             <small>{error}</small>
           </span>
           {fileId && (
-            <button type="button" className="btn small" onClick={openTarget}>
+            <Button size="small" onClick={openTarget}>
               {zh ? '新窗口打开' : 'Open in new window'}
-            </button>
+            </Button>
           )}
         </div>
       ) : loading ? (
