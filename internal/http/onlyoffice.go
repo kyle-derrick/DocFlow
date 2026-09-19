@@ -13,6 +13,7 @@ import (
 
 	"github.com/docflow/docflow/internal/files"
 	"github.com/docflow/docflow/internal/onlyoffice"
+	"github.com/docflow/docflow/internal/share"
 	"github.com/docflow/docflow/internal/upload"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -95,6 +96,49 @@ func (h *Handler) createOnlyOfficeSession(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, config)
+}
+
+// publicShareOfficeConfig GET /api/v1/public/shares/:token/office?lang=：
+// 公开分享的 OnlyOffice 只读查看会话（访客无需登录）。解析分享 token
+//（有效期/撤销/密码会话同 publicSharePreview 口径，view 与 download 权限均
+// 可预览、不消耗 download_count），成功时返回 {server_url, config}（config
+// 为可直接传给 DocsAPI.DocEditor 的 JWT 签名配置，恒 view 模式；分享
+// permission=download 时编辑器内开放下载/打印）。集成未启用时 404（前端
+// 回退「不支持在线预览」分支）。预览成功计入 view_count 与访问事件
+//（action=preview，与 publicSharePreview 一致）。
+func (h *Handler) publicShareOfficeConfig(c *gin.Context) {
+	if h.onlyoffice == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "onlyoffice integration disabled"})
+		return
+	}
+	token := c.Param("token")
+	pre, err := h.shares.Resolve(token)
+	if publicShareError(c, err) {
+		return
+	}
+	if !h.shareSessionAllowed(c, token, pre.Share) {
+		return
+	}
+	r, err := h.shares.ResolveForPreview(token)
+	if publicShareError(c, err) {
+		return
+	}
+	if r.File.Type != "file" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "share target is not a file"})
+		return
+	}
+	config, err := h.onlyoffice.NewShareViewConfig(r.File, r.Version, onlyoffice.SessionOptions{
+		Lang:          c.Query("lang"),
+		AllowDownload: pre.Share.Permission == share.PermissionDownload,
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "onlyoffice operation failed"})
+		return
+	}
+	if err := h.shares.IncrementPreviewView(r); err == nil {
+		h.recordPublicAccessEvent(c, r, share.ActionPreview)
+	}
+	c.JSON(http.StatusOK, gin.H{"server_url": h.onlyoffice.PublicServerURL(), "config": config})
 }
 
 // onlyofficeDownload GET /api/v1/onlyoffice/download/:fileId?v=&token=：

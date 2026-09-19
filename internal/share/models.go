@@ -56,6 +56,9 @@ type Share struct {
 	DownloadCount    int        `gorm:"not null;default:0" json:"download_count"`
 	RevokedAt        *time.Time `json:"revoked_at,omitempty"`
 	CreatedAt        time.Time  `json:"created_at"`
+	// IsBundle 多文件打包分享（migration 036）：FileID 为打包条目的公共父
+	// 目录（锚点），可见条目由 share_files 限定（锚点其余子项不暴露）。
+	IsBundle bool `gorm:"column:is_bundle;not null;default:false" json:"is_bundle"`
 }
 
 // HasPassword 表示公开分享是否受密码保护（仅公开分享可设密码）。

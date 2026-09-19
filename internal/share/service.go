@@ -39,6 +39,8 @@ var (
 	ErrPasswordNotSet = errors.New("share does not require a password")
 	// ErrInvalidWatermarkText 表示自定义水印模板超长（> MaxWatermarkTextLen）。
 	ErrInvalidWatermarkText = errors.New("invalid watermark text")
+	// ErrBundleTooFew 表示打包分享（一个链接多个文件）至少需要两个条目。
+	ErrBundleTooFew = errors.New("bundle share requires at least two files")
 )
 
 // NewToken 生成明文分享 token：32 字节随机数的 URL-safe base64（43 字符）。
@@ -144,6 +146,18 @@ func validateSharePassword(password string) error {
 	return nil
 }
 
+// OwnerListFilter 是「我的分享」列表的过滤条件（GET /shares 查询参数映射）。
+type OwnerListFilter struct {
+	// Q 文件名子串（大小写不敏感）；空串不过滤。
+	Q string
+	// Visibility public|private；空串不过滤。
+	Visibility string
+	// Status active|revoked|expired；空串不过滤（active = 未撤销未过期；
+	// revoked 优先于 expired）。判定基准时间 Now。
+	Status string
+	Now    time.Time
+}
+
 // FileSource 抽象分享服务对文件元数据的访问与下载计数；owner 隔离由实现保证。
 type FileSource interface {
 	Get(owner, id uuid.UUID) (files.File, error)
@@ -161,6 +175,10 @@ type Repo interface {
 	GetByOwner(owner, id uuid.UUID) (Share, error)
 	GetByTokenHash(hash string) (Share, error)
 	ListByOwner(owner uuid.UUID, limit int) ([]Share, error)
+	// ListByOwnerFiltered 分页返回 owner 的分享（created_at 倒序），支持
+	// 文件名子串 / 可见性 / 状态过滤（「我的分享」页服务端分页），返回
+	// 当页数据与过滤后总数。
+	ListByOwnerFiltered(owner uuid.UUID, f OwnerListFilter, limit, offset int) ([]Share, int64, error)
 	// ListSharedWithUser 返回分享给 user 的有效私有分享（share_users 显式授权，
 	// 或 user 属于 share_teams 任一授权团队的成员；公开分享不含），
 	// 按 created_at 倒序。团队判定由实现方实时完成（GormStore JOIN team_members）。
@@ -182,6 +200,9 @@ type Repo interface {
 	AddShareTeams(shareID uuid.UUID, teamIDs []uuid.UUID, now time.Time) error
 	ListShareUserIDs(shareID uuid.UUID) ([]uuid.UUID, error)
 	ListShareTeamIDs(shareID uuid.UUID) ([]uuid.UUID, error)
+	// 打包分享可见条目（share_files，见 migrations/036_share_files.sql）。
+	AddShareFiles(shareID uuid.UUID, fileIDs []uuid.UUID, now time.Time) error
+	ListShareFileIDs(shareID uuid.UUID) ([]uuid.UUID, error)
 	// CreateSession / GetSessionByHash 维护公开访问会话（share_access_sessions，
 	// migration 022）：密码校验通过后写入，后续公开访问按 cookie 值哈希校验。
 	CreateSession(v AccessSession) error
@@ -505,6 +526,119 @@ func (s *Service) CreatePublic(owner, fileID uuid.UUID, permission string, expir
 	return sh, token, nil
 }
 
+// CreateBundle 为多个文件/目录创建一个「打包」公开分享（批量分享 = 一个
+// 目录式链接）：分享锚点取首个条目的父目录（复用目录分享的 tree/raw/zip
+// 访问链路），对外可见条目由 fileIDs 限定（锚点目录的其余子项不暴露）。
+// 仅公开分享；逐条目校验归属（owner 读权限 + 团队 CanShare 门控）与
+// 可用性（文件当前版本 available；目录无版本要求）；其余选项同 CreatePublic。
+func (s *Service) CreateBundle(owner uuid.UUID, fileIDs []uuid.UUID, permission string, expiresIn time.Duration, maxDownloads *int, opts ShareOptions) (Share, string, error) {
+	if s.publicEnabled != nil && !s.publicEnabled() {
+		return Share{}, "", ErrPublicDisabled
+	}
+	if permission != PermissionView && permission != PermissionDownload {
+		return Share{}, "", ErrInvalidPermission
+	}
+	if expiresIn < 0 {
+		return Share{}, "", ErrInvalidExpiry
+	}
+	if expiresIn == 0 {
+		expiresIn = s.defaultExpiry()
+	}
+	if maxDownloads != nil && *maxDownloads < 0 {
+		return Share{}, "", ErrInvalidMaxDownloads
+	}
+	if opts.Password != "" {
+		if err := validateSharePassword(opts.Password); err != nil {
+			return Share{}, "", err
+		}
+	}
+	watermarkEnabled, watermarkText, err := s.resolveWatermark(opts.WatermarkEnabled, opts.WatermarkText)
+	if err != nil {
+		return Share{}, "", err
+	}
+	items := dedupeIDs(fileIDs)
+	if len(items) < 2 {
+		return Share{}, "", ErrBundleTooFew
+	}
+	var anchor *uuid.UUID
+	for _, id := range items {
+		f, ferr := s.files.Get(owner, id)
+		if ferr != nil {
+			return Share{}, "", ErrFileNotFound
+		}
+		if ferr := s.authorizeShare(f, owner); ferr != nil {
+			return Share{}, "", ferr
+		}
+		if f.IsRoot {
+			return Share{}, "", ErrFileNotShareable
+		}
+		switch f.Type {
+		case "file":
+			_, blob, verr := s.files.CurrentVersion(owner, id)
+			if verr != nil {
+				return Share{}, "", ErrFileNotShareable
+			}
+			if blob.Status != files.BlobStatusAvailable {
+				return Share{}, "", ErrFileNotShareable
+			}
+		case "folder":
+			// 目录条目：子树经 tree 访问，无版本要求。
+		default:
+			return Share{}, "", ErrFileNotShareable
+		}
+		if anchor == nil {
+			if f.ParentID == nil {
+				return Share{}, "", ErrFileNotShareable
+			}
+			a := *f.ParentID
+			anchor = &a
+		}
+	}
+	anchorFile, aerr := s.files.Get(owner, *anchor)
+	if aerr != nil {
+		return Share{}, "", ErrFileNotFound
+	}
+	if aerr := s.authorizeShare(anchorFile, owner); aerr != nil {
+		return Share{}, "", aerr
+	}
+	token, terr := NewToken()
+	if terr != nil {
+		return Share{}, "", terr
+	}
+	now := s.now()
+	sh := Share{ID: uuid.New(), OwnerID: owner, FileID: *anchor, TokenHash: HashToken(token), Visibility: VisibilityPublic, Permission: permission, MaxDownloads: maxDownloads, WatermarkEnabled: watermarkEnabled, WatermarkText: &watermarkText, IsBundle: true, CreatedAt: now}
+	if opts.Password != "" {
+		sh.PasswordHash = HashSharePassword(sh.ID, opts.Password)
+	}
+	if expiresIn > 0 {
+		expiresAt := now.Add(expiresIn)
+		sh.ExpiresAt = &expiresAt
+	}
+	if err := s.repo.Create(sh); err != nil {
+		return Share{}, "", err
+	}
+	if err := s.repo.AddShareFiles(sh.ID, items, now); err != nil {
+		return Share{}, "", err
+	}
+	_ = s.repo.SetFilePublic(*anchor, true)
+	return sh, token, nil
+}
+
+// BundleItems 返回打包分享的可见条目元数据（已删除/不可读条目静默跳过）。
+func (s *Service) BundleItems(sh Share) ([]files.File, error) {
+	ids, err := s.repo.ListShareFileIDs(sh.ID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]files.File, 0, len(ids))
+	for _, id := range ids {
+		if f, ferr := s.files.Get(sh.OwnerID, id); ferr == nil && f.DeletedAt == nil {
+			out = append(out, f)
+		}
+	}
+	return out, nil
+}
+
 // CreatePrivate 为 owner 名下文件创建私有分享：不生成公开 token（token_hash 为空），
 // 访问仅限 share_users 显式授权用户与 share_teams 授权团队的成员。
 // userIds/teamIds 自动去重；私有分享不受密码影响（显式传入密码返回错误）。
@@ -756,6 +890,28 @@ func (s *Service) ListWithFileNames(owner uuid.UUID, limit int) ([]ShareWithFile
 		out = append(out, item)
 	}
 	return out, nil
+}
+
+// ListPage 分页返回 owner 的分享并附关联文件名（created_at 倒序），支持
+// 文件名子串 / 可见性 / 状态过滤；返回当页数据与过滤后总数（「我的分享」
+// 页服务端分页，v1.7.1）。
+func (s *Service) ListPage(owner uuid.UUID, f OwnerListFilter, limit, offset int) ([]ShareWithFile, int64, error) {
+	if f.Now.IsZero() {
+		f.Now = s.now()
+	}
+	shares, total, err := s.repo.ListByOwnerFiltered(owner, f, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	out := make([]ShareWithFile, 0, len(shares))
+	for _, sh := range shares {
+		item := ShareWithFile{Share: sh}
+		if f, ferr := s.files.Get(sh.OwnerID, sh.FileID); ferr == nil {
+			item.FileName = f.Name
+		}
+		out = append(out, item)
+	}
+	return out, total, nil
 }
 
 // SharedWithMeItem 是「与我共享」列表条目：有效私有分享 + 文件元数据 + 分享者用户名。

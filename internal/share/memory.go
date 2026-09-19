@@ -3,6 +3,7 @@ package share
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,6 +19,7 @@ type MemoryStore struct {
 	public     map[uuid.UUID]bool
 	shareUsers map[uuid.UUID]map[uuid.UUID]time.Time // share_id -> user_id -> created_at
 	shareTeams map[uuid.UUID]map[uuid.UUID]time.Time // share_id -> team_id -> created_at
+	shareFiles map[uuid.UUID]map[uuid.UUID]time.Time // share_id -> file_id -> created_at（打包分享可见条目）
 	sessions   map[string]AccessSession              // session_hash -> 会话
 	events     []AccessEvent                         // created_at 升序追加
 	eventSeq   int64
@@ -32,6 +34,7 @@ func NewMemoryStore() *MemoryStore {
 		public:     make(map[uuid.UUID]bool),
 		shareUsers: make(map[uuid.UUID]map[uuid.UUID]time.Time),
 		shareTeams: make(map[uuid.UUID]map[uuid.UUID]time.Time),
+		shareFiles: make(map[uuid.UUID]map[uuid.UUID]time.Time),
 		sessions:   make(map[string]AccessSession),
 	}
 }
@@ -103,6 +106,70 @@ func (m *MemoryStore) ListByOwner(owner uuid.UUID, limit int) ([]Share, error) {
 		out = out[:limit]
 	}
 	return out, nil
+}
+
+// ownerFilterMatch 判定分享是否命中 OwnerListFilter（与 GormStore SQL 同
+// 语义：文件名子串由注入的 nameOf 解析，未注入时不过滤文件名）。
+func (m *MemoryStore) ownerFilterMatch(v Share, f OwnerListFilter, nameOf func(fileID uuid.UUID) string) bool {
+	if f.Visibility != "" && v.Visibility != f.Visibility {
+		return false
+	}
+	revoked := v.RevokedAt != nil
+	expired := !revoked && v.ExpiresAt != nil && !v.ExpiresAt.After(f.Now)
+	switch f.Status {
+	case "active":
+		if revoked || expired {
+			return false
+		}
+	case "revoked":
+		if !revoked {
+			return false
+		}
+	case "expired":
+		if !expired {
+			return false
+		}
+	}
+	if f.Q != "" {
+		name := strings.ToLower(nameOf(v.FileID))
+		if !strings.Contains(name, strings.ToLower(f.Q)) {
+			return false
+		}
+	}
+	return true
+}
+
+// ListByOwnerFiltered 分页返回 owner 的分享 + 过滤后总数（测试用实现：
+// 文件名子串过滤无文件源可查——Q 非空时不命中任何条目，其余过滤与
+// GormStore SQL 同语义）。
+func (m *MemoryStore) ListByOwnerFiltered(owner uuid.UUID, f OwnerListFilter, limit, offset int) ([]Share, int64, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	nameOf := func(uuid.UUID) string { return "" }
+	var matched []Share
+	for _, v := range m.items {
+		if v.OwnerID == owner && m.ownerFilterMatch(v, f, nameOf) {
+			matched = append(matched, v)
+		}
+	}
+	sort.Slice(matched, func(i, j int) bool {
+		if !matched[i].CreatedAt.Equal(matched[j].CreatedAt) {
+			return matched[i].CreatedAt.After(matched[j].CreatedAt)
+		}
+		return matched[i].ID.String() < matched[j].ID.String()
+	})
+	total := int64(len(matched))
+	if offset > len(matched) {
+		return []Share{}, total, nil
+	}
+	matched = matched[offset:]
+	if len(matched) > limit {
+		matched = matched[:limit]
+	}
+	if matched == nil {
+		matched = []Share{}
+	}
+	return matched, total, nil
 }
 
 // SetMembership 注入团队成员判定器（测试用）：user 是否属于 team（幂等）。
@@ -249,6 +316,28 @@ func (m *MemoryStore) ListShareTeamIDs(shareID uuid.UUID) ([]uuid.UUID, error) {
 	defer m.mu.RUnlock()
 	out := make([]uuid.UUID, 0, len(m.shareTeams[shareID]))
 	for id := range m.shareTeams[shareID] {
+		out = append(out, id)
+	}
+	return out, nil
+}
+
+func (m *MemoryStore) AddShareFiles(shareID uuid.UUID, fileIDs []uuid.UUID, now time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.shareFiles[shareID] == nil {
+		m.shareFiles[shareID] = make(map[uuid.UUID]time.Time)
+	}
+	for _, id := range fileIDs {
+		m.shareFiles[shareID][id] = now
+	}
+	return nil
+}
+
+func (m *MemoryStore) ListShareFileIDs(shareID uuid.UUID) ([]uuid.UUID, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]uuid.UUID, 0, len(m.shareFiles[shareID]))
+	for id := range m.shareFiles[shareID] {
 		out = append(out, id)
 	}
 	return out, nil

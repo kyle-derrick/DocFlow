@@ -66,6 +66,11 @@ const (
 	ActionGroupDelete       = "group.delete"
 	ActionGroupMemberAdd    = "group.member.add"
 	ActionGroupMemberRemove = "group.member.remove"
+	// 团队生命周期（v1.7 成员管理重构）：解散（仅 owner）、所有权转让
+	//（仅 owner，事务内新旧 owner 角色互换）与主动退出（非 owner 成员）。
+	ActionTeamDelete        = "team.delete"
+	ActionTeamLeave         = "team.leave"
+	ActionTeamOwnerTransfer = "team.owner_transfer"
 )
 
 // resource_type 常量。
@@ -90,6 +95,8 @@ const (
 	ResourceBackup = "backup"
 	// ResourceGroup 为用户组（groups 行，migration 035）。
 	ResourceGroup = "group"
+	// ResourceTeam 为团队（teams 行，v1.7 成员管理重构审计）。
+	ResourceTeam = "team"
 )
 
 // status 常量。

@@ -2,6 +2,7 @@ package share
 
 import (
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -57,6 +58,43 @@ func (s *GormStore) ListByOwner(owner uuid.UUID, limit int) ([]Share, error) {
 	var out []Share
 	err := s.db.Where("owner_id = ?", owner).Order("created_at DESC, id").Limit(limit).Find(&out).Error
 	return out, err
+}
+
+// ownerFilteredScope 组装「我的分享」过滤条件（OwnerListFilter → SQL），
+// 返回叠加了过滤的查询（未加排序/分页）。文件名过滤经 LEFT JOIN files
+// （软删文件名仍可检索，展示名由服务层置空，口径与列表页一致）。
+func (s *GormStore) ownerFilteredScope(owner uuid.UUID, f OwnerListFilter) *gorm.DB {
+	q := s.db.Model(&Share{}).Where("shares.owner_id = ?", owner)
+	if f.Q != "" {
+		needle := "%" + strings.ToLower(f.Q) + "%"
+		q = q.Joins("LEFT JOIN files ON files.id = shares.file_id").
+			Where("LOWER(files.name) LIKE ?", needle)
+	}
+	if f.Visibility == VisibilityPublic || f.Visibility == VisibilityPrivate {
+		q = q.Where("shares.visibility = ?", f.Visibility)
+	}
+	switch f.Status {
+	case "active":
+		q = q.Where("shares.revoked_at IS NULL AND (shares.expires_at IS NULL OR shares.expires_at > ?)", f.Now)
+	case "revoked":
+		q = q.Where("shares.revoked_at IS NOT NULL")
+	case "expired":
+		q = q.Where("shares.revoked_at IS NULL AND shares.expires_at IS NOT NULL AND shares.expires_at <= ?", f.Now)
+	}
+	return q
+}
+
+// ListByOwnerFiltered 分页返回 owner 的分享（created_at 倒序）+ 过滤后总数。
+func (s *GormStore) ListByOwnerFiltered(owner uuid.UUID, f OwnerListFilter, limit, offset int) ([]Share, int64, error) {
+	var total int64
+	if err := s.ownerFilteredScope(owner, f).Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	var out []Share
+	err := s.ownerFilteredScope(owner, f).
+		Order("shares.created_at DESC, shares.id").
+		Limit(limit).Offset(offset).Find(&out).Error
+	return out, total, err
 }
 
 // ListSharedWithUser 单条 SQL 实时判定授权（与 CanAccess 判定一致）：
@@ -139,6 +177,14 @@ type ShareTeam struct {
 	CreatedAt time.Time
 }
 
+// ShareFile 对应 share_files 连接表（migration 036）：多文件打包分享的
+// 可见条目（分享锚点目录其余子项不暴露）。
+type ShareFile struct {
+	ShareID   uuid.UUID `gorm:"type:uuid;primaryKey"`
+	FileID    uuid.UUID `gorm:"type:uuid;primaryKey"`
+	CreatedAt time.Time
+}
+
 func (s *GormStore) AddShareUsers(shareID uuid.UUID, userIDs []uuid.UUID, now time.Time) error {
 	if len(userIDs) == 0 {
 		return nil
@@ -177,6 +223,29 @@ func (s *GormStore) ListShareTeamIDs(shareID uuid.UUID) ([]uuid.UUID, error) {
 	out := make([]uuid.UUID, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, r.TeamID)
+	}
+	return out, err
+}
+
+// AddShareFiles 写入打包分享的可见条目（share_files，migration 036）。
+func (s *GormStore) AddShareFiles(shareID uuid.UUID, fileIDs []uuid.UUID, now time.Time) error {
+	if len(fileIDs) == 0 {
+		return nil
+	}
+	rows := make([]ShareFile, 0, len(fileIDs))
+	for _, id := range fileIDs {
+		rows = append(rows, ShareFile{ShareID: shareID, FileID: id, CreatedAt: now})
+	}
+	return s.db.Create(&rows).Error
+}
+
+// ListShareFileIDs 返回打包分享的可见条目 ID（file_id 排序，结果稳定）。
+func (s *GormStore) ListShareFileIDs(shareID uuid.UUID) ([]uuid.UUID, error) {
+	var rows []ShareFile
+	err := s.db.Where("share_id = ?", shareID).Order("file_id").Find(&rows).Error
+	out := make([]uuid.UUID, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r.FileID)
 	}
 	return out, err
 }

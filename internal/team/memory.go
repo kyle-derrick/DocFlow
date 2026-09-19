@@ -14,23 +14,21 @@ var _ Repo = (*MemoryStore)(nil)
 
 // MemoryStore 是 Repo 的内存实现，供测试使用（不依赖 PostgreSQL）。
 type MemoryStore struct {
-	mu        sync.RWMutex
-	teams     map[uuid.UUID]Team
-	members   map[uuid.UUID]map[uuid.UUID]Member // team_id -> user_id -> member
-	roots     map[uuid.UUID]files.File
-	teamName  map[string]uuid.UUID
-	roles     map[uuid.UUID]Role   // role_id -> role
-	roleNames map[string]uuid.UUID // "teamID:roleID"复合键按名称查重
+	mu       sync.RWMutex
+	teams    map[uuid.UUID]Team
+	members  map[uuid.UUID]map[uuid.UUID]Member // team_id -> user_id -> member
+	roots    map[uuid.UUID]files.File
+	teamName map[string]uuid.UUID
+	invites  map[uuid.UUID]Invite // invite_id -> invite
 }
 
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		teams:     make(map[uuid.UUID]Team),
-		members:   make(map[uuid.UUID]map[uuid.UUID]Member),
-		roots:     make(map[uuid.UUID]files.File),
-		teamName:  make(map[string]uuid.UUID),
-		roles:     make(map[uuid.UUID]Role),
-		roleNames: make(map[string]uuid.UUID),
+		teams:    make(map[uuid.UUID]Team),
+		members:  make(map[uuid.UUID]map[uuid.UUID]Member),
+		roots:    make(map[uuid.UUID]files.File),
+		teamName: make(map[string]uuid.UUID),
+		invites:  make(map[uuid.UUID]Invite),
 	}
 }
 
@@ -40,16 +38,6 @@ func (m *MemoryStore) Root(teamID uuid.UUID) (files.File, bool) {
 	defer m.mu.RUnlock()
 	f, ok := m.roots[teamID]
 	return f, ok
-}
-
-// DeleteRoleDirect 绕过服务层直接删除角色行（测试「角色行缺失 → fail closed」用）。
-func (m *MemoryStore) DeleteRoleDirect(roleID uuid.UUID) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if r, ok := m.roles[roleID]; ok {
-		delete(m.roleNames, r.TeamID.String()+":"+r.Name)
-		delete(m.roles, roleID)
-	}
 }
 
 func (m *MemoryStore) CreateTeamWithRoot(t Team, owner Member, root files.File) error {
@@ -103,68 +91,6 @@ func (m *MemoryStore) Delete(teamID uuid.UUID) error {
 	return nil
 }
 
-func (m *MemoryStore) ListRoles(teamID uuid.UUID) ([]Role, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	var out []Role
-	for _, r := range m.roles {
-		if r.TeamID != teamID {
-			continue
-		}
-		r.MemberCount = m.countMembersByRoleLocked(teamID, r.ID)
-		out = append(out, r)
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
-			return out[i].CreatedAt.Before(out[j].CreatedAt)
-		}
-		return out[i].ID.String() < out[j].ID.String()
-	})
-	return out, nil
-}
-func (m *MemoryStore) CreateRole(role Role) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if _, exists := m.roles[role.ID]; exists {
-		return ErrMemberExists
-	}
-	key := role.TeamID.String() + ":" + role.Name
-	if _, exists := m.roleNames[key]; exists {
-		return ErrNameConflict
-	}
-	m.roles[role.ID] = role
-	m.roleNames[key] = role.ID
-	return nil
-}
-func (m *MemoryStore) UpdateRole(teamID, roleID uuid.UUID, name string, permissions map[string]any) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	r, ok := m.roles[roleID]
-	if !ok || r.TeamID != teamID {
-		return ErrNotFound
-	}
-	key := teamID.String() + ":" + name
-	if old, exists := m.roleNames[key]; exists && old != roleID {
-		return ErrNameConflict
-	}
-	delete(m.roleNames, r.TeamID.String()+":"+r.Name)
-	r.Name, r.Permissions = name, permissions
-	m.roles[roleID] = r
-	m.roleNames[key] = roleID
-	return nil
-}
-func (m *MemoryStore) DeleteRole(teamID, roleID uuid.UUID) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	r, ok := m.roles[roleID]
-	if !ok || r.TeamID != teamID {
-		return ErrNotFound
-	}
-	delete(m.roleNames, r.TeamID.String()+":"+r.Name)
-	delete(m.roles, roleID)
-	return nil
-}
-
 func (m *MemoryStore) Get(id uuid.UUID) (Team, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -185,6 +111,32 @@ func (m *MemoryStore) ListForUser(userID uuid.UUID) ([]Team, error) {
 				out = append(out, t)
 			}
 		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.After(out[j].CreatedAt)
+		}
+		return out[i].ID.String() < out[j].ID.String()
+	})
+	return out, nil
+}
+
+// ListForUserStats 内存实现：成员数按内存表统计，存储用量恒 0（内存库
+// 无 files 数据；仅供单测断言 my_role/member_count）。
+func (m *MemoryStore) ListForUserStats(userID uuid.UUID) ([]TeamInfo, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var out []TeamInfo
+	for id := range m.members {
+		mem, ok := m.members[id][userID]
+		if !ok {
+			continue
+		}
+		t, found := m.teams[id]
+		if !found || t.DeletedAt != nil {
+			continue
+		}
+		out = append(out, TeamInfo{Team: t, MyRole: mem.Role, MemberCount: int64(len(m.members[id]))})
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
@@ -229,11 +181,6 @@ func (m *MemoryStore) ListMembers(teamID uuid.UUID) ([]Member, error) {
 	defer m.mu.RUnlock()
 	var out []Member
 	for _, mem := range m.members[teamID] {
-		if mem.RoleID != nil {
-			if r, ok := m.roles[*mem.RoleID]; ok {
-				mem.RoleName = r.Name
-			}
-		}
 		out = append(out, mem)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -245,66 +192,50 @@ func (m *MemoryStore) ListMembers(teamID uuid.UUID) ([]Member, error) {
 	return out, nil
 }
 
-func (m *MemoryStore) UpdateMemberRole(teamID, userID uuid.UUID, role string, roleID *uuid.UUID) (Member, error) {
+func (m *MemoryStore) UpdateMemberRole(teamID, userID uuid.UUID, role string) (Member, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	mem, ok := m.members[teamID][userID]
 	if !ok {
 		return Member{}, ErrNotFound
 	}
-	mem.Role, mem.RoleID = role, roleID
-	if roleID != nil {
-		if r, ok := m.roles[*roleID]; ok {
-			mem.RoleName = r.Name
-		} else {
-			mem.RoleName = ""
-		}
-	} else {
-		mem.RoleName = ""
-	}
+	mem.Role = role
 	m.members[teamID][userID] = mem
 	return mem, nil
 }
 
 func (m *MemoryStore) Role(teamID, userID uuid.UUID) (string, error) {
-	role, _, err := m.MemberRole(teamID, userID)
-	return role, err
-}
-
-func (m *MemoryStore) MemberRole(teamID, userID uuid.UUID) (string, *uuid.UUID, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	mem, ok := m.members[teamID][userID]
 	if !ok {
-		return "", nil, nil
+		return "", nil
 	}
-	return mem.Role, mem.RoleID, nil
+	return mem.Role, nil
 }
 
-func (m *MemoryStore) RolePermissions(teamID, roleID uuid.UUID) (map[string]any, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	r, ok := m.roles[roleID]
-	if !ok || r.TeamID != teamID {
-		return nil, ErrNotFound
+func (m *MemoryStore) TransferOwnership(teamID, oldOwner, newOwner uuid.UUID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t, ok := m.teams[teamID]
+	if !ok || t.DeletedAt != nil || t.OwnerID != oldOwner {
+		return ErrNotFound
 	}
-	return r.Permissions, nil
-}
-
-func (m *MemoryStore) countMembersByRoleLocked(teamID, roleID uuid.UUID) int64 {
-	var n int64
-	for _, mem := range m.members[teamID] {
-		if mem.RoleID != nil && *mem.RoleID == roleID {
-			n++
-		}
+	mem, ok := m.members[teamID][newOwner]
+	if !ok {
+		return ErrNotFound
 	}
-	return n
-}
-
-func (m *MemoryStore) CountMembersByRole(teamID, roleID uuid.UUID) (int64, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.countMembersByRoleLocked(teamID, roleID), nil
+	old, ok := m.members[teamID][oldOwner]
+	if !ok {
+		return ErrNotFound
+	}
+	t.OwnerID = newOwner
+	m.teams[teamID] = t
+	mem.Role = RoleOwner
+	m.members[teamID][newOwner] = mem
+	old.Role = RoleAdmin
+	m.members[teamID][oldOwner] = old
+	return nil
 }
 
 func (m *MemoryStore) UserInAnyTeam(userID uuid.UUID, teamIDs []uuid.UUID) (bool, error) {
@@ -316,4 +247,89 @@ func (m *MemoryStore) UserInAnyTeam(userID uuid.UUID, teamIDs []uuid.UUID) (bool
 		}
 	}
 	return false, nil
+}
+
+// ---- 团队邀请（内存实现，测试用） ----
+
+func (m *MemoryStore) CreateInvite(v Invite) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.invites[v.ID] = v
+	return nil
+}
+
+func (m *MemoryStore) GetInvite(id uuid.UUID) (Invite, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	v, ok := m.invites[id]
+	if !ok {
+		return Invite{}, ErrNotFound
+	}
+	return v, nil
+}
+
+func (m *MemoryStore) GetInviteByTokenHash(hash string) (Invite, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, v := range m.invites {
+		if v.TokenHash == hash {
+			return v, nil
+		}
+	}
+	return Invite{}, ErrNotFound
+}
+
+func (m *MemoryStore) FindActiveInvite(teamID uuid.UUID, email string, now time.Time) (Invite, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, v := range m.invites {
+		if v.TeamID == teamID && v.Email == email && v.AcceptedAt == nil && now.Before(v.ExpiresAt) {
+			return v, nil
+		}
+	}
+	return Invite{}, ErrNotFound
+}
+
+func (m *MemoryStore) ListInvites(teamID uuid.UUID, limit int) ([]Invite, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var out []Invite
+	for _, v := range m.invites {
+		if v.TeamID == teamID {
+			out = append(out, v)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.After(out[j].CreatedAt)
+		}
+		return out[i].ID.String() < out[j].ID.String()
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (m *MemoryStore) DeleteInvite(teamID, id uuid.UUID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	v, ok := m.invites[id]
+	if !ok || v.TeamID != teamID {
+		return ErrNotFound
+	}
+	delete(m.invites, id)
+	return nil
+}
+
+func (m *MemoryStore) MarkInviteAccepted(id uuid.UUID, now time.Time) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	v, ok := m.invites[id]
+	if !ok || v.AcceptedAt != nil || !now.Before(v.ExpiresAt) {
+		return false, nil
+	}
+	v.AcceptedAt = &now
+	m.invites[id] = v
+	return true, nil
 }

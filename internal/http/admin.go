@@ -27,6 +27,10 @@ type settingsService interface {
 	// GetInt 为 int 键的热读取（batch.max_items 等请求路径消费方使用）；
 	// *settings.Store 天然满足。
 	GetInt(key string) (int, error)
+	// SMTPOverrides / SetSMTP 为 SMTP 运行时配置（system_settings 的 smtp.*
+	// 键；GET/PUT /admin/settings/smtp 专用，不经通用键值端点）。
+	SMTPOverrides() (settings.SMTPOverride, error)
+	SetSMTP(in settings.SMTPSettings, env settings.SMTPSettings, actor uuid.UUID) (settings.SMTPSettings, error)
 }
 type statsSource interface{ Stats() (AdminStats, error) }
 type AdminStats struct {
@@ -189,6 +193,113 @@ func (h *Handler) updateAdminSetting(c *gin.Context) {
 		c.JSON(400, gin.H{"error": err.Error()})
 	default:
 		c.JSON(500, gin.H{"error": "unable to update setting"})
+	}
+}
+
+// smtpEnvBaseline 从环境变量读 SMTP 基线配置（.env 部署值；system_settings
+// 的 smtp.* 入库覆盖在此基础上生效）。解析逻辑与 config.Load 一致。
+func smtpEnvBaseline() settings.SMTPSettings {
+	enabled := false
+	if v := strings.TrimSpace(os.Getenv("SMTP_ENABLED")); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			enabled = b
+		}
+	}
+	port := 587
+	if v := strings.TrimSpace(os.Getenv("SMTP_PORT")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			port = n
+		}
+	}
+	return settings.SMTPSettings{
+		Enabled: enabled,
+		Host:    strings.TrimSpace(os.Getenv("SMTP_HOST")),
+		Port:    port,
+		User:    strings.TrimSpace(os.Getenv("SMTP_USER")),
+		Pass:    strings.TrimSpace(os.Getenv("SMTP_PASS")),
+		From:    strings.TrimSpace(os.Getenv("SMTP_FROM")),
+		TLSMode: settings.SMTPTLSModeAuto,
+	}
+}
+
+// smtpSettingsResponse 为 GET/PUT /admin/settings/smtp 的响应：生效配置
+//（DB 覆盖 → env 回退）+ env 基线对照 + 密码配置状态（只报 configured，
+// 永不回显值）。public_base_url 仅供邮件链接拼接参考（env-only）。
+type smtpSettingsResponse struct {
+	Enabled            bool   `json:"enabled"`
+	Host               string `json:"host"`
+	Port               int    `json:"port"`
+	User               string `json:"user"`
+	From               string `json:"from"`
+	TLSMode            string `json:"tls_mode"`
+	PasswordConfigured bool   `json:"password_configured"`
+	Env                struct {
+		Enabled            bool   `json:"enabled"`
+		Host               string `json:"host"`
+		Port               int    `json:"port"`
+		User               string `json:"user"`
+		From               string `json:"from"`
+		PasswordConfigured bool   `json:"password_configured"`
+	} `json:"env"`
+	PublicBaseURL string `json:"public_base_url"`
+}
+
+func smtpSettingsView(effective, env settings.SMTPSettings, passSet, envPassSet bool) smtpSettingsResponse {
+	out := smtpSettingsResponse{
+		Enabled: effective.Enabled, Host: effective.Host, Port: effective.Port,
+		User: effective.User, From: effective.From, TLSMode: effective.TLSMode,
+		PasswordConfigured: passSet,
+		PublicBaseURL:      strings.TrimSpace(os.Getenv("PUBLIC_BASE_URL")),
+	}
+	out.Env.Enabled = env.Enabled
+	out.Env.Host = env.Host
+	out.Env.Port = env.Port
+	out.Env.User = env.User
+	out.Env.From = env.From
+	out.Env.PasswordConfigured = envPassSet
+	return out
+}
+
+// getSMTPSettings 读当前生效 SMTP 配置（DB 覆盖合并 env 基线）。
+func (h *Handler) getSMTPSettings(c *gin.Context) {
+	if h.settings == nil {
+		c.JSON(500, gin.H{"error": "settings service is not configured"})
+		return
+	}
+	env := smtpEnvBaseline()
+	effective := env
+	ov, err := h.settings.SMTPOverrides()
+	if err == nil {
+		effective = ov.Apply(env)
+	}
+	c.JSON(200, smtpSettingsView(effective, env, effective.Pass != "", env.Pass != ""))
+}
+
+// putSMTPSettings 写入 SMTP 配置（保存即时生效：邮件发送处每次读库）。
+// 请求 pass 留空 = 保持现值；校验失败 400。
+func (h *Handler) putSMTPSettings(c *gin.Context) {
+	if h.settings == nil {
+		c.JSON(500, gin.H{"error": "settings service is not configured"})
+		return
+	}
+	var req settings.SMTPSettings
+	if c.ShouldBindJSON(&req) != nil {
+		c.JSON(400, gin.H{"error": "invalid request"})
+		return
+	}
+	env := smtpEnvBaseline()
+	_, err := h.settings.SetSMTP(req, env, userID(c))
+	switch {
+	case err == nil:
+		effective := env
+		if ov, ovErr := h.settings.SMTPOverrides(); ovErr == nil {
+			effective = ov.Apply(env)
+		}
+		c.JSON(200, smtpSettingsView(effective, env, effective.Pass != "", env.Pass != ""))
+	case errors.Is(err, settings.ErrInvalidType), errors.Is(err, settings.ErrInvalidValue):
+		c.JSON(400, gin.H{"error": err.Error()})
+	default:
+		c.JSON(500, gin.H{"error": "unable to update smtp settings"})
 	}
 }
 

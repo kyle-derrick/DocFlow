@@ -400,15 +400,36 @@ func main() {
 	// /login 一律 401 TOTP_REQUIRED，经 /auth/login/totp 二段提交。
 	service.SetTOTPStore(auth.NewGormTOTPStore(db))
 	// 邀请制注册：邀请生命周期管理 + 邮件通道（邀请/重置链接）。
-	// SMTP_ENABLED=true 时经 net/smtp 投递；默认 Noop 仅日志输出链接，
-	// 不建立任何网络连接。PUBLIC_BASE_URL 用于拼接邮件中的绝对链接。
+	// SMTP 投递参数支持运行时调整：每次发送读 system_settings 的 smtp.*
+	// 入库覆盖（管理端 /admin/settings/smtp 写入）回退 env 基线；通道禁用
+	// 时回退 Noop（仅日志输出链接，不建立任何网络连接）。PUBLIC_BASE_URL
+	// 用于拼接邮件中的绝对链接。
 	inviteService := invite.NewService(invite.NewGormRepo(db), userStore)
-	var mailer mail.Mailer = mail.NewNoopMailer()
+	smtpEnv := settings.SMTPSettings{
+		Enabled: cfg.SMTPEnabled,
+		Host:    cfg.SMTPHost,
+		Port:    cfg.SMTPPort,
+		User:    cfg.SMTPUser,
+		Pass:    cfg.SMTPPass,
+		From:    cfg.SMTPFrom,
+		TLSMode: settings.SMTPTLSModeAuto,
+	}
+	smtpSource := func() (mail.SMTPConfig, bool) {
+		effective := smtpEnv
+		if ov, err := settingsStore.SMTPOverrides(); err == nil {
+			effective = ov.Apply(smtpEnv)
+		}
+		return mail.SMTPConfig{
+			Host: effective.Host, Port: effective.Port,
+			User: effective.User, Pass: effective.Pass,
+			From: effective.From, TLSMode: effective.TLSMode,
+		}, effective.Enabled
+	}
+	mailer := mail.NewSettingsMailer(smtpSource, mail.NewNoopMailer())
 	if cfg.SMTPEnabled {
-		mailer = mail.NewSMTPMailer(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPUser, cfg.SMTPPass, cfg.SMTPFrom)
-		log.Printf("mail transport: smtp (%s:%d from=%s)", cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPFrom)
+		log.Printf("mail transport: smtp (%s:%d from=%s; runtime overrides via /admin/settings/smtp)", cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPFrom)
 	} else {
-		log.Print("mail transport: noop (invitation/reset links are logged only)")
+		log.Print("mail transport: env disabled (invitation/reset links are logged only until enabled via /admin/settings/smtp)")
 	}
 	// 邮件通知渠道（v1.1）：通知落库后按用户邮箱发送纯文本副本（Noop 时
 	// 仅日志）；与站内通知共用同一偏好开关（偏好关闭时两者一并短路）。

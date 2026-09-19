@@ -90,91 +90,65 @@ func TestListTeamsMembershipScoped(t *testing.T) {
 		t.Fatalf("outsider sees %d teams, want 0", len(out))
 	}
 	// 加入成员后成员可见。
-	if _, err := svc.AddMember(owner, tm.ID, member, RoleEditor, nil); err != nil {
+	if _, err := svc.AddMember(owner, tm.ID, member, RoleMember); err != nil {
 		t.Fatal(err)
 	}
 	if out, _ := svc.ListTeams(member); len(out) != 1 || out[0].ID != tm.ID {
 		t.Fatalf("member sees %+v", out)
 	}
+	// ListTeamsDetailed 附带 my_role/member_count（v1.7 团队页卡片数据）。
+	infos, err := svc.ListTeamsDetailed(member)
+	if err != nil || len(infos) != 1 {
+		t.Fatalf("ListTeamsDetailed = %+v, %v; want 1 team", infos, err)
+	}
+	if infos[0].MyRole != RoleMember || infos[0].MemberCount != 2 {
+		t.Fatalf("info = %+v, want my_role=member member_count=2", infos[0])
+	}
 }
 
 func TestAddMemberPermissionAndRoleValidation(t *testing.T) {
 	svc, _ := newTestService()
-	owner, editor, viewer := uuid.New(), uuid.New(), uuid.New()
+	owner, admin, guest := uuid.New(), uuid.New(), uuid.New()
 	tm, _, err := svc.CreateTeam(owner, "team-b", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.AddMember(owner, tm.ID, editor, RoleEditor, nil); err != nil {
+	if _, err := svc.AddMember(owner, tm.ID, admin, RoleAdmin); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.AddMember(owner, tm.ID, viewer, RoleViewer, nil); err != nil {
+	if _, err := svc.AddMember(owner, tm.ID, guest, RoleGuest); err != nil {
 		t.Fatal(err)
 	}
-	// role 校验：owner 角色不可通过 AddMember 授予，未知角色拒绝。
-	if _, err := svc.AddMember(owner, tm.ID, uuid.New(), RoleOwner, nil); !errors.Is(err, ErrInvalidRole) {
+	// owner 角色不可经 AddMember 授予（仅经转让产生）；未知角色拒绝。
+	if _, err := svc.AddMember(owner, tm.ID, uuid.New(), RoleOwner); !errors.Is(err, ErrInvalidRole) {
 		t.Fatalf("add owner role: err = %v, want ErrInvalidRole", err)
 	}
-	if _, err := svc.AddMember(owner, tm.ID, uuid.New(), "admin", nil); !errors.Is(err, ErrInvalidRole) {
-		t.Fatalf("unknown role: err = %v, want ErrInvalidRole", err)
+	if _, err := svc.AddMember(owner, tm.ID, uuid.New(), "editor"); !errors.Is(err, ErrInvalidRole) {
+		t.Fatalf("legacy role: err = %v, want ErrInvalidRole", err)
 	}
-	// 仅 owner 可管理成员。
-	if _, err := svc.AddMember(editor, tm.ID, uuid.New(), RoleViewer, nil); !errors.Is(err, ErrForbidden) {
-		t.Fatalf("add by non-owner: err = %v, want ErrForbidden", err)
+	// admin 角色仅 owner 可授予。
+	if _, err := svc.AddMember(admin, tm.ID, uuid.New(), RoleAdmin); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("grant admin by admin: err = %v, want ErrForbidden", err)
+	}
+	// admin 可添加普通成员。
+	if _, err := svc.AddMember(admin, tm.ID, uuid.New(), RoleMemberShare); err != nil {
+		t.Fatalf("add member by admin: %v", err)
+	}
+	// 普通成员不可管理。
+	if _, err := svc.AddMember(guest, tm.ID, uuid.New(), RoleGuest); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("add by guest: err = %v, want ErrForbidden", err)
 	}
 	// 重复添加冲突。
-	if _, err := svc.AddMember(owner, tm.ID, editor, RoleViewer, nil); !errors.Is(err, ErrMemberExists) {
+	if _, err := svc.AddMember(owner, tm.ID, guest, RoleGuest); !errors.Is(err, ErrMemberExists) {
 		t.Fatalf("duplicate member: err = %v, want ErrMemberExists", err)
 	}
 	// 团队不存在。
-	if _, err := svc.AddMember(owner, uuid.New(), uuid.New(), RoleViewer, nil); !errors.Is(err, ErrNotFound) {
+	if _, err := svc.AddMember(owner, uuid.New(), uuid.New(), RoleGuest); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing team: err = %v, want ErrNotFound", err)
 	}
-}
-
-func TestAddMemberWithCustomRole(t *testing.T) {
-	svc, _ := newTestService()
-	owner, member := uuid.New(), uuid.New()
-	tm, _, err := svc.CreateTeam(owner, "team-custom", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	role, err := svc.CreateRole(owner, tm.ID, "审计员", map[string]any{PermRead: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	// role_id 指定自定义角色：role 归一为 custom。
-	m, err := svc.AddMember(owner, tm.ID, member, "", &role.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if m.Role != RoleCustom || m.RoleID == nil || *m.RoleID != role.ID {
-		t.Fatalf("member = %+v, want custom role %v", m, role.ID)
-	}
-	// role 与 role_id 同时给出且冲突时拒绝。
-	if _, err := svc.AddMember(owner, tm.ID, uuid.New(), RoleViewer, &role.ID); !errors.Is(err, ErrInvalidRole) {
-		t.Fatalf("mixed role and role_id: err = %v, want ErrInvalidRole", err)
-	}
-	// role_id 不属于该团队 / 不存在：拒绝。
-	other, _, err := svc.CreateTeam(owner, "team-other", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	foreignRole, err := svc.CreateRole(owner, other.ID, "外团队角色", map[string]any{PermRead: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := svc.AddMember(owner, tm.ID, uuid.New(), "", &foreignRole.ID); !errors.Is(err, ErrInvalidRole) {
-		t.Fatalf("foreign role_id: err = %v, want ErrInvalidRole", err)
-	}
-	// role_id 不存在：拒绝。
-	missing := uuid.New()
-	if _, err := svc.AddMember(owner, tm.ID, uuid.New(), "", &missing); !errors.Is(err, ErrInvalidRole) {
-		t.Fatalf("missing role_id: err = %v, want ErrInvalidRole", err)
-	}
-	// 零值 UUID：拒绝。
-	if _, err := svc.AddMember(owner, tm.ID, uuid.New(), "", &uuid.Nil); !errors.Is(err, ErrInvalidRole) {
-		t.Fatalf("nil role_id: err = %v, want ErrInvalidRole", err)
+	// 零值用户拒绝。
+	if _, err := svc.AddMember(owner, tm.ID, uuid.Nil, RoleGuest); !errors.Is(err, ErrInvalidRole) {
+		t.Fatalf("nil user: err = %v, want ErrInvalidRole", err)
 	}
 }
 
@@ -185,17 +159,17 @@ func TestRemoveMemberAndAccessInvalidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.AddMember(owner, tm.ID, member, RoleEditor, nil); err != nil {
+	if _, err := svc.AddMember(owner, tm.ID, member, RoleMember); err != nil {
 		t.Fatal(err)
 	}
 	if ok, _ := svc.CanWrite(member, tm.ID); !ok {
-		t.Fatal("editor must be able to write before removal")
+		t.Fatal("member must be able to write before removal")
 	}
 	// owner 成员不可移除。
 	if err := svc.RemoveMember(owner, tm.ID, owner); !errors.Is(err, ErrOwnerMember) {
 		t.Fatalf("remove owner: err = %v, want ErrOwnerMember", err)
 	}
-	// 非 owner 不可管理。
+	// 普通成员不可管理。
 	if err := svc.RemoveMember(member, tm.ID, member); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("remove by non-owner: err = %v, want ErrForbidden", err)
 	}
@@ -214,6 +188,36 @@ func TestRemoveMemberAndAccessInvalidation(t *testing.T) {
 	}
 }
 
+// TestRemoveMemberAdminBoundary：admin 不可移除其他 admin（owner 边界）。
+func TestRemoveMemberAdminBoundary(t *testing.T) {
+	svc, _ := newTestService()
+	owner, admin, admin2, member := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	tm, _, err := svc.CreateTeam(owner, "team-admin-boundary", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range []struct {
+		u uuid.UUID
+		r string
+	}{{admin, RoleAdmin}, {admin2, RoleAdmin}, {member, RoleMember}} {
+		if _, err := svc.AddMember(owner, tm.ID, m.u, m.r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// admin 不可移除其他 admin。
+	if err := svc.RemoveMember(admin, tm.ID, admin2); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("admin removes admin: err = %v, want ErrForbidden", err)
+	}
+	// admin 可移除普通成员。
+	if err := svc.RemoveMember(admin, tm.ID, member); err != nil {
+		t.Fatalf("admin removes member: %v", err)
+	}
+	// owner 可移除 admin。
+	if err := svc.RemoveMember(owner, tm.ID, admin2); err != nil {
+		t.Fatalf("owner removes admin: %v", err)
+	}
+}
+
 func TestListMembersRequiresMembership(t *testing.T) {
 	svc, _ := newTestService()
 	owner, member, outsider := uuid.New(), uuid.New(), uuid.New()
@@ -221,7 +225,7 @@ func TestListMembersRequiresMembership(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.AddMember(owner, tm.ID, member, RoleViewer, nil); err != nil {
+	if _, err := svc.AddMember(owner, tm.ID, member, RoleGuest); err != nil {
 		t.Fatal(err)
 	}
 	members, err := svc.ListMembers(member, tm.ID)
@@ -229,7 +233,7 @@ func TestListMembersRequiresMembership(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(members) != 2 {
-		t.Fatalf("members = %d, want 2 (owner + viewer)", len(members))
+		t.Fatalf("members = %d, want 2 (owner + guest)", len(members))
 	}
 	if _, err := svc.ListMembers(outsider, tm.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("outsider list members: err = %v, want ErrNotFound", err)
@@ -239,43 +243,12 @@ func TestListMembersRequiresMembership(t *testing.T) {
 	}
 }
 
-func TestCanWriteRoleMatrix(t *testing.T) {
-	svc, _ := newTestService()
-	owner, editor, viewer, outsider := uuid.New(), uuid.New(), uuid.New(), uuid.New()
-	tm, _, err := svc.CreateTeam(owner, "team-e", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct {
-		user uuid.UUID
-		want bool
-	}{
-		{owner, true},
-		{editor, true},
-		{viewer, false},
-		{outsider, false},
-	} {
-		if tc.user == editor || tc.user == viewer {
-			role := RoleEditor
-			if tc.user == viewer {
-				role = RoleViewer
-			}
-			if _, err := svc.AddMember(owner, tm.ID, tc.user, role, nil); err != nil {
-				t.Fatal(err)
-			}
-		}
-		got, err := svc.CanWrite(tc.user, tm.ID)
-		if err != nil || got != tc.want {
-			t.Errorf("CanWrite(%v) = %v, %v; want %v", tc.user, got, err, tc.want)
-		}
-	}
-}
-
-// TestPermissionMatrix 覆盖设计 6.5 权限模型：系统角色映射、自定义角色
-// permissions 勾选、显式 deny 优先、角色行缺失 fail closed、非成员无权限。
+// TestPermissionMatrix 覆盖五级内置角色的固定权限矩阵（migration 037）：
+// owner/admin 全权限；member_share 读写删+分享；member 读写删；guest 只读；
+// 非成员（含已移除）无任何权限（fail closed）。
 func TestPermissionMatrix(t *testing.T) {
-	svc, repo := newTestService()
-	owner, editor, viewer, custom, denied, ghost, outsider := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	svc, _ := newTestService()
+	owner, admin, shareM, member, guest, outsider := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	tm, _, err := svc.CreateTeam(owner, "team-perm", "")
 	if err != nil {
 		t.Fatal(err)
@@ -284,54 +257,23 @@ func TestPermissionMatrix(t *testing.T) {
 		user uuid.UUID
 		role string
 	}{
-		{editor, RoleEditor}, {viewer, RoleViewer},
+		{admin, RoleAdmin}, {shareM, RoleMemberShare}, {member, RoleMember}, {guest, RoleGuest},
 	} {
-		if _, err := svc.AddMember(owner, tm.ID, m.user, m.role, nil); err != nil {
+		if _, err := svc.AddMember(owner, tm.ID, m.user, m.role); err != nil {
 			t.Fatal(err)
 		}
 	}
-	// 自定义角色：读/写/删/分享全勾。
-	full, err := svc.CreateRole(owner, tm.ID, "全能", map[string]any{PermRead: true, PermWrite: true, PermDelete: true, PermShare: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := svc.AddMember(owner, tm.ID, custom, "", &full.ID); err != nil {
-		t.Fatal(err)
-	}
-	// 自定义角色：允许写但显式 deny write（deny 优先于 allow）。
-	deniedRole, err := svc.CreateRole(owner, tm.ID, "受限", map[string]any{PermRead: true, PermWrite: true, "deny": []any{PermWrite}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := svc.AddMember(owner, tm.ID, denied, "", &deniedRole.ID); err != nil {
-		t.Fatal(err)
-	}
-	// ghost：绑定后被直接删除的角色行（fail closed 场景）。
-	ghostRole, err := svc.CreateRole(owner, tm.ID, "幽灵", map[string]any{PermRead: true, PermAdmin: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := svc.AddMember(owner, tm.ID, ghost, "", &ghostRole.ID); err != nil {
-		t.Fatal(err)
-	}
-	repo.DeleteRoleDirect(ghostRole.ID)
-
+	// 解散/转让仅 owner：Delete/TransferOwnership 的边界另行覆盖（owner 专属）。
 	cases := []struct {
 		name                       string
 		user                       uuid.UUID
 		read, write, delete, share bool
 	}{
-		// 系统角色：owner 全 true；editor 读/写/分享；viewer 仅读。
 		{"owner", owner, true, true, true, true},
-		{"editor", editor, true, true, false, true},
-		{"viewer", viewer, true, false, false, false},
-		// 自定义角色按 permissions JSON。
-		{"custom full", custom, true, true, true, true},
-		// deny 优先于 allow。
-		{"custom deny write", denied, true, false, false, false},
-		// 角色行缺失：fail closed（无任何权限）。
-		{"missing role row", ghost, false, false, false, false},
-		// 非成员：无任何权限。
+		{"admin", admin, true, true, true, true},
+		{"member_share", shareM, true, true, true, true},
+		{"member", member, true, true, true, false},
+		{"guest", guest, true, false, false, false},
 		{"outsider", outsider, false, false, false, false},
 	}
 	for _, tc := range cases {
@@ -353,150 +295,173 @@ func TestPermissionMatrix(t *testing.T) {
 				t.Errorf("%s Can%s = %v, want %v", tc.name, perm.action, got, perm.want)
 			}
 		}
+		// 管理权限（管成员/目录权限）：仅 owner/admin。
+		gotAdmin, _ := svc.CanAdmin(tc.user, tm.ID)
+		wantAdmin := tc.name == "owner" || tc.name == "admin"
+		if gotAdmin != wantAdmin {
+			t.Errorf("%s CanAdmin = %v, want %v", tc.name, gotAdmin, wantAdmin)
+		}
 	}
 }
 
-// TestUpdateMemberRole 覆盖成员改角色：系统↔自定义互转、owner 成员不可改、
-// 非 owner 拒绝、成员不存在 404、非法 role_id 拒绝。
+// TestUpdateMemberRole 覆盖五级角色改派：owner 成员不可改、admin 边界
+//（不可授 admin / 不可改其他 admin）、普通角色互转、成员不存在 404、
+// 非法角色拒绝。
 func TestUpdateMemberRole(t *testing.T) {
 	svc, _ := newTestService()
-	owner, member := uuid.New(), uuid.New()
+	owner, admin, member := uuid.New(), uuid.New(), uuid.New()
 	tm, _, err := svc.CreateTeam(owner, "team-upd", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.AddMember(owner, tm.ID, member, RoleViewer, nil); err != nil {
+	if _, err := svc.AddMember(owner, tm.ID, admin, RoleAdmin); err != nil {
 		t.Fatal(err)
 	}
-	role, err := svc.CreateRole(owner, tm.ID, "贡献者", map[string]any{PermRead: true, PermWrite: true})
+	if _, err := svc.AddMember(owner, tm.ID, member, RoleGuest); err != nil {
+		t.Fatal(err)
+	}
+	// guest → member：写权限随之生效。
+	m, err := svc.UpdateMemberRole(owner, tm.ID, member, RoleMember)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 系统角色 → 自定义角色。
-	m, err := svc.UpdateMemberRole(owner, tm.ID, member, "", &role.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if m.Role != RoleCustom || m.RoleID == nil || *m.RoleID != role.ID || m.RoleName != "贡献者" {
-		t.Fatalf("updated member = %+v", m)
+	if m.Role != RoleMember {
+		t.Fatalf("updated member = %+v, want member", m)
 	}
 	if ok, _ := svc.CanWrite(member, tm.ID); !ok {
-		t.Fatal("member with write-enabled custom role must be able to write")
+		t.Fatal("member must be able to write after role change")
 	}
-	// 自定义角色 → 系统角色（role_id 置空）。
-	if _, err := svc.UpdateMemberRole(owner, tm.ID, member, RoleViewer, nil); err != nil {
+	// member → guest：写权限随之失效。
+	if _, err := svc.UpdateMemberRole(owner, tm.ID, member, RoleGuest); err != nil {
 		t.Fatal(err)
 	}
 	if ok, _ := svc.CanWrite(member, tm.ID); ok {
-		t.Fatal("viewer must not be able to write")
+		t.Fatal("guest must not be able to write")
 	}
 	// owner 成员角色不可修改。
-	if _, err := svc.UpdateMemberRole(owner, tm.ID, owner, RoleViewer, nil); !errors.Is(err, ErrOwnerMember) {
+	if _, err := svc.UpdateMemberRole(owner, tm.ID, owner, RoleGuest); !errors.Is(err, ErrOwnerMember) {
 		t.Fatalf("update owner member: err = %v, want ErrOwnerMember", err)
 	}
-	// 非 owner 不可管理。
-	if _, err := svc.UpdateMemberRole(member, tm.ID, member, RoleEditor, nil); !errors.Is(err, ErrForbidden) {
-		t.Fatalf("update by non-owner: err = %v, want ErrForbidden", err)
+	// owner 角色不可经改派授予。
+	if _, err := svc.UpdateMemberRole(owner, tm.ID, member, RoleOwner); !errors.Is(err, ErrInvalidRole) {
+		t.Fatalf("assign owner via update: err = %v, want ErrInvalidRole", err)
+	}
+	// admin 不可授予 admin，也不可修改 owner 成员（owner 成员判定优先，
+	// 恒 ErrOwnerMember——owner 只能经转让产生/变更）。
+	if _, err := svc.UpdateMemberRole(admin, tm.ID, member, RoleAdmin); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("admin grants admin: err = %v, want ErrForbidden", err)
+	}
+	if _, err := svc.UpdateMemberRole(admin, tm.ID, owner, RoleGuest); !errors.Is(err, ErrOwnerMember) {
+		t.Fatalf("admin updates owner: err = %v, want ErrOwnerMember", err)
+	}
+	// 普通成员不可管理。
+	if _, err := svc.UpdateMemberRole(member, tm.ID, member, RoleAdmin); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("update by member: err = %v, want ErrForbidden", err)
 	}
 	// 成员不存在。
-	if _, err := svc.UpdateMemberRole(owner, tm.ID, uuid.New(), RoleViewer, nil); !errors.Is(err, ErrNotFound) {
+	if _, err := svc.UpdateMemberRole(owner, tm.ID, uuid.New(), RoleGuest); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing member: err = %v, want ErrNotFound", err)
 	}
-	// 非法 role_id（不属于本团队）。
-	if _, err := svc.UpdateMemberRole(owner, tm.ID, member, "", &uuid.Nil); !errors.Is(err, ErrInvalidRole) {
-		t.Fatalf("nil role_id: err = %v, want ErrInvalidRole", err)
+	// 非法角色。
+	if _, err := svc.UpdateMemberRole(owner, tm.ID, member, "editor"); !errors.Is(err, ErrInvalidRole) {
+		t.Fatalf("legacy role: err = %v, want ErrInvalidRole", err)
 	}
 }
 
-// TestDeleteRoleReferenceCheck 覆盖删除角色的成员引用检查与 member_count 统计。
-func TestDeleteRoleReferenceCheck(t *testing.T) {
+// TestTransferOwnership 覆盖所有权转让：仅 owner 可为、受让人须为成员、
+// 新 owner 角色置 owner、原 owner 降为 admin。
+func TestTransferOwnership(t *testing.T) {
+	svc, _ := newTestService()
+	owner, admin, outsider := uuid.New(), uuid.New(), uuid.New()
+	tm, _, err := svc.CreateTeam(owner, "team-transfer", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.AddMember(owner, tm.ID, admin, RoleAdmin); err != nil {
+		t.Fatal(err)
+	}
+	// 非 owner 不可转让。
+	if err := svc.TransferOwnership(admin, tm.ID, admin); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("transfer by admin: err = %v, want ErrForbidden", err)
+	}
+	// 受让人不是成员。
+	if err := svc.TransferOwnership(owner, tm.ID, outsider); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("transfer to outsider: err = %v, want ErrNotFound", err)
+	}
+	// 受让人为空/自身：拒绝。
+	if err := svc.TransferOwnership(owner, tm.ID, uuid.Nil); !errors.Is(err, ErrInvalidRole) {
+		t.Fatalf("transfer to nil: err = %v, want ErrInvalidRole", err)
+	}
+	if err := svc.TransferOwnership(owner, tm.ID, owner); !errors.Is(err, ErrInvalidRole) {
+		t.Fatalf("transfer to self: err = %v, want ErrInvalidRole", err)
+	}
+	// 正常转让。
+	if err := svc.TransferOwnership(owner, tm.ID, admin); err != nil {
+		t.Fatal(err)
+	}
+	after, err := svc.Get(tm.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.OwnerID != admin {
+		t.Fatalf("owner = %v, want %v", after.OwnerID, admin)
+	}
+	if role, _ := svc.Role(tm.ID, admin); role != RoleOwner {
+		t.Fatalf("new owner role = %q, want owner", role)
+	}
+	if role, _ := svc.Role(tm.ID, owner); role != RoleAdmin {
+		t.Fatalf("old owner role = %q, want admin", role)
+	}
+}
+
+// TestLeave 覆盖成员主动退出：owner 不可离开（须先转让/解散），普通成员可。
+func TestLeave(t *testing.T) {
 	svc, _ := newTestService()
 	owner, member := uuid.New(), uuid.New()
-	tm, _, err := svc.CreateTeam(owner, "team-role-del", "")
+	tm, _, err := svc.CreateTeam(owner, "team-leave", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	used, err := svc.CreateRole(owner, tm.ID, "在用", map[string]any{PermRead: true})
-	if err != nil {
+	if _, err := svc.AddMember(owner, tm.ID, member, RoleMemberShare); err != nil {
 		t.Fatal(err)
 	}
-	free, err := svc.CreateRole(owner, tm.ID, "闲置", map[string]any{PermRead: true, PermWrite: true})
-	if err != nil {
+	if err := svc.Leave(owner, tm.ID); !errors.Is(err, ErrOwnerMember) {
+		t.Fatalf("owner leaves: err = %v, want ErrOwnerMember", err)
+	}
+	if err := svc.Leave(member, tm.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.AddMember(owner, tm.ID, member, "", &used.ID); err != nil {
-		t.Fatal(err)
-	}
-	// 有成员引用：409（ErrRoleInUse）。
-	if err := svc.DeleteRole(owner, tm.ID, used.ID); !errors.Is(err, ErrRoleInUse) {
-		t.Fatalf("delete in-use role: err = %v, want ErrRoleInUse", err)
-	}
-	// 列表含 member_count。
-	roles, err := svc.Roles(owner, tm.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	counts := map[uuid.UUID]int64{}
-	for _, r := range roles {
-		counts[r.ID] = r.MemberCount
-	}
-	if counts[used.ID] != 1 {
-		t.Fatalf("used role member_count = %d, want 1", counts[used.ID])
-	}
-	if counts[free.ID] != 0 {
-		t.Fatalf("free role member_count = %d, want 0", counts[free.ID])
-	}
-	// 改派成员后可删除。
-	if _, err := svc.UpdateMemberRole(owner, tm.ID, member, RoleViewer, nil); err != nil {
-		t.Fatal(err)
-	}
-	if err := svc.DeleteRole(owner, tm.ID, used.ID); err != nil {
-		t.Fatal(err)
-	}
-	// 未引用角色直接删除成功。
-	if err := svc.DeleteRole(owner, tm.ID, free.ID); err != nil {
-		t.Fatal(err)
-	}
-	// 删除不存在的角色 404。
-	if err := svc.DeleteRole(owner, tm.ID, uuid.New()); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("missing role: err = %v, want ErrNotFound", err)
+	if role, _ := svc.Role(tm.ID, member); role != "" {
+		t.Fatalf("left member role = %q, want empty", role)
 	}
 }
 
-// TestValidatePermissions 覆盖 permissions JSON 结构校验（非法键/类型/deny 值）。
-func TestValidatePermissions(t *testing.T) {
-	valid := []map[string]any{
-		nil,
-		{},
-		{PermRead: true, PermWrite: false},
-		{PermRead: true, "deny": []any{PermWrite, PermShare}},
-	}
-	for _, p := range valid {
-		if err := ValidatePermissions(p); err != nil {
-			t.Errorf("ValidatePermissions(%v) = %v, want nil", p, err)
-		}
-	}
-	invalid := []map[string]any{
-		{"execute": true},          // 未知动作
-		{PermRead: "yes"},          // 非布尔
-		{"deny": "write"},          // deny 非数组
-		{"deny": []any{"execute"}}, // deny 含非法动作
-		{"deny": []any{42}},        // deny 含非字符串
-	}
-	for _, p := range invalid {
-		if err := ValidatePermissions(p); !errors.Is(err, ErrInvalidPermission) {
-			t.Errorf("ValidatePermissions(%v) = %v, want ErrInvalidPermission", p, err)
-		}
-	}
-	// 服务层创建/更新角色同样拒绝非法 permissions。
+// TestDeleteAndUpdateOwnerOnly：解散与改名仅 owner；admin 403。
+func TestDeleteAndUpdateOwnerOnly(t *testing.T) {
 	svc, _ := newTestService()
-	owner := uuid.New()
-	tm, _, err := svc.CreateTeam(owner, "team-perm-valid", "")
+	owner, admin := uuid.New(), uuid.New()
+	tm, _, err := svc.CreateTeam(owner, "team-owner-only", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.CreateRole(owner, tm.ID, "bad", map[string]any{"execute": true}); !errors.Is(err, ErrInvalidPermission) {
-		t.Fatalf("create role with invalid permissions: err = %v, want ErrInvalidPermission", err)
+	if _, err := svc.AddMember(owner, tm.ID, admin, RoleAdmin); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Delete(admin, tm.ID); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("dissolve by admin: err = %v, want ErrForbidden", err)
+	}
+	if err := svc.Update(admin, tm.ID, "新名字", ""); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("update by admin: err = %v, want ErrForbidden", err)
+	}
+	if err := svc.Update(owner, tm.ID, "新名字", "描述"); err != nil {
+		t.Fatalf("update by owner: %v", err)
+	}
+	if err := svc.Delete(owner, tm.ID); err != nil {
+		t.Fatalf("delete by owner: %v", err)
+	}
+	// 解散后不可见。
+	if out, _ := svc.ListTeams(owner); len(out) != 0 {
+		t.Fatalf("dissolved team still listed: %+v", out)
 	}
 }
 
@@ -511,7 +476,7 @@ func TestUserInAnyTeam(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.AddMember(owner, t1.ID, member, RoleViewer, nil); err != nil {
+	if _, err := svc.AddMember(owner, t1.ID, member, RoleGuest); err != nil {
 		t.Fatal(err)
 	}
 	if in, _ := svc.UserInAnyTeam(member, []uuid.UUID{t2.ID}); in {

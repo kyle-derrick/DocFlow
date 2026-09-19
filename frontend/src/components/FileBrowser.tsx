@@ -15,8 +15,10 @@
 // 点击改弹窗内嵌 iframe；office 文档弹窗内嵌 OnlyOffice 只读视图（与
 // 独立查看页一致，FileViewerDispatch 统一分发）；树点击文件经
 // fileOpenSignal 受控信号触发本组件弹窗（见 FolderTreeNav）。
-import { FormEvent, ReactNode, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { App as AntdApp, Button, Dropdown, Input, Menu, Modal as AntdModal, Select } from 'antd'
+import { FormEvent, ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
+import { App as AntdApp, Badge, Button, Dropdown, Input, Menu, Modal as AntdModal, Popover, Select } from 'antd'
+import type { DragEvent as ReactDragEvent } from 'react'
 import type { MenuProps } from 'antd'
 import {
   FileText,
@@ -26,59 +28,75 @@ import {
   List,
   MoreHorizontal,
   Plus,
-  Settings,
+  Search,
   Star,
+  Trash2,
   Upload,
 } from 'lucide-react'
 import {
   ApiError,
   BatchItemResult,
   EMPTY_DRAWIO_XML,
+  EMPTY_DFDOC_JSON,
   EMPTY_EXCALIDRAW_JSON,
   FileItem,
   FileQueryOptions,
   FileWithVersion,
-  OpenWithMap,
-  OpenWithOpener,
+  OpenWithPrefs,
   Tag,
+  Team,
   UploadPhase,
   addFileTag,
   batchMoveFiles,
   batchTrashFiles,
   createOfficeTemplate,
   createShare,
+  createShareBundle,
   createTag,
-  deleteOpenWith,
+  deleteFile,
   downloadBatchFiles,
   downloadFile,
   downloadFolderZip,
   drawioStatus,
   getFileMeta,
+  isDfdocFile,
   isDrawioFile,
   isExcalidrawFile,
   isHtmlFile,
   isOfficeFile,
+  isUploadAborted,
   listFileTags,
+  listFiles,
   listOpenWith,
   listTags,
+  listTeamFiles,
+  listTeams,
   onlyOfficeStatus,
   removeFileTag,
   encodePathSegments,
+  renameFile,
   resolveFileById,
   resolvePath,
   setFileStarred,
-  setOpenWith,
   summarizeBatchResults,
   unpackZip,
 } from '../api'
 import {
-  ALL_OPENERS,
+  allEditEntries,
+  allViewEntries,
+  builtinOpenWith,
+  editMethodLabel,
+  editOptionsFor,
+  effectiveOpenWithFor,
   extOf,
   isCodeFile,
-  openWithOptions,
-  openerLabel,
-  resolveOpener,
+  isTextEditableFile,
+  viewMethodLabel,
+  viewOptionsFor,
 } from '../openers'
+import DirPickerModal from './DirPickerModal'
+import type { DirPickerTarget, PickerSpace } from './DirPickerModal'
+import TrashModal from './TrashModal'
 import { useHotkeys } from '../useHotkeys'
 import { MessageKey, formatMessage, t, useLocale } from '../i18n'
 // 弹窗内嵌查看：复用独立查看页的按类型分发器（office/drawio/白板/
@@ -136,8 +154,15 @@ export function clampFixedMenu(el: HTMLElement, x: number, y: number): void {
 /**
  * 全站通用弹窗（antd Modal 薄封装，保持既有签名）：title/onClose/wide/
  * className/headExtra/children 与旧自写 Modal 一致，40+ 调用点零改动；
- * 视觉经 styles.css「antd Modal 适配」节对齐旧 .modal（含 modal-viewer
- * 加宽）。onClose 映射 onCancel（mask 点击 / Esc / 关闭按钮均触发）。
+ * 视觉经 styles.css「antd Modal 适配」节对齐旧 .modal。onClose 映射 onCancel
+ * （mask 点击 / Esc / 关闭按钮均触发）。
+ *
+ * 尺寸体系统一（以视口为参照）：
+ * - 普通表单弹窗 width=min(520px, 92vw)；wide=min(760px, 92vw)；
+ * - 查看弹窗（className 含 modal-viewer）width=min(1180px, 94vw)，body 定高
+ *   min(76vh, 760px) 内部滚动（内容 .preview-embed flex:1 撑满 → 内嵌查看器
+ *   高度链完整，浏览器不出现页面级滚动条）；
+ * - body overflow/maxHeight 统一经 styles prop 设置，删除各处零散高度 hack。
  */
 export function Modal({
   title,
@@ -156,12 +181,26 @@ export function Modal({
   headExtra?: ReactNode
   children: ReactNode
 }) {
+  const viewer = className?.split(/\s+/).includes('modal-viewer') ?? false
   return (
     <AntdModal
       open
       centered
       footer={null}
-      width={wide ? 760 : 420}
+      width={viewer ? 'min(1180px, 94vw)' : wide ? 'min(760px, 92vw)' : 'min(520px, 92vw)'}
+      styles={{
+        body: viewer
+          ? { overflow: 'auto', height: 'min(76vh, 760px)', maxHeight: 'min(76vh, 760px)' }
+          : { overflow: 'auto', maxHeight: 'calc(94vh - 160px)' },
+      }}
+      /* 弹窗内部布局定制经官方 classNames 通道注入自有类（styles.css
+         「antd Modal 薄封装」节），不再钩 .ant-modal-* 内部结构。 */
+      classNames={{
+        header: 'docflow-modal-header',
+        title: 'docflow-modal-title',
+        body: 'docflow-modal-body',
+        close: 'docflow-modal-close',
+      }}
       onCancel={onClose}
       title={
         headExtra ? (
@@ -238,7 +277,7 @@ export function promptViaModal(
   })
 }
 
-export const phaseText: Record<UploadPhase | 'error', string> = {
+export const phaseText: Record<UploadPhase | 'error' | 'canceled', string> = {
   creating: '创建会话…',
   uploading: '上传中…',
   completing: '提交处理…',
@@ -248,7 +287,23 @@ export const phaseText: Record<UploadPhase | 'error', string> = {
   quarantined: '已隔离',
   failed: '失败',
   error: '失败',
+  canceled: '已取消',
 }
+
+/** 上传任务行 phase：UploadPhase + 本地终态（error=失败 / canceled=用户取消）。 */
+type UploadRowPhase = UploadPhase | 'error' | 'canceled'
+
+/** 上传任务是否仍在进行（Badge 计数与「清空已完成」口径：非进行中即可清）。 */
+function uploadPhaseActive(p: UploadRowPhase): boolean {
+  return p !== 'available' && p !== 'error' && p !== 'canceled' && p !== 'quarantined' && p !== 'failed'
+}
+
+/**
+ * 树导航步进点击标记：FolderTreeNav 双击导航经 DOM click 逐段点击目录行，
+ * 网页目录行的用户点击语义是「网页预览弹窗」——程序化导航点击时由包装器
+ * 置位本标记，使该次点击表现为「进入目录」（见 openItem）。
+ */
+export const treeNavClick = { armed: false }
 
 /** 批量错误码 → 中文提示（与后端 openapi BatchResultItem.error_code 对应）。 */
 export const batchErrorText: Record<string, string> = {
@@ -272,7 +327,7 @@ export function describeBatchResults(results: BatchItemResult[]): string {
 interface UploadRow {
   key: number
   name: string
-  phase: UploadPhase | 'error'
+  phase: UploadRowPhase
   error?: string
 }
 
@@ -298,10 +353,9 @@ export function pathSegmentsOf(crumbs: Array<{ id: string | null; name: string }
   return crumbs.slice(1).map((c) => c.name)
 }
 
-/** 「编辑文本」入口的适用扩展名（md/markdown/txt）。 */
+/** 「编辑文本」入口的适用扩展名（全部文本类，见 openers.ts isTextEditableFile）。 */
 function isTextEditable(name: string): boolean {
-  const lower = name.toLowerCase()
-  return lower.endsWith('.md') || lower.endsWith('.markdown') || lower.endsWith('.txt')
+  return isTextEditableFile(name)
 }
 
 /** 「文本文件」新建：按用户自带扩展名推断 MIME（File 构造用）。 */
@@ -343,7 +397,7 @@ export interface FileBrowserProps {
   /** 提供时显示「新建文件夹」。 */
   createFolderFn?: (name: string, parentId: string | null) => Promise<unknown>
   /** 提供时显示「上传文件」。 */
-  uploadFn?: (file: File, parentId: string | null, onPhase: (phase: UploadPhase) => void) => Promise<unknown>
+  uploadFn?: (file: File, parentId: string | null, onPhase: (phase: UploadPhase) => void, signal?: AbortSignal) => Promise<unknown>
   /** 下载实现，缺省走个人文件端点。 */
   downloadFn?: (item: FileItem) => Promise<void>
   /** 每行追加操作按钮（分享 / 重命名 / 删除等由调用方渲染）。 */
@@ -351,8 +405,6 @@ export interface FileBrowserProps {
   emptyHint?: string
   /** 变化时重新加载当前目录（外部操作成功后刷新列表用）。 */
   reloadKey?: number
-  /** 提供时批量移动对话框含「根目录」选项（个人空间；空目标即个人根）。 */
-  rootTargetLabel?: string
   /**
    * 受控视图（全部/收藏/最近）：由 SpaceSwitcher 驱动（视图切换 UI 已上移到
    * 空间切换行，本组件顶栏不再渲染）；变化时同步内部筛选状态并重新查询。
@@ -375,6 +427,43 @@ export interface FileBrowserProps {
    * 已知路径）弹窗内 by-path 路由按其构建，避免面包屑不对应。
    */
   fileOpenSignal?: { fileId: string; seq: number; pathSegments?: string[] }
+  /**
+   * 工具带前缀槽：渲染在工具行最左（空间切换 + 全部/收藏/最近 Segmented，
+   * 见 SpaceSwitcher——v1.4 由独立行并入本行）。
+   */
+  toolbarPrefix?: ReactNode
+  /**
+   * 工具栏宿主元素（v1.5 顶栏化）：提供时工具行经 React portal 渲染到该
+   * 节点——FileBrowserWithTree 把它放在三栏布局上方的全宽顶条
+   *（.files-topbar），使工具栏横跨目录树/主区/右侧栏；未提供时回退为
+   * 本组件内部的常规渲染（弹窗等宿主缺省场景）。
+   */
+  toolbarHost?: HTMLElement | null
+  /**
+   * 复制/移动弹窗（DirPickerModal）的目录列表数据源：缺省复用 listItems。
+   * FileBrowserWithTree 会对 listItems 做导航感知包装（登记左侧树节点、
+   * 同步当前目录高亮）——弹窗内展开目录若走包装版会联动左侧主树。此
+   * prop 供包装器回传「未包装」的原始 listItems，保证弹窗目录树与主树
+   * 状态完全隔离（见 DirPickerModal）。
+   */
+  pickerListItems?: (parentId: string | null, opts?: FileQueryOptions) => Promise<DirListing>
+  /** 面包屑前缀槽（团队空间「← 返回团队列表」入口，不占独立行）。 */
+  crumbPrefix?: ReactNode
+  /**
+   * 条目级「分享」入口（右键菜单）：注入时显示（复用宿主页分享对话框）；
+   * 缺省不显示（团队空间暂无分享 UI）。
+   */
+  shareFn?: (item: FileItem) => void
+  /**
+   * 条目级「重命名」入口（右键菜单）：注入时用宿主页实现；缺省回退本组件
+   * 内置的通用重命名（renameFile + prompt 弹窗，个人/团队端点通用）。
+   */
+  renameFn?: (item: FileItem) => void
+  /**
+   * 条目级「删除」入口（右键菜单）：注入时用宿主页实现（如个人空间的撤销
+   * 横幅）；缺省回退本组件内置的通用删除确认（deleteFile，回收站可恢复）。
+   */
+  deleteFn?: (item: FileItem) => void
 }
 
 export default function FileBrowser({
@@ -386,12 +475,18 @@ export default function FileBrowser({
   rowActions,
   emptyHint,
   reloadKey,
-  rootTargetLabel,
   activeView,
   copyFn,
   fileMetaFn,
   ns,
   fileOpenSignal,
+  toolbarPrefix,
+  toolbarHost,
+  pickerListItems,
+  crumbPrefix,
+  shareFn,
+  renameFn,
+  deleteFn,
 }: FileBrowserProps) {
   const locale = useLocale()
   const msg = (key: MessageKey) => t(locale, key)
@@ -434,13 +529,19 @@ export default function FileBrowser({
   }, [ctxMenu])
   // 「＋ 新建」下拉开关。
   const [createMenuOpen, setCreateMenuOpen] = useState(false)
+  // 回收站弹窗（v1.5：整页路由删除，入口为工具栏按钮）。
+  const [trashOpen, setTrashOpen] = useState(false)
 
   // 右键菜单与新建下拉点击外部关闭（菜单内部动作在冒泡阶段完成后收口）。
+  // 注意：antd Dropdown 菜单面板挂在 body（.ant-dropdown），Menu 内联子菜单
+  // 弹层挂在 body（.ant-menu-submenu-popup，如「打开方式」二级）——两者都
+  // 不在触发按钮包裹层内，必须一并纳入豁免，否则 mousedown 先把 open 置
+  // false、面板卸载，子菜单项的 click 永远不触发（即「打开方式不可点」的根因）。
   useEffect(() => {
     if (!ctxMenu && !createMenuOpen) return
     const onDown = (e: MouseEvent) => {
       const el = e.target as HTMLElement | null
-      if (el?.closest?.('.ctx-menu, .create-menu-wrap, .split-btn')) return
+      if (el?.closest?.('.ctx-menu, .create-menu-wrap, .split-btn, .ant-dropdown, .ant-menu-submenu-popup')) return
       setCtxMenu(null)
       setCreateMenuOpen(false)
     }
@@ -476,12 +577,13 @@ export default function FileBrowser({
     })
   }, [viewMode, items, fileMetaFn])
 
-  // 卡片菜单点击外部关闭（点菜单按钮本身由其 onClick 处理开合切换）。
+  // 卡片菜单点击外部关闭（点菜单按钮本身由其 onClick 处理开合切换；
+  // 「打开方式」等内联子菜单弹层挂 body，一并豁免）。
   useEffect(() => {
     if (cardMenuFor === null) return
     const onDown = (e: MouseEvent) => {
       const el = e.target as HTMLElement | null
-      if (el?.closest?.('.file-card-menu, .card-menu-btn')) return
+      if (el?.closest?.('.file-card-menu, .card-menu-btn, .ant-menu-submenu-popup')) return
       setCardMenuFor(null)
     }
     document.addEventListener('mousedown', onDown)
@@ -492,13 +594,24 @@ export default function FileBrowser({
   const [batchError, setBatchError] = useState('')
   // zip 解包为目录树（POST /files/:id/unpack）：进行中条目 ID + 部分失败明细随结果展示。
   const [unpackBusyId, setUnpackBusyId] = useState<string | null>(null)
-  const [moveOpen, setMoveOpen] = useState(false)
-  const [moveTarget, setMoveTarget] = useState('')
-  const [moveManual, setMoveManual] = useState('')
-  const [moveError, setMoveError] = useState('')
 
-  // 批量分享：逐个创建公开分享后弹出链接列表。
+  // 复制 / 移动目标目录选择器（替代手输 UUID）：
+  // - mode=move：单条移动（menu）或批量移动（batch-bar）共用；
+  // - mode=copy：单文件复制（copyFn 注入时）。
+  const [dirPicker, setDirPicker] = useState<{ mode: 'copy' | 'move'; item: FileItem | null } | null>(null)
+  const [pickerBusy, setPickerBusy] = useState(false)
+  const [pickerError, setPickerError] = useState('')
+
+  // 批量分享（v1.6：打包一个链接——多选 ≥2 项创建目录式打包分享；单项
+  // 回退普通分享）；选项与单项分享创建对齐（权限/有效期/次数/密码/水印）。
+  const [batchShareOpen, setBatchShareOpen] = useState(false)
   const [batchShareBusy, setBatchShareBusy] = useState(false)
+  const [batchShareError, setBatchShareError] = useState('')
+  const [batchSharePermission, setBatchSharePermission] = useState<'view' | 'download'>('download')
+  const [batchShareHours, setBatchShareHours] = useState('0')
+  const [batchShareMax, setBatchShareMax] = useState('')
+  const [batchSharePassword, setBatchSharePassword] = useState('')
+  const [batchShareWatermark, setBatchShareWatermark] = useState(true)
   const [shareLinks, setShareLinks] = useState<Array<{ name: string; url: string }>>([])
   const [shareListOpen, setShareListOpen] = useState(false)
   const [copiedShareIdx, setCopiedShareIdx] = useState(-1)
@@ -509,18 +622,34 @@ export default function FileBrowser({
   const [batchTagBusy, setBatchTagBusy] = useState(false)
   const [batchTagError, setBatchTagError] = useState('')
 
-  // 行内复制：目标目录 UUID 输入，留空复制到源目录。
-  const [copyTarget, setCopyTarget] = useState<FileItem | null>(null)
-  const [copyParent, setCopyParent] = useState('')
-  const [copyBusy, setCopyBusy] = useState(false)
-  const [copyError, setCopyError] = useState('')
-
   // 行内标签管理。
   const [tagModalTarget, setTagModalTarget] = useState<FileItem | null>(null)
   const [tagModalFileTagIds, setTagModalFileTagIds] = useState<Set<string>>(new Set())
   const [tagModalNewName, setTagModalNewName] = useState('')
   const [tagModalError, setTagModalError] = useState('')
   const [tagModalBusy, setTagModalBusy] = useState(false)
+
+  // 条目属性弹窗（右键菜单「属性」，文件与目录通用）：元数据惰性拉取
+  //（大小/创建时间列表接口不回，经 fileMetaFn/getFileMeta 补齐）。
+  const [propsTarget, setPropsTarget] = useState<FileItem | null>(null)
+  const [propsMeta, setPropsMeta] = useState<FileWithVersion | null>(null)
+  const [propsLoading, setPropsLoading] = useState(false)
+  const [propsError, setPropsError] = useState('')
+
+  const openProps = async (item: FileItem) => {
+    setPropsTarget(item)
+    setPropsMeta(null)
+    setPropsError('')
+    setPropsLoading(true)
+    try {
+      const m = await (fileMetaFn ?? getFileMeta)(item.id)
+      setPropsMeta(m)
+    } catch (err) {
+      setPropsError(err instanceof Error ? err.message : '加载属性失败')
+    } finally {
+      setPropsLoading(false)
+    }
+  }
 
   // ONLYOFFICE 集成探测（会话级缓存）：启用且为 office 文档时文件行显示「编辑」。
   const [ooEnabled, setOoEnabled] = useState(false)
@@ -547,14 +676,8 @@ export default function FileBrowser({
     }
   }, [])
 
-  // ---- 默认打开方式偏好（/me/open-with）：初始化加载；保存/删除后即时更新本地映射。 ----
-  const [openWith, setOpenWithMap] = useState<OpenWithMap>({})
-  const [openWithMgrOpen, setOpenWithMgrOpen] = useState(false)
-  const [openWithMgrError, setOpenWithMgrError] = useState('')
-  // 管理弹窗「新增偏好」行：扩展名输入 + 打开方式下拉。
-  const [mgrNewExt, setMgrNewExt] = useState('')
-  const [mgrNewOpener, setMgrNewOpener] = useState<OpenWithOpener>('text')
-  const [mgrAdding, setMgrAdding] = useState(false)
+  // ---- 默认打开方式偏好（/me/open-with）：初始化加载（管理入口在设置页）。 ----
+  const [openWith, setOpenWithMap] = useState<OpenWithPrefs>({})
   useEffect(() => {
     let alive = true
     void listOpenWith()
@@ -584,7 +707,7 @@ export default function FileBrowser({
   const [folderOpen, setFolderOpen] = useState(false)
   const [folderName, setFolderName] = useState('')
   const [folderError, setFolderError] = useState('')
-  const [createKind, setCreateKind] = useState<'md' | 'textfile' | 'drawio' | 'whiteboard' | 'word' | 'spreadsheet' | 'presentation' | null>(null)
+  const [createKind, setCreateKind] = useState<'md' | 'dfdoc' | 'textfile' | 'drawio' | 'whiteboard' | 'word' | 'spreadsheet' | 'presentation' | null>(null)
   const [createName, setCreateName] = useState('')
   const [createError, setCreateError] = useState('')
 
@@ -598,9 +721,22 @@ export default function FileBrowser({
   const [uploads, setUploads] = useState<UploadRow[]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
   const uploadKey = useRef(0)
+  // 上传任务面板（v1.6：浮条改工具栏按钮 + 弹窗；Badge 显示进行中数量）。
+  const [uploadPanelOpen, setUploadPanelOpen] = useState(false)
+  // 上传取消（v1.6）：进行中任务的 AbortController（key → controller）与
+  // 「开始前即被取消」的 key 集合（顺序队列里尚未轮到的文件直接跳过）。
+  const uploadAbortRef = useRef(new Map<number, AbortController>())
+  const uploadCancelReqRef = useRef(new Set<number>())
+
+  // ---- 拖拽上传（v1.6）：拖文件/文件夹到文件管理区 → 上传到当前目录 ----
+  // webkitGetAsEntry 递归展开目录树；悬停高亮 drop zone（计数器法防子元素闪烁）。
+  const [dropActive, setDropActive] = useState(false)
+  const dragDepthRef = useRef(0)
 
   const currentParent = crumbs[crumbs.length - 1].id
   const currentFolderId = crumbs[crumbs.length - 1].folderId
+  // 窄屏搜索 Popover 开合（<1280px 目录搜索收窄为图标按钮，见 toolbar）。
+  const [searchPopOpen, setSearchPopOpen] = useState(false)
   const visibleItems = directoryQuery.trim()
     ? items.filter((item) => item.name.toLocaleLowerCase().includes(directoryQuery.trim().toLocaleLowerCase()))
     : items
@@ -611,6 +747,9 @@ export default function FileBrowser({
     recent: recentView,
     sort: sortKey,
     order: sortOrder,
+    // 拉满 limit（后端钳制 1000）：目录树与列表共用该查询结果，默认 100
+    // 会截断多子项目录（树 caret 误判「空」的根因，见 FolderTreeNav）。
+    limit: 1000,
   })
 
   const refreshTags = () => {
@@ -678,12 +817,6 @@ export default function FileBrowser({
     void load(crumbs[index].id)
   }
 
-  const clearFilters = () => {
-    setTagFilter('')
-    setStarredFilter('')
-    setRecentView(false)
-  }
-
   // 表头排序：点击已激活键翻转方向；切换键时取该键默认方向
   //（名称升序；修改时间/大小默认降序 = 最新/最大优先）。
   const toggleSort = (key: 'name' | 'updated_at' | 'size') => {
@@ -727,52 +860,142 @@ export default function FileBrowser({
     void load(currentParent)
   }
 
-  // ---- 批量移动 ----
+  // ---- 移动 / 复制（DirPickerModal 目标目录选择器） ----
 
-  // 候选目标：根（个人）、面包屑祖先、当前目录的子目录（排除被选中的目录自身）。
-  const moveCandidates: { id: string; label: string }[] = []
-  if (rootTargetLabel) moveCandidates.push({ id: '', label: rootTargetLabel })
-  crumbs.slice(0, -1).forEach((c) => {
-    if (c.folderId) moveCandidates.push({ id: c.folderId, label: c.name })
-  })
-  items.forEach((item) => {
-    if (item.type === 'folder' && !selected.has(item.id)) moveCandidates.push({ id: item.id, label: `当前目录 / ${item.name}` })
-  })
-  const uniqueMoveCandidates = moveCandidates.filter((c, i) => moveCandidates.findIndex((x) => x.id === c.id) === i)
-
-  const openMoveDialog = () => {
-    setMoveTarget(uniqueMoveCandidates[0]?.id ?? '')
-    setMoveManual('')
-    setMoveError('')
-    setMoveOpen(true)
+  /** 打开目录选择器：单条移动（item 非空）或批量移动（item=null，作用于选中集）。
+   * 每次打开都刷新团队列表（挂载后新建的团队立即可选为跨空间目标）。 */
+  const refreshPickerTeams = () => {
+    void listTeams()
+      .then(setPickerTeams)
+      .catch(() => {})
   }
 
-  const handleBatchMove = async (e: FormEvent) => {
-    e.preventDefault()
-    if (selectedIds.length === 0) return
-    const manual = moveManual.trim()
-    let target = moveTarget
-    if (manual) {
-      if (!/^[0-9a-fA-F-]{36}$/.test(manual)) {
-        setMoveError('目标目录 UUID 格式不正确')
-        return
-      }
-      target = manual
+  const openMovePicker = (item: FileItem | null) => {
+    setPickerError('')
+    refreshPickerTeams()
+    setDirPicker({ mode: 'move', item })
+  }
+
+  /** 打开目录选择器：复制（单条 copyFn；批量 copyFn 逐项循环，目录同样
+   * 支持子树复制）。 */
+  const openCopyPicker = (item: FileItem | null) => {
+    if (!copyFn) return
+    setPickerError('')
+    refreshPickerTeams()
+    setDirPicker({ mode: 'copy', item })
+  }
+
+  /** 目录选择器数据源：优先注入的 pickerListItems（未被树导航包装的原始
+   * 版本，保证弹窗展开目录不联动左侧主树），缺省复用注入的 listItems
+   *（返回全量列表，弹窗内过滤目录）。 */
+  const listChildrenForPicker = useCallback(
+    async (parentId: string | null): Promise<FileItem[]> => {
+      const { items } = await (pickerListItems ?? listItems)(parentId)
+      return items
+    },
+    [pickerListItems, listItems],
+  )
+
+  // ---- 复制/移动目标空间（v1.6 跨空间）：当前空间 + 个人空间 + 我的团队 ----
+  // 后端 batch/move 与 copy 均按目标目录继承作用域（个人↔团队）并做写权限
+  // 校验，target_parent_id 指向其他空间目录即可跨 root。团队列表惰性加载；
+  // 仅有当前一个空间时不显示空间切换（回退单空间模式）。
+  const [pickerTeams, setPickerTeams] = useState<Team[]>([])
+  useEffect(() => {
+    let alive = true
+    void listTeams()
+      .then((ts) => {
+        if (alive) setPickerTeams(ts)
+      })
+      .catch(() => {
+        /* 团队列表不可用：仅当前空间（跨空间入口隐藏） */
+      })
+    return () => {
+      alive = false
     }
-    if (!target && !rootTargetLabel) {
-      setMoveError('请选择或输入目标目录')
-      return
+  }, [])
+
+  const pickerSpaces = useMemo<PickerSpace[]>(() => {
+    const zh = locale === 'zh-CN'
+    const currentNsPersonal = !ns || ns.type === 'personal'
+    // 当前空间为团队时，current 根经 listTeamFiles 响应 parent_id 解析
+    //（空团队根也能拿到 UUID；个人根留 ''，batch/move 缺省即个人根）。
+    const currentResolveRoot = !currentNsPersonal && ns
+      ? async () => (await listTeamFiles(ns.scope, null)).parent_id ?? ''
+      : undefined
+    const out: PickerSpace[] = [{
+      key: 'current',
+      label: rootLabel,
+      listChildren: (pid) => listChildrenForPicker(pid),
+      resolveRootId: currentResolveRoot,
+    }]
+    if (!currentNsPersonal) {
+      out.push({
+        key: 'personal',
+        label: zh ? '我的文件（个人空间）' : 'My files (personal)',
+        listChildren: async (pid) => listFiles(pid),
+      })
     }
-    setBatchBusy(true)
-    setMoveError('')
+    for (const t of pickerTeams) {
+      if (ns?.type === 'team' && ns.scope === t.id) continue
+      out.push({
+        key: `team:${t.id}`,
+        label: `${t.name}（${zh ? '团队' : 'team'}）`,
+        listChildren: async (pid) => (await listTeamFiles(t.id, pid)).files ?? [],
+        // 空团队根也须能定位根 UUID（batch/move 的 '' 缺省=个人根，会静默移错空间）。
+        resolveRootId: async () => (await listTeamFiles(t.id, null)).parent_id ?? '',
+      })
+    }
+    return out
+  }, [locale, ns, rootLabel, pickerTeams, listChildrenForPicker])
+
+  /** 选择器确认：移动走 batch/move（单条/批量同端点，部分成功语义）；复制走
+   * copyFn（单条直调；批量逐项循环收集部分失败——目录子树复制由后端
+   * CopyFolder 支持，目标可为跨空间目录）。 */
+  const handleDirPickerConfirm = async (target: DirPickerTarget) => {
+    if (!dirPicker) return
+    setPickerBusy(true)
+    setPickerError('')
     try {
-      const results = await batchMoveFiles(selectedIds, target)
-      setMoveOpen(false)
-      finishBatch(results)
+      if (dirPicker.mode === 'move') {
+        // 单条移动：目标可为其父目录等；批量移动作用于当前选中集。
+        const ids = dirPicker.item ? [dirPicker.item.id] : selectedIds
+        if (ids.length === 0) return
+        const results = await batchMoveFiles(ids, target.id)
+        setDirPicker(null)
+        finishBatch(results)
+      } else {
+        if (!copyFn) return
+        const ids = dirPicker.item ? [dirPicker.item.id] : selectedIds
+        if (ids.length === 0) return
+        // 根目录为空时无法从子项 parent_id 探测根 UUID（copy 端点要求显式
+        // parent_id，无 ''=根 的便捷语义），给出可读错误而非后端 400。
+        if (!target.id) {
+          setPickerError(locale === 'zh-CN' ? '目标根目录为空，无法确定目录 ID；请先在目标根目录创建任意文件/目录' : 'Cannot resolve the empty target root folder ID; create any item under it first')
+          return
+        }
+        const failures: string[] = []
+        for (const id of ids) {
+          try {
+            await copyFn(id, target.id)
+          } catch (err) {
+            failures.push(`${id.slice(0, 8)}…：${writeErrorText(err, msg('fileCopyFailed'))}`)
+          }
+        }
+        setDirPicker(null)
+        if (failures.length > 0) {
+          setBatchNotice('')
+          setBatchError(`复制部分失败（${ids.length - failures.length}/${ids.length} 成功）：${failures.join('；')}`)
+        } else {
+          setBatchError('')
+          setBatchNotice(msg('copyOk'))
+        }
+        await load(currentParent)
+      }
     } catch (err) {
-      setMoveError(writeErrorText(err, '移动失败'))
+      setPickerError(writeErrorText(err, dirPicker.mode === 'move' ? '移动失败' : msg('fileCopyFailed')))
     } finally {
-      setBatchBusy(false)
+      setPickerBusy(false)
     }
   }
 
@@ -816,35 +1039,64 @@ export default function FileBrowser({
     }
   }
 
-  // ---- 批量分享（逐个创建公开分享，完成后弹链接列表；文件与目录均可） ----
+  // ---- 批量分享（v1.6：打包一个链接）----
+  // 多选 ≥2 项 → 创建目录式「打包分享」（后端 share_files，一个 /s/<token>
+  // 链接展示全部选中项，可逐项预览/下载或整包 zip）；单项选中 → 回退普通
+  // 公开分享。选项（权限/有效期/次数/密码/水印）与单项分享创建对齐。
 
-  const handleBatchShare = async () => {
-    const targets = items.filter((it) => selected.has(it.id))
-    if (targets.length === 0) {
+  const openBatchShareDialog = () => {
+    if (selectedIds.length === 0) {
       setBatchError(msg('batchShareEmpty'))
       return
     }
-    setBatchShareBusy(true)
-    setBatchError('')
-    setBatchNotice('')
-    const links: Array<{ name: string; url: string }> = []
-    let failed = 0
-    for (const f of targets) {
-      try {
-        const created = await createShare({ fileId: f.id, permission: 'download', visibility: 'public' })
-        if (created.token) links.push({ name: f.name, url: `${window.location.origin}/s/${created.token}` })
-        else failed++
-      } catch {
-        failed++
-      }
+    setBatchSharePermission('download')
+    setBatchShareHours('0')
+    setBatchShareMax('')
+    setBatchSharePassword('')
+    setBatchShareWatermark(true)
+    setBatchShareError('')
+    setBatchShareOpen(true)
+  }
+
+  const handleBatchShareCreate = async (e: FormEvent) => {
+    e.preventDefault()
+    const ids = selectedIds
+    if (ids.length === 0 || batchShareBusy) return
+    const pwd = batchSharePassword.trim()
+    if (pwd && (pwd.length < 4 || pwd.length > 64)) {
+      setBatchShareError('访问密码须为 4-64 个字符')
+      return
     }
-    setBatchShareBusy(false)
-    if (failed > 0) setBatchError(formatMessage(msg('batchSharePartial'), { ok: links.length, fail: failed }))
-    else setBatchNotice(formatMessage(msg('batchShareDone'), { n: links.length }))
-    if (links.length > 0) {
-      setShareLinks(links)
-      setCopiedShareIdx(-1)
-      setShareListOpen(true)
+    setBatchShareBusy(true)
+    setBatchShareError('')
+    try {
+      const opts = {
+        permission: batchSharePermission,
+        expiresInHours: Number(batchShareHours) || 0,
+        maxDownloads: batchShareMax.trim() === '' ? undefined : Number(batchShareMax),
+        password: pwd || undefined,
+        watermarkEnabled: batchShareWatermark,
+      }
+      const created = ids.length === 1
+        ? await createShare({ fileId: ids[0], visibility: 'public', ...opts })
+        : await createShareBundle({ fileIds: ids, ...opts })
+      const name = ids.length === 1
+        ? (items.find((it) => it.id === ids[0])?.name ?? '分享')
+        : `打包分享（${ids.length} 项）`
+      if (created.token) {
+        setShareLinks([{ name, url: `${window.location.origin}/s/${created.token}` }])
+        setCopiedShareIdx(-1)
+        setBatchShareOpen(false)
+        setShareListOpen(true)
+        setBatchError('')
+        setBatchNotice(ids.length === 1 ? '分享链接已创建' : `已创建打包分享链接（${ids.length} 项）`)
+      } else {
+        setBatchShareError('创建分享失败：未返回令牌')
+      }
+    } catch (err) {
+      setBatchShareError(err instanceof Error ? err.message : '创建分享失败')
+    } finally {
+      setBatchShareBusy(false)
     }
   }
 
@@ -920,43 +1172,6 @@ export default function FileBrowser({
     }
     setBatchNotice(formatMessage(target ? msg('batchStarOk') : msg('batchUnstarOk'), { n: selectedIds.length }))
     void load(currentParent)
-  }
-
-  // ---- 行内复制（目标目录 UUID 可选，留空复制到源目录） ----
-
-  const openCopyDialog = (item: FileItem) => {
-    setCopyTarget(item)
-    setCopyParent('')
-    setCopyError('')
-  }
-
-  const handleCopy = async (e: FormEvent) => {
-    e.preventDefault()
-    if (!copyTarget || !copyFn) return
-    const manual = copyParent.trim()
-    if (manual && !/^[0-9a-fA-F-]{36}$/.test(manual)) {
-      setCopyError(msg('uuidInvalid'))
-      return
-    }
-    const parent = manual || copyTarget.parent_id || ''
-    if (!parent) {
-      setCopyError(msg('uuidInvalid'))
-      return
-    }
-    setCopyBusy(true)
-    setCopyError('')
-    try {
-      await copyFn(copyTarget.id, parent)
-      setCopyTarget(null)
-      setCopyParent('')
-      setBatchError('')
-      setBatchNotice(msg('copyOk'))
-      await load(currentParent)
-    } catch (err) {
-      setCopyError(writeErrorText(err, msg('fileCopyFailed')))
-    } finally {
-      setCopyBusy(false)
-    }
   }
 
   // ---- 星标 ----
@@ -1114,14 +1329,19 @@ export default function FileBrowser({
   /**
    * 网页目录弹窗内嵌查看（默认点击行为）：resolve 目录入口 raw_url 后
    * 复用 previewTarget 机制弹窗，内容渲染 sandbox iframe（菜单保留
-   * 「作为网页打开（新窗口）」入口）。
+   * 「作为网页打开（新窗口）」入口）。fallbackToFolder：目录名启发式
+   *（名称含「网页」）触发但实际无 index.html 时静默回退为进入目录。
    */
-  const openWebFolderPreview = async (item: FileItem) => {
+  const openWebFolderPreview = async (item: FileItem, fallbackToFolder = false) => {
     const segments = folderSegmentsOf(item)
     if (!segments) return
     setError('')
     const url = await resolveWebFolderUrl(segments)
     if (!url) {
+      if (fallbackToFolder) {
+        openFolder(item)
+        return
+      }
       setError('该目录没有 index.html')
       return
     }
@@ -1197,22 +1417,66 @@ export default function FileBrowser({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fileOpenSignal])
 
+  // ---- 受控上传队列（v1.6 取消）：文件选择 / 拖拽两条队列逐文件串行，
+  //      每文件一条任务行；取消 = 排队中直接标记跳过 / 进行中 abort 传输。 ----
+
+  /** 排队中的任务在开始前检查取消请求：命中则行标记「已取消」并返回 true。 */
+  const skipCanceledRow = (key: number): boolean => {
+    if (!uploadCancelReqRef.current.has(key)) return false
+    setUploads((prev) => prev.map((r) => (r.key === key ? { ...r, phase: 'canceled', error: undefined } : r)))
+    return true
+  }
+
+  /** 单文件受控上传：登记 AbortController、驱动行内 phase；失败归类
+   *（取消 → canceled，其余 → error 中文文案）。返回 ok=成功 / canceled=用户取消 / error=失败。 */
+  const runTrackedUpload = async (file: File, parentId: string | null, key: number): Promise<'ok' | 'canceled' | 'error'> => {
+    if (!uploadFn) return 'error'
+    if (skipCanceledRow(key)) return 'canceled'
+    const ctrl = new AbortController()
+    uploadAbortRef.current.set(key, ctrl)
+    try {
+      await uploadFn(file, parentId, (phase) => {
+        setUploads((prev) => prev.map((r) => (r.key === key ? { ...r, phase } : r)))
+      }, ctrl.signal)
+      return 'ok'
+    } catch (err) {
+      const canceled = isUploadAborted(err) || uploadCancelReqRef.current.has(key)
+      setUploads((prev) =>
+        prev.map((r) =>
+          r.key === key
+            ? (canceled
+              ? { ...r, phase: 'canceled', error: undefined }
+              : { ...r, phase: 'error', error: writeErrorText(err, '上传失败') })
+            : r,
+        ),
+      )
+      return canceled ? 'canceled' : 'error'
+    } finally {
+      uploadAbortRef.current.delete(key)
+      uploadCancelReqRef.current.delete(key)
+    }
+  }
+
+  /** 取消上传任务（面板行按钮）：进行中 → abort（api 层抛 AbortError）；
+   *  排队中（顺序队列未轮到）→ 直接标记「已取消」，轮到时跳过。 */
+  const cancelUploadRow = (key: number) => {
+    uploadCancelReqRef.current.add(key)
+    const ctrl = uploadAbortRef.current.get(key)
+    if (ctrl) {
+      ctrl.abort()
+      return
+    }
+    setUploads((prev) =>
+      prev.map((r) => (r.key === key && uploadPhaseActive(r.phase) ? { ...r, phase: 'canceled', error: undefined } : r)),
+    )
+  }
+
   const handleFilesPicked = async (files: FileList | null) => {
     if (!uploadFn || !files || files.length === 0) return
     for (const file of Array.from(files)) {
       const key = ++uploadKey.current
       setUploads((prev) => [...prev, { key, name: file.name, phase: 'creating' }])
-      try {
-        await uploadFn(file, currentFolderId, (phase) => {
-          setUploads((prev) => prev.map((r) => (r.key === key ? { ...r, phase } : r)))
-        })
-      } catch (err) {
-        setUploads((prev) =>
-          prev.map((r) =>
-            r.key === key ? { ...r, phase: 'error', error: writeErrorText(err, '上传失败') } : r,
-          ),
-        )
-      }
+      await runTrackedUpload(file, currentFolderId, key)
     }
     if (fileInputRef.current) fileInputRef.current.value = ''
     await load(currentParent)
@@ -1220,11 +1484,13 @@ export default function FileBrowser({
 
   const [docCreating, setDocCreating] = useState(false)
 
-  // 新建项规格：md（Markdown/富文本）、textfile（文本文件合一：TXT/代码/
-  // HTML 由用户填写的扩展名决定）、drawio、白板与 office 模板；
-  // XMind 已移除（前端仅解析查看、不支持编辑，空白创建价值低）。
+  // 新建项规格：md（Markdown 文档）、dfrt（富文本文档 .dfrt，Tiptap JSON；
+  // kind 键名 dfdoc 为历史命名，路由 /dfdoc 同名复用）、textfile（文本文件
+  // 合一：TXT/代码/HTML 由用户填写的扩展名决定）、drawio、白板与 office
+  // 模板；XMind 已移除（前端仅解析查看、不支持编辑，空白创建价值低）。
   const createSpec = createKind ? {
-    md: { label: 'Markdown / 富文本', ext: '.md', content: '# 新文档\n', mime: 'text/markdown', route: 'markdown' },
+    md: { label: 'Markdown 文档', ext: '.md', content: '# 新文档\n', mime: 'text/markdown', route: 'markdown' },
+    dfdoc: { label: '富文本文档', ext: '.dfrt', content: EMPTY_DFDOC_JSON, mime: 'application/json', route: 'dfdoc' },
     // 「文本文件」：扩展名由用户自带（默认建议 untitled.txt），MIME 与
     // 创建后路由按扩展名推断（见 TEXT_FILE_MIME / textFileRoute）。
     textfile: { label: '文本文件', ext: '', content: '', mime: '', route: '' },
@@ -1237,7 +1503,7 @@ export default function FileBrowser({
 
   const beginNamedCreate = (kind: NonNullable<typeof createKind>) => {
     const defaults: Record<NonNullable<typeof createKind>, string> = {
-      md: '新文档.md', textfile: 'untitled.txt', drawio: '新图表.drawio',
+      md: '新文档.md', dfdoc: '新文档.dfrt', textfile: 'untitled.txt', drawio: '新图表.drawio',
       whiteboard: '新白板.excalidraw', word: '新文档.docx',
       spreadsheet: '新表格.xlsx', presentation: '新演示文稿.pptx',
     }
@@ -1322,12 +1588,12 @@ export default function FileBrowser({
       if (selected.size > 0 && !batchBusy) void handleBatchTrash()
     },
     Escape: () => {
-      if (ctxMenu) {
-        setCtxMenu(null)
+      if (trashOpen) {
+        // antd Modal 自身响应 Esc 关闭；此处拦截避免同时清空列表选择。
         return
       }
-      if (openWithMgrOpen) {
-        setOpenWithMgrOpen(false)
+      if (ctxMenu) {
+        setCtxMenu(null)
         return
       }
       if (createMenuOpen) {
@@ -1336,6 +1602,14 @@ export default function FileBrowser({
       }
       if (cardMenuFor) {
         setCardMenuFor(null)
+        return
+      }
+      if (batchShareOpen) {
+        setBatchShareOpen(false)
+        return
+      }
+      if (uploadPanelOpen) {
+        setUploadPanelOpen(false)
         return
       }
       if (previewTarget) {
@@ -1350,16 +1624,16 @@ export default function FileBrowser({
         setBatchTagOpen(false)
         return
       }
-      if (copyTarget) {
-        setCopyTarget(null)
+      if (dirPicker) {
+        setDirPicker(null)
         return
       }
       if (tagModalTarget) {
         setTagModalTarget(null)
         return
       }
-      if (moveOpen) {
-        setMoveOpen(false)
+      if (propsTarget) {
+        setPropsTarget(null)
         return
       }
       if (folderOpen) {
@@ -1372,83 +1646,37 @@ export default function FileBrowser({
 
   // 集成编辑/查看页统一在新窗口打开（独立窗口便于与文件列表并行操作，
   // 编辑器自身带「返回」：window.open 打开的窗口可直接关闭）。
-  const openEditorWindow = (path: string) => {
+  const openEditorWindow = (path: string, openMethod?: string) => {
     const url = new URL(path, window.location.origin)
+    if (openMethod) url.searchParams.set('open', openMethod)
     url.searchParams.set('returnTo', `${window.location.pathname}${window.location.search}`)
     window.open(`${url.pathname}${url.search}`, '_blank', 'noopener')
   }
 
-  // ---- 默认打开方式：偏好（按 ext）优先，未配置按文件类型自动选择。 ----
+  // ---- 默认打开方式分发（openers.ts 枚举体系） ----
 
-  const openFileWith = (item: FileItem, opener: OpenWithOpener) => {
-    // by-path 优先：编辑类 opener 统一 /edit/by-path（按扩展名分发编辑器），
-    // 其余走查看；office/drawio 集成未启用时回落查看。
-    const wantsEdit = opener !== 'default' && opener !== 'web'
-    const prefix = wantsEdit && !(opener === 'office' && !ooEnabled) && !(opener === 'drawio' && !drawioEnabled) ? 'edit' : 'view'
-    openEditorWindow(routeFor(prefix, item))
-  }
-  /** 「打开方式」选择：PUT 保存为默认（即时生效，失败提示但不阻断）并以该方式打开。 */
-  const handleOpenWithChoice = async (item: FileItem, opener: OpenWithOpener) => {
-    const ext = extOf(item.name)
-    if (ext) {
-      try {
-        await setOpenWith(ext, opener)
-        setOpenWithMap((prev) => ({ ...prev, [ext]: opener }))
-      } catch (err) {
-        setError(err instanceof Error ? err.message : '保存默认打开方式失败')
-      }
-    }
-    openFileWith(item, opener)
-  }
+  /** 集成可用性对方式的门槛：office 须 OnlyOffice、drawio 须 draw.io embed。 */
+  const methodEnabled = (m: string): boolean =>
+    !(m === 'office' && !ooEnabled) && !(m === 'drawio' && !drawioEnabled)
 
-  /** 管理弹窗内修改某扩展名的默认打开器。 */
-  const handleMgrChange = async (ext: string, opener: OpenWithOpener) => {
-    setOpenWithMgrError('')
-    try {
-      await setOpenWith(ext, opener)
-      setOpenWithMap((prev) => ({ ...prev, [ext]: opener }))
-    } catch (err) {
-      setOpenWithMgrError(err instanceof Error ? err.message : '保存失败')
-    }
-  }
+  /** 该文件可用的查看方式（合法性 + 集成门槛过滤；首项即内置默认）。 */
+  const viewChoicesFor = (name: string) => viewOptionsFor(extOf(name)).filter(methodEnabled)
 
-  /** 管理弹窗内删除某扩展名偏好（恢复按文件类型自动选择）。 */
-  const handleMgrDelete = async (ext: string) => {
-    setOpenWithMgrError('')
-    try {
-      await deleteOpenWith(ext)
-      setOpenWithMap((prev) => {
-        const next = { ...prev }
-        delete next[ext]
-        return next
-      })
-    } catch (err) {
-      setOpenWithMgrError(err instanceof Error ? err.message : '删除失败')
-    }
-  }
+  /** 该文件可用的编辑方式（合法性 + 集成门槛过滤；空 = 不支持编辑）。 */
+  const editChoicesFor = (name: string) => editOptionsFor(extOf(name)).filter(methodEnabled)
 
-  /** 管理弹窗内新增偏好（扩展名 + 打开方式；后端规范化为小写去点）。 */
-  const handleMgrAdd = async (e: FormEvent) => {
-    e.preventDefault()
-    const raw = mgrNewExt.trim()
-    if (!raw || mgrAdding) return
-    // 与后端 NormalizeOpenWithExt 一致：去点小写后 1..16 位 [a-z0-9]。
-    const ext = raw.toLowerCase().replace(/^\.+/, '')
-    if (!/^[a-z0-9]{1,16}$/.test(ext)) {
-      setOpenWithMgrError(locale === 'zh-CN' ? '扩展名须为 1..16 位字母/数字（可带前导点）' : 'Extension must be 1..16 letters/digits')
-      return
-    }
-    setMgrAdding(true)
-    setOpenWithMgrError('')
-    try {
-      await setOpenWith(ext, mgrNewOpener)
-      setOpenWithMap((prev) => ({ ...prev, [ext]: mgrNewOpener }))
-      setMgrNewExt('')
-    } catch (err) {
-      setOpenWithMgrError(err instanceof Error ? err.message : '保存失败')
-    } finally {
-      setMgrAdding(false)
-    }
+  /**
+   * 以指定方式在新窗口打开：
+   * - kind=view → /view/by-path（?open=<方式> 强制查看器分发）；
+   * - kind=edit → /edit/by-path（?open=<方式> 强制编辑器分发）。
+   * 方式缺省或等于内置默认时省略 open 参数——by-path 页按扩展名自动
+   * 分发与内置默认一致，且保留 mermaid/xml 嗅探等细化行为。
+   */
+  const openWithMethod = (item: FileItem, kind: 'view' | 'edit', method?: string) => {
+    const builtin = builtinOpenWith(extOf(item.name))
+    const effective = method ?? (kind === 'view' ? builtin.view : builtin.edit)
+    const omit = effective === (kind === 'view' ? builtin.view : builtin.edit)
+    openEditorWindow(routeFor(kind, item), omit ? undefined : effective)
   }
 
   // ---- 目录打包下载 ZIP（download.zip 流式归档，认证 fetch 转 blob 保存）。 ----
@@ -1466,21 +1694,12 @@ export default function FileBrowser({
     }
   }
 
-  // ---- 目录上传：按 webkitRelativePath 重建目录树，目录先于子项创建。 ----
+  // ---- 目录/树形上传共用：按相对路径递归创建目录（已存在复用） ----
 
-  const handleDirPicked = async (files: FileList | null) => {
-    if (!uploadFn || !createFolderFn || dirUpload || !files || files.length === 0) return
-    if (dirInputRef.current) dirInputRef.current.value = ''
-    const list = Array.from(files)
-    const relOf = (f: File) => (f as File & { webkitRelativePath?: string }).webkitRelativePath || f.name
-    const firstRel = relOf(list[0])
-    // 目录上传的目标根 = 当前目录下与所选目录同名的首段文件夹；无目录段时直接入当前目录。
-    const rootName = firstRel.includes('/') ? firstRel.split('/')[0] : '目录'
-    const failures: Array<{ path: string; reason: string }> = []
-    // 目录相对路径 → 已建/既有目录 ID（'' = 当前目录；递归确保父目录先创建）。
-    const dirIds = new Map<string, string>()
-    const rootId = currentFolderId ?? ''
-    dirIds.set('', rootId)
+  /** 目录树保障器：dirPath（'a/b' 形式，''=当前目录）→ 目录 ID；目录先于
+   * 子项创建，409 同名冲突视为成功（列出父目录定位既有目录）。 */
+  const createDirEnsurer = () => {
+    const dirIds = new Map<string, string>([['', currentFolderId ?? '']])
     const ensureDir = async (path: string): Promise<string> => {
       const known = dirIds.get(path)
       if (known !== undefined) return known
@@ -1489,6 +1708,7 @@ export default function FileBrowser({
       const name = idx >= 0 ? path.slice(idx + 1) : path
       const parentId = await ensureDir(parentPath)
       let id = ''
+      if (!createFolderFn) return parentId
       try {
         const created = await createFolderFn(name, parentId || null)
         id = (created as { id?: string } | null)?.id ?? ''
@@ -1507,6 +1727,23 @@ export default function FileBrowser({
       dirIds.set(path, id)
       return id
     }
+    return { dirIds, ensureDir }
+  }
+
+  // ---- 目录上传（webkitdirectory）：按 webkitRelativePath 重建目录树，
+  //      目录先于子项创建；任务进上传面板（行内 phase 由 uploadFn 驱动）。 ----
+
+  const handleDirPicked = async (files: FileList | null) => {
+    if (!uploadFn || !createFolderFn || dirUpload || !files || files.length === 0) return
+    if (dirInputRef.current) dirInputRef.current.value = ''
+    const list = Array.from(files)
+    const relOf = (f: File) => (f as File & { webkitRelativePath?: string }).webkitRelativePath || f.name
+    const firstRel = relOf(list[0])
+    // 目录上传的目标根 = 当前目录下与所选目录同名的首段文件夹；无目录段时直接入当前目录。
+    const rootName = firstRel.includes('/') ? firstRel.split('/')[0] : '目录'
+    const failures: Array<{ path: string; reason: string }> = []
+    const { ensureDir } = createDirEnsurer()
+    const rootId = currentFolderId ?? ''
 
     setDirResult(null)
     setDirUpload({ done: 0, total: list.length })
@@ -1530,12 +1767,98 @@ export default function FileBrowser({
     await load(currentParent)
   }
 
-  // 默认点击：文件 → 弹窗查看；网页目录（has_index_web）→ 弹窗内嵌 iframe
-  //（菜单保留「作为网页打开（新窗口）」）；普通目录 → 进入。
+  // ---- 拖拽上传（v1.6）：拖文件/文件夹到文件管理区 → 上传到当前目录。
+  //      webkitGetAsEntry 递归展开目录（须在事件处理器内同步取 entry，
+  //      DataTransferItemList 异步后失效）；每文件一条上传任务进上传面板。 ----
+
+  /** 递归读取 DataTransfer 条目（文件 + 目录树）为 {file, relPath} 列表。 */
+  const readDropEntry = async (entry: FileSystemEntry, path: string, out: Array<{ file: File; relPath: string }>): Promise<void> => {
+    if (entry.isFile) {
+      const file = await new Promise<File | null>((resolve) => {
+        ;(entry as FileSystemFileEntry).file(resolve, () => resolve(null))
+      })
+      if (file) out.push({ file, relPath: path ? `${path}/${file.name}` : file.name })
+      return
+    }
+    if (!entry.isDirectory) return
+    const reader = (entry as FileSystemDirectoryEntry).createReader()
+    const dirPath = path ? `${path}/${entry.name}` : entry.name
+    for (;;) {
+      const batch = await new Promise<FileSystemEntry[]>((resolve) => {
+        reader.readEntries(resolve, () => resolve([]))
+      })
+      if (batch.length === 0) break
+      for (const child of batch) await readDropEntry(child, dirPath, out)
+    }
+  }
+
+  const canDropUpload = Boolean(uploadFn) && !searchMode
+
+  const handleDrop = async (e: ReactDragEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    dragDepthRef.current = 0
+    setDropActive(false)
+    if (!uploadFn || searchMode) return
+    // 同步取 entry（异步遍历在持有 entry 对象后进行）；无 entry 支持时回退 files。
+    const entries = Array.from(e.dataTransfer?.items ?? [])
+      .map((it) => (typeof it.webkitGetAsEntry === 'function' ? it.webkitGetAsEntry() : null))
+      .filter((en): en is FileSystemEntry => en !== null)
+    const dropped: Array<{ file: File; relPath: string }> = []
+    if (entries.length > 0) {
+      for (const en of entries) await readDropEntry(en, '', dropped)
+    } else {
+      for (const f of Array.from(e.dataTransfer?.files ?? [])) dropped.push({ file: f, relPath: f.name })
+    }
+    if (dropped.length === 0) return
+    const { ensureDir } = createDirEnsurer()
+    let ok = 0
+    const failed: string[] = []
+    for (const { file, relPath } of dropped) {
+      const segments = relPath.split('/').filter(Boolean)
+      const dirPath = segments.slice(0, -1).join('/')
+      const key = ++uploadKey.current
+      setUploads((prev) => [...prev, { key, name: relPath, phase: 'creating' }])
+      if (skipCanceledRow(key)) continue
+      try {
+        const parentId = dirPath ? await ensureDir(dirPath) : currentFolderId ?? ''
+        const r = await runTrackedUpload(file, parentId || null, key)
+        if (r === 'ok') ok++
+        else if (r === 'error') failed.push(relPath)
+      } catch (err) {
+        const reason = writeErrorText(err, '上传失败')
+        failed.push(relPath)
+        setUploads((prev) =>
+          prev.map((r) => (r.key === key ? { ...r, phase: 'error', error: reason } : r)),
+        )
+      }
+    }
+    setBatchNotice('')
+    setBatchError(failed.length > 0
+      ? `拖拽上传：成功 ${ok} 个，失败 ${failed.length} 个（${failed.slice(0, 5).join('；')}${failed.length > 5 ? ' 等' : ''}）`
+      : '')
+    if (failed.length === 0) setBatchNotice(`拖拽上传完成：${ok} 个文件`)
+    await load(currentParent)
+  }
+
+  // 默认单击：文件 → 弹窗查看（zip 网页包由查看分发器自动切 web 预览）；
+  // 网页目录（has_index_web，或名称含「网页」的目录启发式）→ 网页预览弹窗
+  //（无 index.html 时静默回退进入）；普通目录 → 进入该目录。
+  const isWebFolder = (item: FileItem): boolean =>
+    item.type === 'folder' && (Boolean(item.has_index_web) || item.name.includes('网页'))
+
   const openItem = (item: FileItem) => {
     if (item.type === 'folder') {
-      if (item.has_index_web && ns && !searchMode) void openWebFolderPreview(item)
-      else if (!searchMode) openFolder(item)
+      if (searchMode) return
+      if (isWebFolder(item)) {
+        // 树导航的程序化步进点击（treeNavClick.armed）走「进入」而非预览。
+        if (treeNavClick.armed) {
+          openFolder(item)
+          return
+        }
+        void openWebFolderPreview(item, !item.has_index_web)
+        return
+      }
+      openFolder(item)
       return
     }
     openPreview(item)
@@ -1567,6 +1890,7 @@ export default function FileBrowser({
     const isTxtLike = isTextEditable(lower) || isCodeFile(lower)
     const isDrawio = isDrawioFile(lower)
     const isBoard = isExcalidrawFile(lower)
+    const isRichDoc = isDfdocFile(lower)
     const viewOptions: Array<{ label: string; run: () => void }> = []
     if (isOffice && ooEnabled) viewOptions.push({ label: locale === 'zh-CN' ? '查看 Office' : 'View Office', run: () => openEditorWindow(routeFor('view', item)) })
     if (isHtml) viewOptions.push({ label: locale === 'zh-CN' ? '查看网页' : 'View web', run: () => openEditorWindow(routeFor('view', item)) })
@@ -1578,6 +1902,8 @@ export default function FileBrowser({
     if (isTxtLike) editOptions.push({ label: locale === 'zh-CN' ? '编辑文本' : 'Edit text', run: () => openEditorWindow(routeFor('edit', item)) })
     if (isDrawio && drawioEnabled) editOptions.push({ label: locale === 'zh-CN' ? '图表编辑' : 'Edit diagram', run: () => openEditorWindow(routeFor('edit', item)) })
     if (isBoard) editOptions.push({ label: locale === 'zh-CN' ? '白板编辑' : 'Edit whiteboard', run: () => openEditorWindow(routeFor('edit', item)) })
+    // .dfrt/.dfdoc 富文本文档：编辑进 Tiptap（by-path 按扩展名分发）。
+    if (isRichDoc) editOptions.push({ label: locale === 'zh-CN' ? '编辑富文本' : 'Edit rich text', run: () => openEditorWindow(routeFor('edit', item)) })
     // 默认编辑路由：office/drawio 集成未启用时回落只读查看（与 openFileWith 一致）。
     const editFallbackView = (isOffice && !ooEnabled) || (isDrawio && !drawioEnabled)
     const menuOf = (options: Array<{ label: string; run: () => void }>): MenuProps => ({
@@ -1606,83 +1932,153 @@ export default function FileBrowser({
     )
   }
 
-  // 条目操作菜单（列表行「⋯」、右键菜单、网格卡片菜单共用，antd Menu）：
-  // 打开（按默认打开方式）/ 打开方式分组 / 目录「下载为 ZIP」/ 打开方式
-  // 管理入口 + 既有「查看 / 编辑 / 预览 / 下载 / 标签 / 复制」与调用方
-  // rowActions（作为菜单项 label 内嵌，点击行为由调用方按钮自带）。
+  // ---- 条目重命名 / 删除（内置默认实现；宿主页可经 renameFn/deleteFn 覆盖，
+  //      如个人空间的删除撤销横幅）。个人/团队端点通用。 ----
+
+  const builtinRename = async (item: FileItem) => {
+    const name = await promptViaModal(antdModal, {
+      title: locale === 'zh-CN' ? `重命名「${item.name}」` : `Rename “${item.name}”`,
+      label: locale === 'zh-CN' ? '新名称' : 'New name',
+      initialValue: item.name,
+      okText: locale === 'zh-CN' ? '保存' : 'Save',
+      cancelText: locale === 'zh-CN' ? '取消' : 'Cancel',
+    })
+    if (name === null || name === '' || name === item.name) return
+    setError('')
+    try {
+      await renameFile(item.id, name)
+      await load(currentParent)
+    } catch (err) {
+      setError(writeErrorText(err, '重命名失败'))
+    }
+  }
+
+  const builtinDelete = (item: FileItem) => {
+    antdModal.confirm({
+      title: msg('delete'),
+      content: locale === 'zh-CN'
+        ? `确定删除「${item.name}」？可在回收站中恢复。`
+        : `Delete “${item.name}”? You can restore it from trash.`,
+      okText: msg('delete'),
+      okButtonProps: { danger: true },
+      cancelText: locale === 'zh-CN' ? '取消' : 'Cancel',
+      onOk: async () => {
+        setError('')
+        try {
+          await deleteFile(item.id)
+          await load(currentParent)
+        } catch (err) {
+          setError(writeErrorText(err, '删除失败'))
+        }
+      },
+    })
+  }
+
+  // 条目操作菜单（列表行右键 /「⋯」、网格卡片菜单共用，antd Menu）：
+  // 文件：查看（生效方式，新窗口）/ 编辑（生效方式，不支持或集成未启用时
+  // 不显示）/ 打开方式 >（全部查看方式 + 分组线 + 全部编辑方式——仅集成
+  // 未启用（office/drawio）的项灰显注明原因，其余（含对该扩展非法的方式）
+  // 均可点，点击后按用户显式选择经 ?open= 强制分发）/ 下载 / 解压为目录
+  //（.zip）/ 标签 / 复制 / 移动；目录：进入 / 下载为 ZIP / 网页预览（has_
+  // index_web，弹窗）/ 作为网页打开 / 标签 / 复制（子树）/ 移动 / 分享 /
+  // 重命名 / 删除（分享/重命名/删除经宿主页注入，缺省用内置实现）；
+  // 调用方 rowActions（历史/权限等）追加在末位。默认单击文件为弹窗查看；
+  // 网页目录单击为网页预览弹窗，普通目录单击进入。
   const itemMenuItems = (item: FileItem): MenuProps['items'] => {
-    const items: NonNullable<MenuProps['items']> = []
+    const zh = locale === 'zh-CN'
+    const entries: NonNullable<MenuProps['items']> = []
     if (item.type === 'folder') {
-      items.push({
+      entries.push({
         key: 'open',
-        label: item.has_index_web ? (locale === 'zh-CN' ? '目录浏览' : 'Browse folder') : (locale === 'zh-CN' ? '进入' : 'Open'),
+        label: zh ? '进入' : 'Open',
       })
-      items.push({
+      entries.push({
         key: 'zip',
         disabled: zipBusyId !== null,
         label: zipBusyId === item.id
-          ? (locale === 'zh-CN' ? '打包中…' : 'Zipping…')
-          : (locale === 'zh-CN' ? '下载为 ZIP' : 'Download as ZIP'),
+          ? (zh ? '打包中…' : 'Zipping…')
+          : (zh ? '下载为 ZIP' : 'Download as ZIP'),
       })
-    }
-    if (item.type === 'file') {
-      items.push({ key: 'preview', label: locale === 'zh-CN' ? '查看' : 'View' })
-      items.push({ key: 'view-new', label: locale === 'zh-CN' ? '新窗口查看' : 'View in new window' })
-    }
-    if (item.type === 'file' && openWithOptions(item.name).some((op) => op !== 'default' && op !== 'web')) {
-      items.push({
-        type: 'group',
-        label: locale === 'zh-CN' ? '打开方式（选择后设为默认）' : 'Open with (sets default)',
+      if (ns && !searchMode && item.has_index_web) {
+        entries.push({ key: 'preview-web', label: zh ? '网页预览（弹窗）' : 'Preview as website' })
+        entries.push({ key: 'open-web', label: zh ? '作为网页打开' : 'Open as website' })
+      }
+    } else {
+      // 查看方式：用户偏好合并内置默认；集成门槛（office/drawio）过滤。
+      const effective = effectiveOpenWithFor(item.name, openWith)
+      const viewMethods = viewChoicesFor(item.name)
+      const editMethods = editChoicesFor(item.name)
+      const effView = viewMethods.includes(effective.view) ? effective.view : viewMethods[0]
+      if (effView) {
+        entries.push({ key: 'view-default', label: zh ? `查看（${viewMethodLabel(effView, true, extOf(item.name))}）` : `View (${viewMethodLabel(effView, false, extOf(item.name))})` })
+      }
+      const effEdit = editMethods.includes(effective.edit) ? effective.edit : null
+      if (effEdit) {
+        entries.push({ key: 'edit-default', label: zh ? `编辑（${editMethodLabel(effEdit, true)}）` : `Edit (${editMethodLabel(effEdit, false)})` })
+      }
+      // 「打开方式 >」：全量查看方式组 + 分组线 + 全量编辑方式组——所有
+      // 可见项均可点（不置灰；对该扩展非法的方式也可选，点击后按用户显式
+      // 选择经 ?open= 强制分发，非法组合的兜底由查看分发层负责，如 raw 看
+      // 二进制给下载提示）；仅集成未启用（office/drawio）的项隐藏。
+      const ext = extOf(item.name)
+      const av = { office: ooEnabled, drawio: drawioEnabled }
+      const gated = (m: string) => (m === 'office' && !ooEnabled) || (m === 'drawio' && !drawioEnabled)
+      const viewEntries = allViewEntries(ext, av, zh).filter(({ method }) => !gated(method))
+      const editEntries = allEditEntries(ext, av, zh).filter(({ method }) => !gated(method))
+      entries.push({
+        key: 'openwith',
+        label: zh ? '打开方式' : 'Open with',
         children: [
-          ...openWithOptions(item.name).map((op) => ({
-            key: `openwith:${op}`,
-            label: (
-              <>
-                <span className={`openwith-dot${resolveOpener(item.name, openWith) === op ? ' on' : ''}`} aria-hidden="true" />
-                {openerLabel(op, locale === 'zh-CN')}
-              </>
-            ),
-          })),
-          { key: 'openwith-mgr', label: locale === 'zh-CN' ? '管理默认打开方式…' : 'Manage defaults…' },
+          {
+            key: 'group-openwith-view',
+            type: 'group' as const,
+            label: zh ? '查看' : 'View',
+            children: viewEntries.map(({ method }) => ({
+              key: `openview:${method}`,
+              label: `${zh ? '查看 · ' : 'View · '}${viewMethodLabel(method as Parameters<typeof viewMethodLabel>[0], zh, ext)}`,
+            })),
+          },
+          {
+            key: 'group-openwith-edit',
+            type: 'group' as const,
+            label: zh ? '编辑' : 'Edit',
+            children: editEntries.map(({ method }) => ({
+              key: `openedit:${method}`,
+              label: `${zh ? '编辑 · ' : 'Edit · '}${editMethodLabel(method as Parameters<typeof editMethodLabel>[0], zh)}`,
+            })),
+          },
         ],
       })
+      entries.push({ key: 'download', label: msg('download') })
+      if (item.name.toLowerCase().endsWith('.zip')) {
+        entries.push({
+          key: 'unpack',
+          disabled: unpackBusyId !== null,
+          label: unpackBusyId === item.id
+            ? (zh ? '解包中…' : 'Unpacking…')
+            : (zh ? '解压为目录' : 'Unpack to folder'),
+        })
+      }
     }
-    if (item.type === 'folder' && ns && !searchMode) {
-      items.push({ key: 'open-web', label: locale === 'zh-CN' ? '作为网页打开' : 'Open as website' })
+    entries.push({ type: 'divider' })
+    entries.push({ key: 'tag', label: msg('tag') })
+    if (copyFn) {
+      // 文件与目录均可复制（目录为后端子树深复制，目标可跨空间）。
+      entries.push({ key: 'copy', label: msg('copy') })
     }
-    if (item.type === 'file' && item.name.toLowerCase().endsWith('.zip')) {
-      items.push({
-        key: 'unpack',
-        disabled: unpackBusyId !== null,
-        label: unpackBusyId === item.id
-          ? (locale === 'zh-CN' ? '解包中…' : 'Unpacking…')
-          : (locale === 'zh-CN' ? '解包为目录' : 'Unpack to folder'),
-      })
+    entries.push({ key: 'move', label: zh ? '移动到…' : 'Move to…' })
+    if (shareFn) {
+      entries.push({ key: 'share', label: zh ? '分享…' : 'Share…' })
     }
-    if (item.type === 'file' && ooEnabled && isOfficeFile(item.name)) {
-      items.push({ key: 'edit-office', label: locale === 'zh-CN' ? '编辑 Office' : 'Edit Office' })
-    }
-    if (item.type === 'file' && drawioEnabled && isDrawioFile(item.name)) {
-      items.push({ key: 'edit-drawio', label: locale === 'zh-CN' ? '图表编辑' : 'Edit diagram' })
-      items.push({ key: 'view-drawio', label: locale === 'zh-CN' ? '图表查看' : 'View diagram' })
-    }
-    if (item.type === 'file' && isTextEditable(item.name)) {
-      items.push({ key: 'edit-text', label: locale === 'zh-CN' ? '编辑文本' : 'Edit text' })
-    }
-    if (item.type === 'file' && isExcalidrawFile(item.name)) {
-      items.push({ key: 'edit-board', label: locale === 'zh-CN' ? '白板编辑' : 'Edit whiteboard' })
-      items.push({ key: 'view-board', label: locale === 'zh-CN' ? '白板查看' : 'View whiteboard' })
-    }
-    if (item.type === 'file') {
-      items.push({ key: 'download', label: msg('download') })
-    }
-    items.push({ key: 'tag', label: msg('tag') })
-    if (item.type === 'file' && copyFn) {
-      items.push({ key: 'copy', label: msg('copy') })
-    }
+    entries.push({ key: 'rename', label: zh ? '重命名…' : 'Rename…' })
+    entries.push({ key: 'delete', label: msg('delete'), danger: true })
+    entries.push({ key: 'properties', label: zh ? '属性' : 'Properties' })
     const extra = rowActions?.(item)
-    if (extra) items.push({ key: 'row-actions', label: extra })
-    return items
+    if (extra) {
+      entries.push({ type: 'divider' })
+      entries.push({ key: 'row-actions', label: extra })
+    }
+    return entries
   }
 
   /** 菜单项点击分发（key 见 itemMenuItems）。 */
@@ -1694,14 +2090,17 @@ export default function FileBrowser({
       case 'zip':
         void handleZipDownload(item)
         return
-      case 'preview':
-        openPreview(item)
-        return
-      case 'view-new':
-        openEditorWindow(routeFor('view', item))
-        return
       case 'open-web':
         void openAsWebsite(item)
+        return
+      case 'preview-web':
+        void openWebFolderPreview(item)
+        return
+      case 'view-default':
+        openWithMethod(item, 'view', effectiveOpenWithFor(item.name, openWith).view)
+        return
+      case 'edit-default':
+        openWithMethod(item, 'edit', effectiveOpenWithFor(item.name, openWith).edit)
         return
       case 'unpack':
         void handleUnpack(item)
@@ -1713,27 +2112,39 @@ export default function FileBrowser({
         void openTagModal(item)
         return
       case 'copy':
-        openCopyDialog(item)
+        openCopyPicker(item)
         return
-      case 'openwith-mgr':
-        setOpenWithMgrOpen(true)
+      case 'move':
+        openMovePicker(item)
         return
-      case 'edit-office':
-      case 'edit-drawio':
-      case 'edit-board':
-      case 'edit-text':
-        openEditorWindow(routeFor('edit', item))
+      case 'share':
+        shareFn?.(item)
         return
-      case 'view-drawio':
-      case 'view-board':
-        openEditorWindow(routeFor('view', item))
+      case 'rename':
+        if (renameFn) renameFn(item)
+        else void builtinRename(item)
+        return
+      case 'delete':
+        ;(deleteFn ?? builtinDelete)(item)
+        return
+      case 'properties':
+        void openProps(item)
         return
       default:
-        if (key.startsWith('openwith:')) void handleOpenWithChoice(item, key.slice('openwith:'.length) as OpenWithOpener)
+        if (key.startsWith('openview:')) {
+          openWithMethod(item, 'view', key.slice('openview:'.length))
+          return
+        }
+        if (key.startsWith('openedit:')) {
+          openWithMethod(item, 'edit', key.slice('openedit:'.length))
+        }
     }
   }
 
-  /** 渲染条目操作菜单（antd Menu，透明背景由 .ctx-antd-menu 适配）。 */
+  /** 渲染条目操作菜单（antd Menu，透明背景由 .ctx-antd-menu 适配）；
+   * 二级（打开方式）为 vertical 模式的独立 popup（挂 body，紧凑规格由
+   * styles.css「浮层菜单统一 Win11 紧凑规格」全局节覆盖，与一级同视觉），
+   * 自身带视口翻转定位；onOpenChange 后仍重跑一级菜单的视口收缩定位。 */
   const renderItemMenu = (item: FileItem) => (
     <Menu
       className="ctx-antd-menu"
@@ -1741,189 +2152,258 @@ export default function FileBrowser({
       selectable={false}
       items={itemMenuItems(item)}
       onClick={({ key }) => runItemMenuAction(item, key)}
+      onOpenChange={() => {
+        // 内联子菜单展开在下一帧才反映到 DOM，延迟一帧后重跑视口收缩。
+        window.requestAnimationFrame(() => {
+          if (ctxMenuRef.current) clampFixedMenu(ctxMenuRef.current, ctxMenu?.x ?? 0, ctxMenu?.y ?? 0)
+        })
+      }}
     />
+  )
+
+  // 全站唯一顶栏（v1.6.1 布局定稿）：左（空间切换 + 面包屑）｜弹性间隔｜
+  // 右（目录搜索 → 视图切换 → 标签过滤 → 网格排序 → 新建 → 上传 → 上传
+  // 任务 → 回收站）。搜索框与视图切换紧邻标签过滤之前（用户定稿顺序）。
+  // 经 toolbarHost portal 渲染为全宽顶条；顶条本体无独立背景/边框（与页面
+  // 融合，消除与全局 40px 顶栏的双栏观感，见 styles.css .files-topbar 节）；
+  // 面包屑并入本行（工具元素与面包屑同层：左面包屑 + 右工具组）。
+  // 控件统一 antd size="small"（24px 原生小尺寸，不做 height 拉伸）+ 13px 字号。
+  const breadcrumbNav = !searchMode ? (
+    <nav className="breadcrumb files-toolbar-crumbs">
+      {crumbPrefix}
+      {crumbs.map((crumb, index) => (
+        <span key={crumb.id ?? 'root'} className="crumb">
+          {index > 0 && <span className="sep">/</span>}
+          <button
+            className={index === crumbs.length - 1 ? 'current' : ''}
+            onClick={() => gotoCrumb(index)}
+          >
+            {crumb.name}
+          </button>
+        </span>
+      ))}
+    </nav>
+  ) : null
+
+  // 上传任务按钮徽标：进行中（非终态）任务数。
+  const activeUploadCount = uploads.filter((r) => uploadPhaseActive(r.phase)).length
+
+  const toolbar = (
+    <div className="files-toolbar toolbar-mini">
+      {toolbarPrefix}
+      {toolbarHost ? breadcrumbNav : null}
+      <span className="toolbar-spacer" />
+      {/* 目录搜索：宽屏常驻输入框；<1280px 收窄为图标按钮 + Popover 展开
+          （同一 directoryQuery 状态，见 styles.css .files-toolbar 响应式节）。 */}
+      <label className="filter-item directory-search">
+        <Input
+          size="small"
+          allowClear
+          value={directoryQuery}
+          placeholder={locale === 'zh-CN' ? '搜索当前目录…' : 'Search this folder…'}
+          onChange={(event) => setDirectoryQuery(event.target.value)}
+        />
+      </label>
+      <Popover
+        trigger="click"
+        placement="bottomRight"
+        open={searchPopOpen}
+        onOpenChange={setSearchPopOpen}
+        content={
+          <Input
+            size="small"
+            allowClear
+            autoFocus
+            value={directoryQuery}
+            placeholder={locale === 'zh-CN' ? '搜索当前目录…' : 'Search this folder…'}
+            onChange={(event) => setDirectoryQuery(event.target.value)}
+            style={{ width: 220 }}
+          />
+        }
+      >
+        <Button
+          type="text"
+          size="small"
+          className="toolbar-search-narrow"
+          title={locale === 'zh-CN' ? '搜索当前目录' : 'Search this folder'}
+          aria-label={locale === 'zh-CN' ? '搜索当前目录' : 'Search this folder'}
+          aria-expanded={searchPopOpen}
+        >
+          <Search size={14} strokeWidth={2} aria-hidden="true" />
+        </Button>
+      </Popover>
+      {/* 列表/网格切换合一：单按钮按当前模式显示对侧图标（title 提示目标模式）。 */}
+      <Button
+        type="text"
+        size="small"
+        className="view-toggle-btn"
+        title={viewMode === 'list' ? msg('viewModeGrid') : msg('viewModeList')}
+        aria-label={viewMode === 'list' ? msg('viewModeGrid') : msg('viewModeList')}
+        aria-pressed={viewMode === 'grid'}
+        onClick={() => changeViewMode(viewMode === 'list' ? 'grid' : 'list')}
+      >
+        {viewMode === 'list'
+          ? <LayoutGrid size={14} strokeWidth={2} aria-hidden="true" />
+          : <List size={14} strokeWidth={2} aria-hidden="true" />}
+      </Button>
+      <label className="filter-item">
+        <span>{msg('tag')}</span>
+        <Select
+          size="small"
+          className="filter-select"
+          value={tagFilter}
+          onChange={(v) => { setTagFilter(v); setRecentView(false) }}
+          options={[{ value: '', label: msg('all') }, ...tags.map((tg) => ({ value: tg.id, label: `#${tg.name}` }))]}
+        />
+      </label>
+      {viewMode === 'grid' && (
+        <label className="filter-item">
+          <span>{msg('sort')}</span>
+          <Select
+            size="small"
+            className="filter-select"
+            value={`${sortKey}:${sortOrder}`}
+            onChange={(v) => {
+              const [key, order] = v.split(':')
+              setSortKey(key as 'name' | 'updated_at' | 'size')
+              setSortOrder(order as 'asc' | 'desc')
+            }}
+            options={[
+              { value: 'name:asc', label: `${msg('sortOrderName')} ↑` },
+              { value: 'name:desc', label: `${msg('sortOrderName')} ↓` },
+              { value: 'updated_at:desc', label: `${msg('sortOrderUpdated')} ↓` },
+              { value: 'updated_at:asc', label: `${msg('sortOrderUpdated')} ↑` },
+              { value: 'size:desc', label: `${msg('sortOrderSize')} ↓` },
+              { value: 'size:asc', label: `${msg('sortOrderSize')} ↑` },
+            ]}
+          />
+        </label>
+      )}
+      {(createFolderFn || uploadFn) && !searchMode && (
+        <Dropdown
+          trigger={['click']}
+          open={createMenuOpen}
+          onOpenChange={setCreateMenuOpen}
+          menu={{
+            items: [
+              ...(createFolderFn
+                ? [{ key: 'folder', label: locale === 'zh-CN' ? '文件夹' : 'Folder' }]
+                : []),
+              ...uploadFn
+                ? (['md', 'dfdoc', 'textfile', 'drawio', 'whiteboard', 'word', 'spreadsheet', 'presentation'] as const).map((kind) => ({
+                    key: kind,
+                    disabled: docCreating,
+                    label: { md: 'Markdown 文档（.md）', dfdoc: locale === 'zh-CN' ? '富文本（.dfrt）' : 'Rich text（.dfrt）', textfile: '文本文件（.txt/.html/.js…）', drawio: 'draw.io', whiteboard: '白板', word: 'Word', spreadsheet: 'Excel', presentation: 'PPT' }[kind],
+                  }))
+                : [],
+            ],
+            onClick: ({ key }) => {
+              if (key === 'folder') {
+                setFolderOpen(true)
+                setFolderName('')
+                setFolderError('')
+              } else {
+                beginNamedCreate(key as NonNullable<typeof createKind>)
+              }
+            },
+          }}
+        >
+          <Button size="small" icon={<Plus size={13} strokeWidth={2} aria-hidden="true" />}>
+            {locale === 'zh-CN' ? '新建' : 'New'}
+          </Button>
+        </Dropdown>
+      )}
+      {/* 上传拆分按钮（antd Dropdown.Button）：主点击=上传文件；箭头下拉
+          含「上传目录」（目录上传依赖建目录权限）。 */}
+      {uploadFn && !searchMode && (
+        <div className="create-menu-wrap">
+          <Dropdown.Button
+            size="small"
+            type="primary"
+            disabled={dirUpload !== null}
+            menu={{
+              items: [
+                { key: 'files', label: locale === 'zh-CN' ? '上传文件' : 'Upload files' },
+                ...(createFolderFn
+                  ? [{ key: 'folder', label: locale === 'zh-CN' ? '上传目录' : 'Upload folder', disabled: dirUpload !== null }]
+                  : []),
+              ],
+              onClick: ({ key }) => (key === 'files' ? fileInputRef.current?.click() : dirInputRef.current?.click()),
+            }}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <Upload size={13} strokeWidth={2} aria-hidden="true" />{' '}
+            {dirUpload !== null ? (locale === 'zh-CN' ? '上传中…' : 'Uploading…') : locale === 'zh-CN' ? '上传' : 'Upload'}
+          </Dropdown.Button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            hidden
+            onChange={(e) => void handleFilesPicked(e.target.files)}
+          />
+          {createFolderFn && (
+            <input
+              ref={dirInputRef}
+              type="file"
+              multiple
+              hidden
+              onChange={(e) => void handleDirPicked(e.target.files)}
+              {...({ webkitdirectory: '', directory: '' } as Record<string, string>)}
+            />
+          )}
+        </div>
+      )}
+      {/* 上传任务入口（v1.6：浮条改工具栏按钮 + 徽标，点击弹窗查看任务列表）。 */}
+      {uploads.length > 0 && (
+        <Badge count={activeUploadCount} size="small" offset={[-2, 0]}>
+          <Button
+            size="small"
+            title={locale === 'zh-CN' ? '上传任务' : 'Upload tasks'}
+            onClick={() => setUploadPanelOpen(true)}
+          >
+            <Upload size={13} strokeWidth={2} aria-hidden="true" />
+          </Button>
+        </Badge>
+      )}
+      {/* 回收站入口（v1.5 弹窗化：原 /trash 整页路由已删除）。 */}
+      <Button
+        size="small"
+        title={msg('trash')}
+        onClick={() => setTrashOpen(true)}
+      >
+        <Trash2 size={13} strokeWidth={2} aria-hidden="true" /> {msg('trash')}
+      </Button>
+    </div>
   )
 
   return (
     <div className="file-browser">
-      {/* 顶部工具带（SpaceSwitcher 行下方合并为一行，省两行）：视图切换 /
-          ＋新建 / ⬆上传（拆分按钮）/ 目录搜索 / 标签、收藏过滤（网格视图
-          含排序）/ 默认打开方式入口。页面级大标题已移除，仅保留面包屑行。 */}
-      <div className="files-toolbar">
-          {/* 列表/网格切换合一：单按钮按当前模式显示对侧图标（title 提示目标模式）。 */}
-          <Button
-            type="text"
-            className="view-toggle-btn"
-            title={viewMode === 'list' ? msg('viewModeGrid') : msg('viewModeList')}
-            aria-label={viewMode === 'list' ? msg('viewModeGrid') : msg('viewModeList')}
-            aria-pressed={viewMode === 'grid'}
-            onClick={() => changeViewMode(viewMode === 'list' ? 'grid' : 'list')}
-          >
-            {viewMode === 'list'
-              ? <LayoutGrid size={16} strokeWidth={2} aria-hidden="true" />
-              : <List size={16} strokeWidth={2} aria-hidden="true" />}
-          </Button>
-          {(createFolderFn || uploadFn) && !searchMode && (
-            <Dropdown
-              trigger={['click']}
-              open={createMenuOpen}
-              onOpenChange={setCreateMenuOpen}
-              menu={{
-                items: [
-                  ...(createFolderFn
-                    ? [{ key: 'folder', label: locale === 'zh-CN' ? '文件夹' : 'Folder' }]
-                    : []),
-                  ...uploadFn
-                    ? (['md', 'textfile', 'drawio', 'whiteboard', 'word', 'spreadsheet', 'presentation'] as const).map((kind) => ({
-                        key: kind,
-                        disabled: docCreating,
-                        label: { md: 'Markdown / 富文本', textfile: '文本文件（.txt/.html/.js…）', drawio: 'draw.io', whiteboard: '白板', word: 'Word', spreadsheet: 'Excel', presentation: 'PPT' }[kind],
-                      }))
-                    : [],
-                  { type: 'group' as const, label: 'PDF 仅支持上传和查看，不能空白创建' },
-                ],
-                onClick: ({ key }) => {
-                  if (key === 'folder') {
-                    setFolderOpen(true)
-                    setFolderName('')
-                    setFolderError('')
-                  } else {
-                    beginNamedCreate(key as NonNullable<typeof createKind>)
-                  }
-                },
-              }}
-            >
-              <Button icon={<Plus size={14} strokeWidth={2} aria-hidden="true" />}>
-                {locale === 'zh-CN' ? '新建' : 'New'}
-              </Button>
-            </Dropdown>
-          )}
-          {/* 上传拆分按钮（antd Dropdown.Button）：主点击=上传文件；箭头下拉
-              含「上传目录」（目录上传依赖建目录权限）。 */}
-          {uploadFn && !searchMode && (
-            <div className="create-menu-wrap">
-              <Dropdown.Button
-                type="primary"
-                disabled={dirUpload !== null}
-                menu={{
-                  items: [
-                    { key: 'files', label: locale === 'zh-CN' ? '上传文件' : 'Upload files' },
-                    ...(createFolderFn
-                      ? [{ key: 'folder', label: locale === 'zh-CN' ? '上传目录' : 'Upload folder', disabled: dirUpload !== null }]
-                      : []),
-                  ],
-                  onClick: ({ key }) => (key === 'files' ? fileInputRef.current?.click() : dirInputRef.current?.click()),
-                }}
-                onClick={() => fileInputRef.current?.click()}
-              >
-                <Upload size={14} strokeWidth={2} aria-hidden="true" />{' '}
-                {dirUpload !== null ? (locale === 'zh-CN' ? '上传中…' : 'Uploading…') : locale === 'zh-CN' ? '上传' : 'Upload'}
-              </Dropdown.Button>
-              <input
-                ref={fileInputRef}
-                type="file"
-                multiple
-                hidden
-                onChange={(e) => void handleFilesPicked(e.target.files)}
-              />
-              {createFolderFn && (
-                <input
-                  ref={dirInputRef}
-                  type="file"
-                  multiple
-                  hidden
-                  onChange={(e) => void handleDirPicked(e.target.files)}
-                  {...({ webkitdirectory: '', directory: '' } as Record<string, string>)}
-                />
-              )}
-            </div>
-          )}
-        {/* 过滤区：目录内搜索（antd Input allowClear）+ 标签 / 收藏 antd Select
-            （排序已表头化，网格视图无表头、保留一个精简排序下拉；全部/收藏/最近
-            视图切换在 SpaceSwitcher 行）。 */}
-        <span className="toolbar-spacer" />
-        <label className="filter-item directory-search">
-          <Input
-            allowClear
-            value={directoryQuery}
-            placeholder={locale === 'zh-CN' ? '搜索当前目录…' : 'Search this folder…'}
-            onChange={(event) => setDirectoryQuery(event.target.value)}
-          />
-        </label>
-        <label className="filter-item">
-          <span>{msg('tag')}</span>
-          <Select
-            className="filter-select"
-            value={tagFilter}
-            onChange={(v) => { setTagFilter(v); setRecentView(false) }}
-            options={[{ value: '', label: msg('all') }, ...tags.map((tg) => ({ value: tg.id, label: `#${tg.name}` }))]}
-          />
-        </label>
-        <label className="filter-item">
-          <span>{msg('viewStarred')}</span>
-          <Select
-            className="filter-select"
-            value={starredFilter}
-            onChange={(v) => { setStarredFilter(v); setRecentView(false) }}
-            options={[
-              { value: '', label: msg('all') },
-              { value: 'true', label: msg('starredOnly') },
-              { value: 'false', label: msg('starredNo') },
-            ]}
-          />
-        </label>
-        {viewMode === 'grid' && (
-          <label className="filter-item">
-            <span>{msg('sort')}</span>
-            <Select
-              className="filter-select"
-              value={`${sortKey}:${sortOrder}`}
-              onChange={(v) => {
-                const [key, order] = v.split(':')
-                setSortKey(key as 'name' | 'updated_at' | 'size')
-                setSortOrder(order as 'asc' | 'desc')
-              }}
-              options={[
-                { value: 'name:asc', label: `${msg('sortOrderName')} ↑` },
-                { value: 'name:desc', label: `${msg('sortOrderName')} ↓` },
-                { value: 'updated_at:desc', label: `${msg('sortOrderUpdated')} ↓` },
-                { value: 'updated_at:asc', label: `${msg('sortOrderUpdated')} ↑` },
-                { value: 'size:desc', label: `${msg('sortOrderSize')} ↓` },
-                { value: 'size:asc', label: `${msg('sortOrderSize')} ↑` },
-              ]}
-            />
-          </label>
-        )}
-        {searchMode && (
-          <Button type="text" size="small" onClick={clearFilters}>{msg('clearFilters')}</Button>
-        )}
-        {/* 默认打开方式管理入口：与右键菜单「打开方式 → 管理默认打开方式…」
-            打开同一弹窗；工具带常驻提升可发现性（#21）。 */}
-        <Button
-          type="text"
-          size="small"
-          title={locale === 'zh-CN' ? '管理各扩展名的默认打开方式' : 'Manage default openers'}
-          onClick={() => setOpenWithMgrOpen(true)}
-        >
-          <Settings size={14} strokeWidth={2} aria-hidden="true" /> {locale === 'zh-CN' ? '默认打开方式' : 'Openers'}
-        </Button>
-      </div>
+      {toolbarHost ? createPortal(toolbar, toolbarHost) : toolbar}
 
-      {!searchMode && (
-        <nav className="breadcrumb">
-          {crumbs.map((crumb, index) => (
-            <span key={crumb.id ?? 'root'} className="crumb">
-              {index > 0 && <span className="sep">/</span>}
-              <button
-                className={index === crumbs.length - 1 ? 'current' : ''}
-                onClick={() => gotoCrumb(index)}
-              >
-                {crumb.name}
-              </button>
-            </span>
-          ))}
-        </nav>
-      )}
+      {/* 工具行之下的滚动内容区（三栏布局的中栏内部滚动）；v1.6 兼拖拽
+          上传 drop zone（悬停高亮，见 .files-body.dropzone-active）。 */}
+      <div
+        className={`files-body${dropActive && canDropUpload ? ' dropzone-active' : ''}`}
+        onDragEnter={(e) => {
+          if (!canDropUpload) return
+          e.preventDefault()
+          dragDepthRef.current += 1
+          setDropActive(true)
+        }}
+        onDragOver={(e) => {
+          if (!canDropUpload) return
+          e.preventDefault()
+          if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'
+        }}
+        onDragLeave={() => {
+          if (!canDropUpload) return
+          dragDepthRef.current = Math.max(0, dragDepthRef.current - 1)
+          if (dragDepthRef.current === 0) setDropActive(false)
+        }}
+        onDrop={(e) => void handleDrop(e)}
+      >
+      {!searchMode && !toolbarHost && breadcrumbNav}
       {searchMode && (
         <div className="hint search-mode-hint">
           {recentView ? msg('recentHint') : msg('searchModeHint')}
@@ -1933,11 +2413,14 @@ export default function FileBrowser({
       {selected.size > 0 && (
         <div className="batch-bar">
           <span>{formatMessage(msg('selectedCount'), { n: selected.size })}</span>
-          <Button size="small" disabled={batchBusy || batchShareBusy} onClick={openMoveDialog}>{msg('batchMove')}</Button>
+          <Button size="small" disabled={batchBusy || batchShareBusy} onClick={() => openMovePicker(null)}>{msg('batchMove')}</Button>
+          {copyFn && (
+            <Button size="small" disabled={batchBusy || batchShareBusy} onClick={() => openCopyPicker(null)}>{msg('copy')}</Button>
+          )}
           <Button size="small" disabled={batchBusy || batchShareBusy} onClick={() => void handleBatchDownload()}>
             {msg('batchDownload')}
           </Button>
-          <Button size="small" disabled={batchBusy || batchShareBusy} onClick={() => void handleBatchShare()}>
+          <Button size="small" disabled={batchBusy || batchShareBusy} onClick={openBatchShareDialog}>
             {batchShareBusy ? msg('loading') : msg('batchShare')}
           </Button>
           <Button size="small" disabled={batchBusy || batchShareBusy} onClick={openBatchTagDialog}>
@@ -2000,32 +2483,30 @@ export default function FileBrowser({
                   aria-label={msg('selectAll')}
                 />
               </th>
-              <th>
-                {/* 表头排序：点击切换排序键/方向（复用服务端排序状态）。 */}
-                <button
-                  type="button"
-                  className={`th-sort${sortKey === 'name' ? ' active' : ''}`}
-                  onClick={() => toggleSort('name')}
-                  title={msg('sort')}
-                >
+              {/* 表头排序：整个单元格可点（th onClick），激活键高亮 + 方向箭头。 */}
+              <th
+                className={`th-sort-cell${sortKey === 'name' ? ' active' : ''}`}
+                title={msg('sort')}
+                onClick={() => toggleSort('name')}
+              >
+                <span className="th-sort">
                   {msg('name')}
                   {sortKey === 'name' && (
                     <span className="th-sort-arrow" aria-hidden="true">{sortOrder === 'asc' ? '↑' : '↓'}</span>
                   )}
-                </button>
+                </span>
               </th>
-              <th>
-                <button
-                  type="button"
-                  className={`th-sort${sortKey === 'updated_at' ? ' active' : ''}`}
-                  onClick={() => toggleSort('updated_at')}
-                  title={msg('sort')}
-                >
+              <th
+                className={`th-sort-cell${sortKey === 'updated_at' ? ' active' : ''}`}
+                title={msg('sort')}
+                onClick={() => toggleSort('updated_at')}
+              >
+                <span className="th-sort">
                   {msg('sortOrderUpdated')}
                   {sortKey === 'updated_at' && (
                     <span className="th-sort-arrow" aria-hidden="true">{sortOrder === 'asc' ? '↑' : '↓'}</span>
                   )}
-                </button>
+                </span>
               </th>
               <th className="col-actions">{msg('actions')}</th>
             </tr>
@@ -2048,16 +2529,24 @@ export default function FileBrowser({
                     aria-label={`${msg('selectItem')} ${item.name}`}
                   />
                 </td>
-                <td>
+                {/* 名称单元格整格可点（文件打开 / 网页目录预览 / 目录进入）；
+                    星标按钮 stopPropagation 避免误触。 */}
+                <td
+                  className="name-cell"
+                  onClick={() => !(item.type === 'folder' && searchMode) && openItem(item)}
+                >
                   <button
                     className="star-btn"
                     title={item.is_starred ? '取消收藏' : '收藏'}
-                    onClick={() => void toggleStar(item)}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      void toggleStar(item)
+                    }}
                   >
                     <Star size={16} strokeWidth={2} aria-hidden="true" fill={item.is_starred ? 'currentColor' : 'none'} />
                   </button>
                   {item.type === 'folder' && !searchMode ? (
-                    <button className="name-btn" onClick={() => openItem(item)}>
+                    <button className="name-btn" onClick={(e) => { e.stopPropagation(); openItem(item) }}>
                       <span className="icon">{item.has_index_web
                         ? <Globe size={14} strokeWidth={2} aria-hidden="true" />
                         : <Folder size={14} strokeWidth={2} aria-hidden="true" />}</span>
@@ -2069,9 +2558,13 @@ export default function FileBrowser({
                       {item.name}
                     </span>
                   ) : (
-                    <button className="name-btn" title={msg('preview')} onClick={() => openItem(item)}>
-                      <span className="icon"><FileText size={14} strokeWidth={2} aria-hidden="true" /></span>
+                    <button className="name-btn" title={msg('preview')} onClick={(e) => { e.stopPropagation(); openItem(item) }}>
+                      <span className="icon">{item.has_index_web
+                        ? <Globe size={14} strokeWidth={2} aria-hidden="true" />
+                        : <FileText size={14} strokeWidth={2} aria-hidden="true" />}</span>
                       {item.name}
+                      {/* zip 网页包（解包就绪 = 含 index.html）打「网页」徽标，样式同目录。 */}
+                      {item.has_index_web && <span className="web-folder-badge">网页</span>}
                     </button>
                   )}
                 </td>
@@ -2151,7 +2644,9 @@ export default function FileBrowser({
                     ? (item.has_index_web
                       ? <Globe size={22} strokeWidth={2} aria-hidden="true" />
                       : <Folder size={22} strokeWidth={2} aria-hidden="true" />)
-                    : <FileText size={22} strokeWidth={2} aria-hidden="true" />}</span>
+                    : item.has_index_web
+                      ? <Globe size={22} strokeWidth={2} aria-hidden="true" />
+                      : <FileText size={22} strokeWidth={2} aria-hidden="true" />}</span>
                   <span className="file-card-name" title={item.name}>{item.name}{item.has_index_web && <span className="web-folder-badge">网页</span>}</span>
                   <span className="file-card-meta muted">
                     {size > 0 ? `${formatSize(size)} · ` : ''}
@@ -2169,21 +2664,9 @@ export default function FileBrowser({
         </div>
       )}
 
-      {uploads.length > 0 && (
-        <div className="upload-panel">
-          <div className="upload-panel-head">
-            <span>上传任务</span>
-            <Button type="text" size="small" onClick={() => setUploads([])}>清空</Button>
-          </div>
-          {uploads.map((row) => (
-            <div key={row.key} className="upload-row">
-              <span className="upload-name">{row.name}</span>
-              <span className={`badge ${row.phase}`}>{phaseText[row.phase]}</span>
-              {row.error && <span className="error-text">{row.error}</span>}
-            </div>
-          ))}
-        </div>
-      )}
+      {/* 上传任务（v1.6）：浮条已移除——工具栏「上传任务」按钮（Badge 进行中
+          数量）点击弹窗展示任务列表（复用同一 uploads 数据）。 */}
+      </div>
 
       {folderOpen && createFolderFn && (
         <Modal title="新建文件夹" onClose={() => setFolderOpen(false)}>
@@ -2218,37 +2701,30 @@ export default function FileBrowser({
         </Modal>
       )}
 
-      {moveOpen && (
-        <Modal title={`移动 ${selected.size} 项`} onClose={() => setMoveOpen(false)}>
-          <form onSubmit={handleBatchMove}>
-            <label className="field">
-              <span>目标目录</span>
-              <Select
-                value={moveTarget}
-                onChange={(v) => setMoveTarget(v)}
-                options={uniqueMoveCandidates.map((c) => ({ value: c.id, label: c.label }))}
-              />
-            </label>
-            <label className="field">
-              <span>或输入目标目录 UUID</span>
-              <Input
-                allowClear
-                value={moveManual}
-                onChange={(e) => setMoveManual(e.target.value)}
-                placeholder="可选；填写后优先生效"
-              />
-            </label>
-            <p className="hint">单项失败不会回滚其余项；目标目录存在同名项时该项跳过。</p>
-            {moveError && <div className="error-text">{moveError}</div>}
-            <div className="modal-actions">
-              <Button onClick={() => setMoveOpen(false)}>取消</Button>
-              <Button type="primary" htmlType="submit" disabled={batchBusy || selected.size === 0}>
-                {batchBusy ? '移动中…' : '移动'}
-              </Button>
-            </div>
-          </form>
-        </Modal>
-      )}
+      {/* 复制 / 移动目标目录选择器（懒加载目录树 + 单选 + 路径面包屑，
+          替代手输 UUID；移动 = batch/move 部分成功语义，复制 = copyFn）。 */}
+      <DirPickerModal
+        open={dirPicker !== null}
+        title={dirPicker
+          ? (dirPicker.mode === 'copy'
+            ? (dirPicker.item
+              ? formatMessage(msg('copyTitle'), { name: dirPicker.item.name })
+              : `${msg('copy')} ${selected.size} ${locale === 'zh-CN' ? '项' : 'items'}`)
+            : dirPicker.item
+              ? `移动「${dirPicker.item.name}」`
+              : `移动 ${selected.size} 项`)
+          : ''}
+        rootLabel={rootLabel}
+        listChildren={listChildrenForPicker}
+        spaces={pickerSpaces}
+        excludeId={dirPicker?.mode === 'move' && dirPicker.item ? dirPicker.item.id : undefined}
+        busy={pickerBusy}
+        errorText={pickerError}
+        onCancel={() => {
+          if (!pickerBusy) setDirPicker(null)
+        }}
+        onConfirm={(target) => void handleDirPickerConfirm(target)}
+      />
 
       {shareListOpen && shareLinks.length > 0 && (
         <Modal wide title={msg('batchShareTitle')} onClose={() => setShareListOpen(false)}>
@@ -2275,6 +2751,121 @@ export default function FileBrowser({
         </Modal>
       )}
 
+      {/* 上传任务弹窗（v1.6：工具栏按钮入口；列表 = uploads 数据，进行中
+          徽标计数；进行中任务可取消（排队中直接标记跳过 / 传输中 abort）；
+          「清空已完成」保留进行中任务）。 */}
+      {uploadPanelOpen && (
+        <Modal title={locale === 'zh-CN' ? '上传任务' : 'Upload tasks'} onClose={() => setUploadPanelOpen(false)}>
+          {uploads.length === 0 ? (
+            <p className="hint">{locale === 'zh-CN' ? '暂无上传任务。' : 'No upload tasks.'}</p>
+          ) : (
+            <>
+              <div className="upload-list">
+                {uploads.map((row) => (
+                  <div key={row.key} className="upload-row">
+                    <span className="upload-name">{row.name}</span>
+                    <span className={`badge ${row.phase}`}>{phaseText[row.phase]}</span>
+                    {row.error && <span className="error-text">{row.error}</span>}
+                    {uploadPhaseActive(row.phase) && (
+                      <Button size="small" onClick={() => cancelUploadRow(row.key)}>
+                        {locale === 'zh-CN' ? '取消' : 'Cancel'}
+                      </Button>
+                    )}
+                  </div>
+                ))}
+              </div>
+              <div className="modal-actions">
+                <Button
+                  disabled={activeUploadCount === uploads.length}
+                  onClick={() => setUploads((prev) => prev.filter((r) => uploadPhaseActive(r.phase)))}
+                >
+                  {locale === 'zh-CN' ? '清空已完成' : 'Clear finished'}
+                </Button>
+                <Button onClick={() => setUploadPanelOpen(false)}>{msg('close')}</Button>
+              </div>
+            </>
+          )}
+        </Modal>
+      )}
+
+      {/* 批量分享弹窗（v1.6：打包一个链接）：选项与单项分享创建对齐；提交后
+          经 shareLinks 结果弹窗展示唯一链接。 */}
+      {batchShareOpen && (
+        <Modal title={msg('batchShareTitle')} onClose={() => !batchShareBusy && setBatchShareOpen(false)}>
+          <form onSubmit={handleBatchShareCreate}>
+            <p className="hint">
+              {selectedIds.length > 1
+                ? (locale === 'zh-CN'
+                  ? `将 ${selectedIds.length} 项打包为一个目录式分享链接：访问者可逐项预览/下载或整包下载。`
+                  : `Bundle ${selectedIds.length} items into one directory-style share link.`)
+                : (locale === 'zh-CN' ? '为所选内容创建公开分享链接。' : 'Create a public share link for the selection.')}
+            </p>
+            <label className="field">
+              <span>{locale === 'zh-CN' ? '权限' : 'Permission'}</span>
+              <Select
+                value={batchSharePermission}
+                onChange={(v) => setBatchSharePermission(v as 'view' | 'download')}
+                options={[
+                  { value: 'download', label: locale === 'zh-CN' ? '可下载' : 'Download' },
+                  { value: 'view', label: locale === 'zh-CN' ? '仅查看' : 'View only' },
+                ]}
+              />
+            </label>
+            <label className="field">
+              <span>{locale === 'zh-CN' ? '有效期' : 'Expiry'}</span>
+              <Select
+                value={batchShareHours}
+                onChange={(v) => setBatchShareHours(v)}
+                options={[
+                  { value: '0', label: locale === 'zh-CN' ? '永久' : 'Forever' },
+                  { value: '1', label: locale === 'zh-CN' ? '1 小时' : '1 hour' },
+                  { value: '24', label: locale === 'zh-CN' ? '24 小时' : '24 hours' },
+                  { value: '168', label: locale === 'zh-CN' ? '7 天' : '7 days' },
+                ]}
+              />
+            </label>
+            <label className="field">
+              <span>{locale === 'zh-CN' ? '最大下载次数（留空不限）' : 'Max downloads (empty = unlimited)'}</span>
+              <Input
+                type="number"
+                min={1}
+                allowClear
+                value={batchShareMax}
+                onChange={(e) => setBatchShareMax(e.target.value)}
+                placeholder={locale === 'zh-CN' ? '不限' : 'Unlimited'}
+              />
+            </label>
+            <label className="field">
+              <span>{locale === 'zh-CN' ? '访问密码（留空不设密码，4-64 字符）' : 'Password (optional, 4-64 chars)'}</span>
+              <Input.Password
+                value={batchSharePassword}
+                onChange={(e) => setBatchSharePassword(e.target.value)}
+                placeholder={locale === 'zh-CN' ? '可选：访问者须输入密码' : 'Optional'}
+                autoComplete="new-password"
+              />
+            </label>
+            <div className="field">
+              <span>{locale === 'zh-CN' ? '水印' : 'Watermark'}</span>
+              <label className="check-item">
+                <input
+                  type="checkbox"
+                  checked={batchShareWatermark}
+                  onChange={(e) => setBatchShareWatermark(e.target.checked)}
+                />
+                <span>{locale === 'zh-CN' ? '公开访问页叠加斜排水印' : 'Overlay watermark on public pages'}</span>
+              </label>
+            </div>
+            {batchShareError && <div className="error-text">{batchShareError}</div>}
+            <div className="modal-actions">
+              <Button disabled={batchShareBusy} onClick={() => setBatchShareOpen(false)}>{msg('cancel')}</Button>
+              <Button type="primary" htmlType="submit" disabled={batchShareBusy || selectedIds.length === 0}>
+                {batchShareBusy ? msg('loading') : locale === 'zh-CN' ? '创建链接' : 'Create link'}
+              </Button>
+            </div>
+          </form>
+        </Modal>
+      )}
+
       {batchTagOpen && (
         <Modal title={formatMessage(msg('batchTagTitle'), { n: selected.size })} onClose={() => setBatchTagOpen(false)}>
           <form onSubmit={handleBatchTag}>
@@ -2292,30 +2883,6 @@ export default function FileBrowser({
               <Button onClick={() => setBatchTagOpen(false)}>{msg('cancel')}</Button>
               <Button type="primary" htmlType="submit" disabled={batchTagBusy || !batchTagId}>
                 {batchTagBusy ? msg('loading') : msg('apply')}
-              </Button>
-            </div>
-          </form>
-        </Modal>
-      )}
-
-      {copyTarget && copyFn && (
-        <Modal title={formatMessage(msg('copyTitle'), { name: copyTarget.name })} onClose={() => setCopyTarget(null)}>
-          <form onSubmit={handleCopy}>
-            <label className="field">
-              <span>{msg('copyTargetLabel')}</span>
-              <Input
-                autoFocus
-                allowClear
-                value={copyParent}
-                onChange={(e) => setCopyParent(e.target.value)}
-                placeholder="3f0c9c2e-…"
-              />
-            </label>
-            {copyError && <div className="error-text">{copyError}</div>}
-            <div className="modal-actions">
-              <Button onClick={() => setCopyTarget(null)}>{msg('cancel')}</Button>
-              <Button type="primary" htmlType="submit" disabled={copyBusy}>
-                {copyBusy ? msg('loading') : msg('copy')}
               </Button>
             </div>
           </form>
@@ -2355,6 +2922,64 @@ export default function FileBrowser({
               </Button>
             </form>
             {tagModalError && <div className="error-text">{tagModalError}</div>}
+          </div>
+        </Modal>
+      )}
+
+      {propsTarget && (
+        <Modal
+          title={locale === 'zh-CN' ? `属性「${propsTarget.name}」` : `Properties of “${propsTarget.name}”`}
+          onClose={() => setPropsTarget(null)}
+        >
+          {propsError ? (
+            <div className="error-text">{propsError}</div>
+          ) : (
+            <div className="props-list">
+              <div className="props-row">
+                <span className="muted">{locale === 'zh-CN' ? '名称' : 'Name'}</span>
+                <span className="props-value" title={propsTarget.name}>{propsTarget.name}</span>
+              </div>
+              <div className="props-row">
+                <span className="muted">{locale === 'zh-CN' ? '类型' : 'Type'}</span>
+                <span className="props-value">
+                  {propsTarget.type === 'folder'
+                    ? (locale === 'zh-CN' ? '目录' : 'Folder')
+                    : (locale === 'zh-CN' ? '文件' : 'File')}
+                  {propsTarget.has_index_web ? (locale === 'zh-CN' ? '（网页）' : ' (web)') : ''}
+                </span>
+              </div>
+              <div className="props-row">
+                <span className="muted">{locale === 'zh-CN' ? '大小' : 'Size'}</span>
+                <span className="props-value">
+                  {propsLoading
+                    ? '…'
+                    : propsTarget.type === 'file' && propsMeta?.current_version
+                      ? formatSize(propsMeta.current_version.size)
+                      : '—'}
+                </span>
+              </div>
+              <div className="props-row">
+                <span className="muted">{locale === 'zh-CN' ? '创建时间' : 'Created'}</span>
+                <span className="props-value">{formatTime(propsMeta?.created_at ?? propsTarget.created_at)}</span>
+              </div>
+              <div className="props-row">
+                <span className="muted">{locale === 'zh-CN' ? '修改时间' : 'Modified'}</span>
+                <span className="props-value">{formatTime(propsMeta?.updated_at ?? propsTarget.updated_at)}</span>
+              </div>
+              <div className="props-row">
+                <span className="muted">{locale === 'zh-CN' ? '收藏' : 'Starred'}</span>
+                <span className="props-value">
+                  {propsTarget.is_starred ? (locale === 'zh-CN' ? '已收藏' : 'Yes') : (locale === 'zh-CN' ? '未收藏' : 'No')}
+                </span>
+              </div>
+              <div className="props-row">
+                <span className="muted">ID</span>
+                <span className="props-value props-id" title={propsTarget.id}>{propsTarget.id}</span>
+              </div>
+            </div>
+          )}
+          <div className="modal-actions">
+            <Button onClick={() => setPropsTarget(null)}>{msg('close')}</Button>
           </div>
         </Modal>
       )}
@@ -2400,69 +3025,6 @@ export default function FileBrowser({
         </Modal>
       )}
 
-      {/* 管理默认打开方式：任意扩展名 × 全部打开方式可新增；已配置项可即时
-          修改（PUT）或删除（DELETE）。 */}
-      {openWithMgrOpen && (
-        <Modal wide title={locale === 'zh-CN' ? '管理默认打开方式' : 'Manage default openers'} onClose={() => setOpenWithMgrOpen(false)}>
-          <p className="hint">
-            {locale === 'zh-CN'
-              ? '按扩展名保存的默认打开方式；下方可新增任意扩展名的偏好，修改即时保存，删除后恢复按文件类型自动选择。'
-              : 'Per-extension default openers. Add any extension below; changes save immediately; deleting restores automatic selection.'}
-          </p>
-          <div className="openwith-mgr">
-            {Object.entries(openWith)
-              .sort(([a], [b]) => a.localeCompare(b))
-              .map(([ext, opener]) => (
-                <div key={ext} className="openwith-mgr-row">
-                  <span className="openwith-mgr-ext">.{ext}</span>
-                  <Select
-                    value={opener}
-                    aria-label={`.${ext}`}
-                    className="openwith-mgr-select"
-                    onChange={(v) => void handleMgrChange(ext, v as OpenWithOpener)}
-                    options={ALL_OPENERS.map((op) => ({ value: op, label: openerLabel(op, locale === 'zh-CN') }))}
-                  />
-                  <Button size="small" danger onClick={() => void handleMgrDelete(ext)}>
-                    {msg('delete')}
-                  </Button>
-                </div>
-              ))}
-            {Object.keys(openWith).length === 0 && (
-              <p className="hint">
-                {locale === 'zh-CN'
-                  ? '暂无已配置项：可在下方直接新增，或在文件菜单「打开方式」中选择保存。'
-                  : 'No defaults configured yet. Add one below, or pick from a file’s “Open with” menu.'}
-              </p>
-            )}
-            <form className="openwith-mgr-row openwith-mgr-add" onSubmit={handleMgrAdd}>
-              <Input
-                className="openwith-mgr-ext-input"
-                allowClear
-                value={mgrNewExt}
-                onChange={(e) => setMgrNewExt(e.target.value)}
-                placeholder={locale === 'zh-CN' ? '扩展名，如 docx' : 'extension, e.g. docx'}
-                aria-label={locale === 'zh-CN' ? '扩展名' : 'Extension'}
-                maxLength={17}
-              />
-              <Select
-                value={mgrNewOpener}
-                className="openwith-mgr-select"
-                aria-label={locale === 'zh-CN' ? '打开方式' : 'Opener'}
-                onChange={(v) => setMgrNewOpener(v as OpenWithOpener)}
-                options={ALL_OPENERS.map((op) => ({ value: op, label: openerLabel(op, locale === 'zh-CN') }))}
-              />
-              <Button size="small" type="primary" htmlType="submit" disabled={mgrAdding || !mgrNewExt.trim()}>
-                {mgrAdding ? (locale === 'zh-CN' ? '保存中…' : 'Saving…') : (locale === 'zh-CN' ? '新增' : 'Add')}
-              </Button>
-            </form>
-          </div>
-          {openWithMgrError && <div className="error-text">{openWithMgrError}</div>}
-          <div className="modal-actions">
-            <Button onClick={() => setOpenWithMgrOpen(false)}>{msg('close')}</Button>
-          </div>
-        </Modal>
-      )}
-
       {/* 右键 / 列表行「⋯」菜单：视口定位浮层保留（初始按点击坐标，渲染后经
           clampFixedMenu 按实测尺寸收缩进视口），菜单面板换 antd Menu 视觉。 */}
       {ctxMenu && (
@@ -2476,6 +3038,13 @@ export default function FileBrowser({
           {renderItemMenu(ctxMenu.item)}
         </div>
       )}
+
+      {/* 回收站弹窗（恢复/彻底删除/清空；操作成功后刷新当前目录）。 */}
+      <TrashModal
+        open={trashOpen}
+        onClose={() => setTrashOpen(false)}
+        onChanged={() => void load(currentParent)}
+      />
     </div>
   )
 }

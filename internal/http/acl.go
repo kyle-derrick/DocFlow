@@ -32,17 +32,17 @@ func (h *Handler) SetACL(svc aclService) {
 	}
 }
 
-// canManageFolderACL 判定 actor 能否管理目录的 ACL：文件夹所在团队的 owner
-// 或系统 admin（其余成员 403）。团队不存在按 false 处理（调用方前置校验）。
+// canManageFolderACL 判定 actor 能否管理目录的 ACL：文件夹所在团队的
+// owner/admin（团队级管理权限，五级内置角色）或系统 admin（其余成员 403）。
+// 团队不存在按 false 处理（调用方前置校验）。
 func (h *Handler) canManageFolderACL(actor, teamID uuid.UUID) bool {
 	if h.teams == nil {
 		return false
 	}
-	t, err := h.teams.Get(teamID)
-	if err != nil {
+	if _, err := h.teams.Get(teamID); err != nil {
 		return false
 	}
-	if t.OwnerID == actor {
+	if ok, err := h.teams.CanAdmin(actor, teamID); err == nil && ok {
 		return true
 	}
 	if h.roles != nil {

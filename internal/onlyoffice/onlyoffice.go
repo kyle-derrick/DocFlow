@@ -232,6 +232,9 @@ type SessionOptions struct {
 	View bool
 	// Lang 编辑器界面语言（BCP 47 风格，如 zh-CN / en-US）；空或非法回退 zh。
 	Lang string
+	// AllowDownload 仅公开分享查看会话使用（NewShareViewConfig）：编辑器内
+	// 是否允许下载/打印（分享 permission=download 时 true，仅查看 false）。
+	AllowDownload bool
 }
 
 // editorLangRe 合法语言标记形状（字母段 + 可选 -数字/字母子段）；防止把
@@ -307,6 +310,48 @@ func (s *Service) NewSessionConfig(user, fileID uuid.UUID, opts SessionOptions) 
 		"mode":        mode,
 		"lang":        sanitizeEditorLang(opts.Lang),
 		"user":        map[string]any{"id": user.String(), "name": name},
+	}
+	config := map[string]any{
+		"documentType": documentType(f.Name),
+		"document":     document,
+		"editorConfig": editorConfig,
+	}
+	signed, err := s.signConfig(config)
+	if err != nil {
+		return nil, err
+	}
+	config["token"] = signed
+	return config, nil
+}
+
+// NewShareViewConfig 生成公开分享（/s/:token 访客）的只读查看会话配置：
+// 与 NewSessionConfig 的差异——不做用户鉴权（调用方已按分享 token 解析出
+// 目标文件与版本），恒为 view 模式（permissions.edit=false），编辑器用户为
+// 访客占位；opts.AllowDownload 控制编辑器内下载/打印入口（分享
+// permission=download 时开启）。document.url 同为 5 分钟签名下载 URL，
+// config token 以同密钥整体签名（aud=onlyoffice-config）。
+func (s *Service) NewShareViewConfig(f files.File, version files.FileVersion, opts SessionOptions) (map[string]any, error) {
+	if f.Type != "file" {
+		return nil, files.ErrInvalidTarget
+	}
+	token, err := s.signDownloadToken(f.ID, version.ID)
+	if err != nil {
+		return nil, err
+	}
+	base := s.cfg.DownloadBase
+	document := map[string]any{
+		"fileType": fileExt(f.Name),
+		"key":      documentKey(f.ID, version.ID),
+		"title":    f.Name,
+		"url": fmt.Sprintf("%s/api/v1/onlyoffice/download/%s/%s?v=%s&token=%s",
+			base, f.ID, url.PathEscape(f.Name), version.ID, url.QueryEscape(token)),
+		"permissions": map[string]any{"edit": false, "print": opts.AllowDownload, "download": opts.AllowDownload},
+	}
+	editorConfig := map[string]any{
+		"callbackUrl": base + "/api/v1/onlyoffice/callback",
+		"mode":        "view",
+		"lang":        sanitizeEditorLang(opts.Lang),
+		"user":        map[string]any{"id": "share-guest", "name": "访客"},
 	}
 	config := map[string]any{
 		"documentType": documentType(f.Name),

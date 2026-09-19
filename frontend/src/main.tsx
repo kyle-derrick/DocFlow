@@ -8,8 +8,12 @@ import { THEME_ACCENTS, initTheme, useColorMode } from './theme'
 import './styles.css'
 import { LocaleContext, loadLocale, Locale } from './i18n'
 
-/** antd 字体与 body 字体栈保持一致（styles.css body font-family）。 */
-const FONT_FAMILY = "'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif"
+/** antd 字体与 body 字体栈保持一致（styles.css body font-family；中文字形
+ * 依次回退 PingFang SC → 微软雅黑 → Noto Sans SC）。 */
+const FONT_FAMILY = "'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', sans-serif"
+
+/** 字号层级：13 正文 / 12 辅助（styles.css body font-size 同值对齐）。 */
+const FONT_SIZE = 13
 
 /**
  * antd 基础面板色对齐存量 styles.css 变量体系（--bg/--surface/--border/
@@ -54,12 +58,24 @@ function useAccentColor(): string {
  * - 明暗算法跟随 data-mode（useColorMode）、colorPrimary 跟随 accent 主题、
  *   borderRadius 对齐 --radius（6px）、locale 跟随 i18n（zh_CN / en_US）；
  * - 面板色 token 对齐 styles.css 变量体系（见 PALETTE），弹层与存量页面同源。
+ *
+ * 控件尺寸统一（v1.7 正解：ConfigProvider componentSize="small"）：
+ * - componentSize="small" 全局生效：Input/Select/Button/Segmented/InputNumber/
+ *   Table 密度/Pagination 等未显式声明 size 的组件一律 small（全站统一口径；
+ *   散写的 size="small" 与之等价可留，管理后台 Table 的 size="middle" 已删
+ *   交给全局）；
+ * - controlHeight=24 且 controlHeightSM=24 兜底对齐：显式 size="middle" 与
+ *   small 同高（24px），漏网的中号声明不再产生 32px 高差；
+ * - large 派生为 32px：登录页主输入/按钮显式 size="large" 作为视觉主体；
+ * - Menu 条目高度由 styles.css 全局紧凑规格固定（30px）；Modal 页脚按钮走
+ *   Button 默认尺寸，同样随 componentSize=small；站内 Switch 均已显式 small。
  */
 function AntdConfig({ locale, children }: { locale: Locale; children: ReactNode }) {
   const mode = useColorMode()
   const accent = useAccentColor()
   return (
     <ConfigProvider
+      componentSize="small"
       locale={locale === 'zh-CN' ? zhCN : enUS}
       theme={{
         cssVar: { key: 'docflow' },
@@ -69,6 +85,9 @@ function AntdConfig({ locale, children }: { locale: Locale; children: ReactNode 
           colorInfo: accent,
           borderRadius: 6,
           fontFamily: FONT_FAMILY,
+          fontSize: FONT_SIZE,
+          controlHeight: 24,
+          controlHeightSM: 24,
           ...PALETTE[mode],
         },
       }}

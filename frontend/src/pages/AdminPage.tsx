@@ -18,12 +18,12 @@ import {
   Group,
   GroupMember,
   Invitation,
-  MailEnvStatus,
   QuarantineAction,
   QuarantineItem,
   SettingItem,
   SettingType,
   SettingValue,
+  SmtpSettingsView,
   TlsCert,
   TlsMode,
   TlsStatus,
@@ -36,12 +36,14 @@ import {
   adminGetBackupStatus,
   adminVerifyBackup,
   adminGetSettings,
+  adminGetSmtpSettings,
   adminGetTls,
   adminListAuditLogs,
   adminListGroupMembers,
   adminListGroups,
   adminListQuarantine,
   adminPutTls,
+  adminPutSmtpSettings,
   adminQuarantineAction,
   adminRemoveGroupMember,
   adminRunBackup,
@@ -430,7 +432,6 @@ function InvitationsPanel({ onError, onNotice }: { onError: (msg: string) => voi
         </Button>
       </form>
       <Table<Invitation>
-        size="middle"
         rowKey="id"
         dataSource={invitations}
         pagination={false}
@@ -619,7 +620,6 @@ function UsersPanel({ onError, onNotice }: { onError: (msg: string) => void; onN
         )}
       </form>
       <Table<AdminUser>
-        size="middle"
         rowKey="id"
         loading={loading}
         dataSource={users}
@@ -852,7 +852,6 @@ function AuditPanel({ onError }: { onError: (msg: string) => void }) {
         <>
           <div className="setting-meta muted">共 {data.total} 条</div>
           <Table<AuditEntry>
-            size="middle"
             rowKey="id"
             columns={columns}
             dataSource={data.items}
@@ -982,7 +981,6 @@ function BackupPanel({ onError, onNotice }: { onError: (msg: string) => void; on
             </div>
           </div>
           <Table<(typeof status.files)[number]>
-            size="middle"
             rowKey="path"
             style={{ marginBottom: 12 }}
             pagination={false}
@@ -1013,82 +1011,176 @@ function BackupPanel({ onError, onNotice }: { onError: (msg: string) => void; on
   )
 }
 
-/** 邮件（SMTP）卡片：只读状态展示。SMTP 在架构上为 env-only（邮件器启动
- * 时装配、凭据不入库——settings 非密钥原则），本页不提供任何可编辑控件，
- * 仅回显 /admin/settings 附带的 mail 状态（连接参数 + 配置探针），说明
- * 修改入口在部署的 .env。 */
-function MailPanel({ mail }: { mail?: MailEnvStatus }) {
+/** 邮件（SMTP）卡片：可编辑表单。GET/PUT /admin/settings/smtp —— 后端已
+ * 支持运行时修改（DB 覆盖 → env 回退合并，保存即时生效：邮件发送处每次
+ * 读库）；pass 留空 = 保持现值（任何读路径不回显，仅报 configured），
+ * env 基线（.env 部署值）作对照展示，PUBLIC_BASE_URL 仍为 env-only。 */
+function MailPanel({ onNotice, onError }: { onNotice: (m: string) => void; onError: (m: string) => void }) {
+  const [view, setView] = useState<SmtpSettingsView | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [formError, setFormError] = useState('')
+  const [form, setForm] = useState<{ enabled: boolean; host: string; port: number | null; user: string; pass: string; from: string; tls_mode: string }>({
+    enabled: false, host: '', port: 587, user: '', pass: '', from: '', tls_mode: 'auto',
+  })
+
+  const load = async () => {
+    setLoading(true)
+    try {
+      const v = await adminGetSmtpSettings()
+      setView(v)
+      setForm({
+        enabled: v.enabled, host: v.host, port: v.port, user: v.user, pass: '',
+        from: v.from, tls_mode: v.tls_mode || 'auto',
+      })
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'SMTP 配置加载失败')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const handleSave = async (e: FormEvent) => {
+    e.preventDefault()
+    const host = form.host.trim()
+    const from = form.from.trim()
+    const port = form.port ?? 0
+    if (form.enabled && (!host || !from)) {
+      setFormError('启用 SMTP 时服务器地址与发件人必填')
+      return
+    }
+    if (port < 1 || port > 65535) {
+      setFormError('端口须为 1-65535')
+      return
+    }
+    setSaving(true)
+    setFormError('')
+    try {
+      const v = await adminPutSmtpSettings({
+        enabled: form.enabled, host, port, user: form.user.trim(), pass: form.pass, from, tls_mode: form.tls_mode,
+      })
+      setView(v)
+      setForm((prev) => ({ ...prev, pass: '' }))
+      onNotice('SMTP 配置已保存（即时生效）')
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : '保存失败')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="panel setting-group">
+        <h3>邮件（SMTP）</h3>
+        <div className="empty">SMTP 配置加载中…</div>
+      </div>
+    )
+  }
+
   return (
     <div className="panel setting-group">
       <h3>邮件（SMTP）</h3>
       <div className="setting-desc muted" style={{ marginBottom: 12 }}>
-        邮件通道（邀请注册、密码重置、通知副本）由部署环境变量（.env）配置，
-        运行时不可在此修改：SMTP_ENABLED=true 且 SMTP_HOST / SMTP_FROM 必填
-        （认证 SMTP_USER / SMTP_PASS 按需），调整后重启 backend 生效；
-        未启用时使用日志通道（链接输出到 backend 日志，不发送邮件）。
+        邮件通道（邀请注册、密码重置、通知副本）在此保存即时生效：表单值即为
+        生效配置（输入框占位符提示 .env 基线值）；密码留空表示保持现值
+        （不回显）；未启用时使用日志通道（链接输出到 backend 日志，不发送邮件）。
       </div>
-      {!mail ? (
-        <div className="empty">邮件通道状态加载中…</div>
-      ) : (
-        <>
-          <div className="setting-row">
+      {view && (
+        <form className="smtp-form" onSubmit={handleSave}>
+          <div className="setting-row" style={{ borderBottom: 0, paddingBottom: 0 }}>
             <div className="setting-main">
-              <div className="setting-key">通道状态 <code className="setting-desc muted">SMTP_ENABLED</code></div>
-              <div className="setting-desc muted">启用时经 SMTP 投递；未启用为 Noop 日志通道</div>
+              <div className="setting-key">通道状态 <code className="setting-desc muted">smtp.enabled</code></div>
+              <div className="setting-desc muted">启用时经 SMTP 投递；未启用为 Noop 日志通道（env 基线：{view.env.enabled ? '启用' : '未启用'}）</div>
             </div>
             <div className="setting-control">
-              <span className={mail.enabled ? 'badge available' : 'badge failed'}>
-                {mail.enabled ? 'SMTP 已启用' : '未启用（日志通道）'}
+              <span className="setting-bool">
+                <Switch size="small" checked={form.enabled} onChange={(v) => setForm((prev) => ({ ...prev, enabled: v }))} />
+                <span>{form.enabled ? '开启' : '关闭'}</span>
               </span>
             </div>
           </div>
-          <div className="setting-row">
-            <div className="setting-main">
-              <div className="setting-key">服务器 <code className="setting-desc muted">SMTP_HOST / SMTP_PORT</code></div>
-              <div className="setting-desc muted">投递服务器地址（STARTTLS 由服务器协商自动启用）</div>
-            </div>
-            <div className="setting-control">
-              {mail.host ? <span className="setting-value-mono">{mail.host}:{mail.port}</span> : <span className="badge failed">未配置</span>}
-            </div>
+          <div className="smtp-grid">
+            <label className="field">
+              <span>服务器地址（SMTP_HOST）</span>
+              <Input
+                value={form.host}
+                onChange={(e) => setForm((prev) => ({ ...prev, host: e.target.value }))}
+                placeholder={view.env.host || '如 smtp.example.com'}
+              />
+            </label>
+            <label className="field">
+              <span>端口（SMTP_PORT）</span>
+              <InputNumber
+                min={1}
+                max={65535}
+                value={form.port}
+                onChange={(v) => setForm((prev) => ({ ...prev, port: v }))}
+                placeholder={String(view.env.port || 587)}
+                style={{ width: '100%' }}
+              />
+            </label>
+            <label className="field">
+              <span>加密方式（smtp.tls_mode）</span>
+              <Select
+                value={form.tls_mode}
+                onChange={(v) => setForm((prev) => ({ ...prev, tls_mode: v }))}
+                options={[
+                  { value: 'auto', label: 'auto（STARTTLS 自动协商，默认）' },
+                  { value: 'ssl', label: 'ssl（隐式 TLS / SMTPS，465 常见）' },
+                  { value: 'none', label: 'none（不协商，仅内网中继）' },
+                ]}
+              />
+            </label>
+            <label className="field">
+              <span>发件人（SMTP_FROM，启用时必填）</span>
+              <Input
+                value={form.from}
+                onChange={(e) => setForm((prev) => ({ ...prev, from: e.target.value }))}
+                placeholder={view.env.from || '如 docflow@example.com'}
+              />
+            </label>
+            <label className="field">
+              <span>认证用户名（SMTP_USER，空 = 匿名投递）</span>
+              <Input
+                value={form.user}
+                onChange={(e) => setForm((prev) => ({ ...prev, user: e.target.value }))}
+                placeholder={view.env.user || '匿名投递'}
+              />
+            </label>
+            <label className="field">
+              <span>认证密码（SMTP_PASS，留空保持现值）</span>
+              <Input.Password
+                value={form.pass}
+                onChange={(e) => setForm((prev) => ({ ...prev, pass: e.target.value }))}
+                placeholder={view.password_configured ? '已配置（留空保持不变）' : '未配置'}
+                autoComplete="new-password"
+              />
+            </label>
           </div>
-          <div className="setting-row">
-            <div className="setting-main">
-              <div className="setting-key">发件人 <code className="setting-desc muted">SMTP_FROM</code></div>
-              <div className="setting-desc muted">启用 SMTP 时必填</div>
-            </div>
-            <div className="setting-control">
-              {mail.from ? <span className="setting-value-mono">{mail.from}</span> : <span className="badge failed">未配置</span>}
-            </div>
+          {formError && <div className="error-text">{formError}</div>}
+          <div className="modal-actions" style={{ marginTop: 4 }}>
+            <Button disabled={saving} onClick={() => void load()}>重置</Button>
+            <Button type="primary" htmlType="submit" loading={saving}>
+              {saving ? '保存中…' : '保存（即时生效）'}
+            </Button>
           </div>
-          <div className="setting-row">
-            <div className="setting-main">
-              <div className="setting-key">认证 <code className="setting-desc muted">SMTP_USER / SMTP_PASS</code></div>
-              <div className="setting-desc muted">账号为空表示匿名投递；密码只报配置状态，不回显</div>
-            </div>
-            <div className="setting-control">
-              {mail.user ? (
-                <>
-                  <span className="setting-value-mono">{mail.user}</span>
-                  <span className={mail.password_configured ? 'badge available' : 'badge failed'} style={{ marginLeft: 8 }}>
-                    {mail.password_configured ? '密码已配置' : '密码未配置'}
-                  </span>
-                </>
-              ) : (
-                <span className="badge">匿名投递</span>
-              )}
-            </div>
-          </div>
-          <div className="setting-row">
-            <div className="setting-main">
-              <div className="setting-key">站点地址 <code className="setting-desc muted">PUBLIC_BASE_URL</code></div>
-              <div className="setting-desc muted">邮件内邀请/重置链接的前缀；为空时链接退化为相对路径（仅日志可见）</div>
-            </div>
-            <div className="setting-control">
-              {mail.public_base_url ? <span className="setting-value-mono">{mail.public_base_url}</span> : <span className="badge">未设置</span>}
-            </div>
-          </div>
-        </>
+        </form>
       )}
+      <div className="setting-row" style={{ marginTop: 12 }}>
+        <div className="setting-main">
+          <div className="setting-key">站点地址 <code className="setting-desc muted">PUBLIC_BASE_URL</code></div>
+          <div className="setting-desc muted">邮件内邀请/重置链接的前缀（env-only，不可在此修改）；为空时链接退化为相对路径（仅日志可见）</div>
+        </div>
+        <div className="setting-control">
+          {view?.public_base_url ? <span className="setting-value-mono">{view.public_base_url}</span> : <span className="badge">未设置</span>}
+        </div>
+      </div>
     </div>
   )
 }
@@ -1207,7 +1299,6 @@ function QuarantinePanel({ onError, onNotice }: { onError: (msg: string) => void
         <div className="empty">当前没有隔离中的内容对象</div>
       ) : (
         <Table<QuarantineItem>
-          size="middle"
           rowKey="sha256"
           pagination={false}
           dataSource={items}
@@ -1551,7 +1642,6 @@ function GroupsPanel({ onError, onNotice }: { onError: (msg: string) => void; on
         <div className="hint">加载中…</div>
       ) : (
         <Table<Group>
-          size="middle"
           rowKey="id"
           pagination={false}
           dataSource={groups}
@@ -1880,8 +1970,6 @@ export default function AdminPage() {
   const [stats, setStats] = useState<AdminStats | null>(null)
   const [settings, setSettings] = useState<SettingItem[]>([])
   const [secrets, setSecrets] = useState<Record<string, boolean>>({})
-  // 邮件通道（SMTP）env-only 只读状态（邮件分区展示用）。
-  const [mail, setMail] = useState<MailEnvStatus | undefined>(undefined)
   const [loading, setLoading] = useState(true)
   const [forbidden, setForbidden] = useState(false)
   const [error, setError] = useState('')
@@ -1903,7 +1991,6 @@ export default function AdminPage() {
       const [result, st] = await Promise.all([adminGetSettings(), adminGetStats()])
       setSettings(result.settings ?? [])
       setSecrets(result.secrets ?? {})
-      setMail(result.mail)
       setStats(st)
       setForbidden(false)
     } catch (err) {
@@ -1956,7 +2043,6 @@ export default function AdminPage() {
       const refreshed = await adminGetSettings()
       setSettings(refreshed.settings ?? [])
       setSecrets(refreshed.secrets ?? {})
-      setMail(refreshed.mail)
     } catch (err) {
       if (err instanceof ApiError && err.status === 403) setRowError('无权限')
       else setRowError(err instanceof Error ? err.message : '保存失败')
@@ -1992,7 +2078,6 @@ export default function AdminPage() {
         const refreshed = await adminGetSettings()
         setSettings(refreshed.settings ?? [])
         setSecrets(refreshed.secrets ?? {})
-        setMail(refreshed.mail)
       } catch {
         // 列表刷新失败不打断，保留本地已保存状态
       }
@@ -2066,7 +2151,7 @@ export default function AdminPage() {
       {section === 'security' && !loading && !forbidden && <QuarantinePanel onError={(msg) => { setError(msg); setNotice('') }} onNotice={(msg) => { setNotice(msg); setError('') }} />}
       {section === 'security' && !loading && !forbidden && <SecretsPanel secrets={secrets} />}
        {section === 'tls' && !loading && !forbidden && <TlsPanel onNotice={(msg) => { setNotice(msg); setError('') }} />}
-      {section === 'mail' && !loading && !forbidden && <MailPanel mail={mail} />}
+      {section === 'mail' && !loading && !forbidden && <MailPanel onNotice={setNotice} onError={setError} />}
 
       {section === 'people' && !loading && !forbidden && (
         <InvitationsPanel
@@ -2109,7 +2194,6 @@ export default function AdminPage() {
             <Button
               type="text"
               size="small"
-              style={{ padding: '2px 8px' }}
               title={isCollapsed ? '展开分组' : '折叠分组'}
               onClick={() => setCollapsed((prev) => ({ ...prev, [prefix]: !isCollapsed }))}
             >

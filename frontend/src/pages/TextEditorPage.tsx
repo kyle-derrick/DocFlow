@@ -1,7 +1,7 @@
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { isValidElement } from 'react'
-import { Button } from 'antd'
+import { Button, Segmented } from 'antd'
 import ReactMarkdown from 'react-markdown'
 import type { Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -12,12 +12,10 @@ import MermaidDiagram from '../components/MermaidDiagram'
 import { MessageKey, t, useLocale } from '../i18n'
 import { useColorMode } from '../theme'
 
-// 富文本编辑器（Tiptap + lowlight 产物 1MB+）懒加载独立 chunk，仅 markdown
-// 编辑态进入时按需拉取。
-const RichTextEditor = lazy(() => import('../components/richtext/RichTextEditor'))
-
 // Monaco（VSCode）编辑器：本地打包 + 按语言 worker（产物 3MB+ 独立 chunk，
 // 仅编辑态进入时拉取；查看态一律 <pre> 纯渲染，不加载 Monaco）。
+// v1.7 起 .md 回归纯 Markdown（源码+渲染），富文本编辑仅 .dfdoc
+//（见 DfdocEditorPage / RichTextEditor）。
 const MonacoEditor = lazy(() => import('../components/MonacoEditor'))
 
 export type EditorKind = 'text' | 'markdown' | 'html' | 'css' | 'javascript'
@@ -100,6 +98,26 @@ function HtmlViewer({ source, name }: { source: string; name: string }) {
   return <iframe className="standalone-viewer-frame" sandbox="allow-scripts" src={url} title={name} />
 }
 
+// ---- Markdown 编辑器视图模式（v1.6）：编辑 / 分栏（左源码右预览同步滚动）/
+//      预览；默认分栏，偏好持久化 localStorage。 ----
+
+type MdViewMode = 'edit' | 'split' | 'preview'
+
+const MD_VIEW_KEY = 'docflow.mdViewMode'
+
+function loadMdViewMode(): MdViewMode {
+  const v = window.localStorage.getItem(MD_VIEW_KEY)
+  return v === 'edit' || v === 'split' || v === 'preview' ? v : 'split'
+}
+
+function saveMdViewMode(mode: MdViewMode): void {
+  try {
+    window.localStorage.setItem(MD_VIEW_KEY, mode)
+  } catch {
+    /* ignore */
+  }
+}
+
 /** 源码只读查看（txt/css/js 等纯文本类）：等宽 <pre> 直接渲染（自动换行、
  * 铺满滚动）——查看路径不加载 Monaco（chunk 3MB+ 且在弹窗内高度不稳），
  * Monaco 仅编辑态使用。 */
@@ -138,16 +156,51 @@ export default function TextEditorPage({
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const dirtyRef = useRef(false)
-  // markdown 富文本/源码模式（默认富文本；往返失败自动降级源码并提示）。
-  const [richMode, setRichMode] = useState(true)
-  const [richKey, setRichKey] = useState(0)
+  // markdown 视图模式（编辑/分栏/预览，默认分栏，localStorage 记住）。
+  const [mdView, setMdView] = useState<MdViewMode>(loadMdViewMode)
+  // 分栏同步滚动：Monaco 实例与预览容器百分比互推（lock 防回环）。
+  const monacoRef = useRef<{ getScrollTop(): number; setScrollTop(v: number): void; getScrollHeight(): number; getHeight(): number } | null>(null)
+  const previewScrollRef = useRef<HTMLDivElement | null>(null)
+  const syncLockRef = useRef(false)
+
+  const changeMdView = (mode: MdViewMode) => {
+    setMdView(mode)
+    saveMdViewMode(mode)
+    syncLockRef.current = false
+    monacoRef.current = null
+  }
+
+  /** 分栏同步滚动：源侧 → 预览侧（按滚动百分比互推；syncLock 抑制回环）。 */
+  const syncScrollToPreview = () => {
+    const ed = monacoRef.current
+    const pv = previewScrollRef.current
+    if (!ed || !pv || syncLockRef.current) return
+    const edMax = Math.max(1, ed.getScrollHeight() - ed.getHeight())
+    const ratio = Math.min(1, ed.getScrollTop() / edMax)
+    syncLockRef.current = true
+    pv.scrollTop = ratio * Math.max(1, pv.scrollHeight - pv.clientHeight)
+    window.requestAnimationFrame(() => {
+      syncLockRef.current = false
+    })
+  }
+
+  const syncScrollToEditor = () => {
+    const ed = monacoRef.current
+    const pv = previewScrollRef.current
+    if (!ed || !pv || syncLockRef.current) return
+    const pvMax = Math.max(1, pv.scrollHeight - pv.clientHeight)
+    const ratio = Math.min(1, pv.scrollTop / pvMax)
+    syncLockRef.current = true
+    ed.setScrollTop(ratio * Math.max(1, ed.getScrollHeight() - ed.getHeight()))
+    window.requestAnimationFrame(() => {
+      syncLockRef.current = false
+    })
+  }
 
   useEffect(() => {
     let alive = true
     setLoading(true)
     setError('')
-    // 换文件时 markdown 回到默认富文本模式。
-    setRichMode(true)
     void Promise.all([getFileMeta(fileId), fetchFileText(fileId)])
       .then(([meta, content]) => {
         if (!alive) return
@@ -199,31 +252,29 @@ export default function TextEditorPage({
     </main>
   )
 
-  const canPreview = kind === 'markdown' || kind === 'html'
-  const isRich = editorKind === 'markdown' && richMode
+  const isMarkdown = editorKind === 'markdown'
+  const canPreview = isMarkdown || editorKind === 'html'
   return (
     <main className="text-editor-page">
       <header className="text-editor-head">
         <div>
-          <h1>{editorKind === 'markdown' ? msg('markdownEditor') : `${name.split('.').pop()?.toUpperCase() ?? '文本'} 编辑器`}</h1>
+          <h1>{isMarkdown ? msg('markdownEditor') : `${name.split('.').pop()?.toUpperCase() ?? '文本'} 编辑器`}</h1>
           <div className="muted">{name}</div>
         </div>
         <div className="editor-head-actions">
-          {editorKind === 'markdown' && (
-            <Button
-              size="small"
-              onClick={() => {
-                setRichMode((value) => !value)
-                setRichKey((key) => key + 1)
-                setNotice('')
-              }}
-            >
-              {richMode
-                ? (locale === 'zh-CN' ? '源码' : 'Source')
-                : (locale === 'zh-CN' ? '富文本' : 'Rich text')}
-            </Button>
+          {/* markdown：视图切换（编辑/分栏/预览，默认分栏，localStorage 记住）。 */}
+          {isMarkdown && (
+            <Segmented
+              value={mdView}
+              onChange={(v) => changeMdView(v as MdViewMode)}
+              options={[
+                { label: locale === 'zh-CN' ? '编辑' : 'Edit', value: 'edit' },
+                { label: locale === 'zh-CN' ? '分栏' : 'Split', value: 'split' },
+                { label: locale === 'zh-CN' ? '预览' : 'Preview', value: 'preview' },
+              ]}
+            />
           )}
-          {canPreview && (
+          {canPreview && !isMarkdown && (
             <Button size="small" onClick={() => setPreview((value) => !value)}>
               {preview ? msg('editMode') : msg('previewMode')}
             </Button>
@@ -237,27 +288,56 @@ export default function TextEditorPage({
       {notice && <div className="banner ok">{notice}</div>}
       {loading ? (
         <div className="text-editor-state">{msg('loading')}</div>
+      ) : isMarkdown ? (
+        mdView === 'preview' ? (
+          <div className="md-preview-pane" ref={previewScrollRef}>
+            <MarkdownViewer source={text} />
+          </div>
+        ) : mdView === 'split' ? (
+          <div className="md-split">
+            {/* 分栏：左源码（Monaco）右预览，百分比同步滚动。 */}
+            <div className="md-split-editor">
+              <Suspense fallback={<div className="text-editor-state">{msg('loading')}</div>}>
+                <MonacoEditor
+                  language={monacoLanguages.markdown}
+                  theme={monacoTheme(dark)}
+                  value={text}
+                  options={monacoOptions(false)}
+                  onMount={(editor) => {
+                    monacoRef.current = editor as unknown as typeof monacoRef.current
+                    editor.onDidScrollChange(() => syncScrollToPreview())
+                  }}
+                  onChange={(value) => {
+                    setText(value ?? '')
+                    setNotice('')
+                    dirtyRef.current = true
+                  }}
+                />
+              </Suspense>
+            </div>
+            <div className="md-split-preview" ref={previewScrollRef} onScroll={syncScrollToEditor}>
+              <MarkdownViewer source={text} />
+            </div>
+          </div>
+        ) : (
+          <div className="code-editor">
+            <Suspense fallback={<div className="text-editor-state">{msg('loading')}</div>}>
+              <MonacoEditor
+                language={monacoLanguages.markdown}
+                theme={monacoTheme(dark)}
+                value={text}
+                options={monacoOptions(false)}
+                onChange={(value) => {
+                  setText(value ?? '')
+                  setNotice('')
+                  dirtyRef.current = true
+                }}
+              />
+            </Suspense>
+          </div>
+        )
       ) : preview && canPreview ? (
         <SourceViewer kind={editorKind} source={text} name={name} />
-      ) : isRich ? (
-        <Suspense fallback={<div className="text-editor-state">{msg('loading')}</div>}>
-          <RichTextEditor
-            key={`${fileId}-${richKey}`}
-            initialMarkdown={text}
-            fileId={fileId}
-            onChange={(md) => {
-              setText(md)
-              setNotice('')
-              dirtyRef.current = true
-            }}
-            onRoundtripFail={() => {
-              setRichMode(false)
-              setNotice(locale === 'zh-CN'
-                ? '该文档包含富文本无法无损承载的内容，已切换为源码模式'
-                : 'This document cannot be losslessly represented in rich text, switched to source mode')
-            }}
-          />
-        </Suspense>
       ) : (
         <div className="code-editor">
           <Suspense fallback={<div className="text-editor-state">{msg('loading')}</div>}>

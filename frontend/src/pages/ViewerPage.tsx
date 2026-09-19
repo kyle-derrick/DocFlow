@@ -17,6 +17,7 @@ import {
   fetchFileText,
   fetchPreview,
   getFileMeta,
+  isDfdocFile,
   isDrawioFile,
   isDrawioXmlContent,
   isExcalidrawFile,
@@ -27,6 +28,7 @@ import {
   resolveFileById,
 } from '../api'
 import DrawioPage from './DrawioPage'
+import DfdocEditorPage from './DfdocEditorPage'
 import EditorPage from './EditorPage'
 import ExcalidrawPage from './ExcalidrawPage'
 import TextEditorPage from './TextEditorPage'
@@ -170,15 +172,21 @@ function XMindFileViewer({ fileId, name }: { fileId: string; name: string }) {
  * resolve 结果）；resolveRawUrl 供 .html 网页查看现取 raw_url（重试时
  * 复用）。office 文档统一内嵌 OnlyOffice 只读视图（EditorPage mode=view，
  * 弹窗与独立页渲染一致；EditorPage 在 .preview-embed 内已去视口化自适应）。
+ * force（?open= 查看方式强制）：非空时跳过按扩展名的自动分发，直接进入
+ * 指定查看器（「打开方式」子菜单 / 用户偏好经 routeFor 传递）；'raw' 走
+ * RawSourceViewer（认证读取源文本；二进制给出下载提示）。
  */
 export function FileViewerDispatch({
   fileId,
   name,
   resolveRawUrl,
+  force,
 }: {
   fileId: string
   name: string
   resolveRawUrl: () => Promise<string | null>
+  /** 强制查看方式（openers.ViewMethod）；缺省按扩展名自动分发。 */
+  force?: string
 }) {
   const lower = name.toLowerCase()
   const endsXml = lower.endsWith('.xml')
@@ -196,9 +204,20 @@ export function FileViewerDispatch({
     return () => { alive = false }
   }, [fileId, endsXml])
 
+  if (force === 'office') return <EditorPage mode="view" fileId={fileId} />
+  if (force === 'drawio') return <DrawioPage mode="view" fileId={fileId} />
+  if (force === 'excalidraw') return <ExcalidrawPage mode="view" fileId={fileId} />
+  if (force === 'xmind') return <XMindFileViewer fileId={fileId} name={name} />
+  // richtext 查看方式：.dfdoc → Tiptap 只读渲染；.md 家族 → Markdown 渲染。
+  if (force === 'richtext') {
+    if (isDfdocFile(lower)) return <DfdocEditorPage mode="view" fileId={fileId} />
+    return <TextEditorPage kind="markdown" mode="view" fileId={fileId} />
+  }
+  if (force === 'raw') return <RawSourceViewer fileId={fileId} />
   if (isOfficeFile(lower)) return <EditorPage mode="view" fileId={fileId} />
   if (isDrawioFile(lower)) return <DrawioPage mode="view" fileId={fileId} />
   if (isExcalidrawFile(lower)) return <ExcalidrawPage mode="view" fileId={fileId} />
+  if (isDfdocFile(lower)) return <DfdocEditorPage mode="view" fileId={fileId} />
   if (isXmindFile(lower)) return <XMindFileViewer fileId={fileId} name={name} />
   if (isMermaidFile(lower)) return <MermaidFileViewer fileId={fileId} />
   if (endsXml) {
@@ -214,12 +233,39 @@ export function FileViewerDispatch({
   return <GenericViewer fileId={fileId} name={name} />
 }
 
+/** 强制「原始内容」查看（?open=raw）：认证读取源文本按 <pre> 渲染；
+ * 读取失败（二进制/无权限）给出下载提示（raw 查看对二进制的兜底语义）。 */
+function RawSourceViewer({ fileId }: { fileId: string }) {
+  const [text, setText] = useState<string | null>(null)
+  const [failed, setFailed] = useState(false)
+  useEffect(() => {
+    let alive = true
+    setFailed(false)
+    setText(null)
+    void fetchFileText(fileId)
+      .then((t) => { if (alive) setText(t) })
+      .catch(() => { if (alive) setFailed(true) })
+    return () => { alive = false }
+  }, [fileId])
+  if (failed) {
+    return (
+      <main className="text-editor-page">
+        <div className="empty">该文件为二进制内容，暂不支持原始查看，请下载后查看</div>
+      </main>
+    )
+  }
+  if (text === null) return <main className="text-editor-page"><div className="text-editor-state">正在加载…</div></main>
+  return <main className="text-editor-page viewer-only"><pre className="preview-text">{text}</pre></main>
+}
+
 export default function ViewerPage() {
   const { fileId = '' } = useParams()
   const [searchParams] = useSearchParams()
   // ?origin_content=1：resolve 携带 origin_content，raw_url 按
   // CONTENT_PUBLIC_BASE_URL 绝对化（跨 origin 内容域场景；未配置回退相对）。
   const originContent = searchParams.get('origin_content') === '1'
+  // ?open=<viewMethod>：强制查看方式（「打开方式」子菜单 / 用户偏好传递）。
+  const forceOpen = searchParams.get('open') ?? undefined
   const [file, setFile] = useState<FileWithVersion | null>(null)
   const [error, setError] = useState('')
 
@@ -245,5 +291,5 @@ export default function ViewerPage() {
   if (error) return <main className="text-editor-page"><div className="banner error">{error}</div></main>
   if (!file) return <main className="text-editor-page"><div className="text-editor-state">正在加载…</div></main>
 
-  return <FileViewerDispatch fileId={file.id} name={file.name} resolveRawUrl={resolveRawUrl} />
+  return <FileViewerDispatch fileId={file.id} name={file.name} resolveRawUrl={resolveRawUrl} force={forceOpen} />
 }

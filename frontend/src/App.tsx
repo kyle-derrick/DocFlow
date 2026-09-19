@@ -1,7 +1,7 @@
 import { ReactElement, useEffect, useRef, useState } from 'react'
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
-import { Bell, FileText, Folder, Languages } from 'lucide-react'
-import { Badge, Button, Dropdown, Popover, Tooltip } from 'antd'
+import { Bell, FileText, Folder, Languages, Search } from 'lucide-react'
+import { Badge, Button, Dropdown, Input, Popover, Tooltip } from 'antd'
 import type { MenuProps } from 'antd'
 import {
   SearchResultItem,
@@ -29,16 +29,17 @@ import RegisterPage from './pages/RegisterPage'
 import ForgotPage from './pages/ForgotPage'
 import ResetPage from './pages/ResetPage'
 import FilesPage from './pages/FilesPage'
-import TrashPage from './pages/TrashPage'
 import SharePage from './pages/SharePage'
 import TeamsPage from './pages/TeamsPage'
 import TeamSpacePage from './pages/TeamSpacePage'
+import JoinTeamPage from './pages/JoinTeamPage'
 import SharedPage from './pages/SharedPage'
 import AdminPage from './pages/AdminPage'
 import EditorPage from './pages/EditorPage'
 import DrawioPage from './pages/DrawioPage'
 import ExcalidrawPage from './pages/ExcalidrawPage'
 import TextEditorPage from './pages/TextEditorPage'
+import DfdocEditorPage from './pages/DfdocEditorPage'
 import SettingsPage from './pages/SettingsPage'
 import DashboardPage from './pages/DashboardPage'
 import ViewerPage from './pages/ViewerPage'
@@ -318,12 +319,15 @@ function TopBarSearch() {
 
   return (
     <div className="topbar-search" ref={wrapRef}>
-      <input
+      {/* 与全站 antd Input 风格统一：allowClear + 前置搜索图标（紧凑胶囊
+          样式已退役，视觉与文件页工具栏搜索一致）。 */}
+      <Input
         data-hotkey="search"
-        type="search"
+        allowClear
         value={q}
         placeholder="搜索文件…（按 / 聚焦）"
         aria-label="全文搜索"
+        prefix={<Search size={14} strokeWidth={2} aria-hidden="true" />}
         onChange={(e) => setQ(e.target.value)}
         onKeyDown={onInputKey}
         onFocus={() => {
@@ -366,7 +370,7 @@ function TopBarSearch() {
 }
 
 /**
- * 全局快捷键（v1.1）：'/' 聚焦顶栏全文搜索框、g f/t/s/h 导航、'?' 帮助。
+ * 全局快捷键（v1.1）：'/' 聚焦顶栏全文搜索框、g f/t/s 导航、'?' 帮助。
  * 编辑器页（/edit、/drawio，iframe 捕获键盘；/excalidraw 画布工具快捷键）
  * 禁用；弹窗打开时由 useHotkeys 统一跳过（Escape 由 HotkeysHelp 自行处理关闭）。
  */
@@ -386,7 +390,6 @@ function GlobalHotkeys() {
       'g f': () => navigate('/'),
       'g t': () => navigate('/teams'),
       'g s': () => navigate('/shared'),
-      'g h': () => navigate('/trash'),
       '?': () => setHelpOpen(true),
     },
     !editorPage,
@@ -446,6 +449,8 @@ function TopBar() {
       <nav className="nav">
         <Link to="/dashboard" className={location.pathname === '/dashboard' ? 'active' : ''}>{msg('overview')}</Link>
         <Link to="/" className={location.pathname === '/' ? 'active' : ''}>{msg('files')}</Link>
+        {/* 团队管理页（v1.7）：我的团队卡片 + 成员管理/解散/转让入口。 */}
+        <Link to="/teams" className={location.pathname.startsWith('/teams') ? 'active' : ''}>{msg('teams')}</Link>
           <Link to="/shared" className={location.pathname === '/shared' ? 'active' : ''}>{msg('shared')}</Link>
       </nav>
       <TopBarSearch />
@@ -519,6 +524,8 @@ export default function App() {
         <Route path="/dashboard" element={<RequireAuth><DashboardPage /></RequireAuth>} />
         <Route path="/teams" element={<RequireAuth><TeamsPage /></RequireAuth>} />
         <Route path="/teams/:id" element={<RequireAuth><TeamSpacePage /></RequireAuth>} />
+        {/* 接受团队邀请落地页（/teams/join/:token，一次性链接）。 */}
+        <Route path="/teams/join/:token" element={<RequireAuth><JoinTeamPage /></RequireAuth>} />
         <Route path="/shared" element={<RequireAuth><SharedPage /></RequireAuth>} />
         {/* 按路径访问（v1.1，登录）：resolve 现取 grant/file_id 后复用查看与
             编辑器分发；须置于 /view/:fileId、/edit/:fileId 之前匹配。 */}
@@ -537,9 +544,12 @@ export default function App() {
         <Route path="/text/:fileId" element={<RequireAuth bare><TextEditorPage kind="text" /></RequireAuth>} />
         <Route path="/markdown/:fileId" element={<RequireAuth bare><TextEditorPage kind="markdown" /></RequireAuth>} />
         <Route path="/code/:fileId" element={<RequireAuth bare><TextEditorPage kind="text" /></RequireAuth>} />
+        {/* .dfdoc 富文本文档（Tiptap JSON）：编辑/查看同编辑器，独立窗口。 */}
+        <Route path="/dfdoc/:fileId" element={<RequireAuth bare><DfdocEditorPage /></RequireAuth>} />
         <Route path="/admin" element={<Navigate to="/admin/overview" replace />} />
         <Route path="/admin/:section" element={<RequireAuth><AdminPage /></RequireAuth>} />
-        <Route path="/trash" element={<RequireAuth><TrashPage /></RequireAuth>} />
+        {/* 回收站已弹窗化（文件页工具栏按钮，见 TrashModal），整页路由删除；
+            旧地址 /trash 落入通配重定向回文件页。 */}
         <Route path="/settings" element={<Navigate to="/settings/profile" replace />} />
         {/* 账户设置：登录会话与个人访问令牌（PAT）管理。 */}
         <Route path="/settings/:section" element={<RequireAuth><SettingsPage /></RequireAuth>} />

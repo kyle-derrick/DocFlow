@@ -3,6 +3,7 @@ package team
 import (
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -13,41 +14,49 @@ import (
 var _ Repo = (*GormStore)(nil)
 
 // Repo 是团队持久化与权限查询接口；GormStore 为 PostgreSQL 实现，MemoryStore 供测试使用。
-// 权限判定所需的成员/角色查询（MemberRole/RolePermissions）集中在此接口，
-// 动作求值（deny 优先等）在 Service 层完成；未来可替换为 Casbin 等策略引擎。
+// 权限判定所需的成员角色查询（Role）集中在此接口，五级内置角色的动作求值
+// 在 Service 层完成；未来可替换为 Casbin 等策略引擎。
 type Repo interface {
 	// CreateTeamWithRoot 在同一事务内写入团队、owner 成员与团队根目录。
 	CreateTeamWithRoot(t Team, owner Member, root files.File) error
 	Get(id uuid.UUID) (Team, error)
 	// ListForUser 返回用户所属（成员或 owner，创建者自动为成员）的团队。
 	ListForUser(userID uuid.UUID) ([]Team, error)
+	// ListForUserInfo 返回用户所属团队的列表条目（含我的角色/成员数/存储
+	// 用量，GET /teams 响应；单 SQL 子查询聚合，无 N+1）。
+	ListForUserStats(userID uuid.UUID) ([]TeamInfo, error)
 	AddMember(m Member) error
 	RemoveMember(teamID, userID uuid.UUID) error
 	ListMembers(teamID uuid.UUID) ([]Member, error)
-	// UpdateMemberRole 修改成员角色（系统角色或自定义 role_id）；成员不存在返回 ErrNotFound。
-	UpdateMemberRole(teamID, userID uuid.UUID, role string, roleID *uuid.UUID) (Member, error)
-	// Role 返回用户在团队中的角色，非成员返回空串（自定义角色返回 'custom'）。
+	// UpdateMemberRole 修改成员角色（五级内置角色）；成员不存在返回 ErrNotFound。
+	UpdateMemberRole(teamID, userID uuid.UUID, role string) (Member, error)
+	// Role 返回用户在团队中的角色，非成员返回空串。
 	Role(teamID, userID uuid.UUID) (string, error)
-	// MemberRole 返回成员的角色字符串与自定义角色 ID（非成员空串 + nil）。
-	MemberRole(teamID, userID uuid.UUID) (string, *uuid.UUID, error)
-	// RolePermissions 返回自定义角色的 permissions JSON；角色不存在或不属于
-	// 该团队返回 ErrNotFound。
-	RolePermissions(teamID, roleID uuid.UUID) (map[string]any, error)
-	// CountMembersByRole 统计引用该自定义角色的成员数（删除角色前的引用检查）。
-	CountMembersByRole(teamID, roleID uuid.UUID) (int64, error)
+	// TransferOwnership 同一事务内转让所有权：teams.owner_id 更新、新 owner
+	// 成员角色置 owner、原 owner 置 admin。
+	TransferOwnership(teamID, oldOwner, newOwner uuid.UUID) error
 	// UserInAnyTeam 实时判定用户是否属于 teamIDs 中任一团队（供私有分享 share_teams 授权）。
 	UserInAnyTeam(userID uuid.UUID, teamIDs []uuid.UUID) (bool, error)
 	Update(teamID uuid.UUID, name string, description *string) error
 	Delete(teamID uuid.UUID) error
-	// ListRoles 返回团队自定义角色（含 member_count 引用统计）。
-	ListRoles(teamID uuid.UUID) ([]Role, error)
-	CreateRole(role Role) error
-	UpdateRole(teamID, roleID uuid.UUID, name string, permissions map[string]any) error
-	DeleteRole(teamID, roleID uuid.UUID) error
+	// ---- 团队邀请（team_invites，migration 039；v1.7.1 成员管理完善） ----
+	CreateInvite(v Invite) error
+	GetInvite(id uuid.UUID) (Invite, error)
+	// GetInviteByTokenHash 凭 token 哈希取邀请（接受入口）。
+	GetInviteByTokenHash(hash string) (Invite, error)
+	// FindActiveInvite 返回该团队发给 email 的未过期未接受邀请（幂等创建探测）。
+	FindActiveInvite(teamID uuid.UUID, email string, now time.Time) (Invite, error)
+	// ListInvites 返回团队邀请（created_at 倒序，最多 limit 条）。
+	ListInvites(teamID uuid.UUID, limit int) ([]Invite, error)
+	// DeleteInvite 删除邀请（撤销；token 随之不可用）。限定团队归属，
+	// 不存在返回 ErrNotFound。
+	DeleteInvite(teamID, id uuid.UUID) error
+	// MarkInviteAccepted 原子标记 accepted_at（仅未接受且未过期时成功）。
+	MarkInviteAccepted(id uuid.UUID, now time.Time) (bool, error)
 }
 
-// GormStore 是 Repo 的 PostgreSQL 实现（teams/team_members 表见 migrations/008_teams_shares.sql，
-// roles 表与 team_members.role_id 见 migrations/026/029）。
+// GormStore 是 Repo 的 PostgreSQL 实现（teams/team_members 表见
+// migrations/008_teams_shares.sql；五级内置角色见 migration 037）。
 type GormStore struct{ db *gorm.DB }
 
 func NewGormStore(db *gorm.DB) *GormStore { return &GormStore{db: db} }
@@ -82,6 +91,26 @@ func (s *GormStore) ListForUser(userID uuid.UUID) ([]Team, error) {
 	return out, err
 }
 
+// ListForUserStats 返回用户所属团队的列表条目：JOIN team_members 取我的
+// 角色，member_count / storage_used 经相关子查询聚合（每团队一行，无
+// N+1；storage 口径 = 团队空间未软删文件的当前版本对象字节合计）。
+func (s *GormStore) ListForUserStats(userID uuid.UUID) ([]TeamInfo, error) {
+	var out []TeamInfo
+	err := s.db.Raw(`
+		SELECT t.id, t.name, t.description, t.owner_id, t.created_at, t.deleted_at,
+		       tm.role AS my_role,
+		       (SELECT COUNT(*) FROM team_members mc WHERE mc.team_id = t.id) AS member_count,
+		       (SELECT COALESCE(SUM(fv.size), 0)
+		          FROM files f JOIN file_versions fv ON fv.id = f.current_version_id
+		         WHERE f.team_id = t.id AND f.scope_type = 'team'
+		           AND f.deleted_at IS NULL AND f.is_root = false AND f.type = 'file') AS storage_used
+		FROM teams t
+		JOIN team_members tm ON tm.team_id = t.id AND tm.user_id = ?
+		WHERE t.deleted_at IS NULL
+		ORDER BY t.created_at DESC, t.id`, userID).Scan(&out).Error
+	return out, err
+}
+
 func (s *GormStore) AddMember(m Member) error {
 	err := s.db.Create(&m).Error
 	if err != nil && isUniqueViolation(err) {
@@ -103,22 +132,21 @@ func (s *GormStore) RemoveMember(teamID, userID uuid.UUID) error {
 
 func (s *GormStore) ListMembers(teamID uuid.UUID) ([]Member, error) {
 	var out []Member
-	// LEFT JOIN roles 解析自定义角色名（role_name，系统角色为空）；
-	// JOIN users 补齐成员 username/nickname（成员列表展示用户名，替代 UUID；
-	// 用户行随账户删除时成员关系亦不保留，JOIN 不会引入丢行）。
+	// JOIN users 补齐成员 username/nickname/email（成员列表展示用户名与
+	// 邮箱，替代 UUID；用户行随账户删除时成员关系亦不保留，JOIN 不会
+	// 引入丢行）。
 	err := s.db.Model(&Member{}).
-		Select("team_members.*, r.name AS role_name, u.username AS username, COALESCE(u.nickname, '') AS nickname").
-		Joins("LEFT JOIN roles r ON r.id = team_members.role_id").
+		Select("team_members.*, u.username AS username, COALESCE(u.nickname, '') AS nickname, u.email AS email").
 		Joins("JOIN users u ON u.id = team_members.user_id").
 		Where("team_members.team_id = ?", teamID).
 		Order("team_members.created_at, team_members.user_id").Find(&out).Error
 	return out, err
 }
 
-func (s *GormStore) UpdateMemberRole(teamID, userID uuid.UUID, role string, roleID *uuid.UUID) (Member, error) {
+func (s *GormStore) UpdateMemberRole(teamID, userID uuid.UUID, role string) (Member, error) {
 	result := s.db.Model(&Member{}).
 		Where("team_id = ? AND user_id = ?", teamID, userID).
-		Updates(map[string]any{"role": role, "role_id": roleID})
+		Update("role", role)
 	if result.Error != nil {
 		return Member{}, result.Error
 	}
@@ -138,41 +166,34 @@ func (s *GormStore) UpdateMemberRole(teamID, userID uuid.UUID, role string, role
 }
 
 func (s *GormStore) Role(teamID, userID uuid.UUID) (string, error) {
-	role, _, err := s.MemberRole(teamID, userID)
-	return role, err
-}
-
-func (s *GormStore) MemberRole(teamID, userID uuid.UUID) (string, *uuid.UUID, error) {
 	var m Member
-	err := s.db.Select("role", "role_id").
-		Where("team_id = ? AND user_id = ?", teamID, userID).First(&m).Error
+	err := s.db.Select("role").Where("team_id = ? AND user_id = ?", teamID, userID).First(&m).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return "", nil, nil
+		return "", nil // 非成员：空角色（无权限）
 	}
 	if err != nil {
-		return "", nil, err
+		return "", err
 	}
-	return m.Role, m.RoleID, nil
+	return m.Role, nil
 }
 
-func (s *GormStore) RolePermissions(teamID, roleID uuid.UUID) (map[string]any, error) {
-	var r Role
-	err := s.db.Select("permissions").
-		Where("id = ? AND team_id = ?", roleID, teamID).First(&r).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, ErrNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-	return r.Permissions, nil
-}
-
-func (s *GormStore) CountMembersByRole(teamID, roleID uuid.UUID) (int64, error) {
-	var count int64
-	err := s.db.Model(&Member{}).
-		Where("team_id = ? AND role_id = ?", teamID, roleID).Count(&count).Error
-	return count, err
+func (s *GormStore) TransferOwnership(teamID, oldOwner, newOwner uuid.UUID) error {
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		res := tx.Model(&Team{}).Where("id = ? AND deleted_at IS NULL AND owner_id = ?", teamID, oldOwner).
+			Update("owner_id", newOwner)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return ErrNotFound
+		}
+		if err := tx.Model(&Member{}).Where("team_id = ? AND user_id = ?", teamID, newOwner).
+			Update("role", RoleOwner).Error; err != nil {
+			return err
+		}
+		return tx.Model(&Member{}).Where("team_id = ? AND user_id = ?", teamID, oldOwner).
+			Update("role", RoleAdmin).Error
+	})
 }
 
 func (s *GormStore) UserInAnyTeam(userID uuid.UUID, teamIDs []uuid.UUID) (bool, error) {
@@ -208,32 +229,6 @@ func (s *GormStore) Delete(teamID uuid.UUID) error {
 	}
 	return result.Error
 }
-func (s *GormStore) ListRoles(teamID uuid.UUID) ([]Role, error) {
-	var out []Role
-	// member_count：引用该角色的成员数（删除角色的引用检查与前端展示共用）。
-	err := s.db.Model(&Role{}).
-		Select("roles.*, (SELECT COUNT(*) FROM team_members tm WHERE tm.role_id = roles.id) AS member_count").
-		Where("team_id = ?", teamID).Order("created_at, id").Find(&out).Error
-	return out, err
-}
-func (s *GormStore) CreateRole(role Role) error { return s.db.Create(&role).Error }
-func (s *GormStore) UpdateRole(teamID, roleID uuid.UUID, name string, permissions map[string]any) error {
-	r := s.db.Model(&Role{}).Where("id = ? AND team_id = ?", roleID, teamID).Updates(map[string]any{"name": name, "permissions": permissions})
-	if r.Error != nil && isUniqueViolation(r.Error) {
-		return ErrNameConflict
-	}
-	if r.Error == nil && r.RowsAffected == 0 {
-		return ErrNotFound
-	}
-	return r.Error
-}
-func (s *GormStore) DeleteRole(teamID, roleID uuid.UUID) error {
-	r := s.db.Where("id = ? AND team_id = ?", roleID, teamID).Delete(&Role{})
-	if r.Error == nil && r.RowsAffected == 0 {
-		return ErrNotFound
-	}
-	return r.Error
-}
 
 func isUniqueViolation(err error) bool {
 	if err == nil {
@@ -241,4 +236,65 @@ func isUniqueViolation(err error) bool {
 	}
 	return strings.Contains(strings.ToLower(err.Error()), "unique") ||
 		strings.Contains(strings.ToLower(err.Error()), "duplicate key")
+}
+
+// ---- 团队邀请（team_invites）----
+
+func (s *GormStore) CreateInvite(v Invite) error {
+	return s.db.Create(&v).Error
+}
+
+func (s *GormStore) GetInvite(id uuid.UUID) (Invite, error) {
+	var v Invite
+	err := s.db.First(&v, "id = ?", id).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return Invite{}, ErrNotFound
+	}
+	return v, err
+}
+
+func (s *GormStore) GetInviteByTokenHash(hash string) (Invite, error) {
+	var v Invite
+	err := s.db.First(&v, "token_hash = ?", hash).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return Invite{}, ErrNotFound
+	}
+	return v, err
+}
+
+func (s *GormStore) FindActiveInvite(teamID uuid.UUID, email string, now time.Time) (Invite, error) {
+	var v Invite
+	err := s.db.Where("team_id = ? AND email = ? AND accepted_at IS NULL AND expires_at > ?", teamID, email, now).
+		First(&v).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return Invite{}, ErrNotFound
+	}
+	return v, err
+}
+
+func (s *GormStore) ListInvites(teamID uuid.UUID, limit int) ([]Invite, error) {
+	var out []Invite
+	err := s.db.Where("team_id = ?", teamID).Order("created_at DESC, id").Limit(limit).Find(&out).Error
+	return out, err
+}
+
+func (s *GormStore) DeleteInvite(teamID, id uuid.UUID) error {
+	result := s.db.Where("id = ? AND team_id = ?", id, teamID).Delete(&Invite{})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *GormStore) MarkInviteAccepted(id uuid.UUID, now time.Time) (bool, error) {
+	result := s.db.Model(&Invite{}).
+		Where("id = ? AND accepted_at IS NULL AND expires_at > ?", id, now).
+		Update("accepted_at", now)
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected > 0, nil
 }

@@ -1,12 +1,11 @@
-// DocFlow 富文本编辑器（Tiptap v2 + tiptap-markdown，Markdown 存储）：
-// - 受控语义：initialMarkdown 仅装载期生效（父组件用 key 重挂载换内容），
-//   用户编辑经 onChange(md) 全量回吐最新 markdown；
+// DocFlow 富文本编辑器（Tiptap v2，.dfdoc 专属格式：Tiptap JSON 存储）：
+// - 受控语义：initialJSON 仅装载期生效（父组件用 key 重挂载换内容），
+//   用户编辑经 onChange(json) 全量回吐最新文档 JSON（JSON.stringify(getJSON())）；
 // - readonly 态复用同一渲染（editable=false，隐藏工具栏/菜单）；
-// - 往返保障：装载后 serialize(parse(initial)) 与源文归一比较，不一致时
-//   回调 onRoundtripFail 由父组件降级源码模式（内容保真优先）；
-// - 嵌入块（drawio/excalidraw/office/web/file）以 fenced code block 存储
-//   （见 markdownRoundtrip.ts 约定）；slash 菜单插入，图片另支持粘贴/拖拽
-//   上传到 md 所在目录的 assets/ 子目录。
+// - 嵌入块（drawio/excalidraw/office/web/file 引用文件节点）以 docflowEmbed
+//   自定义节点原生存进 JSON（见 DocflowEmbed.ts）；slash 菜单插入，图片
+//   另支持粘贴/拖拽上传到文档所在目录的 assets/ 子目录；
+// - 历史 .md 内容不再进本编辑器（.md 已回归 Monaco 源码编辑）。
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { EditorContent, useEditor } from '@tiptap/react'
@@ -20,6 +19,7 @@ import {
   Heading1,
   Heading2,
   Heading3,
+  Highlighter,
   Image as ImageIcon,
   Italic,
   Link2,
@@ -38,6 +38,7 @@ import {
 } from 'lucide-react'
 import StarterKit from '@tiptap/starter-kit'
 import Underline from '@tiptap/extension-underline'
+import Highlight from '@tiptap/extension-highlight'
 import Link from '@tiptap/extension-link'
 import Image from '@tiptap/extension-image'
 import TaskList from '@tiptap/extension-task-list'
@@ -49,55 +50,54 @@ import TableCell from '@tiptap/extension-table-cell'
 import Placeholder from '@tiptap/extension-placeholder'
 import CodeBlockLowlight from '@tiptap/extension-code-block-lowlight'
 import { common, createLowlight } from 'lowlight'
-import { Markdown } from 'tiptap-markdown'
 import { getFileMeta, resolveNamespaceOf, uploadFile } from '../../api'
 import { useLocale } from '../../i18n'
 import { promptViaModal } from '../FileBrowser'
 import DocflowEmbed from './DocflowEmbed'
-import { EmbedKind, markdownRoundTripMatches } from './markdownRoundtrip'
+import { EmbedKind } from './markdownRoundtrip'
 import FilePickerModal, { PickerFilter, ensureAssetsFolder } from './FilePickerModal'
 import type { PickedFile } from './FilePickerModal'
 import { createSlashMenuExtension } from './SlashMenu'
 import type { SlashMenuCallbacks } from './SlashMenu'
 
 export interface RichTextEditorProps {
-  /** 装载期使用的 markdown 内容（外部更新不会自动同步，用 key 重挂载）。 */
-  initialMarkdown: string
-  /** 用户编辑后回调（最新全文 markdown）。 */
-  onChange?: (md: string) => void
+  /** 装载期使用的文档 JSON（Tiptap doc 序列化串；外部更新不自动同步，用 key 重挂载）。 */
+  initialJSON: string
+  /** 用户编辑后回调（最新文档 JSON 字符串）。 */
+  onChange?: (json: string) => void
   readonly?: boolean
-  /** md 文件自身 ID：图片上传时解析其所在目录（其下 assets/ 子目录）。 */
+  /** dfdoc 文件自身 ID：图片上传时解析其所在目录（其下 assets/ 子目录）。 */
   fileId?: string
-  /** 初始往返校验失败（内容无法无损进富文本）时回调，父组件应降级源码模式。 */
-  onRoundtripFail?: () => void
 }
 
-/** tiptap-markdown storage 的最小结构（getMarkdown 序列化出口）。 */
-interface MarkdownStorage {
-  getMarkdown: () => string
-}
-
-function storageOf(editor: Editor): MarkdownStorage | null {
-  return (editor.storage as Record<string, unknown>).markdown as MarkdownStorage | null
+/** 解析 .dfdoc 内容：JSON 合法且为 {type:'doc'} 时原样使用，否则回退空段（不抛错——查看态损坏内容仍可打开编辑修复）。 */
+function parseDocJSON(text: string): Record<string, unknown> {
+  const trimmed = text.trim()
+  if (trimmed) {
+    try {
+      const parsed = JSON.parse(trimmed) as Record<string, unknown>
+      if (parsed && parsed.type === 'doc') return parsed
+    } catch {
+      /* 损坏内容回退空文档 */
+    }
+  }
+  return { type: 'doc', content: [{ type: 'paragraph' }] }
 }
 
 const IMAGE_MIME = /^image\//
 
 export default function RichTextEditor({
-  initialMarkdown,
+  initialJSON,
   onChange,
   readonly = false,
   fileId,
-  onRoundtripFail,
 }: RichTextEditorProps) {
   const locale = useLocale()
   const zh = locale === 'zh-CN'
   const { modal: antdModal } = AntdApp.useApp()
   const editorRef = useRef<Editor | null>(null)
   const onChangeRef = useRef(onChange)
-  const onRoundtripFailRef = useRef(onRoundtripFail)
   onChangeRef.current = onChange
-  onRoundtripFailRef.current = onRoundtripFail
 
   const [picker, setPicker] = useState<PickerFilter | null>(null)
   const [mdParentId, setMdParentId] = useState<string | null | undefined>(undefined)
@@ -123,7 +123,7 @@ export default function RichTextEditor({
     callbacksRef.current.isZh = zh
   }, [zh])
 
-  // md 文件所在目录（图片上传目标 assets/ 的父目录）。
+  // 文档所在目录（图片上传目标 assets/ 的父目录）。
   useEffect(() => {
     if (!fileId) {
       setMdParentId(null)
@@ -136,7 +136,7 @@ export default function RichTextEditor({
     return () => { alive = false }
   }, [fileId])
 
-  /** 图片上传：assets 目录定位/创建（按 md 所在目录探测个人/团队空间分发
+  /** 图片上传：assets 目录定位/创建（按文档所在目录探测个人/团队空间分发
    * 端点）→ 上传 → 插入 file 嵌入块。 */
   const uploadImages = async (files: File[]) => {
     const editor = editorRef.current
@@ -180,6 +180,7 @@ export default function RichTextEditor({
       }),
       CodeBlockLowlight.configure({ lowlight }),
       Underline,
+      Highlight.configure({ multicolor: false }),
       Link.configure({ openOnClick: false, autolink: true }),
       Image.configure({ inline: false }),
       TaskList,
@@ -193,17 +194,9 @@ export default function RichTextEditor({
         showOnlyWhenEditable: true,
       }),
       DocflowEmbed,
-      Markdown.configure({
-        html: false,
-        linkify: false,
-        breaks: false,
-        // 粘贴纯文本按 markdown 解析（复制时剪贴板文本同为 markdown）。
-        transformPastedText: true,
-        transformCopiedText: true,
-      }),
       createSlashMenuExtension(callbacksRef),
     ],
-    content: initialMarkdown,
+    content: parseDocJSON(initialJSON),
     editable: !readonly,
     editorProps: {
       attributes: { class: 'rich-text-content', spellcheck: 'false' },
@@ -230,30 +223,17 @@ export default function RichTextEditor({
   })
   editorRef.current = editor
 
-  // 编辑 → markdown 回吐（仅文档真实变化）。
+  // 编辑 → 文档 JSON 回吐（仅文档真实变化）。
   useEffect(() => {
     if (!editor) return
     const handler = ({ transaction }: { transaction: Transaction }) => {
       if (!transaction.docChanged) return
-      const md = storageOf(editor)
-      if (md) onChangeRef.current?.(md.getMarkdown())
+      onChangeRef.current?.(JSON.stringify(editor.getJSON()))
     }
     editor.on('update', handler)
     return () => {
       editor.off('update', handler)
     }
-  }, [editor])
-
-  // 装载后往返校验：失败则通知父组件降级（本组件随后会被卸载）。
-  useEffect(() => {
-    if (!editor) return
-    const md = storageOf(editor)
-    if (!md) return
-    if (!markdownRoundTripMatches(initialMarkdown, md.getMarkdown())) {
-      onRoundtripFailRef.current?.()
-    }
-    // 仅装载期校验一次（initialMarkdown 变化由父组件 key 重挂载承担）。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editor])
 
   useEffect(() => {
@@ -335,6 +315,7 @@ export default function RichTextEditor({
             {toolbarBtn('italic', icon(Italic), zh ? '斜体' : 'Italic', editor.isActive('italic'), false, () => chain().toggleItalic().run())}
             {toolbarBtn('underline', icon(UnderlineIcon), zh ? '下划线' : 'Underline', editor.isActive('underline'), false, () => chain().toggleUnderline().run())}
             {toolbarBtn('strike', icon(Strikethrough), zh ? '删除线' : 'Strikethrough', editor.isActive('strike'), false, () => chain().toggleStrike().run())}
+            {toolbarBtn('highlight', icon(Highlighter), zh ? '高亮' : 'Highlight', editor.isActive('highlight'), false, () => chain().toggleHighlight().run())}
             {toolbarBtn('code', icon(Code), zh ? '行内代码' : 'Inline code', editor.isActive('code'), false, () => chain().toggleCode().run())}
           </div>
           <div className="rich-text-toolbar-group">

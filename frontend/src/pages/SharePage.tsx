@@ -1,27 +1,33 @@
 // 公开分享页（/s/:token，无需登录）：
-// - 文件分享：元信息 + 下载 + 按类型内联预览（含网页包）；
+// - 文件分享：元信息 + 下载 + 按类型内联预览（含网页包与 Office 文档的
+//   OnlyOffice 只读查看会话）；
 // - 目录分享（type=folder，v1.1）：tree 模式——默认探测根 index.html，存在
 //   则整站 iframe（raw/share）+ 顶部「文件列表」切换；否则直接文件列表。
 //   目录可逐级进入（tree API），文件按类型内联预览（raw）或下载，html 用
 //   raw/share 新窗口打开；
 // - 密码保护分享先解锁（HttpOnly 会话 cookie），水印开启时叠加全屏覆盖层。
-import { FormEvent, useCallback, useEffect, useState } from 'react'
+import { FormEvent, useCallback, useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { FileQuestion, FileText, Folder, Lock } from 'lucide-react'
-import { Button, Input } from 'antd'
+import { Button, Input, Segmented } from 'antd'
 import {
   ApiError,
   PASSWORD_REQUIRED_CODE,
   PublicShareInfo,
+  PublicShareOffice,
   PublicShareTree,
   ShareTreeEntry,
   fetchPublicPreviewText,
+  fetchPublicShareOffice,
   fetchPublicWebpkgPreview,
   getPublicShare,
+  isOfficeFile,
   previewKind,
   publicShareTree,
   verifyPublicShare,
 } from '../api'
+import { loadDocEditorScript } from './EditorPage'
+import { useColorMode } from '../theme'
 
 function formatSize(size: number): string {
   if (size < 1024) return `${size} B`
@@ -119,6 +125,67 @@ function sortTreeEntries(entries: ShareTreeEntry[]): ShareTreeEntry[] {
   return [...entries].sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === 'folder' ? -1 : 1))
 }
 
+/**
+ * Office 文档公开查看（访客态）：GET /public/shares/:token/office 取 JWT
+ * 签名的只读 DocEditor 配置，复用 EditorPage 的 api.js 动态加载初始化编辑
+ * 器（恒 view 模式）；失败（集成未启用/网络）回落「不支持在线预览」文案。
+ */
+function PublicOfficeViewer({ token, name }: { token: string; name: string }) {
+  const dark = useColorMode() === 'dark'
+  const [phase, setPhase] = useState<'loading' | 'ready' | 'failed'>('loading')
+  const shellRef = useRef<HTMLDivElement | null>(null)
+  const editorRef = useRef<{ destroyEditor: () => void } | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    const shell = shellRef.current
+    const init = async () => {
+      setPhase('loading')
+      try {
+        const { server_url, config }: PublicShareOffice = await fetchPublicShareOffice(token, 'zh-CN')
+        await loadDocEditorScript(server_url)
+        if (!alive || !window.DocsAPI?.DocEditor || !shellRef.current) return
+        const holder = document.createElement('div')
+        const holderId = `share-onlyoffice-${Math.random().toString(36).slice(2)}`
+        holder.id = holderId
+        holder.className = 'editor-placeholder'
+        shellRef.current.replaceChildren(holder)
+        editorRef.current = window.DocsAPI.DocEditor(holderId, {
+          ...config,
+          width: '100%',
+          height: '100%',
+          customization: {
+            ...((config.customization as Record<string, unknown> | undefined) ?? {}),
+            uiTheme: dark ? 'theme-dark' : 'theme-classic-light',
+          },
+        })
+        if (alive) setPhase('ready')
+      } catch {
+        if (alive) setPhase('failed')
+      }
+    }
+    void init()
+    return () => {
+      alive = false
+      editorRef.current?.destroyEditor()
+      editorRef.current = null
+      shell?.replaceChildren()
+    }
+    // dark 变化不重建会话（uiTheme 仅初始化时生效，主题切换少见场景忽略）。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token])
+
+  if (phase === 'failed') {
+    return <div className="empty">该文件类型不支持在线预览，请联系分享者开启 OnlyOffice 集成或下载后查看</div>
+  }
+  return (
+    <div className="preview-box share-office-box">
+      {phase === 'loading' && <p className="hint">正在加载文档查看器…</p>}
+      <div className="editor-shell" ref={shellRef} title={name} />
+    </div>
+  )
+}
+
 /** 选中文件的行内预览：文本（fetch 后 <pre>）/ 图片 / PDF 用 raw URL 直渲。 */
 function ShareEntryPreview({ rawBase, entry }: { rawBase: string; entry: ShareTreeEntry }) {
   const url = rawUrlOf(rawBase, entry.path, false)
@@ -182,10 +249,11 @@ function ShareEntryPreview({ rawBase, entry }: { rawBase: string; entry: ShareTr
 }
 
 /**
- * 目录分享视图（tree 模式）：根 index.html 探测成功时整站 iframe（顶部
- * 「文件列表」切换）；文件列表支持逐级进入子目录、按类型预览/下载/新窗口
- * 打开网页。每次 tree 拉取均刷新 raw_base（10 分钟 grant，页面常驻时点击
- * 目录/文件前由最新 grant 支撑）。
+ * 目录分享视图（tree 模式）：根 index.html 探测成功时整站 iframe；
+ * 「网页视图 / 文件列表」切换与「下载整包」收进右上角小控件区（紧凑顶条），
+ * 主体内容区最大化（flex 铺满剩余视口，内部滚动）。文件列表支持逐级进入
+ * 子目录、按类型预览/下载/新窗口打开网页。每次 tree 拉取均刷新 raw_base
+ *（10 分钟 grant，页面常驻时点击目录/文件前由最新 grant 支撑）。
  */
 function FolderShareView({ token, info }: { token: string; info: PublicShareInfo }) {
   const [dir, setDir] = useState('')
@@ -252,118 +320,117 @@ function FolderShareView({ token, info }: { token: string; info: PublicShareInfo
 
   return (
     <>
-      <div className="share-tree-toolbar">
-        {siteReady === null ? (
-          <span className="muted">正在检查网页入口…</span>
-        ) : (
-          <div className="seg-group" role="tablist">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={view === 'site'}
-              className={`seg${view === 'site' ? ' active' : ''}`}
-              onClick={() => setView('site')}
+      {/* 紧凑顶条：左标题 + 权限徽章，右侧小控件区（视图切换 + 下载整包）。 */}
+      <div className="share-folder-bar">
+        <div className="share-folder-title">
+          <Folder size={16} strokeWidth={2} aria-hidden="true" />
+          <span className="share-folder-name">{info.name}</span>
+          <span className="badge">{info.permission === 'download' ? '可下载' : '仅查看'}</span>
+        </div>
+        <div className="share-folder-actions">
+          {siteReady === true && (
+            <Segmented
+              size="small"
+              value={view}
+              onChange={(v) => setView(v as 'site' | 'files')}
+              options={[
+                { label: '网页视图', value: 'site' },
+                { label: '文件列表', value: 'files' },
+              ]}
+            />
+          )}
+          {/* 目录分享整包下载（公开端点直接 a[download]；view 权限分享后端 403，不展示）。 */}
+          {info.permission === 'download' && (
+            <Button
+              size="small"
+              href={`/api/v1/public/shares/${encodeURIComponent(token)}/download.zip`}
+              download={`${info.name}.zip`}
+              title="下载整个目录（ZIP）"
             >
-              网页视图
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={view === 'files'}
-              className={`seg${view === 'files' ? ' active' : ''}`}
-              onClick={() => setView('files')}
-            >
-              文件列表
-            </button>
-          </div>
-        )}
-        {/* 目录分享整包下载（公开端点直接 a[download]；view 权限分享后端 403，不展示）。 */}
-        {info.permission === 'download' && (
-          <Button
-            size="small"
-            href={`/api/v1/public/shares/${encodeURIComponent(token)}/download.zip`}
-            download={`${info.name}.zip`}
-            title="下载整个目录（ZIP）"
-          >
-            下载整包
-          </Button>
-        )}
+              下载整包
+            </Button>
+          )}
+        </div>
       </div>
 
-      {view === 'site' && siteReady === true && rawBase && (
-        // 整站渲染：目录尾斜杠 raw URL → 服务端解析 index.html，相对资源
-        // 落在 raw/share 同一前缀下；sandbox 见 raw 端点 CSP（iframe 属性
-        // 额外放宽 forms/popups/modals 以兼容交互式静态站）。
-        <div className="share-site-box">
-          <iframe
-            className="share-site-frame"
-            sandbox="allow-scripts allow-forms allow-popups allow-modals"
-            src={rawUrlOf(rawBase, '', true)}
-            title={info.name}
-          />
-        </div>
-      )}
+      {/* 主体内容区：最大化铺满剩余视口，内部滚动。 */}
+      <div className="share-folder-body">
+        {view === 'site' && siteReady === true && rawBase && (
+          // 整站渲染：目录尾斜杠 raw URL → 服务端解析 index.html，相对资源
+          // 落在 raw/share 同一前缀下；sandbox 见 raw 端点 CSP（iframe 属性
+          // 额外放宽 forms/popups/modals 以兼容交互式静态站）。
+          <div className="share-site-box">
+            <iframe
+              className="share-site-frame"
+              sandbox="allow-scripts allow-forms allow-popups allow-modals"
+              src={rawUrlOf(rawBase, '', true)}
+              title={info.name}
+            />
+          </div>
+        )}
 
-      {view === 'site' && siteReady === true && !rawBase && <p className="hint">加载网页…</p>}
+        {view === 'site' && siteReady === true && !rawBase && <p className="hint">加载网页…</p>}
 
-      {(view === 'files' || siteReady !== true) && (
-        <div className="share-tree">
-          <nav className="share-tree-crumb">
-            <button className={dirSegments.length === 0 ? 'current' : ''} onClick={() => void loadDir('')}>
-              {info.name}
-            </button>
-            {dirSegments.map((seg, i) => (
-              <span key={i} className="crumb">
-                <span className="sep">/</span>
-                <button onClick={() => void loadDir(dirSegments.slice(0, i + 1).join('/'))}>{seg}</button>
-              </span>
-            ))}
-          </nav>
-          {error && <div className="error-text">{error}</div>}
-          {entries === null ? (
-            <p className="hint">加载目录…</p>
-          ) : entries.length === 0 && !error ? (
-            <div className="empty">此目录为空</div>
-          ) : (
-            <ul className="share-tree-list">
-              {entries.map((entry) => {
-                const isHtml = entry.name.toLowerCase().endsWith('.html') || entry.name.toLowerCase().endsWith('.htm')
-                const previewable = previewKind(entry.mime_type ?? '') !== 'unsupported' || isHtml || isRawServed(entry.name)
-                return (
-                  <li key={entry.path} className="share-tree-row">
-                    <button className="share-tree-name" onClick={() => openEntry(entry)} title={entry.name}>
-                      <span className="icon">{entry.type === 'folder'
-                        ? <Folder size={14} strokeWidth={2} aria-hidden="true" />
-                        : <FileText size={14} strokeWidth={2} aria-hidden="true" />}</span>
-                      <span>{entry.name}</span>
-                    </button>
-                    <span className="muted share-tree-size">
-                      {entry.type === 'folder' ? '目录' : entry.size !== undefined ? formatSize(entry.size) : ''}
-                    </span>
-                    <span className="share-tree-actions">
-                      {entry.type === 'file' && isHtml && (
-                        <Button
-                          size="small"
-                          onClick={() => window.open(rawUrlOf(rawBase, entry.path, false), '_blank', 'noopener')}
-                        >
-                          打开网页
-                        </Button>
-                      )}
-                      {entry.type === 'file' && !isHtml && isRawServed(entry.name) && (
-                        <Button size="small" href={rawUrlOf(rawBase, entry.path, false)} download={entry.name}>
-                          下载
-                        </Button>
-                      )}
-                      {entry.type === 'file' && !previewable && <span className="muted">不支持在线预览</span>}
-                    </span>
-                  </li>
-                )
-              })}
-            </ul>
-          )}
-          {selected && <ShareEntryPreview rawBase={rawBase} entry={selected} />}
-        </div>
-      )}
+        {(view === 'files' || siteReady !== true) && (
+          <div className="share-tree">
+            {siteReady === null && <p className="hint">正在检查网页入口…</p>}
+            <nav className="share-tree-crumb">
+              <button className={dirSegments.length === 0 ? 'current' : ''} onClick={() => void loadDir('')}>
+                {info.name}
+              </button>
+              {dirSegments.map((seg, i) => (
+                <span key={i} className="crumb">
+                  <span className="sep">/</span>
+                  <button onClick={() => void loadDir(dirSegments.slice(0, i + 1).join('/'))}>{seg}</button>
+                </span>
+              ))}
+            </nav>
+            {error && <div className="error-text">{error}</div>}
+            {entries === null ? (
+              <p className="hint">加载目录…</p>
+            ) : entries.length === 0 && !error ? (
+              <div className="empty">此目录为空</div>
+            ) : (
+              <ul className="share-tree-list">
+                {entries.map((entry) => {
+                  const isHtml = entry.name.toLowerCase().endsWith('.html') || entry.name.toLowerCase().endsWith('.htm')
+                  const previewable = previewKind(entry.mime_type ?? '') !== 'unsupported' || isHtml || isRawServed(entry.name)
+                  return (
+                    <li key={entry.path} className="share-tree-row">
+                      <button className="share-tree-name" onClick={() => openEntry(entry)} title={entry.name}>
+                        <span className="icon">{entry.type === 'folder'
+                          ? <Folder size={14} strokeWidth={2} aria-hidden="true" />
+                          : <FileText size={14} strokeWidth={2} aria-hidden="true" />}</span>
+                        <span>{entry.name}</span>
+                      </button>
+                      <span className="muted share-tree-size">
+                        {entry.type === 'folder' ? '目录' : entry.size !== undefined ? formatSize(entry.size) : ''}
+                      </span>
+                      <span className="share-tree-actions">
+                        {entry.type === 'file' && isHtml && (
+                          <Button
+                            size="small"
+                            onClick={() => window.open(rawUrlOf(rawBase, entry.path, false), '_blank', 'noopener')}
+                          >
+                            打开网页
+                          </Button>
+                        )}
+                        {entry.type === 'file' && !isHtml && isRawServed(entry.name) && (
+                          <Button size="small" href={rawUrlOf(rawBase, entry.path, false)} download={entry.name}>
+                            下载
+                          </Button>
+                        )}
+                        {entry.type === 'file' && !previewable && <span className="muted">不支持在线预览</span>}
+                      </span>
+                    </li>
+                  )
+                })}
+              </ul>
+            )}
+            {selected && <ShareEntryPreview rawBase={rawBase} entry={selected} />}
+          </div>
+        )}
+      </div>
     </>
   )
 }
@@ -478,9 +545,6 @@ export default function SharePage() {
   if (state.status === 'loading') {
     return (
       <div className="share-page">
-        <header className="share-head">
-          <span className="brand">DocFlow</span>
-        </header>
         <main className="share-card">
           <p className="hint">加载中…</p>
         </main>
@@ -505,22 +569,13 @@ export default function SharePage() {
   const downloadUrl = `/api/v1/public/shares/${encodeURIComponent(token)}/download`
   const showWatermark = info.watermark_enabled && !!info.watermark_text
 
-  // 目录分享：tree 模式（根 index.html 整站 iframe / 文件列表）。
+  // 目录分享：tree 模式（根 index.html 整站 iframe / 文件列表），
+  // 全幅布局（无顶栏：紧凑顶条 + 最大化内容区，见 FolderShareView）。
   if (info.type === 'folder') {
     return (
-      <div className="share-page">
+      <div className="share-page share-folder-page">
         {showWatermark && <WatermarkOverlay text={info.watermark_text as string} />}
-        <header className="share-head">
-          <span className="brand">DocFlow</span>
-        </header>
-        <main className="share-card share-card-wide">
-          <h1 className="share-title"><Folder size={22} strokeWidth={2} aria-hidden="true" /> {info.name}</h1>
-          <div className="share-meta">
-            <span>目录分享</span>
-            <span className="badge">{info.permission === 'download' ? '可下载' : '仅查看'}</span>
-          </div>
-          <FolderShareView token={token} info={info} />
-        </main>
+        <FolderShareView token={token} info={info} />
       </div>
     )
   }
@@ -530,9 +585,6 @@ export default function SharePage() {
   return (
     <div className="share-page">
       {showWatermark && <WatermarkOverlay text={info.watermark_text as string} />}
-      <header className="share-head">
-        <span className="brand">DocFlow</span>
-      </header>
       <main className="share-card">
         <h1 className="share-title">{info.name}</h1>
         <div className="share-meta">
@@ -553,6 +605,9 @@ export default function SharePage() {
           <div className="preview-box">
             <iframe className="preview-frame" sandbox="allow-scripts" src={webpkgUrl} title={info.name} />
           </div>
+        ) : isOfficeFile(info.name) ? (
+          // Office 文档：OnlyOffice 只读查看会话（公开端点，访客无需登录）。
+          <PublicOfficeViewer token={token} name={info.name} />
         ) : kind === 'image' ? (
           <div className="preview-box">
             <img className="preview-image" src={previewUrl} alt={info.name} />

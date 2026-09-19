@@ -155,6 +155,20 @@ func (s *Service) ReadyPackage(fileID uuid.UUID) (string, bool) {
 	return pkg.PublicID, true
 }
 
+// ReadyFileIDs 批量判定哪些文件已成功解包为网页包（status=ready，Extract
+// 校验保证该 zip 含 index.html）；文件列表据此给 zip 行打「网页」标记。
+// 服务未接线或查询失败返回空集合（不阻塞列举）。
+func (s *Service) ReadyFileIDs(ids []uuid.UUID) map[uuid.UUID]bool {
+	if s == nil || s.repo == nil || len(ids) == 0 {
+		return map[uuid.UUID]bool{}
+	}
+	out, err := s.repo.ReadyFileIDs(ids)
+	if err != nil {
+		return map[uuid.UUID]bool{}
+	}
+	return out
+}
+
 // Resolve 按 publicId + 相对路径取内容 reader 与推断的 Content-Type。
 // 校验（任一失败返回 ok=false，HTTP 侧统一 404 不泄露细节）：
 // public_id 形如 43 字符 URL-safe 串、包 ready、文件未删除、当前版本

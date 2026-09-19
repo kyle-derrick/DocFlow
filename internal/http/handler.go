@@ -515,14 +515,20 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	api.GET("/teams", h.listTeams)
 	api.PATCH("/teams/:id", h.updateTeam)
 	api.DELETE("/teams/:id", h.deleteTeam)
-	api.GET("/teams/:id/roles", h.listRoles)
-	api.POST("/teams/:id/roles", h.createRole)
-	api.PATCH("/teams/:id/roles/:role_id", h.updateRole)
-	api.DELETE("/teams/:id/roles/:role_id", h.deleteRole)
+	// 成员主动退出（非 owner；v1.7 团队页「离开」卡片操作）。
+	api.POST("/teams/:id/leave", h.leaveTeam)
+	// 所有权转让（仅 owner）：POST {user_id}（五级内置角色，见 teams.go）。
+	api.POST("/teams/:id/transfer-ownership", h.transferTeamOwnership)
 	api.POST("/teams/:id/members", h.addTeamMember)
 	api.GET("/teams/:id/members", h.listTeamMembers)
 	api.PATCH("/teams/:id/members/:uid", h.updateTeamMember)
 	api.DELETE("/teams/:id/members/:uid", h.removeTeamMember)
+	// 团队邮箱邀请（v1.7.1 成员管理完善；owner/admin 管理，token 一次性）。
+	api.POST("/teams/:id/invites", h.createTeamInvite)
+	api.GET("/teams/:id/invites", h.listTeamInvites)
+	api.DELETE("/teams/:id/invites/:iid", h.revokeTeamInvite)
+	// 接受邀请（登录用户凭 token 入队；独立前缀避免与 /teams/:id 路由树冲突）。
+	api.POST("/team-invites/join/:token", h.acceptTeamInvite)
 	api.GET("/teams/:id/files", h.listTeamFiles)
 	api.POST("/teams/:id/folders", h.createTeamFolder)
 	// ONLYOFFICE 集成：config 探测端点恒注册（认证组；禁用时 enabled=false
@@ -560,6 +566,10 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	admin := api.Group("/admin", auth.RequireRole(auth.RoleAdmin, h.roles))
 	admin.GET("/settings", h.listAdminSettings)
 	admin.PUT("/settings/:key", h.updateAdminSetting)
+	// SMTP 运行时配置（system_settings 的 smtp.* 键）：读生效值（DB 覆盖 →
+	// env 回退）/ 写即时生效（邮件发送处每次读库）；密码只写不读。
+	admin.GET("/settings/smtp", h.getSMTPSettings)
+	admin.PUT("/settings/smtp", h.putSMTPSettings)
 	// HTTPS 运行时切换（热下发 Caddy admin API）：GET 恒注册（未托管时
 	// managed=false 供页面降级展示）；PUT 未托管时 503；POST /tls/cert
 	// 上传自定义证书（custom 模式，multipart cert+key）。
@@ -606,6 +616,9 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	// 目录分享打包下载（流式 zip）：成功消耗一次下载额度（原子消费+限额）。
 	public.GET("/shares/:token/download.zip", h.publicShareDownloadZip)
 	public.GET("/shares/:token/preview", h.publicSharePreview)
+	// Office 文档公开查看会话（OnlyOffice view 配置；集成启用时可用，访客
+	// 无需登录，view/download 权限均可预览）。
+	public.GET("/shares/:token/office", h.publicShareOfficeConfig)
 	// 目录分享树（清单/子文件元数据 + raw grant 签发；密码分享先 verify）。
 	public.GET("/shares/:token/tree/*path", h.publicShareTree)
 	public.POST("/shares/:token/verify", shareVerifyLimiter(NewRateLimiter(shareVerifyRateLimitPerMin)), h.publicShareVerify)
@@ -867,6 +880,8 @@ func (h *Handler) listFiles(c *gin.Context) {
 	if !ok {
 		return
 	}
+	// limit 1..1000（缺省 100）：允许显式放大（前端目录树/文件列表拉满
+	// 1000，避免多子项目录截断——与 /teams/:id/files 的 teamFolderLimit 同口径）。
 	limit := 100
 	if raw := c.Query("limit"); raw != "" {
 		n, err := strconv.Atoi(raw)
@@ -874,8 +889,10 @@ func (h *Handler) listFiles(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid limit"})
 			return
 		}
-		if n < limit {
+		if n < 1000 {
 			limit = n
+		} else {
+			limit = 1000
 		}
 	}
 	var out []files.File
@@ -907,20 +924,28 @@ func (h *Handler) listFiles(c *gin.Context) {
 	// 网页目录标记：目录直接子级含 index.html 时 has_index_web=true，
 	// 前端把该目录默认点击行为切换为"网页打开"。查询失败不阻塞列举。
 	folderIDs := make([]uuid.UUID, 0, len(out))
+	zipIDs := make([]uuid.UUID, 0, len(out))
 	for _, f := range out {
 		if f.Type == "folder" {
 			folderIDs = append(folderIDs, f.ID)
+		} else if strings.HasSuffix(strings.ToLower(f.Name), ".zip") {
+			zipIDs = append(zipIDs, f.ID)
 		}
 	}
 	indexWeb, ierr := h.files.HasIndexWebChildren(folderIDs)
 	if ierr != nil {
 		indexWeb = nil
 	}
+	// 网页包标记：zip 已成功解包（Extract 校验保证含 index.html）时
+	// has_index_web=true，前端在该 zip 行显示「网页」徽标（与目录口径一致）。
+	zipWeb := h.webpkg.ReadyFileIDs(zipIDs)
 	result := make([]gin.H, 0, len(out))
 	for _, f := range out {
 		item := fileJSON(f)
 		if f.Type == "folder" {
 			item["has_index_web"] = indexWeb[f.ID]
+		} else if zipWeb[f.ID] {
+			item["has_index_web"] = true
 		}
 		result = append(result, item)
 	}
@@ -986,7 +1011,12 @@ func (h *Handler) copyFile(c *gin.Context) {
 	uid := userID(c)
 	f, err := h.files.Copy(uid, id, parent, name)
 	if errors.Is(err, files.ErrFolderCopy) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "folders cannot be copied"})
+		// 仅根目录等不可复制目录命中（普通目录走 CopyFolder 递归复制）。
+		c.JSON(http.StatusBadRequest, gin.H{"error": "root folder cannot be copied"})
+		return
+	}
+	if errors.Is(err, files.ErrCopyLimit) {
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": err.Error(), "code": "COPY_LIMIT_EXCEEDED"})
 		return
 	}
 	if h.fileError(c, err) {

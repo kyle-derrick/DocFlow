@@ -40,11 +40,13 @@ type zipDownloadAPI interface {
 
 var _ zipDownloadAPI = (*files.Store)(nil)
 
-// zipEntry 为待写入归档的条目：目录名含尾斜杠；文件携带存储 key。
+// zipEntry 为待写入归档的条目：目录名含尾斜杠；文件携带存储 key 与
+// 当前版本大小（批量下载多目录累计限额用）。
 type zipEntry struct {
 	name string
 	dir  bool
 	key  string
+	size int64
 }
 
 // downloadFolderZip GET /api/v1/files/:id/download.zip（id 为目录）：流式打包
@@ -105,13 +107,43 @@ func (h *Handler) publicShareDownloadZip(c *gin.Context) {
 	if publicShareError(c, err) {
 		return
 	}
-	entries, err := collectZipEntries(h.zipper, r.Share.OwnerID, r.File)
-	if h.zipWalkError(c, err) {
-		return
+	// 多文件打包分享：仅打包 share_files 中的条目入包（锚点目录其余
+	// 子项不暴露）；目录条目走子树预遍历，文件条目直入。
+	var entries []zipEntry
+	if r.Share.IsBundle {
+		items, ierr := h.shares.BundleItems(r.Share)
+		if ierr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to walk folder"})
+			return
+		}
+		for _, it := range items {
+			if it.Type == "folder" {
+				sub, werr := collectZipEntries(h.zipper, r.Share.OwnerID, it)
+				if h.zipWalkError(c, werr) {
+					return
+				}
+				entries = append(entries, sub...)
+				continue
+			}
+			_, blob, verr := h.zipper.CurrentVersion(r.Share.OwnerID, it.ID)
+			if verr != nil || blob.Status != files.BlobStatusAvailable {
+				continue
+			}
+			entries = append(entries, zipEntry{name: it.Name, key: blob.StorageKey, size: blob.Size})
+		}
+	} else {
+		entries, err = collectZipEntries(h.zipper, r.Share.OwnerID, r.File)
+		if h.zipWalkError(c, err) {
+			return
+		}
 	}
 	h.recordAudit(c, audit.Entry{UserID: nil, Action: audit.ActionPublicDownload, ResourceType: audit.ResourceShare, ResourceID: r.Share.ID.String(), Metadata: `{"file_id":"` + r.File.ID.String() + `","kind":"zip","entries":` + strconv.Itoa(len(entries)) + `}`})
 	h.recordPublicAccessEvent(c, r, share.ActionDownload)
-	h.writeZipStream(c, r.File.Name, entries)
+	zipName := r.File.Name
+	if r.Share.IsBundle {
+		zipName = "docflow-bundle"
+	}
+	h.writeZipStream(c, zipName, entries)
 }
 
 // zipWalkError 映射子树预遍历失败：超限 413，其余 500。
@@ -168,7 +200,7 @@ func collectZipEntries(api zipDownloadAPI, owner uuid.UUID, root files.File) ([]
 				return errZipDownloadLimit
 			}
 			total += blob.Size
-			out = append(out, zipEntry{name: name, key: blob.StorageKey})
+			out = append(out, zipEntry{name: name, key: blob.StorageKey, size: blob.Size})
 		}
 		return nil
 	}

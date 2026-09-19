@@ -9,12 +9,14 @@ import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import {
   ApiError,
   ResolveNamespaceType,
+  isDfdocFile,
   isDrawioFile,
   isExcalidrawFile,
-  isHtmlFile,
   isOfficeFile,
   resolvePath,
 } from '../api'
+import { textEditorKindFor } from '../openers'
+import DfdocEditorPage from './DfdocEditorPage'
 import DrawioPage from './DrawioPage'
 import EditorPage from './EditorPage'
 import ExcalidrawPage from './ExcalidrawPage'
@@ -52,13 +54,15 @@ function useByPathParams(): {
   return { nsType, nsScope: params.nsScope ?? '', segments, rawPath: params['*'] ?? '' }
 }
 
-/** 按路径查看：resolve(mode=view) → 文件走 ViewerPage 分发 / 目录整站 iframe。 */
+/** 按路径查看：resolve(mode=view) → 文件走 ViewerPage 分发 / 目录整站 iframe。
+ * ?open=<viewMethod> 强制查看方式（透传 FileViewerDispatch force）。 */
 export function ViewByPathPage() {
   const { nsType, nsScope, segments, rawPath } = useByPathParams()
   const [searchParams] = useSearchParams()
   // ?origin_content=1：raw_url 取地址的 resolve 携带 origin_content，按
   // CONTENT_PUBLIC_BASE_URL 绝对化（跨 origin 内容域场景；未配置回退相对）。
   const originContent = searchParams.get('origin_content') === '1'
+  const forceOpen = searchParams.get('open') ?? undefined
   const [phase, setPhase] = useState<'loading' | 'error' | 'folder' | 'file'>('loading')
   const [error, setError] = useState('')
   // 目录整站：'' = 根 index.html 解析（raw 目录尾斜杠）；'index.htm' = 以
@@ -152,16 +156,19 @@ export function ViewByPathPage() {
   if (!target) {
     return <ByPathError title="无法打开该路径" detail={error} />
   }
-  return <FileViewerDispatch fileId={target.fileId} name={target.name} resolveRawUrl={fileResolveRawUrl} />
+  return <FileViewerDispatch fileId={target.fileId} name={target.name} resolveRawUrl={fileResolveRawUrl} force={forceOpen} />
 }
 
 /**
  * 按路径编辑：resolve(mode=edit，写权限校验) → 按扩展名进入对应编辑器
  * （office/drawio/excalidraw/markdown/html/css/js/txt，与文件页打开方式
- * 一致）；目录与不支持类型显示友好错误页。
+ * 一致）；?open=<editMethod> 强制编辑方式（text=Monaco / office=OnlyOffice /
+ * drawio / excalidraw / richtext=富文本）；目录与不支持类型显示友好错误页。
  */
 export function EditByPathPage() {
   const { nsType, nsScope, segments, rawPath } = useByPathParams()
+  const [searchParams] = useSearchParams()
+  const forceOpen = searchParams.get('open') ?? undefined
   const [phase, setPhase] = useState<'loading' | 'error' | 'edit'>('loading')
   const [error, setError] = useState('')
   const [target, setTarget] = useState<{ fileId: string; name: string } | null>(null)
@@ -207,16 +214,27 @@ export function EditByPathPage() {
   }
 
   const lower = target.name.toLowerCase()
+  // ?open= 强制编辑方式：text→Monaco（md 家族 markdown 源码）、richtext→
+  // .dfdoc 富文本（Tiptap JSON）；md 的 richtext 已退役，回落 Monaco 源码、
+  // office/drawio/excalidraw→专项编辑器。
+  if (forceOpen === 'office') return <EditorPage fileId={target.fileId} />
+  if (forceOpen === 'drawio') return <DrawioPage fileId={target.fileId} />
+  if (forceOpen === 'excalidraw') return <ExcalidrawPage fileId={target.fileId} />
+  if (forceOpen === 'richtext') {
+    if (isDfdocFile(lower)) return <DfdocEditorPage fileId={target.fileId} />
+    return <TextEditorPage kind="markdown" fileId={target.fileId} />
+  }
+  if (forceOpen === 'text') {
+    const kind = textEditorKindFor(lower)
+    return <TextEditorPage kind={kind === 'markdown' || kind === null ? 'text' : kind} fileId={target.fileId} />
+  }
   if (isOfficeFile(lower)) return <EditorPage fileId={target.fileId} />
   if (isDrawioFile(lower)) return <DrawioPage fileId={target.fileId} />
   if (isExcalidrawFile(lower)) return <ExcalidrawPage fileId={target.fileId} />
-  if (lower.endsWith('.md') || lower.endsWith('.markdown')) return <TextEditorPage kind="markdown" fileId={target.fileId} />
-  if (isHtmlFile(lower)) return <TextEditorPage kind="html" fileId={target.fileId} />
-  if (lower.endsWith('.css')) return <TextEditorPage kind="css" fileId={target.fileId} />
-  if (lower.endsWith('.js') || lower.endsWith('.mjs') || lower.endsWith('.json')) {
-    return <TextEditorPage kind="javascript" fileId={target.fileId} />
-  }
-  if (lower.endsWith('.txt') || lower.endsWith('.xml')) return <TextEditorPage kind="text" fileId={target.fileId} />
+  if (isDfdocFile(lower)) return <DfdocEditorPage fileId={target.fileId} />
+  // 文本类（md/html/css/js 及全部可安全编辑的文本扩展名，见 openers.ts）。
+  const textKind = textEditorKindFor(lower)
+  if (textKind) return <TextEditorPage kind={textKind} fileId={target.fileId} />
   return (
     <ByPathError
       title="该文件类型暂不支持在线编辑"

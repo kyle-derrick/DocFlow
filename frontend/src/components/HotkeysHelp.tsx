@@ -20,7 +20,6 @@ export function hotkeyDocs(locale: Locale): Array<{ group: string; items: Hotkey
         { keys: ['g', 'f'], desc: locale === 'zh-CN' ? '前往文件' : 'Go to Files' },
         { keys: ['g', 't'], desc: locale === 'zh-CN' ? '前往团队' : 'Go to Teams' },
         { keys: ['g', 's'], desc: locale === 'zh-CN' ? '前往我的分享' : 'Go to My shares' },
-        { keys: ['g', 'h'], desc: locale === 'zh-CN' ? '前往回收站' : 'Go to Trash' },
         { keys: ['?'], desc: locale === 'zh-CN' ? '显示快捷键帮助' : 'Show keyboard shortcuts' },
       ],
     },

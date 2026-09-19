@@ -1,36 +1,12 @@
 // DocFlow 富文本嵌入块节点（自定义 Tiptap node）：
 // - atom 块级节点，attrs { kind, fileId, title }，NodeView 渲染实际内容
 //   （见 EmbedView.tsx）；
-// - Markdown 存储约定（tiptap-markdown 不认识自定义 node，经其
-//   addStorage().markdown 扩展点成对补丁）：
-//   序列化 → fenced code block：```drawio file:<uuid> title:<name>```
-//   解析    → markdown-it fence 渲染规则补丁，命中约定的 fence 输出
-//             <div data-docflow-embed=… data-file-id=… data-title=…>，
-//             再由本节点 parseHTML 收集（与普通代码块互不干扰）。
+// - .dfdoc 为 Tiptap JSON 存储：嵌入块以本节点原生存进文档 JSON，
+//   无需 Markdown 序列化约定（v1.7 起 .md 不再走富文本编辑器，
+//   旧的 fenced code block 往返补丁已随 tiptap-markdown 一并移除）。
 import { Node, mergeAttributes, ReactNodeViewRenderer } from '@tiptap/react'
 import EmbedView from './EmbedView'
-import { EmbedKind, EmbedRef, escapeHtmlAttr, formatEmbedFence, parseEmbedFence } from './markdownRoundtrip'
-
-/** tiptap-markdown 序列化 state 的最小结构类型（prosemirror-markdown 子集）。 */
-interface MarkdownSerializerStateLike {
-  write(text: string): void
-  closeBlock(node: unknown): void
-}
-
-/** markdown-it 实例的最小结构类型（setup 回调入参）。 */
-interface MarkdownItLike {
-  renderer: {
-    rules: Record<string, ((tokens: FenceTokenLike[], idx: number, options: unknown, env: unknown, self: unknown) => string) | undefined>
-  }
-  /** setup 在每次 parse 前都会被调用，用标记保证 fence 补丁幂等。 */
-  __docflowEmbedPatched?: boolean
-}
-
-interface FenceTokenLike {
-  type: string
-  info?: string
-  content?: string
-}
+import { EmbedKind, EmbedRef } from './markdownRoundtrip'
 
 /** Docs 命令类型扩展：editor.commands.insertDocflowEmbed(ref)。 */
 declare module '@tiptap/core' {
@@ -92,44 +68,8 @@ export const DocflowEmbed = Node.create({
     return {
       insertDocflowEmbed:
         (ref: EmbedRef) =>
-        ({ commands }) =>
-          commands.insertContent({ type: this.name, attrs: { kind: ref.kind, fileId: ref.fileId, title: ref.title } }),
-    }
-  },
-
-  addStorage() {
-    return {
-      // tiptap-markdown 扩展点：getMarkdownSpec(extension) 读取
-      // extension.storage.markdown，serialize/parse 成对定义保证无损往返。
-      markdown: {
-        serialize(state: MarkdownSerializerStateLike, node: { attrs: DocflowEmbedAttrs }) {
-          state.write(formatEmbedFence({
-            kind: node.attrs.kind,
-            fileId: node.attrs.fileId,
-            title: node.attrs.title,
-          }))
-          state.closeBlock(node)
-        },
-        parse: {
-          setup(md: MarkdownItLike) {
-            if (md.__docflowEmbedPatched) return
-            md.__docflowEmbedPatched = true
-            const original = md.renderer.rules.fence
-            md.renderer.rules.fence = (tokens, idx, options, env, self) => {
-              const token = tokens[idx]
-              const ref = parseEmbedFence(token?.info ?? '', token?.content ?? '')
-              if (ref) {
-                return (
-                  `<div data-docflow-embed="${escapeHtmlAttr(ref.kind)}"` +
-                  ` data-file-id="${escapeHtmlAttr(ref.fileId)}"` +
-                  ` data-title="${escapeHtmlAttr(ref.title)}"></div>`
-                )
-              }
-              return original ? original(tokens, idx, options, env, self) : ''
-            }
-          },
-        },
-      },
+          ({ commands }) =>
+            commands.insertContent({ type: this.name, attrs: { kind: ref.kind, fileId: ref.fileId, title: ref.title } }),
     }
   },
 })

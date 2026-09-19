@@ -1,22 +1,33 @@
-import { useEffect, useState } from 'react'
+// 回收站弹窗（v1.5 布局整改：原 /trash 整页路由删除，改为文件页工具栏
+// 「回收站」按钮打开的 Modal）：范围下拉（个人 / 各团队）+ 多选批量恢复
+// + 单项恢复 / 彻底删除 + 一键清空（逐项 purge，部分成功语义）。
+// 尺寸：width min(920px, 92vw)，body 定高 70vh 内部滚动。
+import { useCallback, useEffect, useState } from 'react'
 import { FileText, Folder } from 'lucide-react'
-import { App as AntdApp, Button, Select } from 'antd'
+import { App as AntdApp, Button, Modal as AntdModal, Select } from 'antd'
 import { FileItem, Team, batchRestoreFiles, listTeams, listTrash, purgeFile, restoreFile } from '../api'
-import { describeBatchResults } from '../components/FileBrowser'
-import SpaceSwitcher from '../components/SpaceSwitcher'
+import { describeBatchResults } from './FileBrowser'
 import { MessageKey, formatMessage, t, useLocale } from '../i18n'
 
 function formatTime(iso: string): string {
   return new Date(iso).toLocaleString('zh-CN', { hour12: false })
 }
 
-/** 回收站：单项恢复/彻底删除 + 多选批量恢复（部分成功语义，逐项结果摘要）。 */
-export default function TrashPage() {
+export default function TrashModal({
+  open,
+  onClose,
+  onChanged,
+}: {
+  open: boolean
+  onClose: () => void
+  /** 恢复/清空等操作成功后回调（文件页刷新当前目录用）。 */
+  onChanged?: () => void
+}) {
   const locale = useLocale()
   const { modal: antdModal } = AntdApp.useApp()
   const msg = (key: MessageKey) => t(locale, key)
   const [items, setItems] = useState<FileItem[]>([])
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [selected, setSelected] = useState<Set<string>>(new Set())
@@ -24,26 +35,33 @@ export default function TrashPage() {
   const [teams, setTeams] = useState<Team[]>([])
   const [scope, setScope] = useState('personal')
 
-  const load = async (nextScope = scope) => {
-    setLoading(true)
-    setError('')
-    try {
-      const list = await listTrash(nextScope === 'personal' ? 'personal' : 'team', nextScope === 'personal' ? '' : nextScope)
-      list.sort((a, b) => a.name.localeCompare(b.name))
-      setItems(list)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : msg('trashLoadFailed'))
-      setItems([])
-    } finally {
-      setLoading(false)
-    }
-  }
+  const load = useCallback(
+    async (nextScope = scope) => {
+      setLoading(true)
+      setError('')
+      try {
+        const list = await listTrash(nextScope === 'personal' ? 'personal' : 'team', nextScope === 'personal' ? '' : nextScope)
+        list.sort((a, b) => a.name.localeCompare(b.name))
+        setItems(list)
+        setSelected(new Set())
+      } catch (err) {
+        setError(err instanceof Error ? err.message : msg('trashLoadFailed'))
+        setItems([])
+      } finally {
+        setLoading(false)
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [locale],
+  )
 
+  // 打开时加载（关闭期间不轮询）；首次打开拉取团队列表。
   useEffect(() => {
+    if (!open) return
     void listTeams().then(setTeams).catch(() => setTeams([]))
     void load('personal')
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [open])
 
   const toggleSelect = (id: string) => {
     setSelected((prev) => {
@@ -68,6 +86,7 @@ export default function TrashPage() {
     try {
       const results = await batchRestoreFiles(ids)
       setNotice(formatMessage(msg('batchRestorePrefix'), { summary: describeBatchResults(results) }))
+      onChanged?.()
       await load()
     } catch (err) {
       setError(err instanceof Error ? err.message : msg('batchRestoreFailed'))
@@ -81,6 +100,7 @@ export default function TrashPage() {
     try {
       await restoreFile(item.id)
       setNotice(formatMessage(msg('restoreOk'), { name: item.name }))
+      onChanged?.()
       await load()
     } catch (err) {
       setNotice('')
@@ -100,6 +120,7 @@ export default function TrashPage() {
         try {
           await purgeFile(item.id)
           setNotice(formatMessage(msg('purgeOk'), { name: item.name }))
+          onChanged?.()
           await load()
         } catch (err) {
           setNotice('')
@@ -109,25 +130,80 @@ export default function TrashPage() {
     })
   }
 
+  /** 清空回收站（当前范围）：逐项 purge，部分成功语义（失败明细摘要）。 */
+  const handlePurgeAll = () => {
+    if (items.length === 0 || batchBusy) return
+    antdModal.confirm({
+      title: locale === 'zh-CN' ? '清空回收站' : 'Empty trash',
+      content: locale === 'zh-CN'
+        ? `确定彻底删除当前范围内的 ${items.length} 项？此操作不可恢复。`
+        : `Permanently delete ${items.length} items in the current scope? This cannot be undone.`,
+      okText: msg('purge'),
+      okButtonProps: { danger: true },
+      cancelText: locale === 'zh-CN' ? '取消' : 'Cancel',
+      onOk: async () => {
+        setBatchBusy(true)
+        setError('')
+        setNotice('')
+        let ok = 0
+        const failures: string[] = []
+        for (const item of items) {
+          try {
+            await purgeFile(item.id)
+            ok++
+          } catch {
+            failures.push(item.name)
+          }
+        }
+        setBatchBusy(false)
+        if (ok > 0) {
+          setNotice(locale === 'zh-CN' ? `清空完成：彻底删除 ${ok} 项${failures.length > 0 ? `，${failures.length} 项失败` : ''}` : `Emptied ${ok} items${failures.length > 0 ? `, ${failures.length} failed` : ''}`)
+          onChanged?.()
+        }
+        if (failures.length > 0) {
+          setError(`${locale === 'zh-CN' ? '失败明细' : 'Failures'}：${failures.slice(0, 10).join('；')}`)
+        }
+        await load()
+      },
+    })
+  }
+
   return (
-    <div className="page wide-page">
-      <SpaceSwitcher />
-      <div className="page-head">
-        <h2>{msg('trash')}</h2>
-        <Button type="text" onClick={() => void load()}>{msg('refresh')}</Button>
-      </div>
-      <div className="filter-bar">
-        <label className="filter-item">回收站范围
+    <AntdModal
+      open={open}
+      onCancel={onClose}
+      footer={null}
+      title={msg('trash')}
+      width="min(920px, 92vw)"
+      className="docflow-modal trash-modal"
+      styles={{ body: { height: '70vh', maxHeight: '70vh', overflow: 'auto', paddingTop: 12 } }}
+      /* 弹窗内部布局定制经官方 classNames 通道注入自有类（styles.css
+         「antd Modal 薄封装」节），不再钩 .ant-modal-* 内部结构。 */
+      classNames={{
+        header: 'docflow-modal-header',
+        title: 'docflow-modal-title',
+        body: 'docflow-modal-body',
+        close: 'docflow-modal-close',
+      }}
+    >
+      <div className="trash-modal-toolbar toolbar-mini">
+        <label className="filter-item">
+          <span>{locale === 'zh-CN' ? '范围' : 'Scope'}</span>
           <Select
-            className="trash-scope-select"
+            size="small"
             value={scope}
             onChange={(v) => { setScope(v); setSelected(new Set()); void load(v) }}
             options={[
-              { value: 'personal', label: '我的文件' },
+              { value: 'personal', label: locale === 'zh-CN' ? '我的文件' : 'My files' },
               ...teams.map((team) => ({ value: team.id, label: team.name })),
             ]}
           />
         </label>
+        <Button size="small" onClick={() => void load()}>{msg('refresh')}</Button>
+        <span className="toolbar-spacer" />
+        <Button size="small" danger disabled={batchBusy || items.length === 0} onClick={handlePurgeAll}>
+          {locale === 'zh-CN' ? '清空回收站' : 'Empty trash'}
+        </Button>
       </div>
 
       {error && <div className="banner error">{error}</div>}
@@ -184,6 +260,6 @@ export default function TrashPage() {
           </tbody>
         </table>
       )}
-    </div>
+    </AntdModal>
   )
 }

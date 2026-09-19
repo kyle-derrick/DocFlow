@@ -1,12 +1,12 @@
-import { useEffect, useState } from 'react'
-import type { FormEvent, KeyboardEvent } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import type { FormEvent } from 'react'
 import { Lock } from 'lucide-react'
 import { App as AntdApp, Button, Input, Segmented, Select } from 'antd'
 import {
   CreatedShare,
   FileItem,
   Team,
-  UUID_RE,
+  UserSearchResult,
   copyFile,
   createFolder,
   createShare,
@@ -16,8 +16,9 @@ import {
   listFiles,
   listTeams,
   renameFile,
-  uploadFile,
   restoreFile,
+  searchUsers,
+  uploadFile,
 } from '../api'
 import { Modal, formatTime } from '../components/FileBrowser'
 import { FileBrowserWithTree } from '../components/FolderTreeNav'
@@ -64,7 +65,12 @@ export default function FilesPage() {
   const [shareWatermark, setShareWatermark] = useState(true)
   const [shareWatermarkText, setShareWatermarkText] = useState('')
   const [shareUsers, setShareUsers] = useState<string[]>([])
-  const [shareUserInput, setShareUserInput] = useState('')
+  // 授权用户远程搜索（v1.6：替代手输 UUID；防抖 300ms，≥2 字触发）。
+  const [shareUserQuery, setShareUserQuery] = useState('')
+  const [shareUserOptions, setShareUserOptions] = useState<UserSearchResult[]>([])
+  const [shareUserSearching, setShareUserSearching] = useState(false)
+  // 已选用户的显示名缓存（id → 昵称/用户名），供多选框回显。
+  const shareUserNameRef = useRef(new Map<string, string>())
   const [shareTeams, setShareTeams] = useState<string[]>([])
   const [teams, setTeams] = useState<Team[]>([])
   const [shareResult, setShareResult] = useState<CreatedShare | null>(null)
@@ -78,6 +84,28 @@ export default function FilesPage() {
       .then(setTeams)
       .catch(() => {})
   }, [])
+
+  // 授权用户远程搜索（私有分享）：防抖 + 最少 2 字。
+  useEffect(() => {
+    const q = shareUserQuery.trim()
+    if (q.length < 2) {
+      setShareUserOptions([])
+      return
+    }
+    const timer = window.setTimeout(() => {
+      setShareUserSearching(true)
+      void searchUsers(q)
+        .then((users) => {
+          setShareUserOptions(users)
+          for (const u of users) {
+            shareUserNameRef.current.set(u.id, u.nickname ?? u.profile?.nickname ?? u.username)
+          }
+        })
+        .catch(() => setShareUserOptions([]))
+        .finally(() => setShareUserSearching(false))
+    }, 300)
+    return () => window.clearTimeout(timer)
+  }, [shareUserQuery])
 
   const handleRename = async (e: FormEvent) => {
     e.preventDefault()
@@ -140,25 +168,12 @@ export default function FilesPage() {
     setShareWatermark(true)
     setShareWatermarkText('')
     setShareUsers([])
-    setShareUserInput('')
+    setShareUserQuery('')
+    setShareUserOptions([])
     setShareTeams([])
     setShareResult(null)
     setShareError('')
     setCopied(false)
-  }
-
-  const addUserChip = () => {
-    const value = shareUserInput.trim()
-    if (!UUID_RE.test(value) || shareUsers.includes(value)) return
-    setShareUsers((prev) => [...prev, value])
-    setShareUserInput('')
-  }
-
-  const onUserInputKey = (e: KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') {
-      e.preventDefault()
-      addUserChip()
-    }
   }
 
   const toggleShareTeam = (teamId: string) => {
@@ -230,8 +245,7 @@ export default function FilesPage() {
   })
 
   return (
-    <div className="page wide-page">
-      <SpaceSwitcher activeView={spaceView} onViewChange={setSpaceView} />
+    <div className="page wide-page files-page">
       {deleteError && <div className="banner error">{deleteError}</div>}
       {recentlyDeletedId && undoSeconds > 0 && (
         <div className="banner ok">
@@ -243,27 +257,22 @@ export default function FilesPage() {
       <FileBrowserWithTree
         rootLabel="我的文件"
         reloadKey={reloadKey}
+        toolbarPrefix={<SpaceSwitcher activeView={spaceView} onViewChange={setSpaceView} />}
         listItems={async (parentId, opts) => ({ items: await listFiles(parentId, opts), folderId: parentId })}
         createFolderFn={createFolder}
         uploadFn={uploadFile}
-        rootTargetLabel="我的文件（根目录）"
         activeView={spaceView}
         copyFn={(fileId, parentId) => copyFile(fileId, parentId)}
         fileMetaFn={(fileId) => getFileMeta(fileId).catch(() => null)}
         ns={meId ? { type: 'personal', scope: meId } : undefined}
+        shareFn={openShare}
+        renameFn={(item) => { setRenameTarget(item); setRenameValue(item.name); setRenameError('') }}
+        deleteFn={confirmDelete}
         rowActions={(item) => (
           <div className="row-actions-group">
-            <Button size="small" onClick={() => openShare(item)}>分享</Button>
             {item.type === 'file' && (
               <Button size="small" onClick={() => setHistoryTarget(item)}>历史</Button>
             )}
-            <Button
-              size="small"
-              onClick={() => { setRenameTarget(item); setRenameValue(item.name); setRenameError('') }}
-            >
-              重命名
-            </Button>
-            <Button size="small" danger onClick={() => confirmDelete(item)}>删除</Button>
           </div>
         )}
       />
@@ -329,32 +338,30 @@ export default function FilesPage() {
               ) : (
                 <>
                   <div className="field">
-                    <span>授权用户（UUID）</span>
-                    {shareUsers.length > 0 && (
-                      <div className="chips">
-                        {shareUsers.map((uid) => (
-                          <span key={uid} className="chip">
-                            {uid}
-                            <button type="button" aria-label="移除" onClick={() => setShareUsers((prev) => prev.filter((u) => u !== uid))}>×</button>
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                    <div className="chip-input">
-                      <Input
-                        allowClear
-                        value={shareUserInput}
-                        onChange={(e) => setShareUserInput(e.target.value)}
-                        onKeyDown={onUserInputKey}
-                        placeholder="输入用户 UUID 后添加"
-                      />
-                      <Button
-                        disabled={!UUID_RE.test(shareUserInput.trim()) || shareUsers.includes(shareUserInput.trim())}
-                        onClick={addUserChip}
-                      >
-                        添加
-                      </Button>
-                    </div>
+                    <span>授权用户</span>
+                    {/* v1.6：远程搜索多选（昵称/用户名/邮箱 ≥2 字），替代手输 UUID。 */}
+                    <Select
+                      mode="multiple"
+                      showSearch
+                      allowClear
+                      filterOption={false}
+                      value={shareUsers}
+                      loading={shareUserSearching}
+                      placeholder="搜索昵称、用户名或邮箱（至少 2 字）"
+                      notFoundContent={shareUserSearching ? '搜索中…' : null}
+                      onSearch={setShareUserQuery}
+                      onChange={setShareUsers}
+                      options={[
+                        // 选项 = 当前搜索结果 + 已选但不在结果中的用户（回显名）。
+                        ...shareUserOptions.map((u) => {
+                          const nickname = u.nickname ?? u.profile?.nickname
+                          return { value: u.id, label: `${nickname || u.username}（${u.username}）` }
+                        }),
+                        ...shareUsers
+                          .filter((id) => !shareUserOptions.some((u) => u.id === id))
+                          .map((id) => ({ value: id, label: shareUserNameRef.current.get(id) ?? id })),
+                      ]}
+                    />
                   </div>
                   <div className="field">
                     <span>授权团队</span>

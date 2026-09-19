@@ -20,6 +20,7 @@ import {
   ApiTokenItem,
   MeData,
   NotificationEventType,
+  OpenWithPrefs,
   PROFILE_LANGUAGES,
   SessionItem,
   TotpSetup,
@@ -29,11 +30,13 @@ import {
   confirmTotpSetup,
   createToken,
   createWebhook,
+  deleteOpenWith,
   deleteWebhook,
   disableTotp,
   getMe,
   getTotpStatus,
   listNotificationPreferences,
+  listOpenWith,
   listSessions,
   listTokens,
   listWebhooks,
@@ -41,11 +44,22 @@ import {
   revokeAllSessions,
   revokeSession,
   revokeToken,
+  setOpenWith,
   updateMe,
   updateToken,
   updateNotificationPreference,
   updateWebhook,
 } from '../api'
+import {
+  BUILTIN_OPENWITH_EXTS,
+  EditMethod,
+  ViewMethod,
+  builtinOpenWith,
+  editMethodLabel,
+  editOptionsFor,
+  viewMethodLabel,
+  viewOptionsFor,
+} from '../openers'
 import { formatTime } from '../components/FileBrowser'
 import { THEME_ACCENTS, ThemeAccent, ThemeMode, ThemePreference, loadTheme, saveTheme } from '../theme'
 import { MessageKey, saveLocale, t, useLocale } from '../i18n'
@@ -1149,7 +1163,340 @@ function NotificationsPanel({ onError, onNotice }: { onError: (msg: string) => v
   )
 }
 
-const settingsSections = [['profile', '资料'], ['appearance', '外观'], ['security', '安全'], ['notifications', '通知'], ['developer', '开发者']] as const
+/** 打开方式卡片（自文件页迁移）：按扩展名管理默认 {查看, 编辑} 双方式。
+ * - 表格预填全部内置默认扩展名（txt/md/html/…/docx/drawio/excalidraw/
+ *   xmind/pdf 等，见 openers.BUILTIN_OPENWITH_EXTS）+「其他（默认）」说明行
+ *   + 用户自定义扩展名（高亮「已覆盖」）；
+ * - 内置行下拉直接可改（=创建覆盖），改回内置值自动删除覆盖恢复内置；
+ * - 每行两个下拉按该扩展的合法性过滤（openers.viewOptionsFor/editOptionsFor）；
+ * - 「添加」：输入扩展名 + 两个下拉（合法项随输入的扩展名实时更新）。 */
+function OpenWithPanel({ onError, onNotice }: { onError: (msg: string) => void; onNotice: (msg: string) => void }) {
+  const [prefs, setPrefs] = useState<OpenWithPrefs>({})
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+  // 「添加」行草稿：扩展名 + 查看/编辑方式（空串 = 跟随内置默认）。
+  const [newExt, setNewExt] = useState('')
+  const [newView, setNewView] = useState<ViewMethod | ''>('')
+  const [newEdit, setNewEdit] = useState<EditMethod | ''>('')
+
+  const load = async () => {
+    setLoading(true)
+    try {
+      setPrefs(await listOpenWith())
+      onError('')
+    } catch (err) {
+      onError(err instanceof Error ? err.message : '打开方式偏好加载失败')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  /** 行内下拉修改：合并既有覆盖后整体 upsert；两字段均与内置一致时改回
+   *「删除覆盖」恢复内置（内置值即显式保存的兜底语义）。 */
+  const saveField = async (ext: string, field: 'view' | 'edit', value: ViewMethod | EditMethod) => {
+    if (busy) return
+    const builtin = builtinOpenWith(ext)
+    setBusy(true)
+    onError('')
+    try {
+      const merged: { view?: ViewMethod; edit?: EditMethod } = { ...prefs[ext], [field]: value }
+      const viewEq = (merged.view ?? builtin.view) === builtin.view
+      const editEq = (merged.edit ?? builtin.edit) === builtin.edit
+      if (viewEq && editEq) {
+        // 与内置默认一致：删除覆盖行（若存在）恢复内置。
+        if (prefs[ext]) {
+          await deleteOpenWith(ext)
+          setPrefs((prev) => {
+            const next = { ...prev }
+            delete next[ext]
+            return next
+          })
+          onNotice(`已恢复 .${ext} 的内置默认打开方式`)
+        }
+      } else {
+        await setOpenWith(ext, merged)
+        setPrefs((prev) => ({ ...prev, [ext]: merged }))
+      }
+    } catch (err) {
+      onError(err instanceof Error ? err.message : '保存失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** 重置：删除该扩展偏好，恢复内置默认。 */
+  const resetExt = async (ext: string) => {
+    if (busy) return
+    setBusy(true)
+    onError('')
+    try {
+      await deleteOpenWith(ext)
+      setPrefs((prev) => {
+        const next = { ...prev }
+        delete next[ext]
+        return next
+      })
+      onNotice(`已恢复 .${ext} 的内置默认打开方式`)
+    } catch (err) {
+      onError(err instanceof Error ? err.message : '重置失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** 添加：扩展名规范化（去点小写，1..16 位 [a-z0-9]）+ 合法性校验后保存。 */
+  const submitAdd = async (e: FormEvent) => {
+    e.preventDefault()
+    if (busy) return
+    const ext = newExt.trim().toLowerCase().replace(/^\.+/, '')
+    if (!/^[a-z0-9]{1,16}$/.test(ext)) {
+      onError('扩展名须为 1..16 位字母/数字（可带前导点）')
+      return
+    }
+    if (prefs[ext]) {
+      onError(`.${ext} 已在列表中，可直接在行内修改`)
+      return
+    }
+    setBusy(true)
+    onError('')
+    try {
+      const builtin = builtinOpenWith(ext)
+      const merged: { view?: ViewMethod; edit?: EditMethod } = {
+        view: newView || builtin.view,
+        // 编辑方式仅在该扩展支持编辑时可保存（下拉为空 = 不支持）。
+        ...(editOptionsFor(ext).length > 0 ? { edit: (newEdit || builtin.edit) as EditMethod } : {}),
+      }
+      await setOpenWith(ext, merged)
+      setPrefs((prev) => ({ ...prev, [ext]: merged }))
+      setNewExt('')
+      setNewView('')
+      setNewEdit('')
+      onNotice(`已添加 .${ext} 的默认打开方式`)
+    } catch (err) {
+      onError(err instanceof Error ? err.message : '保存失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // 表格行 = 内置默认扩展名 ∪ 用户覆盖中不属于内置的自定义扩展名。
+  const builtinExts = BUILTIN_OPENWITH_EXTS as readonly string[]
+  const customExts = Object.keys(prefs).filter((e) => !builtinExts.includes(e)).sort((a, b) => a.localeCompare(b))
+  const rowExts = [...builtinExts, ...customExts]
+  // 「其他（默认）」行：未列出扩展名的内置兜底（raw / 二进制不可编辑）。
+  const fallbackBuiltin = builtinOpenWith('')
+
+  // 「添加」行下拉选项：按输入中的扩展名实时计算合法性。
+  const draftExt = newExt.trim().toLowerCase().replace(/^\.+/, '')
+  const draftViewOptions = draftExt ? viewOptionsFor(draftExt) : []
+  const draftEditOptions = draftExt ? editOptionsFor(draftExt) : []
+
+  return (
+    <div className="panel setting-group">
+      <h3>打开方式</h3>
+      <div className="setting-desc muted" style={{ marginBottom: 12 }}>
+        按扩展名管理默认的查看 / 编辑方式。下表预填全部内置默认（未覆盖行直接显示内置值，
+        修改即创建覆盖、改回内置值自动恢复默认）；标「已覆盖」的行是你显式保存过的配置，
+        可重置恢复内置。下拉仅列出该扩展名合法的方式；文件右键菜单的「打开方式」选择不再改写这里的配置。
+      </div>
+      {loading ? (
+        <div className="hint">加载中…</div>
+      ) : (
+        <table className="file-table openwith-table">
+          <thead>
+            <tr>
+              <th>扩展名</th>
+              <th>查看方式</th>
+              <th>编辑方式</th>
+              <th>状态</th>
+              <th className="col-actions">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rowExts.map((ext) => {
+              const builtin = builtinOpenWith(ext)
+              const viewOptions = viewOptionsFor(ext)
+              const editOptions = editOptionsFor(ext)
+              const overridden = Boolean(prefs[ext])
+              const currentView = prefs[ext]?.view ?? builtin.view
+              const currentEdit = prefs[ext]?.edit ?? builtin.edit
+              return (
+                <tr key={ext} className={overridden ? 'openwith-overridden' : undefined}>
+                  <td><code>.{ext}</code></td>
+                  <td>
+                    <Select
+                      size="small"
+                      disabled={busy}
+                      value={currentView}
+                      onChange={(v) => void saveField(ext, 'view', v as ViewMethod)}
+                      options={viewOptions.map((m) => ({ value: m, label: viewMethodLabel(m, true, ext) }))}
+                      style={{ minWidth: 140 }}
+                    />
+                  </td>
+                  <td>
+                    {editOptions.length === 0 ? (
+                      <span className="muted">不支持</span>
+                    ) : (
+                      <Select
+                        size="small"
+                        disabled={busy}
+                        value={currentEdit}
+                        onChange={(v) => void saveField(ext, 'edit', v as EditMethod)}
+                        options={editOptions.map((m) => ({ value: m, label: editMethodLabel(m, true) }))}
+                        style={{ minWidth: 140 }}
+                      />
+                    )}
+                  </td>
+                  <td>
+                    {overridden
+                      ? <span className="badge openwith-badge">已覆盖</span>
+                      : <span className="muted">内置默认</span>}
+                  </td>
+                  <td className="col-actions">
+                    {overridden && (
+                      <Button size="small" disabled={busy} onClick={() => void resetExt(ext)}>
+                        重置
+                      </Button>
+                    )}
+                  </td>
+                </tr>
+              )
+            })}
+            <tr>
+              <td><span className="muted">其他（默认）</span></td>
+              <td className="muted">{viewMethodLabel(fallbackBuiltin.view, true)}</td>
+              <td className="muted">不支持</td>
+              <td className="muted">内置兜底</td>
+              <td className="col-actions" />
+            </tr>
+          </tbody>
+        </table>
+      )}
+      <form className="team-create-row" style={{ marginTop: 12 }} onSubmit={(e) => void submitAdd(e)}>
+        <label className="field">
+          <span>扩展名</span>
+          <Input
+            allowClear
+            maxLength={17}
+            value={newExt}
+            onChange={(e) => {
+              setNewExt(e.target.value)
+              setNewView('')
+              setNewEdit('')
+            }}
+            placeholder="如 docx / md / drawio"
+            aria-label="扩展名"
+          />
+        </label>
+        <label className="field">
+          <span>查看方式</span>
+          <Select
+            value={newView || (draftViewOptions[0] ?? '')}
+            onChange={(v) => setNewView(v as ViewMethod)}
+            disabled={!draftExt || busy}
+            options={draftViewOptions.map((m) => ({ value: m, label: viewMethodLabel(m, true, draftExt || undefined) }))}
+            style={{ minWidth: 140 }}
+            aria-label="查看方式"
+          />
+        </label>
+        <label className="field">
+          <span>编辑方式</span>
+          {draftExt && draftEditOptions.length === 0 ? (
+            <span className="muted" style={{ lineHeight: '32px' }}>不支持</span>
+          ) : (
+            <Select
+              value={newEdit || (draftEditOptions[0] ?? '')}
+              onChange={(v) => setNewEdit(v as EditMethod)}
+              disabled={!draftExt || busy}
+              options={draftEditOptions.map((m) => ({ value: m, label: editMethodLabel(m, true) }))}
+              style={{ minWidth: 140 }}
+              aria-label="编辑方式"
+            />
+          )}
+        </label>
+        <Button type="primary" htmlType="submit" disabled={busy || !/^[a-z0-9]{1,16}$/.test(draftExt)}>
+          {busy ? '保存中…' : '添加'}
+        </Button>
+      </form>
+    </div>
+  )
+}
+
+/** MCP 服务卡片（v1.7）：DocFlow 已内置 MCP 服务端（POST /mcp，JSON-RPC 2.0，
+ * PAT Bearer 鉴权）。本卡片展示接入端点与客户端配置示例（Claude Desktop /
+ * Cursor / Cline），凭据经下方「个人访问令牌」创建（建议限定 files:read /
+ * files:write scope 最小授权）。服务随部署常开，无独立开关；按 PAT 可控
+ * 撤销即等效停用。 */
+function McpPanel({ onNotice }: { onNotice: (msg: string) => void }) {
+  const locale = useLocale()
+  const zh = locale === 'zh-CN'
+  const endpoint = `${window.location.origin}/mcp`
+  const clientConfig = JSON.stringify(
+    {
+      mcpServers: {
+        docflow: {
+          type: 'http',
+          url: endpoint,
+          headers: { Authorization: 'Bearer dfpat_用你的令牌替换' },
+        },
+      },
+    },
+    null,
+    2,
+  )
+  const [copied, setCopied] = useState<'url' | 'json' | ''>('')
+  const copy = async (kind: 'url' | 'json', text: string) => {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(kind)
+      setTimeout(() => setCopied(''), 2000)
+    } catch {
+      onNotice(zh ? '复制失败，请手动选择复制' : 'Copy failed — select manually')
+    }
+  }
+  return (
+    <div className="panel setting-group">
+      <h3>MCP{zh ? ' 服务（AI 接入）' : ' service (AI access)'}</h3>
+      <div className="setting-desc muted">
+        {zh ? (
+          <>DocFlow 已内置 MCP（Model Context Protocol）服务端：在 Claude Desktop / Cursor / Cline 等
+            AI 客户端接入后，AI 可直接操作你的文件（浏览 / 读写 / 版本管理 / 分享 / 全文检索，共 21 个工具）。
+            权限与你的账号完全一致，写入走完整上传管线（病毒扫描 / 配额 / 黑名单）。</>
+        ) : (
+          <>DocFlow ships a built-in MCP (Model Context Protocol) server: connect from Claude Desktop,
+            Cursor, Cline and let AI operate your files (browse / read / write / versions / shares / search,
+            21 tools). Permissions mirror your account; writes go through the full upload pipeline.</>
+        )}
+      </div>
+      <div className="field" style={{ marginTop: 10 }}>
+        <span>{zh ? '服务端点（POST /mcp，JSON-RPC 2.0，限流 60 次/分钟/IP）' : 'Endpoint (POST /mcp, JSON-RPC 2.0, 60 req/min/IP)'}</span>
+        <div className="share-link">
+          <Input readOnly value={endpoint} onFocus={(e) => e.currentTarget.select()} />
+          <Button onClick={() => void copy('url', endpoint)}>
+            {copied === 'url' ? (zh ? '已复制 ✓' : 'Copied ✓') : zh ? '复制' : 'Copy'}
+          </Button>
+        </div>
+      </div>
+      <div className="field" style={{ marginTop: 10 }}>
+        <span>
+          {zh ? '客户端配置示例（先在本页「个人访问令牌」创建 PAT，建议限定 files:read 或 files:write scope）'
+            : 'Client config (create a PAT below first; scope it to files:read or files:write)'}
+        </span>
+        <pre className="mcp-config-sample">{clientConfig}</pre>
+        <Button size="small" style={{ marginTop: 6 }} onClick={() => void copy('json', clientConfig)}>
+          {copied === 'json' ? (zh ? '已复制 ✓' : 'Copied ✓') : zh ? '复制配置' : 'Copy config'}
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+const settingsSections = [['profile', '资料'], ['appearance', '外观'], ['openers', '打开方式'], ['security', '安全'], ['notifications', '通知'], ['developer', '开发者']] as const
 
 export default function SettingsPage() {
   const { section = 'profile' } = useParams()
@@ -1172,6 +1519,10 @@ export default function SettingsPage() {
         onNotice={(msg) => { setNotice(msg); setError('') }}
       />}
       {section === 'appearance' && <AppearancePanel />}
+      {section === 'openers' && <OpenWithPanel
+        onError={(msg) => { setError(msg); setNotice('') }}
+        onNotice={(msg) => { setNotice(msg); setError('') }}
+      />}
       {section === 'notifications' && <NotificationsPanel
         onError={(msg) => { setError(msg); setNotice('') }}
         onNotice={(msg) => { setNotice(msg); setError('') }}
@@ -1188,6 +1539,9 @@ export default function SettingsPage() {
             一次性凭据仅在创建时展示一次。
           </div>
         </div>
+      )}
+      {section === 'developer' && (
+        <McpPanel onNotice={(m) => { setNotice(m); setError('') }} />
       )}
       {section === 'developer' && <WebhooksPanel
         onError={(msg) => { setError(msg); setNotice('') }}

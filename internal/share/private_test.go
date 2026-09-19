@@ -72,10 +72,10 @@ func TestPrivateShareAccessMatrix(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := teamSvc.AddMember(teamOwner, tm.ID, member, team.RoleEditor, nil); err != nil {
+	if _, err := teamSvc.AddMember(teamOwner, tm.ID, member, team.RoleMember); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := teamSvc.AddMember(teamOwner, tm.ID, viewer, team.RoleViewer, nil); err != nil {
+	if _, err := teamSvc.AddMember(teamOwner, tm.ID, viewer, team.RoleGuest); err != nil {
 		t.Fatal(err)
 	}
 	sh, err := svc.CreatePrivate(owner, fileID, PermissionView, 0, nil, []uuid.UUID{explicit}, []uuid.UUID{tm.ID})
@@ -111,7 +111,7 @@ func TestPrivateShareAccessInvalidatedByRemovalAndRevoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := teamSvc.AddMember(teamOwner, tm.ID, member, team.RoleEditor, nil); err != nil {
+	if _, err := teamSvc.AddMember(teamOwner, tm.ID, member, team.RoleMember); err != nil {
 		t.Fatal(err)
 	}
 	sh, err := svc.CreatePrivate(owner, fileID, PermissionView, 0, nil, nil, []uuid.UUID{tm.ID})
@@ -132,7 +132,7 @@ func TestPrivateShareAccessInvalidatedByRemovalAndRevoke(t *testing.T) {
 		t.Fatalf("resolve after removal: err = %v, want ErrForbidden", err)
 	}
 	// 重新加入后可访问，随后撤销分享 → ErrGone。
-	if _, err := teamSvc.AddMember(teamOwner, tm.ID, member, team.RoleViewer, nil); err != nil {
+	if _, err := teamSvc.AddMember(teamOwner, tm.ID, member, team.RoleGuest); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := svc.ResolveForUser(sh.ID, fileID, member); err != nil {
@@ -340,7 +340,7 @@ func TestSharedWithMeTeamGrantAndRemoval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := teamSvc.AddMember(teamOwner, tm.ID, member, team.RoleViewer, nil); err != nil {
+	if _, err := teamSvc.AddMember(teamOwner, tm.ID, member, team.RoleGuest); err != nil {
 		t.Fatal(err)
 	}
 	sh, err := svc.CreatePrivate(owner, fileID, PermissionView, 0, nil, nil, []uuid.UUID{tm.ID})

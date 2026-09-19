@@ -4,10 +4,12 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/docflow/docflow/internal/audit"
 	"github.com/docflow/docflow/internal/files"
 	"github.com/docflow/docflow/internal/team"
 )
@@ -44,73 +46,40 @@ func (h *Handler) deleteTeam(c *gin.Context) {
 	if teamError(c, h.teams.Delete(userID(c), id)) {
 		return
 	}
+	// 审计：team.delete（仅 owner 可达此处；失败不阻塞删除结果）。
+	h.recordTeamAudit(c, audit.ActionTeamDelete, id, audit.StatusSuccess, "")
 	c.Status(http.StatusNoContent)
 }
 
-type roleRequest struct {
-	Name        string         `json:"name"`
-	Permissions map[string]any `json:"permissions"`
-}
-
-func (h *Handler) listRoles(c *gin.Context) {
+// leaveTeam POST /api/v1/teams/:id/leave：非 owner 成员主动退出团队
+//（owner 须先转让所有权或解散，403）。
+func (h *Handler) leaveTeam(c *gin.Context) {
 	id, ok := parseID(c, c.Param("id"))
 	if !ok {
 		return
 	}
-	roles, err := h.teams.Roles(userID(c), id)
-	if teamError(c, err) {
+	if teamError(c, h.teams.Leave(userID(c), id)) {
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"roles": roles})
-}
-func (h *Handler) createRole(c *gin.Context) {
-	id, ok := parseID(c, c.Param("id"))
-	if !ok {
-		return
-	}
-	var req roleRequest
-	if c.ShouldBindJSON(&req) != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
-		return
-	}
-	r, err := h.teams.CreateRole(userID(c), id, req.Name, req.Permissions)
-	if teamError(c, err) {
-		return
-	}
-	c.JSON(http.StatusCreated, r)
-}
-func (h *Handler) updateRole(c *gin.Context) {
-	tid, ok := parseID(c, c.Param("id"))
-	if !ok {
-		return
-	}
-	rid, ok := parseID(c, c.Param("role_id"))
-	if !ok {
-		return
-	}
-	var req roleRequest
-	if c.ShouldBindJSON(&req) != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
-		return
-	}
-	if teamError(c, h.teams.UpdateRole(userID(c), tid, rid, req.Name, req.Permissions)) {
-		return
-	}
+	h.recordTeamAudit(c, audit.ActionTeamLeave, id, audit.StatusSuccess, "")
 	c.Status(http.StatusNoContent)
 }
-func (h *Handler) deleteRole(c *gin.Context) {
-	tid, ok := parseID(c, c.Param("id"))
-	if !ok {
+
+// recordTeamAudit 团队生命周期审计（解散/退出/转让）：失败静默（审计
+// 不可用不阻断业务结果）。
+func (h *Handler) recordTeamAudit(c *gin.Context, action string, teamID uuid.UUID, status, metadata string) {
+	if h.audit == nil {
 		return
 	}
-	rid, ok := parseID(c, c.Param("role_id"))
-	if !ok {
-		return
-	}
-	if teamError(c, h.teams.DeleteRole(userID(c), tid, rid)) {
-		return
-	}
-	c.Status(http.StatusNoContent)
+	actor := userID(c)
+	_ = h.audit.Record(audit.Entry{
+		UserID:       &actor,
+		Action:       action,
+		ResourceType: audit.ResourceTeam,
+		ResourceID:   teamID.String(),
+		Status:       status,
+		Metadata:     metadata,
+	})
 }
 
 // teamJSON 序列化团队安全字段（不暴露 owner_id 之外的内部信息）。
@@ -118,21 +87,18 @@ func teamJSON(t team.Team) gin.H {
 	return gin.H{"id": t.ID, "name": t.Name, "description": t.Description, "owner_id": t.OwnerID, "created_at": t.CreatedAt}
 }
 
-// teamError 统一映射团队服务错误：非成员/非 owner 的资源一律 404 或 403，不泄露存在性细节。
+// teamError 统一映射团队服务错误：非成员/非管理者的资源一律 404 或 403，不泄露存在性细节。
 func teamError(c *gin.Context, err error) bool {
 	if err == nil {
 		return false
 	}
 	switch {
-	case errors.Is(err, team.ErrInvalidName), errors.Is(err, team.ErrInvalidRole), errors.Is(err, team.ErrInvalidPermission):
+	case errors.Is(err, team.ErrInvalidName), errors.Is(err, team.ErrInvalidRole):
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 	case errors.Is(err, team.ErrNameConflict):
 		c.JSON(http.StatusConflict, gin.H{"error": "team name already exists"})
 	case errors.Is(err, team.ErrMemberExists):
 		c.JSON(http.StatusConflict, gin.H{"error": "user is already a member"})
-	case errors.Is(err, team.ErrRoleInUse):
-		// 删除角色前须先改派引用该角色的成员（migration 029 另有 ON DELETE RESTRICT 兜底）。
-		c.JSON(http.StatusConflict, gin.H{"error": "role is assigned to team members"})
 	case errors.Is(err, team.ErrOwnerMember):
 		c.JSON(http.StatusForbidden, gin.H{"error": "team owner membership cannot be removed"})
 	case errors.Is(err, team.ErrForbidden):
@@ -164,61 +130,51 @@ func (h *Handler) createTeam(c *gin.Context) {
 }
 
 // listTeams GET /api/v1/teams：当前用户所属（成员或 owner）的团队。
+// v1.7 起每条附带 my_role（五级内置角色）/ member_count / storage_used
+//（团队页卡片数据；单 SQL 聚合，无 N+1）。
 func (h *Handler) listTeams(c *gin.Context) {
-	teams, err := h.teams.ListTeams(userID(c))
+	infos, err := h.teams.ListTeamsDetailed(userID(c))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to list teams"})
 		return
 	}
-	items := make([]gin.H, 0, len(teams))
-	for _, t := range teams {
-		items = append(items, teamJSON(t))
+	items := make([]gin.H, 0, len(infos))
+	for _, info := range infos {
+		item := teamJSON(info.Team)
+		item["my_role"] = info.MyRole
+		item["member_count"] = info.MemberCount
+		item["storage_used"] = info.StorageUsed
+		items = append(items, item)
 	}
 	c.JSON(http.StatusOK, gin.H{"teams": items})
 }
 
 type teamMemberRequest struct {
 	UserID string `json:"user_id"`
-	Role   string `json:"role"`
-	// RoleID 自定义角色 ID（可选）：非空时成员绑定该自定义角色（role 归一为 custom）。
-	RoleID string `json:"role_id"`
+	// Role 五级内置角色（admin/member_share/member/guest；owner 经转让产生）。
+	Role string `json:"role"`
 }
 
-// parseMemberRole 解析成员角色入参：返回 (role, roleID)；role_id 非法 UUID 时 400。
-func parseMemberRole(c *gin.Context, req teamMemberRequest) (string, *uuid.UUID, bool) {
-	if req.RoleID == "" {
-		return req.Role, nil, true
-	}
-	roleID, ok := parseID(c, req.RoleID)
-	if !ok {
-		return "", nil, false
-	}
-	return req.Role, &roleID, true
-}
-
-// memberJSON 序列化成员安全字段：role（owner/editor/viewer/custom）、
-// role_id/role_name（自定义角色时返回，供前端展示与改派）、
-// username/nickname（成员列表 JOIN users 补齐，展示用户名替代 UUID；
-// 仅非空时返回，兼容 MemoryStore 等无用户数据的实现）。
+// memberJSON 序列化成员安全字段：role（owner/admin/member_share/member/guest）
+// 与 username/nickname/email（成员列表 JOIN users 补齐，展示替代 UUID；
+// 仅非空时返回，兼容 MemoryStore 等无用户数据的实现）。joined_at 即
+// team_members.created_at（加入时间，v1.7.1 显式字段；created_at 兼容保留）。
 func memberJSON(m team.Member) gin.H {
-	out := gin.H{"user_id": m.UserID, "role": m.Role, "created_at": m.CreatedAt}
-	if m.RoleID != nil {
-		out["role_id"] = m.RoleID
-	}
-	if m.RoleName != "" {
-		out["role_name"] = m.RoleName
-	}
+	out := gin.H{"user_id": m.UserID, "role": m.Role, "created_at": m.CreatedAt, "joined_at": m.CreatedAt}
 	if m.Username != "" {
 		out["username"] = m.Username
 	}
 	if m.Nickname != "" {
 		out["nickname"] = m.Nickname
 	}
+	if m.Email != "" {
+		out["email"] = m.Email
+	}
 	return out
 }
 
-// addTeamMember POST /api/v1/teams/:id/members {user_id, role?, role_id?}：
-// 仅团队 owner 可添加成员；角色为系统角色（editor/viewer）或自定义角色（role_id）。
+// addTeamMember POST /api/v1/teams/:id/members {user_id, role}：
+// 团队 owner/admin 可添加成员；角色为五级内置（admin 仅 owner 可授予）。
 func (h *Handler) addTeamMember(c *gin.Context) {
 	teamID, ok := parseID(c, c.Param("id"))
 	if !ok {
@@ -233,19 +189,15 @@ func (h *Handler) addTeamMember(c *gin.Context) {
 	if !ok {
 		return
 	}
-	role, roleID, ok := parseMemberRole(c, req)
-	if !ok {
-		return
-	}
-	m, err := h.teams.AddMember(userID(c), teamID, memberUserID, role, roleID)
+	m, err := h.teams.AddMember(userID(c), teamID, memberUserID, req.Role)
 	if teamError(c, err) {
 		return
 	}
 	c.JSON(http.StatusCreated, memberJSON(m))
 }
 
-// updateTeamMember PATCH /api/v1/teams/:id/members/:uid {role?, role_id?}：
-// 仅团队 owner 可改成员角色（系统角色或自定义角色）；owner 成员不可改（403）。
+// updateTeamMember PATCH /api/v1/teams/:id/members/:uid {role}：
+// owner/admin 可改成员角色（五级内置下拉）；owner 成员不可改（403）。
 func (h *Handler) updateTeamMember(c *gin.Context) {
 	teamID, ok := parseID(c, c.Param("id"))
 	if !ok {
@@ -260,18 +212,15 @@ func (h *Handler) updateTeamMember(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
 	}
-	role, roleID, ok := parseMemberRole(c, req)
-	if !ok {
-		return
-	}
-	m, err := h.teams.UpdateMemberRole(userID(c), teamID, memberUserID, role, roleID)
+	m, err := h.teams.UpdateMemberRole(userID(c), teamID, memberUserID, req.Role)
 	if teamError(c, err) {
 		return
 	}
 	c.JSON(http.StatusOK, memberJSON(m))
 }
 
-// removeTeamMember DELETE /api/v1/teams/:id/members/:uid：仅团队 owner 可移除成员；owner 成员不可移除。
+// removeTeamMember DELETE /api/v1/teams/:id/members/:uid：owner/admin 可移除
+// 成员；owner 成员不可移除。
 func (h *Handler) removeTeamMember(c *gin.Context) {
 	teamID, ok := parseID(c, c.Param("id"))
 	if !ok {
@@ -304,6 +253,40 @@ func (h *Handler) listTeamMembers(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"members": items})
 }
 
+type transferRequest struct {
+	UserID string `json:"user_id"`
+}
+
+// transferTeamOwnership POST /api/v1/teams/:id/transfer-ownership {user_id}：
+// 仅 owner 可把团队所有权转让给既有成员（新 owner 角色置 owner、原 owner
+// 降为 admin，事务内完成）。
+func (h *Handler) transferTeamOwnership(c *gin.Context) {
+	teamID, ok := parseID(c, c.Param("id"))
+	if !ok {
+		return
+	}
+	var req transferRequest
+	if c.ShouldBindJSON(&req) != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	newOwner, ok := parseID(c, req.UserID)
+	if !ok {
+		return
+	}
+	if teamError(c, h.teams.TransferOwnership(userID(c), teamID, newOwner)) {
+		return
+	}
+	t, err := h.teams.Get(teamID)
+	if teamError(c, err) {
+		return
+	}
+	// 审计：team.owner_transfer（metadata 记录新 owner；仅 owner 可达）。
+	h.recordTeamAudit(c, audit.ActionTeamOwnerTransfer, teamID, audit.StatusSuccess,
+		`{"new_owner":"`+newOwner.String()+`"}`)
+	c.JSON(http.StatusOK, teamJSON(t))
+}
+
 // teamFolderLimit 解析团队空间列举的 limit 查询参数（默认 100，上限 1000）。
 func teamFolderLimit(c *gin.Context) (int, bool) {
 	limit := 100
@@ -322,9 +305,9 @@ func teamFolderLimit(c *gin.Context) (int, bool) {
 	return limit, true
 }
 
-// requireTeamRead 校验 actor 对团队空间的读权限（系统角色任意成员；自定义角色
-// 按 read 勾选且未被 deny；角色行缺失 fail closed）。无读权限按 404 处理
-// （不泄露团队存在性）。返回 true 表示校验通过（false 时已写响应）。
+// requireTeamRead 校验 actor 对团队空间的读权限（五级内置角色任意成员）。
+// 无读权限按 404 处理（不泄露团队存在性）。返回 true 表示校验通过
+//（false 时已写响应）。
 func (h *Handler) requireTeamRead(c *gin.Context, teamID, actor uuid.UUID) bool {
 	if _, err := h.teams.Get(teamID); err != nil {
 		teamError(c, err)
@@ -420,7 +403,7 @@ type teamFolderRequest struct {
 
 // createTeamFolder POST /api/v1/teams/:id/folders {name, parent_id?}：
 // 在团队根目录（缺省）或指定目录下建目录；写权限由 CreateFolderIn 内的
-// CanWrite 判定（owner/editor/含 write 权限的自定义角色，viewer 403）。
+// CanWrite 判定（owner/admin/member_share/member，guest 403）。
 func (h *Handler) createTeamFolder(c *gin.Context) {
 	teamID, ok := parseID(c, c.Param("id"))
 	if !ok {
@@ -467,4 +450,135 @@ func (h *Handler) createTeamFolder(c *gin.Context) {
 	}
 	setETag(c, f)
 	c.JSON(http.StatusCreated, fileJSON(f))
+}
+
+// ---- 团队邀请（v1.7.1 成员管理完善；team_invites，migration 039） ----
+
+type teamInviteRequest struct {
+	Email string `json:"email"`
+	// Role 五级内置可授予角色（admin/member_share/member/guest）。
+	Role string `json:"role"`
+}
+
+// inviteJSON 序列化邀请（不含 token_hash），附派生状态。
+func inviteJSON(v team.Invite) gin.H {
+	return gin.H{
+		"id":          v.ID,
+		"email":       v.Email,
+		"role":        v.Role,
+		"invited_by":  v.InvitedBy,
+		"status":      v.Status(time.Now().UTC()),
+		"expires_at":  v.ExpiresAt,
+		"accepted_at": v.AcceptedAt,
+		"created_at":  v.CreatedAt,
+	}
+}
+
+// inviteError 统一映射邀请服务错误。
+func inviteError(c *gin.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+	switch {
+	case errors.Is(err, team.ErrInvalidEmail), errors.Is(err, team.ErrInvalidRole):
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	case errors.Is(err, team.ErrNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": "invitation not found"})
+	case errors.Is(err, team.ErrInviteGone):
+		c.JSON(http.StatusGone, gin.H{"error": "invitation is no longer available"})
+	case errors.Is(err, team.ErrEmailMismatch):
+		c.JSON(http.StatusForbidden, gin.H{"error": "invitation email does not match your account"})
+	case errors.Is(err, team.ErrForbidden), errors.Is(err, team.ErrMemberExists):
+		teamError(c, err)
+	default:
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "invitation operation failed"})
+	}
+	return true
+}
+
+// createTeamInvite POST /api/v1/teams/:id/invites {email, role}：创建邮箱
+// 邀请（owner/admin）。明文 token 仅本次响应可见一次（join_url 指向前端
+// 路由 /teams/join/<token>）；幂等命中既有邀请返回 200（无链接）。
+func (h *Handler) createTeamInvite(c *gin.Context) {
+	teamID, ok := parseID(c, c.Param("id"))
+	if !ok {
+		return
+	}
+	var req teamInviteRequest
+	if c.ShouldBindJSON(&req) != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	actor := userID(c)
+	inv, token, err := h.teams.CreateInvite(actor, teamID, req.Email, req.Role)
+	if inviteError(c, err) {
+		return
+	}
+	out := inviteJSON(inv)
+	status := http.StatusCreated
+	if token != "" {
+		out["join_url"] = "/teams/join/" + token
+	} else {
+		// 幂等命中既有邀请：明文 token 已不可恢复。
+		status = http.StatusOK
+	}
+	h.recordTeamAudit(c, audit.ActionInviteCreate, teamID, audit.StatusSuccess,
+		`{"email":"`+inv.Email+`","role":"`+inv.Role+`"}`)
+	c.JSON(status, out)
+}
+
+// listTeamInvites GET /api/v1/teams/:id/invites：团队邀请列表（owner/admin），
+// 每条附派生状态 pending/accepted/expired。
+func (h *Handler) listTeamInvites(c *gin.Context) {
+	teamID, ok := parseID(c, c.Param("id"))
+	if !ok {
+		return
+	}
+	list, err := h.teams.ListInvites(userID(c), teamID)
+	if inviteError(c, err) {
+		return
+	}
+	items := make([]gin.H, 0, len(list))
+	for _, v := range list {
+		items = append(items, inviteJSON(v))
+	}
+	c.JSON(http.StatusOK, gin.H{"invites": items})
+}
+
+// revokeTeamInvite DELETE /api/v1/teams/:id/invites/:iid：撤销邀请（删行，
+// token 立即失效；owner/admin）。
+func (h *Handler) revokeTeamInvite(c *gin.Context) {
+	teamID, ok := parseID(c, c.Param("id"))
+	if !ok {
+		return
+	}
+	inviteID, ok := parseID(c, c.Param("iid"))
+	if !ok {
+		return
+	}
+	actor := userID(c)
+	if inviteError(c, h.teams.RevokeInvite(actor, teamID, inviteID)) {
+		return
+	}
+	h.recordTeamAudit(c, audit.ActionInviteRevoke, teamID, audit.StatusSuccess, "")
+	c.Status(http.StatusNoContent)
+}
+
+// acceptTeamInvite POST /api/v1/team-invites/join/:token：登录用户凭一次性
+// token 接受团队邀请（邮箱须匹配）。成功返回团队信息与 already_member
+// 标记（已在团队时邀请被消费，不视为错误）。
+func (h *Handler) acceptTeamInvite(c *gin.Context) {
+	user := userID(c)
+	u, err := h.users.GetByID(user)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to load user"})
+		return
+	}
+	t, inv, already, err := h.teams.AcceptInvite(user, c.Param("token"), u.Email)
+	if inviteError(c, err) {
+		return
+	}
+	h.recordTeamAudit(c, audit.ActionInviteCreate, t.ID, audit.StatusSuccess,
+		`{"accepted":true,"email":"`+inv.Email+`"}`)
+	c.JSON(http.StatusOK, gin.H{"team": teamJSON(t), "already_member": already, "role": inv.Role})
 }

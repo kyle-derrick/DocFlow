@@ -18,7 +18,11 @@ var (
 	ErrNotFound    = errors.New("file not found")
 	ErrRoot        = errors.New("root cannot be changed")
 	ErrNoVersion   = errors.New("file has no current version")
-	ErrFolderCopy  = errors.New("folders cannot be copied")
+	// ErrFolderCopy 仅在复制根目录（is_root）等不可复制目录时返回；
+	// 普通目录子树复制见 CopyFolder。
+	ErrFolderCopy = errors.New("folders cannot be copied")
+	// ErrCopyLimit 单次目录复制的子树条目数超限。
+	ErrCopyLimit = errors.New("folder exceeds copy limit")
 	// ErrForbidden 表示用户对团队目录无写权限（如 viewer 或非成员）。
 	ErrForbidden = errors.New("no permission to write this folder")
 	// ErrFolderDepth 目录嵌套深度超过上限（folder.max_depth，默认 32）。
@@ -780,7 +784,7 @@ func (s *Store) Copy(user, id, parent uuid.UUID, name string) (File, error) {
 		return File{}, err
 	}
 	if source.Type == "folder" {
-		return File{}, ErrFolderCopy
+		return s.CopyFolder(user, id, parent, name)
 	}
 	parentFile, err := authorizeParentFolder(s, user, parent, s.teamWriter, s.acl)
 	if err != nil {
@@ -824,6 +828,123 @@ func (s *Store) Copy(user, id, parent uuid.UUID, name string) (File, error) {
 		return tx.Model(&copied).Update("current_version_id", newVersion.ID).Error
 	})
 	return copied, err
+}
+
+// copyFolderMaxEntries 单次目录子树复制的最大条目数（目录与文件合计）。
+const copyFolderMaxEntries = 2000
+
+// CopyFolder 把 source 目录子树整体复制到 parent 下（name 缺省「<原名> copy」）。
+// 授权同 Copy：源读权限（Get，团队文件为成员读）+ 目标目录写权限
+// （authorizeParentFolder）——跨作用域复制（个人↔团队）时子树继承目标
+// 作用域（与移动的继承语义一致）。文件经 blob ref_count 复用当前版本；
+// 无当前版本的文件跳过。单事务递归；条目数超限（ErrCopyLimit）或目标
+// 深度超限（ErrFolderDepth）时整体回滚；同名冲突返回 ErrConflict。
+func (s *Store) CopyFolder(user, id, parent uuid.UUID, name string) (File, error) {
+	source, err := s.Get(user, id)
+	if err != nil {
+		return File{}, err
+	}
+	if source.Type != "folder" || source.IsRoot {
+		return File{}, ErrFolderCopy
+	}
+	parentFile, err := authorizeParentFolder(s, user, parent, s.teamWriter, s.acl)
+	if err != nil {
+		return File{}, err
+	}
+	if name == "" {
+		name = source.Name + " copy"
+	}
+	n, err := NormalizeName(name)
+	if err != nil {
+		return File{}, err
+	}
+	targetDepth, derr := s.folderDepthOf(parent)
+	if derr != nil {
+		return File{}, derr
+	}
+	height, herr := s.folderSubtreeHeight(source.ID)
+	if herr != nil {
+		return File{}, herr
+	}
+	if verr := validateMoveDepth(targetDepth, height, s.effectiveMaxFolderDepth()); verr != nil {
+		return File{}, verr
+	}
+	var copied File
+	count := 0
+	err = s.db.Transaction(func(tx *gorm.DB) error {
+		var cerr error
+		copied, cerr = copyFolderTree(tx, source, parent, n, parentFile.ScopeType, parentFile.TeamID, user, &count)
+		return cerr
+	})
+	if err != nil {
+		return File{}, err
+	}
+	return copied, nil
+}
+
+// copyFolderTree 事务内递归复制目录子树：目录行逐层新建（继承目标作用域），
+// 文件行复制当前版本（blob ref_count+1，与单文件 Copy 同语义）；
+// 子项按 lower(name) 排序复制（结果顺序稳定）；软删子项排除。
+func copyFolderTree(tx *gorm.DB, src File, parentID uuid.UUID, name, scopeType string, teamID *uuid.UUID, user uuid.UUID, count *int) (File, error) {
+	*count++
+	if *count > copyFolderMaxEntries {
+		return File{}, ErrCopyLimit
+	}
+	dest := File{ID: uuid.New(), Name: name, ParentID: &parentID, OwnerID: user, Type: "folder", ScopeType: scopeType, TeamID: teamID, Description: src.Description}
+	if err := tx.Create(&dest).Error; err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "unique") {
+			return File{}, ErrConflict
+		}
+		return File{}, err
+	}
+	var children []File
+	if err := tx.Where("parent_id = ? AND deleted_at IS NULL", src.ID).Order("lower(name)").Find(&children).Error; err != nil {
+		return File{}, err
+	}
+	for _, ch := range children {
+		if ch.Type == "folder" {
+			if _, err := copyFolderTree(tx, ch, dest.ID, ch.Name, scopeType, teamID, user, count); err != nil {
+				return File{}, err
+			}
+			continue
+		}
+		if ch.CurrentVersionID == nil {
+			continue
+		}
+		if _, err := copyFileRow(tx, ch, dest.ID, scopeType, teamID, user); err != nil {
+			return File{}, err
+		}
+	}
+	return dest, nil
+}
+
+// copyFileRow 复制单个文件行（当前版本 + blob 引用计数），与 Store.Copy
+// 的事务体一致；供目录递归复制复用。
+func copyFileRow(tx *gorm.DB, src File, parentID uuid.UUID, scopeType string, teamID *uuid.UUID, user uuid.UUID) (File, error) {
+	var version FileVersion
+	if err := tx.Where("id = ?", *src.CurrentVersionID).First(&version).Error; err != nil {
+		return File{}, err
+	}
+	var blob ObjectBlob
+	if err := tx.Where("id = ?", version.ObjectBlobID).First(&blob).Error; err != nil {
+		return File{}, err
+	}
+	copied := File{ID: uuid.New(), Name: src.Name, ParentID: &parentID, OwnerID: user, Type: "file", ScopeType: scopeType, TeamID: teamID}
+	if err := tx.Create(&copied).Error; err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "unique") {
+			return File{}, ErrConflict
+		}
+		return File{}, err
+	}
+	if err := tx.Model(&ObjectBlob{}).Where("id = ?", blob.ID).UpdateColumn("ref_count", gorm.Expr("ref_count + 1")).Error; err != nil {
+		return File{}, err
+	}
+	newVersion := FileVersion{ID: uuid.New(), FileID: copied.ID, Version: 1, ObjectBlobID: blob.ID, ContentSHA256: version.ContentSHA256, Size: version.Size, Comment: version.Comment, UserID: user}
+	if err := tx.Create(&newVersion).Error; err != nil {
+		return File{}, err
+	}
+	copied.CurrentVersionID = &newVersion.ID
+	return copied, tx.Model(&File{}).Where("id = ?", copied.ID).Update("current_version_id", newVersion.ID).Error
 }
 
 func (s *Store) Recent(owner uuid.UUID, limit int) ([]File, error) {

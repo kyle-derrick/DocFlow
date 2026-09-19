@@ -39,34 +39,36 @@ const SAVE_HINT_DEBOUNCE_MS = 3000
 const savedMarkerKey = (fileId: string) => `docflow:onlyoffice-saved:${fileId}`
 
 /**
- * 动态注入 DocumentServer 的 api.js；同一 src 复用已在加载/已加载的 script
- * （window.DocsAPI 已存在时直接就绪）。返回移除函数（卸载时调用）。
+ * 动态注入 DocumentServer 的 api.js（全局只增不删）：
+ * - window.DocsAPI 一旦就绪即常驻——弹窗/组件卸载绝不移除 script（api.js
+ *   移除后 DocsAPI 仍在，但其内部初始化状态与二次挂载的 placeholder 不再
+ *   匹配，DocEditor 会异常回退 body 兜底 iframe，即「二次打开弹窗变成内嵌
+ *   当前页面」的根因）；
+ * - 同一 src 复用已在加载/已加载的 script（dataset 标记全局一次），加载
+ *   失败（onerror）时才清理该 script 允许下次重试。
  */
-function loadDocEditorScript(serverUrl: string): { ready: Promise<void>; remove: () => void } {
+export function loadDocEditorScript(serverUrl: string): Promise<void> {
+  if (window.DocsAPI?.DocEditor) return Promise.resolve()
   const src = `${serverUrl.replace(/\/+$/, '')}/web-apps/apps/api/documents/api.js`
   const existing = document.querySelector<HTMLScriptElement>(`script[data-docflow-onlyoffice="${src}"]`)
-  if (window.DocsAPI?.DocEditor) {
-    return { ready: Promise.resolve(), remove: () => {} }
-  }
   if (existing) {
-    return {
-      ready: new Promise((resolve, reject) => {
-        existing.addEventListener('load', () => resolve(), { once: true })
-        existing.addEventListener('error', () => reject(new Error('编辑服务不可用')), { once: true })
-      }),
-      remove: () => existing.remove(),
-    }
+    return new Promise((resolve, reject) => {
+      existing.addEventListener('load', () => resolve(), { once: true })
+      existing.addEventListener('error', () => reject(new ApiError(0, '编辑服务不可用')), { once: true })
+    })
   }
-  const script = document.createElement('script')
-  script.src = src
-  script.async = true
-  script.dataset.docflowOnlyoffice = src
-  const ready = new Promise<void>((resolve, reject) => {
+  return new Promise((resolve, reject) => {
+    const script = document.createElement('script')
+    script.src = src
+    script.async = true
+    script.dataset.docflowOnlyoffice = src
     script.onload = () => resolve()
-    script.onerror = () => reject(new ApiError(0, '编辑服务不可用'))
+    script.onerror = () => {
+      script.remove()
+      reject(new ApiError(0, '编辑服务不可用'))
+    }
+    document.head.appendChild(script)
   })
-  document.head.appendChild(script)
-  return { ready, remove: () => script.remove() }
 }
 
 export default function EditorPage({ mode, fileId: fileIdProp }: { mode?: 'edit' | 'view'; fileId?: string } = {}) {
@@ -85,7 +87,10 @@ export default function EditorPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
   const [error, setError] = useState('')
   const [saveHint, setSaveHint] = useState('')
 
-  const placeholderId = useRef(`onlyoffice-placeholder-${Math.random().toString(36).slice(2)}`)
+  // DocEditor 挂载容器（shell）。placeholder 节点在每次 init 时以全新 id
+  // 命令式创建（弹窗复用组件实例/主题变化等二次 init 时，旧 placeholder 已
+  // 被 destroyEditor 清理，复用旧 id 会让 DocEditor 找不到挂载点）。
+  const shellRef = useRef<HTMLDivElement | null>(null)
   const editorRef = useRef<DocEditorInstance | null>(null)
 
   // 手动/跨标签页刷新当前版本指针（current_version 摘要）。
@@ -143,9 +148,7 @@ export default function EditorPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
         ])
         if (!alive) return
         setFile(meta)
-        const { ready, remove } = loadDocEditorScript(status.server_url)
-        removeFns.push(remove)
-        await ready
+        await loadDocEditorScript(status.server_url)
         if (!alive || !window.DocsAPI?.DocEditor) {
           if (alive) setError('编辑服务不可用')
           return
@@ -165,7 +168,14 @@ export default function EditorPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
             onChange: () => scheduleSaveHint(),
           },
         }
-        editorRef.current = window.DocsAPI.DocEditor(placeholderId.current, editorConfig)
+        // 全新 id 的 placeholder 节点（init 与 DOM 就绪在同一帧后完成）。
+        const holder = document.createElement('div')
+        const holderId = `onlyoffice-placeholder-${Math.random().toString(36).slice(2)}`
+        holder.id = holderId
+        holder.className = 'editor-placeholder'
+        if (!shellRef.current) return
+        shellRef.current.replaceChildren(holder)
+        editorRef.current = window.DocsAPI.DocEditor(holderId, editorConfig)
       } catch (err) {
         if (alive) setError(err instanceof Error ? err.message : '编辑器加载失败')
       } finally {
@@ -177,8 +187,11 @@ export default function EditorPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
     return () => {
       alive = false
       window.clearTimeout(saveTimer)
+      // destroy 只在 cleanup（卸载或依赖变化重初始化）时执行：编辑器实例
+      // 与 placeholder 同生共死，script 常驻不动。
       editorRef.current?.destroyEditor()
       editorRef.current = null
+      shellRef.current?.replaceChildren()
       for (const fn of removeFns) fn()
     }
   }, [fileId, viewMode, locale, colorMode])
@@ -198,8 +211,9 @@ export default function EditorPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
       {error && <div className="banner error">{error}</div>}
       {loading && !error && <div className="hint">{viewMode ? '正在加载查看器…' : '正在加载编辑器…'}</div>}
 
-      {/* DocEditor 挂载容器：未进入错误态时始终渲染，保证 placeholder 存在。 */}
-      {!error && <div className="editor-shell"><div id={placeholderId.current} className="editor-placeholder" /></div>}
+      {/* DocEditor 挂载容器：未进入错误态时始终渲染，placeholder 由 effect
+          内命令式创建（每次 init 全新 id）。 */}
+      {!error && <div className="editor-shell" ref={shellRef} />}
     </div>
   )
 }

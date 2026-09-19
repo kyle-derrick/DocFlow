@@ -1,18 +1,19 @@
 import { FormEvent, useEffect, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { Users } from 'lucide-react'
-import { App as AntdApp, Button, Input, Select } from 'antd'
+import { App as AntdApp, Button, Input, Segmented, Select } from 'antd'
 import { Team, createTeam, currentUserId, deleteTeam, listTeams, updateTeam } from '../api'
 import { Modal, formatTime, promptViaModal } from './FileBrowser'
 import { MessageKey, formatMessage, t, useLocale } from '../i18n'
 
 /**
- * 空间切换行（文件页 / 团队空间页共用）：
- * - 空间下拉（我的文件 + 各团队）；
- * - 全局视图（全部 / 收藏 / 最近）下拉选择——受控组件，状态由页面持有
- *   并透传给 FileBrowser 的 activeView（v1.3 由三段按钮改为下拉，省宽）；
- * - 团队管理弹窗（创建 / 改名 / 删除，不再跳转 /teams 页）；
- * - 回收站入口。
+ * 空间切换控件组（文件页 / 团队空间页共用；v1.5 经 toolbarPrefix 槽内联
+ * 渲染在文件页全宽顶栏最左）：
+ * - 空间下拉（我的文件 + 各团队，antd small）；
+ * - 全局视图（全部 / 收藏 / 最近）迷你 Segmented（antd small）——受控
+ *   组件，状态由页面持有并透传给 FileBrowser 的 activeView；
+ * - 团队管理弹窗（创建 / 改名 / 删除，不再跳转 /teams 页）。
+ * 回收站入口在 FileBrowser 工具行末位（弹窗化，见 TrashModal.tsx）。
  */
 export default function SpaceSwitcher({
   activeView,
@@ -20,7 +21,7 @@ export default function SpaceSwitcher({
 }: {
   /** 当前视图（受控）：FilesPage / TeamSpacePage 持有并传给 FileBrowser。 */
   activeView?: 'all' | 'starred' | 'recent'
-  /** 视图切换回调；提供时渲染 全部/收藏/最近 下拉选择。 */
+  /** 视图切换回调；提供时渲染 全部/收藏/最近 Segmented。 */
   onViewChange?: (view: 'all' | 'starred' | 'recent') => void
 }) {
   const navigate = useNavigate()
@@ -109,6 +110,7 @@ export default function SpaceSwitcher({
   return (
     <div className="space-switcher">
       <Select
+        size="small"
         className="space-select"
         aria-label="选择团队空间"
         value={value}
@@ -119,20 +121,19 @@ export default function SpaceSwitcher({
         ]}
       />
       {onViewChange && (
-        <Select
-          className="space-view-select"
+        <Segmented
+          size="small"
           aria-label={locale === 'zh-CN' ? '视图' : 'View'}
           value={activeView}
           onChange={(v) => onViewChange(v as 'all' | 'starred' | 'recent')}
           options={[
-            { value: 'all', label: msg('viewAll') },
-            { value: 'starred', label: msg('viewStarred') },
-            { value: 'recent', label: msg('viewRecent') },
+            { label: msg('viewAll'), value: 'all' },
+            { label: msg('viewStarred'), value: 'starred' },
+            { label: msg('viewRecent'), value: 'recent' },
           ]}
         />
       )}
       <Button size="small" onClick={() => setManageOpen(true)}>团队管理</Button>
-      <Button type="text" size="small" onClick={() => navigate('/trash')}>回收站</Button>
 
       {manageOpen && (
         <Modal wide title="团队管理" onClose={() => setManageOpen(false)}>

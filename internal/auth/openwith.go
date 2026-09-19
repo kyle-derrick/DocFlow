@@ -16,11 +16,22 @@ type OpenWithPreference struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// openWithOpeners 为 opener 枚举白名单（前端打开器标识）。
+// openWithOpeners 为旧版单值 opener 枚举白名单（前端打开器标识；保留兼容）。
 var openWithOpeners = map[string]bool{
 	"office": true, "drawio": true, "excalidraw": true, "text": true,
 	"markdown": true, "code": true, "web": true, "default": true,
 }
+
+// 查看方式（v:）与编辑方式（e:）枚举白名单：与前端 openers.ts 的
+// ViewMethod / EditMethod 对齐；存储为复合编码 "v:<view>[+e:<edit>]"。
+var (
+	openWithViews = map[string]bool{
+		"raw": true, "office": true, "drawio": true, "excalidraw": true, "xmind": true, "richtext": true,
+	}
+	openWithEdits = map[string]bool{
+		"text": true, "office": true, "drawio": true, "excalidraw": true, "richtext": true, "none": true,
+	}
+)
 
 var (
 	// ErrInvalidOpenWithExt 表示扩展名非法（去点/小写后为空、超 16 字符或含白名单外字符）。
@@ -46,10 +57,36 @@ func NormalizeOpenWithExt(ext string) (string, error) {
 	return ext, nil
 }
 
-// ValidateOpenWithOpener 校验 opener 枚举（office/drawio/excalidraw/text/
-// markdown/code/web/default）。
+// ValidateOpenWithOpener 校验 opener 取值：
+// - 旧版单值枚举（office/drawio/excalidraw/text/markdown/code/web/default）；或
+// - 复合编码 "v:<view>" / "e:<edit>" / "v:<view>+e:<edit>"（view/edit 分别
+//   须在各自枚举白名单内；"e:none" 合法 = 显式声明不支持编辑）。
 func ValidateOpenWithOpener(opener string) error {
-	if !openWithOpeners[opener] {
+	if openWithOpeners[opener] {
+		return nil
+	}
+	parts := strings.Split(opener, "+")
+	if len(parts) == 0 || len(parts) > 2 {
+		return ErrInvalidOpenWithOpener
+	}
+	seenView, seenEdit := false, false
+	for _, part := range parts {
+		switch {
+		case strings.HasPrefix(part, "v:"):
+			if seenView || !openWithViews[part[2:]] {
+				return ErrInvalidOpenWithOpener
+			}
+			seenView = true
+		case strings.HasPrefix(part, "e:"):
+			if seenEdit || !openWithEdits[part[2:]] {
+				return ErrInvalidOpenWithOpener
+			}
+			seenEdit = true
+		default:
+			return ErrInvalidOpenWithOpener
+		}
+	}
+	if !seenView && !seenEdit {
 		return ErrInvalidOpenWithOpener
 	}
 	return nil

@@ -1,13 +1,16 @@
 // Package settings 提供运行时可调的系统设置（system_settings 表）：
 // 内置键定义（类型/默认值/范围/描述）、类型校验、热读取接口与审计写入。
-// 非密钥原则：密钥类配置（JWT/S3/SMTP 凭据等）一律走环境变量，
-// 不入库、不暴露于管理 API。
+// 非密钥原则：密钥类配置（JWT/S3 凭据等）一律走环境变量，不入库、不暴露
+// 于管理 API。例外：SMTP 投递参数（含密码，只写不读）允许经管理端入库
+// 覆盖 env——邮件通道是管理员日常运维项，且 DB 值经专用端点读写、密码
+// 永不回显（见 SMTPSettings 与 /admin/settings/smtp）。
 package settings
 
 import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/docflow/docflow/internal/audit"
@@ -76,6 +79,112 @@ const (
 	// "exe,bat,sh"）；默认空 = 不拦截。建会话与 Complete 双侧校验。
 	KeyUploadBlockedExtensions = "upload.blocked_extensions"
 )
+
+// SMTP 运行时配置键（system_settings 存储，邮件发送处优先读库回退 env）。
+// 刻意不进 Definitions：通用设置列表（GET /admin/settings）不展示、通用
+// 写入口（PUT /admin/settings/:key）不可写，统一走专用 /admin/settings/smtp
+// 端点（密码只写不读、审计打码）。
+const (
+	KeySMTPEnabled = "smtp.enabled"
+	KeySMTPHost    = "smtp.host"
+	KeySMTPPort    = "smtp.port"
+	KeySMTPUser    = "smtp.user"
+	KeySMTPPass    = "smtp.pass"
+	KeySMTPFrom    = "smtp.from"
+	KeySMTPTLSMode = "smtp.tls_mode"
+)
+
+// SMTP TLS 模式（KeySMTPTLSMode 取值）。
+const (
+	SMTPTLSModeAuto = "auto" // STARTTLS（服务器通告时自动协商，默认）
+	SMTPTLSModeSSL  = "ssl"  // 隐式 TLS（SMTPS，465 端口常见）
+	SMTPTLSModeNone = "none" // 不协商 TLS（仅内网中继场景）
+)
+
+// SMTPSettings 为 SMTP 投递参数全集（env 基线 / 入库覆盖 / 请求载荷共用）。
+// Pass 仅在 PUT 请求中携带（空 = 保持现值不覆盖）；任何读路径都不回显。
+type SMTPSettings struct {
+	Enabled bool   `json:"enabled"`
+	Host    string `json:"host"`
+	Port    int    `json:"port"`
+	User    string `json:"user"`
+	Pass    string `json:"pass,omitempty"`
+	From    string `json:"from"`
+	TLSMode string `json:"tls_mode"`
+}
+
+// SMTPOverride 为 system_settings 中已入库的 SMTP 覆盖项（nil 指针 = 该键
+// 未入库，沿用 env 基线；Pass 仅在入库为非空字符串时覆盖）。
+type SMTPOverride struct {
+	Enabled *bool
+	Host    *string
+	Port    *int
+	User    *string
+	Pass    *string
+	From    *string
+	TLSMode *string
+}
+
+// Apply 把入库覆盖合并到 env 基线，返回生效配置。
+func (o SMTPOverride) Apply(env SMTPSettings) SMTPSettings {
+	out := env
+	if o.Enabled != nil {
+		out.Enabled = *o.Enabled
+	}
+	if o.Host != nil {
+		out.Host = *o.Host
+	}
+	if o.Port != nil {
+		out.Port = *o.Port
+	}
+	if o.User != nil {
+		out.User = *o.User
+	}
+	if o.Pass != nil && *o.Pass != "" {
+		out.Pass = *o.Pass
+	}
+	if o.From != nil {
+		out.From = *o.From
+	}
+	if o.TLSMode != nil && *o.TLSMode != "" {
+		out.TLSMode = *o.TLSMode
+	}
+	return out
+}
+
+// smtpKeyTypes 为各 SMTP 键的 value_type（写入 system_settings 行用）。
+var smtpKeyTypes = map[string]string{
+	KeySMTPEnabled: TypeBool,
+	KeySMTPHost:    TypeString,
+	KeySMTPPort:    TypeInt,
+	KeySMTPUser:    TypeString,
+	KeySMTPPass:    TypeString,
+	KeySMTPFrom:    TypeString,
+	KeySMTPTLSMode: TypeString,
+}
+
+// ValidateSMTP 校验生效配置的完整性（enabled 时 host/from 必填、port 与
+// TLS 模式合法；Pass 不参与校验）。返回 ErrInvalidValue 语义错误。
+func ValidateSMTP(s SMTPSettings) error {
+	if !s.Enabled {
+		return nil
+	}
+	if s.Host == "" {
+		return fmt.Errorf("%w: smtp.host is required when smtp.enabled", ErrInvalidValue)
+	}
+	if s.Port < 1 || s.Port > 65535 {
+		return fmt.Errorf("%w: smtp.port must be 1-65535", ErrInvalidValue)
+	}
+	if s.From == "" {
+		return fmt.Errorf("%w: smtp.from is required when smtp.enabled", ErrInvalidValue)
+	}
+	switch s.TLSMode {
+	case "", SMTPTLSModeAuto, SMTPTLSModeSSL, SMTPTLSModeNone:
+	default:
+		return fmt.Errorf("%w: smtp.tls_mode must be auto/ssl/none", ErrInvalidValue)
+	}
+	return nil
+}
 
 // Definition 是一个内置键的元数据：类型、默认值、取值范围、描述与生效方式。
 type Definition struct {
@@ -368,4 +477,154 @@ func (s *Store) GetString(key string) (string, error) {
 		return "", fmt.Errorf("settings key %s is not string", key)
 	}
 	return str, nil
+}
+
+// SMTPOverrides 读取全部 smtp.* 入库覆盖项（未入库的键保持 nil 指针，
+// 与入库值恰为零值区分）。DB 异常返回错误，调用方回退 env 基线投递。
+func (s *Store) SMTPOverrides() (SMTPOverride, error) {
+	var out SMTPOverride
+	// read：行存在且 JSON 可解析时置指针；行不存在（ErrNotSet）保持 nil。
+	readBool := func(key string, dst **bool) error {
+		row, err := s.repo.GetRow(key)
+		if errors.Is(err, ErrNotSet) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		var v bool
+		if err := json.Unmarshal([]byte(row.ValueJSON), &v); err != nil {
+			return err
+		}
+		*dst = &v
+		return nil
+	}
+	readInt := func(key string, dst **int) error {
+		row, err := s.repo.GetRow(key)
+		if errors.Is(err, ErrNotSet) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		var v int64
+		if err := json.Unmarshal([]byte(row.ValueJSON), &v); err != nil {
+			return err
+		}
+		n := int(v)
+		*dst = &n
+		return nil
+	}
+	readString := func(key string, dst **string) error {
+		row, err := s.repo.GetRow(key)
+		if errors.Is(err, ErrNotSet) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		var v string
+		if err := json.Unmarshal([]byte(row.ValueJSON), &v); err != nil {
+			return err
+		}
+		*dst = &v
+		return nil
+	}
+	if err := readBool(KeySMTPEnabled, &out.Enabled); err != nil {
+		return out, err
+	}
+	if err := readString(KeySMTPHost, &out.Host); err != nil {
+		return out, err
+	}
+	if err := readInt(KeySMTPPort, &out.Port); err != nil {
+		return out, err
+	}
+	if err := readString(KeySMTPUser, &out.User); err != nil {
+		return out, err
+	}
+	if err := readString(KeySMTPPass, &out.Pass); err != nil {
+		return out, err
+	}
+	if err := readString(KeySMTPFrom, &out.From); err != nil {
+		return out, err
+	}
+	if err := readString(KeySMTPTLSMode, &out.TLSMode); err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
+// SetSMTP 写入 SMTP 配置（与 env 基线合并校验：Pass 留空 = 保持现值），
+// 成功后写 settings.update 审计（Pass 以 "******" 打码，绝不记录明文）。
+func (s *Store) SetSMTP(in SMTPSettings, env SMTPSettings, actor uuid.UUID) (SMTPSettings, error) {
+	// 与现值合并出完整生效配置再校验（避免「只改 host、库里无 port」被误拒）。
+	current := env
+	if ov, err := s.SMTPOverrides(); err == nil {
+		current = ov.Apply(env)
+	}
+	merged := SMTPSettings{
+		Enabled: in.Enabled,
+		Host:    strings.TrimSpace(in.Host),
+		Port:    in.Port,
+		User:    strings.TrimSpace(in.User),
+		Pass:    in.Pass,
+		From:    strings.TrimSpace(in.From),
+		TLSMode: in.TLSMode,
+	}
+	if merged.Host == "" {
+		merged.Host = current.Host
+	}
+	if merged.Port == 0 {
+		merged.Port = current.Port
+	}
+	if merged.User == "" {
+		merged.User = current.User
+	}
+	if merged.From == "" {
+		merged.From = current.From
+	}
+	if merged.TLSMode == "" {
+		merged.TLSMode = current.TLSMode
+	}
+	if err := ValidateSMTP(merged); err != nil {
+		return SMTPSettings{}, err
+	}
+	now := s.now().UTC()
+	writes := []struct {
+		key  string
+		val  any
+		skip bool
+	}{
+		{KeySMTPEnabled, merged.Enabled, false},
+		{KeySMTPHost, merged.Host, false},
+		{KeySMTPPort, int64(merged.Port), false},
+		{KeySMTPUser, merged.User, false},
+		// 密码只写不读：请求为空 = 保持现值（不覆盖为空串）。
+		{KeySMTPPass, merged.Pass, merged.Pass == ""},
+		{KeySMTPFrom, merged.From, false},
+		{KeySMTPTLSMode, merged.TLSMode, false},
+	}
+	for _, w := range writes {
+		if w.skip {
+			continue
+		}
+		raw, err := json.Marshal(w.val)
+		if err != nil {
+			return SMTPSettings{}, err
+		}
+		row := Setting{Key: w.key, ValueJSON: string(raw), ValueType: smtpKeyTypes[w.key], Description: "SMTP runtime override", UpdatedBy: &actor, UpdatedAt: now}
+		if err := s.repo.UpsertRow(row); err != nil {
+			return SMTPSettings{}, err
+		}
+	}
+	audited := SMTPSettings{
+		Enabled: merged.Enabled, Host: merged.Host, Port: merged.Port,
+		User: merged.User, Pass: "", From: merged.From, TLSMode: merged.TLSMode,
+	}
+	if merged.User != "" {
+		audited.Pass = "******"
+	}
+	metadata, _ := json.Marshal(map[string]any{"key": "smtp", "value": audited})
+	_ = s.audit.Record(audit.Entry{UserID: &actor, Action: audit.ActionSettingsUpdate, ResourceType: audit.ResourceSettings, ResourceID: "smtp", Status: audit.StatusSuccess, Metadata: string(metadata)})
+	return merged, nil
 }

@@ -2,6 +2,8 @@
 // - access_token 仅存内存（模块级变量），不写 localStorage；刷新页面后依赖 refresh cookie 恢复会话。
 // - 统一处理 JSON 错误与 401 自动刷新重放；refresh 失败广播 SESSION_EXPIRED_EVENT 通知路由回登录页。
 
+import type { EditMethod, ViewMethod } from './openers'
+
 let accessToken: string | null = null
 
 export function setAccessToken(token: string | null): void {
@@ -226,6 +228,9 @@ export interface FileQueryOptions {
   recent?: boolean
   sort?: 'name' | 'updated_at' | 'size'
   order?: 'asc' | 'desc'
+  /** 列举条数上限（后端钳制 1..1000）。目录树/文件列表拉满 1000，避免多
+   *  子项目录被默认 limit=100 截断（FolderTreeNav caret 误判「空」根因）。 */
+  limit?: number
 }
 
 function buildFileQuery(parentId: string | null, opts?: FileQueryOptions): string {
@@ -242,6 +247,7 @@ function buildFileQuery(parentId: string | null, opts?: FileQueryOptions): strin
   }
   if (opts?.sort) params.set('sort', opts.sort)
   if (opts?.order) params.set('order', opts.order)
+  if (opts?.limit && opts.limit > 0) params.set('limit', String(opts.limit))
   const query = params.toString()
   return query ? `?${query}` : ''
 }
@@ -964,6 +970,23 @@ export async function fetchPublicWebpkgPreview(token: string): Promise<string> {
   throw new ApiError(res.status || 415, '网页包预览不可用')
 }
 
+/** 公开分享 OnlyOffice 查看会话（Office 文档访客预览）。 */
+export interface PublicShareOffice {
+  /** DocumentServer 浏览器可达地址（加载 api.js）。 */
+  server_url: string
+  /** 可直接传给 DocsAPI.DocEditor 的 JWT 签名配置（恒 view 模式）。 */
+  config: Record<string, unknown>
+}
+
+/**
+ * 公开分享 Office 查看会话（无认证）：返回 OnlyOffice 只读 DocEditor 配置。
+ * 集成未启用/分享失效等抛 ApiError，由调用方回退「不支持在线预览」分支。
+ */
+export async function fetchPublicShareOffice(token: string, lang: string): Promise<PublicShareOffice> {
+  const q = lang ? `?lang=${encodeURIComponent(lang)}` : ''
+  return publicApi<PublicShareOffice>(`/api/v1/public/shares/${encodeURIComponent(token)}/office${q}`)
+}
+
 // ---------- 目录分享树（公开，/public/shares/{token}/tree） ----------
 
 /** 目录分享树条目（相对分享根的 canonical path + 当前版本 size/mime）。 */
@@ -1237,13 +1260,63 @@ export async function createShare(opts: CreateShareOptions): Promise<CreatedShar
   return created
 }
 
-/** 我的分享列表（公开与私有，created_at 倒序）。 */
-export async function listShares(): Promise<ShareItem[]> {
-  const data = await api<{ shares: ShareItem[] }>('/api/v1/shares')
-  return data.shares ?? []
+/** 多文件打包分享（file_ids ≥ 2）：一个目录式公开链接承载全部选中项。 */
+export async function createShareBundle(opts: {
+  fileIds: string[]
+  permission: 'view' | 'download'
+  expiresInHours?: number
+  maxDownloads?: number
+  password?: string
+  watermarkEnabled?: boolean
+  watermarkText?: string
+}): Promise<CreatedShare> {
+  const body: Record<string, unknown> = {
+    file_ids: opts.fileIds,
+    permission: opts.permission,
+    visibility: 'public',
+  }
+  if (opts.expiresInHours && opts.expiresInHours > 0) body.expires_in = opts.expiresInHours * 3600
+  if (opts.maxDownloads && opts.maxDownloads > 0) body.max_downloads = opts.maxDownloads
+  if (opts.password) body.password = opts.password
+  if (opts.watermarkEnabled !== undefined) body.watermark_enabled = opts.watermarkEnabled
+  if (opts.watermarkText) body.watermark_text = opts.watermarkText
+  const created = await api<CreatedShare>('/api/v1/shares', jsonInit('POST', body))
+  rememberShareMeta(created.id, { token: created.token ?? undefined })
+  return created
 }
 
-/** 撤销分享（幂等，仅创建者）。 */
+/** 我的分享列表查询选项（v1.7.1 服务端分页 + 过滤）。 */
+export interface ShareListOptions {
+  page?: number
+  pageSize?: number
+  /** 文件名子串（大小写不敏感）。 */
+  q?: string
+  visibility?: 'public' | 'private'
+  status?: 'active' | 'revoked' | 'expired'
+}
+
+/** 我的分享分页结果。 */
+export interface ShareListResult {
+  shares: ShareItem[]
+  total: number
+  page: number
+  page_size: number
+}
+
+/** 我的分享列表（公开与私有，created_at 倒序；服务端分页 + 过滤）。 */
+export async function listShares(opts: ShareListOptions = {}): Promise<ShareListResult> {
+  const params = new URLSearchParams()
+  if (opts.page !== undefined) params.set('page', String(opts.page))
+  if (opts.pageSize !== undefined) params.set('page_size', String(opts.pageSize))
+  if (opts.q) params.set('q', opts.q)
+  if (opts.visibility) params.set('visibility', opts.visibility)
+  if (opts.status) params.set('status', opts.status)
+  const query = params.toString()
+  const data = await api<ShareListResult>(`/api/v1/shares${query ? `?${query}` : ''}`)
+  return { shares: data.shares ?? [], total: data.total ?? 0, page: data.page ?? 1, page_size: data.page_size ?? 20 }
+}
+
+/** 删除分享（撤销即删除，幂等，仅创建者；链接立即失效）。 */
 export async function revokeShare(id: string): Promise<void> {
   await api(`/api/v1/shares/${id}`, { method: 'DELETE' })
 }
@@ -1288,6 +1361,12 @@ export interface Team {
   description: string
   owner_id: string
   created_at: string
+  /** 我在该团队的角色（五级内置；GET /teams 附带，单团队响应可能缺省）。 */
+  my_role?: TeamRole
+  /** 团队成员数（GET /teams 附带）。 */
+  member_count?: number
+  /** 团队空间存储用量（字节，GET /teams 附带）。 */
+  storage_used?: number
 }
 export async function updateTeam(id: string, name: string, description: string): Promise<Team> {
   return api<Team>(`/api/v1/teams/${id}`, jsonInit('PATCH', { name, description }))
@@ -1298,39 +1377,26 @@ export interface CreatedTeam extends Team {
   root_folder_id: string
 }
 
-export type TeamRole = 'owner' | 'editor' | 'viewer' | 'custom'
+export type TeamRole = 'owner' | 'admin' | 'member_share' | 'member' | 'guest'
+
+/** 可经成员管理授予的内置角色（owner 经「转让所有权」产生，不可直接指派）。 */
+export type AssignableTeamRole = Exclude<TeamRole, 'owner'>
+
+/** 全部可授予角色（角色下拉固定顺序，权限从高到低）。 */
+export const ASSIGNABLE_TEAM_ROLES: readonly AssignableTeamRole[] = ['admin', 'member_share', 'member', 'guest']
 
 export interface TeamMember {
   user_id: string
+  /** 五级内置角色（owner/admin/member_share/member/guest，migration 037）。 */
   role: TeamRole
-  /** 自定义角色 ID（role=custom 时存在）。 */
-  role_id?: string
-  /** 自定义角色名（role=custom 时存在）。 */
-  role_name?: string
-  /** 成员用户名 / 昵称（成员列表接口 JOIN users 补齐；展示用，可能缺省）。 */
+  /** 成员用户名 / 昵称 / 邮箱（成员列表接口 JOIN users 补齐；展示用，可能缺省）。 */
   username?: string
   nickname?: string
+  email?: string
   created_at: string
+  /** 加入时间（= team_members.created_at，v1.7.1 显式字段；旧后端回退 created_at）。 */
+  joined_at?: string
   team_id?: string
-}
-
-/** 角色细粒度权限（设计 6.5.2）；deny 中的动作显式拒绝且优先于 allow。 */
-export interface RolePermissions {
-  read?: boolean
-  write?: boolean
-  delete?: boolean
-  share?: boolean
-  admin?: boolean
-  deny?: string[]
-}
-
-export interface TeamRoleDef {
-  id: string
-  team_id: string
-  name: string
-  permissions: RolePermissions
-  member_count: number
-  created_at: string
 }
 
 /** 创建团队：创建者自动成为 owner 成员并生成团队根目录。 */
@@ -1338,7 +1404,7 @@ export async function createTeam(name: string, description: string): Promise<Cre
   return api<CreatedTeam>('/api/v1/teams', jsonInit('POST', { name, description }))
 }
 
-/** 我所在（成员或 owner）的团队列表。 */
+/** 我所在（成员或 owner）的团队列表（v1.7 起含 my_role/member_count/storage_used）。 */
 export async function listTeams(): Promise<Team[]> {
   const data = await api<{ teams: Team[] }>('/api/v1/teams')
   return data.teams ?? []
@@ -1349,67 +1415,84 @@ export async function listTeamMembers(teamId: string): Promise<TeamMember[]> {
   return data.members ?? []
 }
 
-/** 添加成员（仅团队 owner）。roleId 非空时绑定自定义角色（忽略 role）。 */
+/** 添加成员（owner/admin；admin 角色仅 owner 可授予）。 */
 export async function addTeamMember(
   teamId: string,
   userId: string,
-  role: 'editor' | 'viewer',
-  roleId?: string,
+  role: AssignableTeamRole,
 ): Promise<TeamMember> {
-  const body = roleId
-    ? { user_id: userId, role_id: roleId }
-    : { user_id: userId, role }
-  return api<TeamMember>(`/api/v1/teams/${teamId}/members`, jsonInit('POST', body))
+  return api<TeamMember>(`/api/v1/teams/${teamId}/members`, jsonInit('POST', { user_id: userId, role }))
 }
 
-/** 修改成员角色（仅团队 owner；owner 成员不可改）。roleId 非空时绑定自定义角色。 */
+/** 修改成员角色（owner/admin；owner 成员不可改，admin 角色仅 owner 可授）。 */
 export async function updateTeamMemberRole(
   teamId: string,
   userId: string,
-  role: 'editor' | 'viewer',
-  roleId?: string,
+  role: AssignableTeamRole,
 ): Promise<TeamMember> {
-  const body = roleId
-    ? { role_id: roleId }
-    : { role }
-  return api<TeamMember>(`/api/v1/teams/${teamId}/members/${userId}`, jsonInit('PATCH', body))
+  return api<TeamMember>(`/api/v1/teams/${teamId}/members/${userId}`, jsonInit('PATCH', { role }))
 }
 
-/** 移除成员（仅团队 owner；owner 成员不可移除）。 */
+/** 移除成员（owner/admin；owner 成员不可移除）。 */
 export async function removeTeamMember(teamId: string, userId: string): Promise<void> {
   await api(`/api/v1/teams/${teamId}/members/${userId}`, { method: 'DELETE' })
 }
 
-// ---------- 团队自定义角色（设计 6.5.2） ----------
-
-/** 自定义角色列表（仅团队 owner；含 member_count 引用统计）。 */
-export async function listTeamRoles(teamId: string): Promise<TeamRoleDef[]> {
-  const data = await api<{ roles: TeamRoleDef[] }>(`/api/v1/teams/${teamId}/roles`)
-  return data.roles ?? []
+/** 成员主动退出团队（非 owner；POST /teams/:id/leave，v1.7）。 */
+export async function leaveTeam(teamId: string): Promise<void> {
+  await api(`/api/v1/teams/${teamId}/leave`, jsonInit('POST', {}))
 }
 
-/** 创建自定义角色（permissions 勾选 + deny 显式拒绝）。 */
-export async function createTeamRole(
-  teamId: string,
-  name: string,
-  permissions: RolePermissions,
-): Promise<TeamRoleDef> {
-  return api<TeamRoleDef>(`/api/v1/teams/${teamId}/roles`, jsonInit('POST', { name, permissions }))
+/** 转让团队所有权（仅 owner；新 owner 须为既有成员，原 owner 降为 admin）。 */
+export async function transferTeamOwnership(teamId: string, newOwnerId: string): Promise<Team> {
+  return api<Team>(`/api/v1/teams/${teamId}/transfer-ownership`, jsonInit('POST', { user_id: newOwnerId }))
 }
 
-/** 更新自定义角色。 */
-export async function updateTeamRole(
-  teamId: string,
-  roleId: string,
-  name: string,
-  permissions: RolePermissions,
-): Promise<void> {
-  await api(`/api/v1/teams/${teamId}/roles/${roleId}`, jsonInit('PATCH', { name, permissions }))
+// ---- 团队邮箱邀请（v1.7.1 成员管理完善） ----
+
+/** 团队邀请条目（GET /teams/:id/invites；status 为后端派生 pending/accepted/expired）。 */
+export interface TeamInvite {
+  id: string
+  email: string
+  role: AssignableTeamRole
+  invited_by?: string | null
+  status: 'pending' | 'accepted' | 'expired'
+  expires_at: string
+  accepted_at?: string | null
+  created_at: string
 }
 
-/** 删除自定义角色；仍有成员引用时 409。 */
-export async function deleteTeamRole(teamId: string, roleId: string): Promise<void> {
-  await api(`/api/v1/teams/${teamId}/roles/${roleId}`, { method: 'DELETE' })
+/** 创建邀请响应：新建（201）附 join_url（明文 token 仅本次可见一次）；幂等命中既有邀请（200）无链接。 */
+export interface CreatedTeamInvite extends TeamInvite {
+  join_url?: string
+}
+
+/** 创建邮箱邀请（owner/admin；admin 角色仅 owner 可授予）。 */
+export async function createTeamInvite(teamId: string, email: string, role: AssignableTeamRole): Promise<CreatedTeamInvite> {
+  return api<CreatedTeamInvite>(`/api/v1/teams/${teamId}/invites`, jsonInit('POST', { email, role }))
+}
+
+/** 团队邀请列表（owner/admin；含已接受/已过期）。 */
+export async function listTeamInvites(teamId: string): Promise<TeamInvite[]> {
+  const data = await api<{ invites: TeamInvite[] }>(`/api/v1/teams/${teamId}/invites`)
+  return data.invites ?? []
+}
+
+/** 撤销邀请（删行，token 立即失效；owner/admin）。 */
+export async function revokeTeamInvite(teamId: string, inviteId: string): Promise<void> {
+  await api(`/api/v1/teams/${teamId}/invites/${inviteId}`, { method: 'DELETE' })
+}
+
+/** 接受邀请响应：团队信息 + already_member（已在团队时邀请仍被消费）。 */
+export interface AcceptedTeamInvite {
+  team: Team
+  already_member: boolean
+  role: AssignableTeamRole
+}
+
+/** 凭一次性 token 接受团队邀请（登录用户；邮箱须与邀请邮箱一致）。 */
+export async function acceptTeamInvite(token: string): Promise<AcceptedTeamInvite> {
+  return api<AcceptedTeamInvite>(`/api/v1/team-invites/join/${encodeURIComponent(token)}`, jsonInit('POST', {}))
 }
 
 export interface TeamFileListing {
@@ -1430,6 +1513,7 @@ export async function listTeamFiles(
   if (opts?.starred !== undefined) params.set('starred', String(opts.starred))
   if (opts?.sort) params.set('sort', opts.sort)
   if (opts?.order) params.set('order', opts.order)
+  if (opts?.limit && opts.limit > 0) params.set('limit', String(opts.limit))
   const query = params.toString()
   return api<TeamFileListing>(`/api/v1/teams/${teamId}/files${query ? `?${query}` : ''}`)
 }
@@ -1460,20 +1544,37 @@ async function startUploadSession(body: Record<string, unknown>): Promise<Upload
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
+/** 上传取消错误（signal.aborted）：name='AbortError'，调用方据此区分
+ *  「用户取消」与真实失败（上传任务面板的取消按钮语义）。 */
+function uploadAbortError(): Error {
+  const err = new Error('已取消')
+  err.name = 'AbortError'
+  return err
+}
+
+/** 判定上传错误是否为用户取消（AbortError）。 */
+export function isUploadAborted(err: unknown): boolean {
+  return err instanceof Error && err.name === 'AbortError'
+}
+
 /**
  * 会话后续流程：PATCH /uploads/:id（Upload-Offset 头 + 原始字节）→ POST complete
  * → 轮询状态至终态；available 之外抛 ApiError。uploadFile / uploadFileVersion 共用。
+ * signal 触发 abort 时在任何阶段抛 AbortError（body 传输中断 / 轮询前检查）。
  */
 async function runUploadSession(
   session: UploadSession,
   file: File,
   onProgress: (phase: UploadPhase) => void,
+  signal?: AbortSignal,
 ): Promise<UploadSession> {
   onProgress('uploading')
+  if (signal?.aborted) throw uploadAbortError()
   const res = await authFetch(`/api/v1/uploads/${session.id}`, {
     method: 'PATCH',
     headers: { 'Upload-Offset': String(session.offset ?? 0), 'Content-Type': 'application/octet-stream' },
     body: file,
+    signal,
   })
   if (!res.ok) {
     const data = (await res.json().catch(() => null)) as { error?: string } | null
@@ -1497,6 +1598,7 @@ async function runUploadSession(
   // 打开」等调用方定位文件。
   const fileIDFromComplete = done.file_id ?? null
   while (done.status === 'uploading' || done.status === 'verifying' || done.status === 'scanning') {
+    if (signal?.aborted) throw uploadAbortError()
     onProgress(done.status)
     await sleep(800)
     done = await api<UploadSession>(`/api/v1/uploads/${session.id}`)
@@ -1514,15 +1616,18 @@ async function runUploadSession(
 /**
  * 一次性整文件上传（MVP 不做分块/哈希）：
  * POST /uploads 建会话 → PATCH /uploads/:id → POST complete → 轮询状态至终态。
+ * signal 用于上传任务面板的「取消」：中断 body 传输或轮询，抛 AbortError。
  */
 export async function uploadFile(
   file: File,
   parentId: string | null,
   onProgress: (phase: UploadPhase) => void,
+  signal?: AbortSignal,
 ): Promise<UploadSession> {
   onProgress('creating')
+  if (signal?.aborted) throw uploadAbortError()
   const session = await startUploadSession({ name: file.name, size: file.size, parent_id: parentId ?? '' })
-  return runUploadSession(session, file, onProgress)
+  return runUploadSession(session, file, onProgress, signal)
 }
 
 /**
@@ -1533,10 +1638,12 @@ export async function uploadFileVersion(
   file: File,
   fileId: string,
   onProgress: (phase: UploadPhase) => void,
+  signal?: AbortSignal,
 ): Promise<UploadSession> {
   onProgress('creating')
+  if (signal?.aborted) throw uploadAbortError()
   const session = await startUploadSession({ name: file.name, size: file.size, file_id: fileId })
-  return runUploadSession(session, file, onProgress)
+  return runUploadSession(session, file, onProgress, signal)
 }
 
 // ---------- 文件版本 ----------
@@ -1686,6 +1793,17 @@ export function isExcalidrawFile(name: string): boolean {
 /** 空白板初始场景（新建 .excalidraw 文件与空/损坏内容容错共用）。 */
 export const EMPTY_EXCALIDRAW_JSON = '{"type":"excalidraw","version":2,"elements":[],"appState":{}}'
 
+// ---------- DocFlow 富文本文档（.dfrt 主后缀，.dfdoc 兼容别名：Tiptap JSON 存储） ----------
+
+/** 仅富文本文档扩展名（.dfrt / 旧 .dfdoc）进入富文本编辑（Tiptap JSON 文档，查看/编辑同编辑器）。 */
+export function isDfdocFile(name: string): boolean {
+  const lower = name.toLowerCase()
+  return lower.endsWith('.dfrt') || lower.endsWith('.dfdoc')
+}
+
+/** 空富文本文档初始 JSON（新建 .dfrt 文件共用；一个空段）。 */
+export const EMPTY_DFDOC_JSON = '{"type":"doc","content":[{"type":"paragraph"}]}'
+
 // ---------- XMind 思维导图查看器（前端 fflate 解析 + Markmap 渲染） ----------
 
 /** 仅 .xmind 扩展名进入思维导图查看（本地解析只读渲染，无编辑）。 */
@@ -1816,6 +1934,49 @@ export async function adminPutSetting(key: string, value: SettingValue): Promise
 
 export async function adminGetStats(): Promise<AdminStats> {
   return api<AdminStats>('/api/v1/admin/stats')
+}
+
+// ---------- SMTP 运行时配置（GET/PUT /admin/settings/smtp） ----------
+
+/** GET /admin/settings/smtp 响应：当前生效配置（DB 覆盖 → env 回退）+ env
+ * 基线对照 + 密码配置状态（只报 configured，任何读路径不回显值）。 */
+export interface SmtpSettingsView {
+  enabled: boolean
+  host: string
+  port: number
+  user: string
+  from: string
+  tls_mode: string
+  password_configured: boolean
+  env: {
+    enabled: boolean
+    host: string
+    port: number
+    user: string
+    from: string
+    password_configured: boolean
+  }
+  public_base_url: string
+}
+
+/** PUT /admin/settings/smtp 请求：SMTP 投递参数全集；pass 留空 = 保持现值
+ * 不覆盖，保存即时生效（邮件发送处每次读库）。 */
+export interface SmtpSettingsInput {
+  enabled: boolean
+  host: string
+  port: number
+  user: string
+  pass: string
+  from: string
+  tls_mode: string
+}
+
+export async function adminGetSmtpSettings(): Promise<SmtpSettingsView> {
+  return api<SmtpSettingsView>('/api/v1/admin/settings/smtp')
+}
+
+export async function adminPutSmtpSettings(input: SmtpSettingsInput): Promise<SmtpSettingsView> {
+  return api<SmtpSettingsView>('/api/v1/admin/settings/smtp', jsonInit('PUT', input))
 }
 
 // ---------- HTTPS 运行时切换（仅 admin；经 Caddy admin API 热下发） ----------
@@ -2161,32 +2322,69 @@ export async function updateMe(opts: UpdateMeOptions): Promise<MeData> {
 
 // ---------- 默认打开方式偏好（/me/open-with，按扩展名） ----------
 
-/** 打开器枚举（与后端 openWithOpeners 白名单一致）。 */
-export type OpenWithOpener = 'office' | 'drawio' | 'excalidraw' | 'text' | 'markdown' | 'code' | 'web' | 'default'
+// 打开方式枚举（ViewMethod/EditMethod）与内置默认表见 openers.ts；
+// 此处仅承担存储编码：单字段偏好序列化为复合 opener 字符串
+//（"v:<view>" / "e:<edit>" / "v:<view>+e:<edit>"，后端白名单同步支持，
+// 旧版单值 opener 读取时按 legacy 映射解析）。
 
-/** 单条偏好（GET 列表与 PUT upsert 响应共用）。 */
+/** 单条偏好的线格式（GET 列表与 PUT upsert 响应共用；opener 为复合编码串）。 */
 export interface OpenWithPreference {
   ext: string
-  opener: OpenWithOpener
+  opener: string
   updated_at: string
 }
 
-/** ext → opener 映射（FileBrowser / Wiki 视图分发用）。 */
-export type OpenWithMap = Record<string, OpenWithOpener>
+/** 用户打开方式偏好：ext → 仅显式覆盖的字段（view/edit 均可缺省）。 */
+export type OpenWithPrefs = Record<string, { view?: ViewMethod; edit?: EditMethod }>
 
-/** 我的全部打开方式偏好（GET /me/open-with {open_with:[...]} → Map 形态）。 */
-export async function listOpenWith(): Promise<OpenWithMap> {
+/** 旧版单值 opener → 新 {view?, edit?} 映射（历史数据读取兼容）。 */
+const LEGACY_OPENER_MAP: Record<string, { view?: ViewMethod; edit?: EditMethod }> = {
+  office: { view: 'office', edit: 'office' },
+  drawio: { view: 'drawio', edit: 'drawio' },
+  excalidraw: { view: 'excalidraw', edit: 'excalidraw' },
+  text: { edit: 'text' },
+  code: { edit: 'text' },
+  markdown: { view: 'richtext', edit: 'richtext' },
+  web: { view: 'raw' },
+  default: {},
+}
+
+/** 解析存储的 opener 串（复合编码或旧版单值）→ {view?, edit?}；无法解析返回空对象。 */
+function decodeOpenWith(opener: string): { view?: ViewMethod; edit?: EditMethod } {
+  if (opener.startsWith('v:') || opener.startsWith('e:')) {
+    const out: { view?: ViewMethod; edit?: EditMethod } = {}
+    for (const part of opener.split('+')) {
+      if (part.startsWith('v:')) out.view = part.slice(2) as ViewMethod
+      else if (part.startsWith('e:')) out.edit = part.slice(2) as EditMethod
+    }
+    return out
+  }
+  return LEGACY_OPENER_MAP[opener] ?? {}
+}
+
+/** {view?, edit?} → 复合 opener 串；均缺省时返回 'default'（等价无覆盖）。 */
+function encodeOpenWith(pref: { view?: ViewMethod; edit?: EditMethod }): string {
+  const parts: string[] = []
+  if (pref.view) parts.push(`v:${pref.view}`)
+  if (pref.edit) parts.push(`e:${pref.edit}`)
+  return parts.length > 0 ? parts.join('+') : 'default'
+}
+
+/** 我的全部打开方式偏好（GET /me/open-with → 解析后的 Map 形态）。 */
+export async function listOpenWith(): Promise<OpenWithPrefs> {
   const data = await api<{ open_with: OpenWithPreference[] }>('/api/v1/me/open-with')
-  const map: OpenWithMap = {}
+  const map: OpenWithPrefs = {}
   for (const row of data.open_with ?? []) {
-    if (row?.ext && row.opener) map[row.ext] = row.opener
+    if (!row?.ext || !row.opener) continue
+    const pref = decodeOpenWith(row.opener)
+    if (pref.view || pref.edit) map[row.ext] = pref
   }
   return map
 }
 
 /** upsert 一条偏好（ext 服务端规范化：小写去点 1..16 位 [a-z0-9]；非法 400）。 */
-export async function setOpenWith(ext: string, opener: OpenWithOpener): Promise<OpenWithPreference> {
-  return api<OpenWithPreference>('/api/v1/me/open-with', jsonInit('PUT', { ext, opener }))
+export async function setOpenWith(ext: string, pref: { view?: ViewMethod; edit?: EditMethod }): Promise<OpenWithPreference> {
+  return api<OpenWithPreference>('/api/v1/me/open-with', jsonInit('PUT', { ext, opener: encodeOpenWith(pref) }))
 }
 
 /** 删除一条偏好（幂等；恢复按文件类型自动选择）。 */

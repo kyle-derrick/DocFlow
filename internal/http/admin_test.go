@@ -40,6 +40,16 @@ func (f *fakeSettingsService) GetInt(key string) (int, error) {
 	return f.intKeys[key], nil
 }
 
+// SMTPOverrides 补齐 settingsService 接口（SMTP 运行时覆盖；测试场景恒空）。
+func (f *fakeSettingsService) SMTPOverrides() (settings.SMTPOverride, error) {
+	return settings.SMTPOverride{}, nil
+}
+
+// SetSMTP 补齐 settingsService 接口（SMTP 运行时保存；测试场景原样返回）。
+func (f *fakeSettingsService) SetSMTP(in, env settings.SMTPSettings, actor uuid.UUID) (settings.SMTPSettings, error) {
+	return in, nil
+}
+
 type fakeStatsSource struct {
 	stats AdminStats
 	err   error

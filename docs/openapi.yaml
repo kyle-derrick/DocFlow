@@ -1106,8 +1106,11 @@ paths:
       summary: 设置默认打开方式偏好（upsert）
       description: >-
         upsert 一条偏好。ext 规范化：去前置点、转小写、1..16 个 [a-z0-9]
-        字符；opener 枚举校验（office/drawio/excalidraw/text/markdown/
-        code/web/default）。非法请求 400。
+        字符；opener 取值二选一：旧版单值枚举（office/drawio/excalidraw/
+        text/markdown/code/web/default）或复合编码 "v:<view>[+e:<edit>]"
+        （view ∈ raw/office/drawio/excalidraw/xmind/richtext，edit ∈
+        text/office/drawio/excalidraw/richtext/none，各段最多一次）。
+        非法请求 400。
       requestBody:
         required: true
         content:
@@ -3152,6 +3155,61 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
         '429': { $ref: '#/components/responses/RateLimited' }
 
+  /public/shares/{token}/office:
+    get:
+      tags: [Public Shares]
+      operationId: publicShareOfficeConfig
+      summary: 公开分享 OnlyOffice 查看会话（无认证）
+      description: >-
+        Office 文档（doc/docx/xls/xlsx/ppt/pptx/odt/ods/odp）访客在线查看：
+        解析分享 token（有效期/撤销/密码会话同 preview 口径），返回可直接
+        传给 DocsAPI.DocEditor 的 JWT 签名只读配置（恒 view 模式；分享
+        permission=download 时编辑器内开放下载/打印）与浏览器可达的
+        DocumentServer 地址 server_url。view 与 download 权限均可预览、
+        不消耗 download_count；预览成功计入 view_count 与访问事件
+        （action=preview）。ONLYOFFICE 集成未启用时 404（前端回退
+        「不支持在线预览」）。
+      security: []
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { type: string }
+        - name: lang
+          in: query
+          required: false
+          description: 编辑器界面语言（BCP 47，如 zh-CN；非法值回退 zh）
+          schema: { type: string }
+      responses:
+        '200':
+          description: 只读查看会话配置
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [server_url, config]
+                properties:
+                  server_url:
+                    type: string
+                    description: DocumentServer 浏览器可达地址（加载 api.js）
+                  config:
+                    type: object
+                    description: JWT 签名的 DocEditor 配置（document/editorConfig/token）
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401':
+          description: 分享受密码保护且未携带有效会话 cookie
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: 对象不可用或分享不允许访问
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '410': { $ref: '#/components/responses/Gone' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
   /public/shares/{token}/tree/*path:
     get:
       tags: [Public Shares]
@@ -3294,24 +3352,14 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
-  /teams/{id}/roles:
-    get:
-      tags: [Teams]
-      operationId: listTeamRoles
-      summary: 列出自定义角色（仅 owner）
-      description: 返回团队自定义角色列表（含 member_count 引用统计与 permissions 勾选）。
-      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
-      responses:
-        '200':
-          description: 角色列表
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/TeamRoleList' }
-        '403': { $ref: '#/components/responses/Forbidden' }
+  /teams/{id}/transfer-ownership:
     post:
       tags: [Teams]
-      operationId: createTeamRole
-      summary: 创建自定义角色（仅 owner）
+      operationId: transferTeamOwnership
+      summary: 转让团队所有权（仅 owner）
+      description: >-
+        把团队所有权转让给既有成员：新 owner 成员角色置 owner、teams.owner_id
+        更新，原 owner 降为 admin（事务内完成）。受让人不是团队成员时 404。
       parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
       requestBody:
         required: true
@@ -3319,69 +3367,41 @@ paths:
           application/json:
             schema:
               type: object
-              required: [name]
+              required: [user_id]
               properties:
-                name: { type: string, maxLength: 64 }
-                permissions: { $ref: '#/components/schemas/TeamRolePermissions' }
+                user_id: { type: string, format: uuid, description: 受让成员的用户 ID }
       responses:
-        '201':
-          description: 角色已创建
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/TeamRole' }
+        '200': { description: 已转让（返回团队记录） }
         '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
-        '409':
-          description: 同团队角色名已存在
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
 
-  /teams/{id}/roles/{role_id}:
-    patch:
+  /teams/{id}/leave:
+    post:
       tags: [Teams]
-      operationId: updateTeamRole
-      summary: 更新自定义角色（仅 owner）
-      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }, { name: role_id, in: path, required: true, schema: { type: string, format: uuid } }]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [name]
-              properties:
-                name: { type: string, maxLength: 64 }
-                permissions: { $ref: '#/components/schemas/TeamRolePermissions' }
+      operationId: leaveTeam
+      summary: 成员主动退出团队
+      description: >-
+        非 owner 成员主动退出团队（成员关系即时移除）；owner 须先转让所有权
+        或解散团队（403）。
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
       responses:
-        '204': { description: 已更新 }
-        '400': { $ref: '#/components/responses/BadRequest' }
+        '204': { description: 已退出 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
-    delete:
-      tags: [Teams]
-      operationId: deleteTeamRole
-      summary: 删除自定义角色（仅 owner）
-      description: 仍有成员引用该角色时返回 409（须先改派成员角色）。
-      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }, { name: role_id, in: path, required: true, schema: { type: string, format: uuid } }]
-      responses:
-        '204': { description: 已删除 }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '404': { $ref: '#/components/responses/NotFound' }
-        '409':
-          description: 角色仍被成员引用
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
 
   /teams/{id}/members:
     post:
       tags: [Teams]
       operationId: addTeamMember
-      summary: 添加成员（仅团队 owner）
+      summary: 添加成员（团队 owner/admin）
       description: >-
-        角色为系统角色（editor/viewer，owner 不可经本接口授予）或自定义角色
-        （role_id 非空时生效，须为本团队已有角色，role 归一为 custom）。
+        角色为五级内置角色（admin/member_share/member/guest，owner 经
+        transfer-ownership 产生不可直接指派）；admin 角色仅 owner 可授予。
       requestBody:
         required: true
         content:
@@ -3392,9 +3412,7 @@ paths:
               properties:
                 user_id: { type: string, format: uuid }
                 role:
-                  { type: string, enum: [editor, viewer], default: viewer, description: 系统角色；role_id 非空时忽略 }
-                role_id:
-                  { type: string, format: uuid, description: 自定义角色 ID（可选）；非空时成员绑定该自定义角色 }
+                  { type: string, enum: [admin, member_share, member, guest], default: member, description: 五级内置角色 }
       parameters:
         - name: id
           in: path
@@ -3437,12 +3455,136 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '429': { $ref: '#/components/responses/RateLimited' }
 
+  /teams/{id}/invites:
+    post:
+      tags: [Teams]
+      operationId: createTeamInvite
+      summary: 创建团队邮箱邀请（owner/admin）
+      description: >-
+        向邮箱发出入队邀请，生成一次性 token（仅存哈希；明文 join_url 仅
+        本次响应返回一次，指向前端路由 /teams/join/<token>，7 天有效）。
+        幂等：该团队对同邮箱已有未过期未接受的邀请时返回 200（无链接）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+                role:
+                  { type: string, enum: [admin, member_share, member, guest], default: member, description: 五级内置角色（admin 仅 owner 可授予） }
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '201':
+          description: 邀请已创建（附 join_url，仅本次可见）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TeamInvite' }
+        '200':
+          description: 幂等命中既有邀请（无 join_url）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TeamInvite' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    get:
+      tags: [Teams]
+      operationId: listTeamInvites
+      summary: 团队邀请列表（owner/admin）
+      description: 每条附派生状态 pending/accepted/expired。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 邀请列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  invites:
+                    type: array
+                    items: { $ref: '#/components/schemas/TeamInvite' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /teams/{id}/invites/{iid}:
+    delete:
+      tags: [Teams]
+      operationId: revokeTeamInvite
+      summary: 撤销团队邀请（owner/admin）
+      description: 删除邀请行，token 立即失效。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: iid
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+          description: 邀请 ID
+      responses:
+        '204': { description: 邀请已撤销 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /team-invites/join/{token}:
+    post:
+      tags: [Teams]
+      operationId: acceptTeamInvite
+      summary: 接受团队邀请（登录用户凭一次性 token）
+      description: >-
+        校验邀请未过期未接受、当前用户邮箱与邀请邮箱一致（不匹配 403）；
+        写入成员后原子标记 accepted_at。已在团队时邀请被消费并返回
+        already_member=true。
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { type: string }
+          description: 一次性邀请 token（明文，43 字符 URL-safe base64）
+      responses:
+        '200':
+          description: 已接受（返回团队信息与 already_member 标记）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  team: { $ref: '#/components/schemas/Team' }
+                  already_member: { type: boolean }
+                  role: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '410': { description: 邀请已失效（过期或已接受） }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
   /teams/{id}/members/{uid}:
     patch:
       tags: [Teams]
       operationId: updateTeamMemberRole
-      summary: 修改成员角色（仅团队 owner）
-      description: 系统角色（editor/viewer）或自定义角色（role_id）；owner 成员不可改（403）。
+      summary: 修改成员角色（团队 owner/admin）
+      description: 五级内置角色（admin/member_share/member/guest）；owner 成员不可改（403）；admin 角色仅 owner 可授予/修改。
       parameters:
         - name: id
           in: path
@@ -3459,11 +3601,10 @@ paths:
           application/json:
             schema:
               type: object
+              required: [role]
               properties:
                 role:
-                  { type: string, enum: [editor, viewer], description: 系统角色；role_id 非空时忽略 }
-                role_id:
-                  { type: string, format: uuid, description: 自定义角色 ID；改回系统角色时省略 }
+                  { type: string, enum: [admin, member_share, member, guest], description: 五级内置角色 }
       responses:
         '200':
           description: 已更新（返回成员记录）
@@ -4376,6 +4517,47 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '429': { $ref: '#/components/responses/RateLimited' }
 
+  /admin/settings/smtp:
+    get:
+      tags: [Admin]
+      operationId: getAdminSMTPSettings
+      summary: 读取 SMTP 运行时配置（仅 admin）
+      description: >-
+        返回当前生效 SMTP 配置（DB 覆盖合并 env 基线）与 env 基线对照
+        （enabled/host/port/user/from/tls_mode；pass 不回传，仅
+        password_configured 布尔）；附 public_base_url（PUBLIC_BASE_URL 环境变量）。
+      responses:
+        '200':
+          description: SMTP 配置视图
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SMTPSettingsView' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    put:
+      tags: [Admin]
+      operationId: updateAdminSMTPSettings
+      summary: 更新 SMTP 运行时配置（仅 admin，即时生效）
+      description: >-
+        写入 DB 覆盖（邮件发送处每次读库，保存即时生效）。pass 留空 = 保持
+        现值；校验失败 400。成功返回与 GET 相同的配置视图。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SMTPSettingsInput' }
+      responses:
+        '200':
+          description: 已更新；返回生效配置视图
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SMTPSettingsView' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
   /admin/stats:
     get:
       tags: [Admin]
@@ -4981,7 +5163,17 @@ components:
           description: 文件扩展名（1..16 个 [a-z0-9] 字符，无前置点）
         opener:
           type: string
-          enum: [office, drawio, excalidraw, text, markdown, code, web, default]
+          description: >-
+            旧版单值枚举，或复合编码 v:<view>[+e:<edit>]（查看/编辑方式
+            分别覆盖；view ∈ raw/office/drawio/excalidraw/xmind/richtext，
+            edit ∈ text/office/drawio/excalidraw/richtext/none）
+          enum:
+            [
+              office, drawio, excalidraw, text, markdown, code, web, default,
+              'v:raw', 'v:office', 'v:drawio', 'v:excalidraw', 'v:xmind', 'v:richtext',
+              'e:text', 'e:office', 'e:drawio', 'e:excalidraw', 'e:richtext', 'e:none',
+            ]
+          # 复合组合（v:x+e:y）由 description 说明，enum 列出基础段示例。
         updated_at: { type: string, format: date-time }
     Setting:
       type: object
@@ -5072,6 +5264,43 @@ components:
         teams: { type: integer, format: int64, description: 未软删团队数 }
         groups: { type: integer, format: int64, description: 用户组数（migration 035） }
         storage_bytes: { type: integer, format: int64, description: 对象存储用量（object_blobs.size 合计，字节） }
+    SMTPSettingsInput:
+      type: object
+      description: PUT /admin/settings/smtp 请求体（pass 留空 = 保持现值）
+      properties:
+        enabled: { type: boolean }
+        host: { type: string }
+        port: { type: integer }
+        user: { type: string }
+        pass: { type: string, description: SMTP 密码；空串 = 保持已存值（响应不回传） }
+        from: { type: string }
+        tls_mode:
+          type: string
+          enum: [none, starttls, smtps]
+    SMTPSettingsView:
+      type: object
+      description: GET/PUT /admin/settings/smtp 响应（生效配置 + env 基线对照；密码不回传）
+      properties:
+        enabled: { type: boolean }
+        host: { type: string }
+        port: { type: integer }
+        user: { type: string }
+        from: { type: string }
+        tls_mode: { type: string, enum: [none, starttls, smtps] }
+        password_configured: { type: boolean }
+        env:
+          type: object
+          description: 环境变量基线（同字段口径；无 DB 覆盖时与顶层一致）
+          properties:
+            enabled: { type: boolean }
+            host: { type: string }
+            port: { type: integer }
+            user: { type: string }
+            from: { type: string }
+            password_configured: { type: boolean }
+        public_base_url:
+          type: [string, 'null']
+          description: PUBLIC_BASE_URL 环境变量（邮件/分享链接前缀；未配置为 null）
     BackupVerifyResult:
       type: object
       description: >-
@@ -5725,48 +5954,34 @@ components:
     TeamMember:
       type: object
       description: >-
-        团队成员：role 为系统角色（owner/editor/viewer）或 custom（自定义角色，
-        此时附 role_id 与 role_name）。权限继承 = 团队成员身份：团队内全部
-        文件/目录适用同一权限集（设计 6.5.3 最小落地，无路径级覆盖）。
+        团队成员：role 为五级内置角色（owner 所有者/admin 管理员/
+        member_share 可分享成员/member 成员/guest 访客，migration 037 起
+        自定义角色移除）。权限继承 = 团队成员身份：团队内全部文件/目录
+        适用同一权限集（路径级覆盖见 /folders/{id}/acl）。
       properties:
         user_id: { type: string, format: uuid }
-        role: { type: string, enum: [owner, editor, viewer, custom] }
-        role_id:
-          { type: string, format: uuid, description: 自定义角色 ID；系统角色时缺省 }
-        role_name:
-          { type: string, description: 自定义角色名（role=custom 时返回） }
+        role: { type: string, enum: [owner, admin, member_share, member, guest] }
+        username: { type: string, description: 成员用户名（列表 JOIN users 补齐） }
+        nickname: { type: string, description: 成员昵称（可缺省） }
+        email: { type: string, format: email, description: 成员邮箱（列表 JOIN users 补齐） }
         created_at: { type: string, format: date-time }
-    TeamRolePermissions:
+        joined_at: { type: string, format: date-time, description: 加入时间（= created_at，v1.7.1 显式字段） }
+    TeamInvite:
       type: object
       description: >-
-        角色细粒度权限（设计 6.5.2）：布尔勾选 read/write/delete/share/admin；
-        deny 数组中列出的权限显式拒绝且优先于 allow（勾选 true 也无效）。
-        系统角色映射：owner 全 true；editor 读/写/分享；viewer 仅读。
-      properties:
-        read: { type: boolean }
-        write: { type: boolean }
-        delete: { type: boolean }
-        share: { type: boolean }
-        admin: { type: boolean }
-        deny:
-          type: array
-          items: { type: string, enum: [read, write, delete, share, admin] }
-    TeamRole:
-      type: object
+        团队邮箱邀请（team_invites 表，migration 039）：一次性 token 仅存
+        SHA-256 哈希，明文 join_url 只在创建响应返回一次；status 为派生
+        状态（pending/accepted/expired）。
       properties:
         id: { type: string, format: uuid }
-        team_id: { type: string, format: uuid }
-        name: { type: string, maxLength: 64 }
-        permissions: { $ref: '#/components/schemas/TeamRolePermissions' }
-        member_count:
-          { type: integer, description: 引用该角色的成员数（删除角色引用检查用） }
+        email: { type: string, format: email }
+        role: { type: string, enum: [admin, member_share, member, guest] }
+        invited_by: { type: string, format: uuid, nullable: true }
+        status: { type: string, enum: [pending, accepted, expired] }
+        expires_at: { type: string, format: date-time }
+        accepted_at: { type: string, format: date-time, nullable: true }
         created_at: { type: string, format: date-time }
-    TeamRoleList:
-      type: object
-      properties:
-        roles:
-          type: array
-          items: { $ref: '#/components/schemas/TeamRole' }
+        join_url: { type: string, description: 仅创建响应（201）附带；幂等命中（200）无 }
     TeamMemberList:
       type: object
       properties:

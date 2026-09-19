@@ -261,33 +261,74 @@ func (h *Handler) batchDownload(c *gin.Context) {
 	if !ok {
 		return
 	}
-	c.Header("Content-Type", "application/zip")
-	c.Header("Content-Disposition", `attachment; filename="docflow-files.zip"`)
-	zw := zip.NewWriter(c.Writer)
+	// 目录与文件混合打包：文件直入归档（条目名 <id>-<name>，与既有口径
+	// 一致）；目录走 download.zip 的子树预遍历（条目数/总大小限额同目录
+	// 打包下载），使批量下载与单项「下载为 ZIP」能力对齐。
+	actor := userID(c)
+	entries := make([]zipEntry, 0, len(ids))
+	var total int64
 	for _, id := range ids {
-		f, err := h.files.Get(userID(c), id)
-		if err != nil || f.Type != "file" {
-			continue
-		}
-		_, blob, err := h.files.CurrentVersion(userID(c), id)
-		if err != nil || blob.Status != files.BlobStatusAvailable {
-			continue
-		}
-		reader, err := upload.ReadSection(h.storage, blob.StorageKey, 0, blob.Size)
+		f, err := h.files.Get(actor, id)
 		if err != nil {
+			continue
+		}
+		if f.Type == "folder" {
+			if h.zipper == nil {
+				continue
+			}
+			sub, werr := collectZipEntries(h.zipper, actor, f)
+			if werr != nil {
+				if h.zipWalkError(c, werr) {
+					return
+				}
+				continue
+			}
+			for _, e := range sub {
+				if len(entries)+1 > zipDownloadMaxEntries {
+					h.zipWalkError(c, errZipDownloadLimit)
+					return
+				}
+				total += e.size
+				if total > zipDownloadMaxTotalSize {
+					h.zipWalkError(c, errZipDownloadLimit)
+					return
+				}
+				entries = append(entries, e)
+			}
+			continue
+		}
+		_, blob, err := h.files.CurrentVersion(actor, id)
+		if err != nil || blob.Status != files.BlobStatusAvailable {
 			continue
 		}
 		name := filepath.Base(f.Name)
 		if name == "." || name == "\\" || name == "" {
 			name = id.String()
 		}
-		w, err := zw.Create(id.String() + "-" + name)
-		if err == nil {
-			_, _ = io.Copy(w, reader)
-		}
-		_ = reader.Close()
+		total += blob.Size
+		entries = append(entries, zipEntry{name: id.String() + "-" + name, key: blob.StorageKey, size: blob.Size})
 	}
-	_ = zw.Close()
+	if h.zipper == nil {
+		// 无 zipper（理论上不发生，NewHandler 恒注入）：退回内联流式写出。
+		c.Header("Content-Type", "application/zip")
+		c.Header("Content-Disposition", `attachment; filename="docflow-files.zip"`)
+		zw := zip.NewWriter(c.Writer)
+		for _, e := range entries {
+			w, err := zw.CreateHeader(&zip.FileHeader{Name: e.name, Method: zip.Deflate})
+			if err != nil {
+				break
+			}
+			reader, err := upload.ReadSection(h.storage, e.key, 0, e.size)
+			if err != nil {
+				continue
+			}
+			_, _ = io.Copy(w, reader)
+			_ = reader.Close()
+		}
+		_ = zw.Close()
+		return
+	}
+	h.writeZipStream(c, "docflow-files", entries)
 }
 
 func batchResultsJSON(results []files.BatchItemResult) []gin.H {

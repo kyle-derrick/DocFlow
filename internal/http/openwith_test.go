@@ -208,7 +208,21 @@ func TestOpenWithNormalizeMatrix(t *testing.T) {
 			t.Fatalf("opener %q must be valid", opener)
 		}
 	}
-	for _, opener := range []string{"", "vscode", "Office", "browser"} {
+	// 复合编码（v:/e:/v:+e:）。
+	for _, opener := range []string{
+		"v:raw", "v:office", "v:drawio", "v:excalidraw", "v:xmind", "v:richtext",
+		"e:text", "e:office", "e:drawio", "e:excalidraw", "e:richtext", "e:none",
+		"v:raw+e:text", "v:office+e:office", "e:text+v:raw",
+	} {
+		if err := auth.ValidateOpenWithOpener(opener); err != nil {
+			t.Fatalf("opener %q must be valid", opener)
+		}
+	}
+	for _, opener := range []string{
+		"", "vscode", "Office", "browser",
+		"v:", "e:", "v:raw+e:text+e:none", "v:raw+v:office", "e:text+e:office",
+		"v:code", "e:code", "v:web", "e:web", "v:default", "raw", "e:none+",
+	} {
 		if err := auth.ValidateOpenWithOpener(opener); err == nil {
 			t.Fatalf("opener %q must be invalid", opener)
 		}

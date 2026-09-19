@@ -1,6 +1,10 @@
 package team
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"strings"
 	"time"
@@ -8,20 +12,42 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/docflow/docflow/internal/auth"
 	"github.com/docflow/docflow/internal/files"
 )
 
 var (
-	ErrInvalidName       = errors.New("invalid team name")
-	ErrNameConflict      = errors.New("team name already exists")
-	ErrNotFound          = errors.New("team not found")
-	ErrInvalidRole       = errors.New("invalid member role")
-	ErrInvalidPermission = errors.New("invalid role permissions")
-	ErrRoleInUse         = errors.New("role is assigned to team members")
-	ErrForbidden         = errors.New("not allowed to manage this team")
-	ErrMemberExists      = errors.New("user is already a member")
-	ErrOwnerMember       = errors.New("team owner membership cannot be removed")
+	ErrInvalidName  = errors.New("invalid team name")
+	ErrNameConflict = errors.New("team name already exists")
+	ErrNotFound     = errors.New("team not found")
+	ErrInvalidRole  = errors.New("invalid member role")
+	ErrForbidden    = errors.New("not allowed to manage this team")
+	ErrMemberExists = errors.New("user is already a member")
+	ErrOwnerMember  = errors.New("team owner membership cannot be removed")
+	// 邀请相关（v1.7.1）。
+	ErrInvalidEmail  = errors.New("invalid email address")
+	ErrInviteGone    = errors.New("invitation is no longer available")
+	ErrEmailMismatch = errors.New("invitation email does not match your account")
 )
+
+// InviteTTL 团队邀请有效期（7 天）。
+const InviteTTL = 7 * 24 * time.Hour
+
+// NewInviteToken 生成明文邀请 token：32 字节随机数的 URL-safe base64
+//（43 字符，与 shares/invitations 同模式；数据库只存 SHA-256 hex 哈希）。
+func NewInviteToken() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
+// HashInviteToken 返回 token 的 SHA-256 十六进制小写哈希（64 字符）。
+func HashInviteToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
 
 // validateName 校验团队名：NFC 归一（简化为 TrimSpace）、非空、无控制字符、不超过 100 字符。
 func validateName(name string) (string, error) {
@@ -37,79 +63,50 @@ func validateName(name string) (string, error) {
 	return name, nil
 }
 
-// ValidatePermissions 校验角色 permissions JSON 结构：键只允许
-// read/write/delete/share/admin（布尔值）与 deny（合法动作字符串数组）；
-// 其余键或类型不匹配一律拒绝（fail closed）。
-func ValidatePermissions(p map[string]any) error {
-	for k, v := range p {
-		switch k {
-		case PermRead, PermWrite, PermDelete, PermShare, PermAdmin:
-			if _, ok := v.(bool); !ok {
-				return ErrInvalidPermission
-			}
-		case "deny":
-			list, ok := v.([]any)
-			if !ok {
-				return ErrInvalidPermission
-			}
-			for _, item := range list {
-				s, ok := item.(string)
-				if !ok || !isValidAction(s) {
-					return ErrInvalidPermission
-				}
-			}
-		default:
-			return ErrInvalidPermission
-		}
-	}
-	return nil
-}
-
-func isValidAction(action string) bool {
-	for _, a := range ValidActions {
-		if a == action {
-			return true
-		}
-	}
-	return false
-}
-
-// systemPermissions 系统角色的固定权限映射（设计 6.5.1，保持现状兼容）：
-// owner 全部权限；editor 读/写/分享（无删除与管理）；viewer 仅读。
-// 非成员（空角色）无任何权限。
-func systemPermissions(role string) map[string]any {
+// rolePermissions 五级内置角色的固定权限矩阵（migration 037 起自定义角色移除）：
+//
+//	owner        read/write/delete/share/admin（全部）
+//	admin        read/write/delete/share/admin（不含解散/转让——仅 owner）
+//	member_share read/write/delete/share
+//	member       read/write/delete
+//	guest        read
+//
+// 非成员（空角色）无任何权限（fail closed）。
+func rolePermissions(role string) map[string]bool {
 	switch role {
-	case RoleOwner:
-		return map[string]any{PermRead: true, PermWrite: true, PermDelete: true, PermShare: true, PermAdmin: true}
-	case RoleEditor:
-		return map[string]any{PermRead: true, PermWrite: true, PermShare: true}
-	case RoleViewer:
-		return map[string]any{PermRead: true}
+	case RoleOwner, RoleAdmin:
+		return map[string]bool{PermRead: true, PermWrite: true, PermDelete: true, PermShare: true, PermAdmin: true}
+	case RoleMemberShare:
+		return map[string]bool{PermRead: true, PermWrite: true, PermDelete: true, PermShare: true}
+	case RoleMember:
+		return map[string]bool{PermRead: true, PermWrite: true, PermDelete: true}
+	case RoleGuest:
+		return map[string]bool{PermRead: true}
 	default:
 		return nil
 	}
 }
 
-// permissionAllowed 按 permissions JSON 求值单个动作：
-// deny 数组中列出的动作显式拒绝且优先于 allow；未列出的动作按布尔勾选，
-// 缺失/非真值一律无权限（fail closed）。
-func permissionAllowed(perms map[string]any, action string) bool {
-	if perms == nil {
-		return false
+// isValidRole 判定角色是否为五级内置角色之一。
+func isValidRole(role string) bool {
+	switch role {
+	case RoleOwner, RoleAdmin, RoleMemberShare, RoleMember, RoleGuest:
+		return true
 	}
-	if denies, ok := perms["deny"].([]any); ok {
-		for _, d := range denies {
-			if s, ok := d.(string); ok && s == action {
-				return false
-			}
-		}
-	}
-	allowed, ok := perms[action].(bool)
-	return ok && allowed
+	return false
 }
 
-// Service 提供团队生命周期、成员与角色管理及权限判定；权限判定委托 Repo
-// 查询实现（纯查询，不引入 Casbin；继承 = 团队成员身份，见 can 注释）。
+// isAssignable 判定角色是否可经成员管理接口授予（owner 除外）。
+func isAssignable(role string) bool {
+	switch role {
+	case RoleAdmin, RoleMemberShare, RoleMember, RoleGuest:
+		return true
+	}
+	return false
+}
+
+// Service 提供团队生命周期与成员管理及权限判定；权限判定委托 Repo 的
+// 成员角色查询（纯查询实现，继承 = 团队成员身份）。
 type Service struct {
 	repo Repo
 	now  func() time.Time
@@ -119,52 +116,41 @@ func NewService(repo Repo) *Service {
 	return &Service{repo: repo, now: time.Now}
 }
 
-// can 求值用户在团队内的单个动作权限（设计 6.5 权限模型，纯查询实现）：
-//   - 系统角色按 systemPermissions 固定映射（owner 全 true；editor 读/写/分享）；
-//   - 自定义角色按 roles.permissions JSON（deny 优先于 allow）；
-//   - 成员的 role_id 指向的角色行不存在（如已被删除）时 fail closed（无任何权限）；
-//   - 非成员无任何权限。
-//
-// 权限继承说明（设计 6.5.3 的最小落地）：继承 = 团队成员身份——团队内全部
-// 文件/目录适用同一权限集，无子目录或路径级覆盖（路径通配、子项独立覆盖为
-// 6.5.3/6.5.4 的后续扩展，需引入 Casbin 或路径策略表）。
+// can 求值用户在团队内的单个动作权限：按五级内置角色的固定矩阵；
+// 非成员无任何权限（fail closed）。
 func (s *Service) can(userID, teamID uuid.UUID, action string) (bool, error) {
-	role, roleID, err := s.repo.MemberRole(teamID, userID)
+	role, err := s.repo.Role(teamID, userID)
 	if err != nil {
 		return false, err
 	}
-	if roleID != nil {
-		perms, err := s.repo.RolePermissions(teamID, *roleID)
-		if errors.Is(err, ErrNotFound) {
-			return false, nil // 角色行缺失：fail closed
-		}
-		if err != nil {
-			return false, err
-		}
-		return permissionAllowed(perms, action), nil
-	}
-	return permissionAllowed(systemPermissions(role), action), nil
+	perms := rolePermissions(role)
+	return perms != nil && perms[action], nil
 }
 
-// CanRead 判定用户能否读取团队空间（系统 owner/editor/viewer；自定义角色按 read 勾选）。
+// CanRead 判定用户能否读取团队空间（owner/admin/member_share/member/guest）。
 func (s *Service) CanRead(userID, teamID uuid.UUID) (bool, error) {
 	return s.can(userID, teamID, PermRead)
 }
 
-// CanWrite 判定用户能否写入团队空间（系统 owner/editor；自定义角色按 write 勾选且未被 deny）。
+// CanWrite 判定用户能否写入团队空间（owner/admin/member_share/member）。
 func (s *Service) CanWrite(userID, teamID uuid.UUID) (bool, error) {
 	return s.can(userID, teamID, PermWrite)
 }
 
-// CanDelete 判定用户能否删除团队文件（系统仅 owner；自定义角色按 delete 勾选且未被 deny）。
+// CanDelete 判定用户能否删除团队文件（owner/admin/member_share/member）。
 func (s *Service) CanDelete(userID, teamID uuid.UUID) (bool, error) {
 	return s.can(userID, teamID, PermDelete)
 }
 
-// CanShare 判定用户能否创建团队文件分享（设计 6.5.5：系统 owner/editor；
-// 自定义角色按 share 勾选且未被 deny）。
+// CanShare 判定用户能否创建团队文件分享（owner/admin/member_share）。
 func (s *Service) CanShare(userID, teamID uuid.UUID) (bool, error) {
 	return s.can(userID, teamID, PermShare)
+}
+
+// CanAdmin 判定用户是否具备团队管理权限（管成员/改目录文件权限：
+// owner/admin；解散与转让另行限定仅 owner）。
+func (s *Service) CanAdmin(userID, teamID uuid.UUID) (bool, error) {
+	return s.can(userID, teamID, PermAdmin)
 }
 
 // CreateTeam 创建团队：创建者自动成为 owner 成员，并在同一事务内创建团队根目录
@@ -196,37 +182,30 @@ func (s *Service) ListTeams(user uuid.UUID) ([]Team, error) {
 	return s.repo.ListForUser(user)
 }
 
+// ListTeamsDetailed 返回用户所属团队的列表条目（我的角色/成员数/存储
+// 用量，v1.7 /teams 页卡片数据）。
+func (s *Service) ListTeamsDetailed(user uuid.UUID) ([]TeamInfo, error) {
+	return s.repo.ListForUserStats(user)
+}
+
 // Get 返回团队信息。
 func (s *Service) Get(id uuid.UUID) (Team, error) { return s.repo.Get(id) }
 
-// resolveMemberRole 校验并归一成员角色入参：
-// roleID 非空时为自定义角色（role 归一为 'custom'，且角色行必须属于该团队）；
-// 否则 role 必须为系统角色 editor/viewer（owner 不可经成员接口授予）。
-func (s *Service) resolveMemberRole(teamID uuid.UUID, role string, roleID *uuid.UUID) (string, *uuid.UUID, error) {
-	if roleID != nil {
-		if role != "" && role != RoleCustom {
-			return "", nil, ErrInvalidRole
-		}
-		if *roleID == uuid.Nil {
-			return "", nil, ErrInvalidRole
-		}
-		if _, err := s.repo.RolePermissions(teamID, *roleID); err != nil {
-			if errors.Is(err, ErrNotFound) {
-				return "", nil, ErrInvalidRole // 角色不存在或不属于该团队
-			}
-			return "", nil, err
-		}
-		return RoleCustom, roleID, nil
+// canManageMembers 校验 actor 具备成员管理权限（owner/admin）。
+func (s *Service) canManageMembers(actor, teamID uuid.UUID) error {
+	ok, err := s.CanAdmin(actor, teamID)
+	if err != nil {
+		return err
 	}
-	if role != RoleEditor && role != RoleViewer {
-		return "", nil, ErrInvalidRole
+	if !ok {
+		return ErrForbidden
 	}
-	return role, nil, nil
+	return nil
 }
 
-// AddMember 由 actor（须为团队 owner）添加成员并指定角色：
-// 系统角色（editor/viewer）或自定义角色（role_id，须为本团队已有角色）。
-func (s *Service) AddMember(actor, teamID, userID uuid.UUID, role string, roleID *uuid.UUID) (Member, error) {
+// AddMember 由 actor（owner/admin）添加成员并指定内置角色
+//（admin/member_share/member/guest；admin 角色仅 owner 可授予）。
+func (s *Service) AddMember(actor, teamID, userID uuid.UUID, role string) (Member, error) {
 	if userID == uuid.Nil {
 		return Member{}, ErrInvalidRole
 	}
@@ -234,18 +213,21 @@ func (s *Service) AddMember(actor, teamID, userID uuid.UUID, role string, roleID
 	if err != nil {
 		return Member{}, err
 	}
-	if t.OwnerID != actor {
-		return Member{}, ErrForbidden
-	}
-	role, roleID, err = s.resolveMemberRole(teamID, role, roleID)
-	if err != nil {
+	if err := s.canManageMembers(actor, teamID); err != nil {
 		return Member{}, err
 	}
-	m := Member{TeamID: teamID, UserID: userID, Role: role, RoleID: roleID, CreatedAt: s.now()}
+	if !isAssignable(role) {
+		return Member{}, ErrInvalidRole
+	}
+	// admin 角色仅 owner 可授予（管理员之间互相制衡的边界由 owner 把持）。
+	if role == RoleAdmin && t.OwnerID != actor {
+		return Member{}, ErrForbidden
+	}
+	m := Member{TeamID: teamID, UserID: userID, Role: role, CreatedAt: s.now()}
 	if err := s.repo.AddMember(m); err != nil {
 		return Member{}, err
 	}
-	// 回读以携带 role_name（自定义角色名）；回读失败退回构造值（不阻断添加）。
+	// 回读以携带 username/nickname；回读失败退回构造值（不阻断添加）。
 	members, err := s.repo.ListMembers(teamID)
 	if err != nil {
 		return m, nil
@@ -258,28 +240,67 @@ func (s *Service) AddMember(actor, teamID, userID uuid.UUID, role string, roleID
 	return m, nil
 }
 
-// UpdateMemberRole 由 actor（须为团队 owner）修改成员角色（系统或自定义）；
-// owner 成员的角色不可修改（所有权转移不在本期范围）。
-func (s *Service) UpdateMemberRole(actor, teamID, userID uuid.UUID, role string, roleID *uuid.UUID) (Member, error) {
+// UpdateMemberRole 由 actor（owner/admin）修改成员角色（五级内置下拉；
+// owner 成员不可改；admin 角色的授予/修改仅 owner 可为，admin 不可动
+// 其他 admin）。
+func (s *Service) UpdateMemberRole(actor, teamID, userID uuid.UUID, role string) (Member, error) {
 	t, err := s.repo.Get(teamID)
 	if err != nil {
 		return Member{}, err
 	}
-	if t.OwnerID != actor {
-		return Member{}, ErrForbidden
+	if err := s.canManageMembers(actor, teamID); err != nil {
+		return Member{}, err
 	}
 	if userID == t.OwnerID {
 		return Member{}, ErrOwnerMember
 	}
-	role, roleID, err = s.resolveMemberRole(teamID, role, roleID)
-	if err != nil {
-		return Member{}, err
+	if !isAssignable(role) {
+		return Member{}, ErrInvalidRole
 	}
-	return s.repo.UpdateMemberRole(teamID, userID, role, roleID)
+	if actor != t.OwnerID {
+		// admin：不可授予/修改 admin 角色，也不可修改其他 admin 的角色。
+		if role == RoleAdmin {
+			return Member{}, ErrForbidden
+		}
+		targetRole, err := s.repo.Role(teamID, userID)
+		if err != nil {
+			return Member{}, err
+		}
+		if targetRole == RoleOwner || targetRole == RoleAdmin {
+			return Member{}, ErrForbidden
+		}
+	}
+	return s.repo.UpdateMemberRole(teamID, userID, role)
 }
 
-// RemoveMember 由 actor（须为团队 owner）移除成员；owner 成员不可移除（所有权转移不在本期范围）。
+// RemoveMember 由 actor（owner/admin）移除成员；owner 成员不可移除，
+// admin 不可移除其他 admin（边界同 UpdateMemberRole）。
 func (s *Service) RemoveMember(actor, teamID, userID uuid.UUID) error {
+	t, err := s.repo.Get(teamID)
+	if err != nil {
+		return err
+	}
+	if err := s.canManageMembers(actor, teamID); err != nil {
+		return err
+	}
+	if userID == t.OwnerID {
+		return ErrOwnerMember
+	}
+	if actor != t.OwnerID {
+		targetRole, err := s.repo.Role(teamID, userID)
+		if err != nil {
+			return err
+		}
+		if targetRole == RoleOwner || targetRole == RoleAdmin {
+			return ErrForbidden
+		}
+	}
+	return s.repo.RemoveMember(teamID, userID)
+}
+
+// TransferOwnership 由 owner 把团队所有权转让给既有成员：新 owner 成员
+// 角色变为 owner、teams.owner_id 更新，原 owner 降为 admin（同一事务）。
+func (s *Service) TransferOwnership(actor, teamID, newOwner uuid.UUID) error {
 	t, err := s.repo.Get(teamID)
 	if err != nil {
 		return err
@@ -287,10 +308,17 @@ func (s *Service) RemoveMember(actor, teamID, userID uuid.UUID) error {
 	if t.OwnerID != actor {
 		return ErrForbidden
 	}
-	if userID == t.OwnerID {
-		return ErrOwnerMember
+	if newOwner == uuid.Nil || newOwner == actor {
+		return ErrInvalidRole
 	}
-	return s.repo.RemoveMember(teamID, userID)
+	role, err := s.repo.Role(teamID, newOwner)
+	if err != nil {
+		return err
+	}
+	if !isValidRole(role) {
+		return ErrNotFound // 受让人不是团队成员
+	}
+	return s.repo.TransferOwnership(teamID, actor, newOwner)
 }
 
 // ListMembers 返回团队成员列表；actor 必须是团队成员（含 owner）。
@@ -310,9 +338,10 @@ func (s *Service) ListMembers(actor, teamID uuid.UUID) ([]Member, error) {
 	return s.repo.ListMembers(teamID)
 }
 
-// Role 返回用户在团队中的角色（非成员为空串；自定义角色返回 'custom'）。
+// Role 返回用户在团队中的角色（非成员为空串）。
 func (s *Service) Role(teamID, userID uuid.UUID) (string, error) { return s.repo.Role(teamID, userID) }
 
+// Update 更新团队信息（仅 owner）。
 func (s *Service) Update(actor, teamID uuid.UUID, name, description string) error {
 	t, err := s.repo.Get(teamID)
 	if err != nil {
@@ -327,6 +356,8 @@ func (s *Service) Update(actor, teamID uuid.UUID, name, description string) erro
 	}
 	return s.repo.Update(teamID, n, &description)
 }
+
+// Delete 解散团队（仅 owner，软删除）。
 func (s *Service) Delete(actor, teamID uuid.UUID) error {
 	t, err := s.repo.Get(teamID)
 	if err != nil {
@@ -337,79 +368,140 @@ func (s *Service) Delete(actor, teamID uuid.UUID) error {
 	}
 	return s.repo.Delete(teamID)
 }
-func (s *Service) Roles(actor, teamID uuid.UUID) ([]Role, error) {
-	t, err := s.repo.Get(teamID)
-	if err != nil {
-		return nil, err
-	}
-	if t.OwnerID != actor {
-		return nil, ErrForbidden
-	}
-	return s.repo.ListRoles(teamID)
-}
-func (s *Service) CreateRole(actor, teamID uuid.UUID, name string, permissions map[string]any) (Role, error) {
-	t, err := s.repo.Get(teamID)
-	if err != nil {
-		return Role{}, err
-	}
-	if t.OwnerID != actor {
-		return Role{}, ErrForbidden
-	}
-	name, err = validateName(name)
-	if err != nil {
-		return Role{}, err
-	}
-	if err := ValidatePermissions(permissions); err != nil {
-		return Role{}, err
-	}
-	r := Role{ID: uuid.New(), TeamID: teamID, Name: name, Permissions: permissions, CreatedAt: s.now()}
-	if err := s.repo.CreateRole(r); err != nil {
-		if isUniqueViolation(err) {
-			return Role{}, ErrNameConflict
-		}
-		return Role{}, err
-	}
-	return r, nil
-}
-func (s *Service) UpdateRole(actor, teamID, roleID uuid.UUID, name string, permissions map[string]any) error {
-	t, err := s.repo.Get(teamID)
-	if err != nil {
-		return err
-	}
-	if t.OwnerID != actor {
-		return ErrForbidden
-	}
-	name, err = validateName(name)
-	if err != nil {
-		return err
-	}
-	if err := ValidatePermissions(permissions); err != nil {
-		return err
-	}
-	return s.repo.UpdateRole(teamID, roleID, name, permissions)
-}
-
-// DeleteRole 删除自定义角色；仍有成员引用该角色时返回 ErrRoleInUse（HTTP 409），
-// 须先改派成员角色（数据库侧另有 ON DELETE RESTRICT 兜底，migration 029）。
-func (s *Service) DeleteRole(actor, teamID, roleID uuid.UUID) error {
-	t, err := s.repo.Get(teamID)
-	if err != nil {
-		return err
-	}
-	if t.OwnerID != actor {
-		return ErrForbidden
-	}
-	n, err := s.repo.CountMembersByRole(teamID, roleID)
-	if err != nil {
-		return err
-	}
-	if n > 0 {
-		return ErrRoleInUse
-	}
-	return s.repo.DeleteRole(teamID, roleID)
-}
 
 // UserInAnyTeam 实时判定用户是否属于任一给定团队。
 func (s *Service) UserInAnyTeam(userID uuid.UUID, teamIDs []uuid.UUID) (bool, error) {
 	return s.repo.UserInAnyTeam(userID, teamIDs)
+}
+
+// Leave 成员主动退出团队（非 owner 成员；owner 须先转让所有权或解散
+// 团队，ErrOwnerMember 403）。审计由 HTTP 层记录。
+func (s *Service) Leave(actor, teamID uuid.UUID) error {
+	t, err := s.repo.Get(teamID)
+	if err != nil {
+		return err
+	}
+	if t.OwnerID == actor {
+		return ErrOwnerMember
+	}
+	role, err := s.repo.Role(teamID, actor)
+	if err != nil {
+		return err
+	}
+	if role == "" {
+		return ErrNotFound
+	}
+	return s.repo.RemoveMember(teamID, actor)
+}
+
+// ---- 团队邀请（v1.7.1 成员管理完善；team_invites，migration 039） ----
+
+// CreateInvite 由 actor（owner/admin）向 email 发出团队邀请，返回邀请与
+// 明文 token（仅本次可见，库中只存哈希）。幂等：该团队对同邮箱已有未过期
+// 未接受的邀请时返回既有记录（token 为空串）。角色限内置可授予级
+//（admin 仅 owner 可授予，与 AddMember 同边界）。
+func (s *Service) CreateInvite(actor, teamID uuid.UUID, email, role string) (Invite, string, error) {
+	t, err := s.repo.Get(teamID)
+	if err != nil {
+		return Invite{}, "", err
+	}
+	if err := s.canManageMembers(actor, teamID); err != nil {
+		return Invite{}, "", err
+	}
+	if !isAssignable(role) {
+		return Invite{}, "", ErrInvalidRole
+	}
+	if role == RoleAdmin && t.OwnerID != actor {
+		return Invite{}, "", ErrForbidden
+	}
+	email = auth.NormalizeEmail(email)
+	if err := auth.ValidateEmail(email); err != nil {
+		return Invite{}, "", ErrInvalidEmail
+	}
+	now := s.now().UTC()
+	if existing, err := s.repo.FindActiveInvite(teamID, email, now); err == nil {
+		return existing, "", nil
+	} else if !errors.Is(err, ErrNotFound) {
+		return Invite{}, "", err
+	}
+	token, err := NewInviteToken()
+	if err != nil {
+		return Invite{}, "", err
+	}
+	invitedBy := actor
+	inv := Invite{
+		ID: uuid.New(), TeamID: teamID, Email: email, Role: role,
+		TokenHash: HashInviteToken(token), InvitedBy: &invitedBy,
+		ExpiresAt: now.Add(InviteTTL), CreatedAt: now,
+	}
+	if err := s.repo.CreateInvite(inv); err != nil {
+		return Invite{}, "", err
+	}
+	return inv, token, nil
+}
+
+// ListInvites 返回团队邀请列表（含已接受/已过期；actor 须 owner/admin）。
+func (s *Service) ListInvites(actor, teamID uuid.UUID) ([]Invite, error) {
+	if _, err := s.repo.Get(teamID); err != nil {
+		return nil, err
+	}
+	if err := s.canManageMembers(actor, teamID); err != nil {
+		return nil, err
+	}
+	return s.repo.ListInvites(teamID, 200)
+}
+
+// RevokeInvite 撤销邀请（删行，token 立即失效；actor 须 owner/admin）。
+func (s *Service) RevokeInvite(actor, teamID, inviteID uuid.UUID) error {
+	if _, err := s.repo.Get(teamID); err != nil {
+		return err
+	}
+	if err := s.canManageMembers(actor, teamID); err != nil {
+		return err
+	}
+	return s.repo.DeleteInvite(teamID, inviteID)
+}
+
+// AcceptInvite 凭一次性 token 加入团队：校验未过期未接受、当前用户邮箱
+// 与邀请邮箱一致（GitLab 语义，防链接外泄被冒用），写入成员后原子标记
+// accepted_at。已在团队时标记接受并返回 alreadyMember=true（不报错，前端
+// 提示后跳转）。返回团队信息供跳转。
+func (s *Service) AcceptInvite(user uuid.UUID, token, userEmail string) (Team, Invite, bool, error) {
+	inv, err := s.repo.GetInviteByTokenHash(HashInviteToken(strings.TrimSpace(token)))
+	if err != nil {
+		return Team{}, Invite{}, false, ErrNotFound
+	}
+	now := s.now().UTC()
+	if inv.AcceptedAt != nil || !now.Before(inv.ExpiresAt) {
+		return Team{}, Invite{}, false, ErrInviteGone
+	}
+	if auth.NormalizeEmail(userEmail) != inv.Email {
+		return Team{}, Invite{}, false, ErrEmailMismatch
+	}
+	t, err := s.repo.Get(inv.TeamID)
+	if err != nil {
+		return Team{}, Invite{}, false, err
+	}
+	if t.DeletedAt != nil {
+		return Team{}, Invite{}, false, ErrNotFound
+	}
+	alreadyMember := false
+	if role, rerr := s.repo.Role(inv.TeamID, user); rerr == nil && role != "" {
+		alreadyMember = true
+	} else if err := s.repo.AddMember(Member{TeamID: inv.TeamID, UserID: user, Role: inv.Role, CreatedAt: now}); err != nil {
+		if errors.Is(err, ErrMemberExists) {
+			alreadyMember = true
+		} else {
+			return Team{}, Invite{}, false, err
+		}
+	}
+	accepted, err := s.repo.MarkInviteAccepted(inv.ID, now)
+	if err != nil {
+		return Team{}, Invite{}, false, err
+	}
+	if !accepted {
+		return Team{}, Invite{}, false, ErrInviteGone
+	}
+	inv.AcceptedAt = &now
+	return t, inv, alreadyMember, nil
 }

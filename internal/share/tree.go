@@ -74,6 +74,11 @@ func (s *Service) ResolveTree(token, path string) (TreeResult, error) {
 	if s.tree == nil {
 		return TreeResult{}, ErrTreeUnavailable
 	}
+	// 多文件打包分享（is_bundle）：根清单与子路径均以 share_files 条目为界，
+	// 锚点目录的其余子项不暴露（见 resolveBundleTree）。
+	if sh.Share.IsBundle {
+		return s.resolveBundleTree(sh.Share, path)
+	}
 	root := sh.File
 	if path == "" {
 		if root.Type == "folder" {
@@ -98,6 +103,63 @@ func (s *Service) ResolveTree(token, path string) (TreeResult, error) {
 		return s.folderResult(sh.Share, f, rel)
 	}
 	return TreeResult{Share: sh.Share, Path: rel, File: &f, Blob: s.availableBlob(sh.Share.OwnerID, f.ID)}, nil
+}
+
+// resolveBundleTree 打包分享的树解析：path 为空返回打包条目清单（folder
+// 语义）；非空时首段必须命中某个打包条目名——文件条目仅接受精确命中，
+// 目录条目余下路径在其子树内解析（子树约束保证不越界）。未命中统一
+// ErrNotFound（不泄露锚点目录其余子项的存在性）。
+func (s *Service) resolveBundleTree(sh Share, path string) (TreeResult, error) {
+	items, err := s.BundleItems(sh)
+	if err != nil {
+		return TreeResult{}, err
+	}
+	if path == "" {
+		out := TreeResult{Share: sh, Folder: true, Path: "", Entries: make([]TreeEntry, 0, len(items))}
+		for _, it := range items {
+			entry := TreeEntry{Name: it.Name, Type: it.Type, Path: it.Name}
+			if it.Type == "file" {
+				if _, blob, cerr := s.tree.CurrentVersion(sh.OwnerID, it.ID); cerr == nil {
+					entry.Size, entry.MimeType = blob.Size, blob.MimeType
+				}
+			}
+			out.Entries = append(out.Entries, entry)
+		}
+		return out, nil
+	}
+	first, rest, _ := strings.Cut(path, "/")
+	for _, it := range items {
+		if it.Name != first {
+			continue
+		}
+		if it.Type == "file" {
+			if rest != "" {
+				return TreeResult{}, ErrNotFound
+			}
+			blob := s.availableBlob(sh.OwnerID, it.ID)
+			return TreeResult{Share: sh, Path: it.Name, File: &it, Blob: blob}, nil
+		}
+		if rest == "" {
+			return s.folderResult(sh, it, it.Name)
+		}
+		f, chain, rerr := s.tree.ResolveSubpath(it, rest)
+		if rerr != nil {
+			switch {
+			case errors.Is(rerr, files.ErrInvalidTarget),
+				errors.Is(rerr, files.ErrInvalidName),
+				errors.Is(rerr, files.ErrFolderDepth),
+				errors.Is(rerr, files.ErrNotFound):
+				return TreeResult{}, ErrNotFound
+			}
+			return TreeResult{}, rerr
+		}
+		rel := it.Name + "/" + relativePath(chain)
+		if f.Type == "folder" {
+			return s.folderResult(sh, f, rel)
+		}
+		return TreeResult{Share: sh, Path: rel, File: &f, Blob: s.availableBlob(sh.OwnerID, f.ID)}, nil
+	}
+	return TreeResult{}, ErrNotFound
 }
 
 // folderResult 构造目录命中结果（baseRel 为目录相对分享根的路径，子项

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/docflow/docflow/internal/audit"
@@ -18,15 +19,16 @@ import (
 
 type shareRequest struct {
 	FileID           string   `json:"file_id"`
+	FileIDs          []string `json:"file_ids"`        // 多文件打包分享（≥2 项，一个目录式链接）；与 file_id 二选一
 	Permission       string   `json:"permission"`
-	Visibility       string   `json:"visibility"`        // public|private，缺省 public
-	UserIDs          []string `json:"user_ids"`          // 私有分享：显式授权用户
-	TeamIDs          []string `json:"team_ids"`          // 私有分享：授权团队
-	ExpiresIn        *int64   `json:"expires_in"`        // 秒；缺省或 0 表示永久
-	MaxDownloads     *int     `json:"max_downloads"`     // 缺省表示不限
-	Password         string   `json:"password"`          // 公开分享访问密码（4-64 字符，存哈希）
+	Visibility       string   `json:"visibility"`      // public|private，缺省 public
+	UserIDs          []string `json:"user_ids"`        // 私有分享：显式授权用户
+	TeamIDs          []string `json:"team_ids"`        // 私有分享：授权团队
+	ExpiresIn        *int64   `json:"expires_in"`      // 秒；缺省或 0 表示永久
+	MaxDownloads     *int     `json:"max_downloads"`   // 缺省表示不限
+	Password         string   `json:"password"`        // 公开分享访问密码（4-64 字符，存哈希）
 	WatermarkEnabled *bool    `json:"watermark_enabled"` // 缺省用 settings 默认
-	WatermarkText    *string  `json:"watermark_text"`    // 自定义模板；缺省用 settings 默认
+	WatermarkText    *string  `json:"watermark_text"`  // 自定义模板；缺省用 settings 默认
 }
 
 // parseIDList 解析 UUID 列表（去重顺序保留）。
@@ -60,10 +62,6 @@ func (h *Handler) createShare(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
 	}
-	fileID, ok := parseID(c, req.FileID)
-	if !ok {
-		return
-	}
 	owner := userID(c)
 	permission := req.Permission
 	if permission == "" {
@@ -82,6 +80,49 @@ func (h *Handler) createShare(c *gin.Context) {
 		expiresIn = time.Duration(*req.ExpiresIn) * time.Second
 	}
 	opts := share.ShareOptions{Password: req.Password, WatermarkEnabled: req.WatermarkEnabled, WatermarkText: req.WatermarkText}
+	// 多文件打包分享（file_ids，仅公开）：一个目录式链接承载全部选中项。
+	if len(req.FileIDs) > 0 {
+		if req.FileID != "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "file_id and file_ids are mutually exclusive"})
+			return
+		}
+		if visibility != share.VisibilityPublic {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "bundle shares must be public"})
+			return
+		}
+		if len(req.UserIDs) > 0 || len(req.TeamIDs) > 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "user_ids/team_ids are only allowed for private shares"})
+			return
+		}
+		fileIDs, ok := parseIDList(c, req.FileIDs)
+		if !ok {
+			return
+		}
+		created, token, err := h.shares.CreateBundle(owner, fileIDs, permission, expiresIn, req.MaxDownloads, opts)
+		if err != nil {
+			if errors.Is(err, share.ErrBundleTooFew) {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+			h.shareCreateError(c, err)
+			return
+		}
+		hasPassword := "false"
+		if created.HasPassword() {
+			hasPassword = "true"
+		}
+		h.recordAudit(c, audit.Entry{UserID: &owner, Action: audit.ActionShareCreate, ResourceType: audit.ResourceShare, ResourceID: created.ID.String(), Metadata: `{"file_id":"` + created.FileID.String() + `","permission":"` + created.Permission + `","visibility":"public","bundle":true,"items":` + strconv.Itoa(len(fileIDs)) + `,"password":` + hasPassword + `}`})
+		out := shareJSON(created)
+		out["visibility"] = share.VisibilityPublic
+		out["token"] = token
+		out["share_url"] = "/api/v1/public/shares/" + token
+		c.JSON(http.StatusCreated, out)
+		return
+	}
+	fileID, ok := parseID(c, req.FileID)
+	if !ok {
+		return
+	}
 	var out gin.H
 	if visibility == share.VisibilityPrivate {
 		if req.Password != "" {
@@ -155,21 +196,67 @@ func (h *Handler) shareCreateError(c *gin.Context, err error) {
 
 // listShares GET /api/v1/shares 列出当前用户的分享（created_at 倒序）。
 // 每条附 file_name（文件已删除时为空）与 visibility（public|private）。
+// v1.7.1 服务端分页 + 过滤：
+//   - 分页：page（≥1，缺省 1）+ page_size（1..200，缺省 20）；响应附
+//     total / page / page_size。未传分页参数时兼容旧 limit 语义（默认
+//     100，上限 1000，total = 当页条数）。
+//   - 过滤：q（关联文件名子串，大小写不敏感）、visibility（public|private）、
+//     status（active|revoked|expired，revoked 优先于 expired）。
 func (h *Handler) listShares(c *gin.Context) {
-	limit := 100
-	if raw := c.Query("limit"); raw != "" {
+	filter := share.OwnerListFilter{Q: strings.TrimSpace(c.Query("q")), Visibility: c.Query("visibility"), Status: c.Query("status"), Now: time.Now().UTC()}
+	if filter.Visibility != "" && filter.Visibility != share.VisibilityPublic && filter.Visibility != share.VisibilityPrivate {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid visibility"})
+		return
+	}
+	switch filter.Status {
+	case "", "active", "revoked", "expired":
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid status"})
+		return
+	}
+	// 分页参数（page / page_size）；解析失败或越界一律 400。
+	page, pageSize := 1, 20
+	paginated := c.Query("page") != "" || c.Query("page_size") != ""
+	if raw := c.Query("page"); raw != "" {
 		n, err := strconv.Atoi(raw)
 		if err != nil || n < 1 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid limit"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid page"})
 			return
 		}
-		if n < 1000 {
-			limit = n
-		} else {
-			limit = 1000
-		}
+		page = n
 	}
-	out, err := h.shares.ListWithFileNames(userID(c), limit)
+	if raw := c.Query("page_size"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 || n > 200 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid page_size"})
+			return
+		}
+		pageSize = n
+	}
+	var (
+		out   []share.ShareWithFile
+		total int64
+		err   error
+	)
+	if paginated {
+		out, total, err = h.shares.ListPage(userID(c), filter, pageSize, (page-1)*pageSize)
+	} else {
+		// 兼容旧调用：limit 语义不变（默认 100，上限 1000）。
+		limit := 100
+		if raw := c.Query("limit"); raw != "" {
+			n, lerr := strconv.Atoi(raw)
+			if lerr != nil || n < 1 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid limit"})
+				return
+			}
+			if n < 1000 {
+				limit = n
+			} else {
+				limit = 1000
+			}
+		}
+		out, total, err = h.shares.ListPage(userID(c), filter, limit, 0)
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to list shares"})
 		return
@@ -181,7 +268,11 @@ func (h *Handler) listShares(c *gin.Context) {
 		item["file_name"] = it.FileName
 		items = append(items, item)
 	}
-	c.JSON(http.StatusOK, gin.H{"shares": items})
+	if !paginated {
+		// 旧模式无总数概念：total 取当页条数（客户端按无分页处理）。
+		total = int64(len(items))
+	}
+	c.JSON(http.StatusOK, gin.H{"shares": items, "total": total, "page": page, "page_size": pageSize})
 }
 
 // listSharedWithMe GET /api/v1/shares/shared-with-me：分享给当前用户的有效私有分享列表
@@ -330,7 +421,7 @@ func (h *Handler) updateShare(c *gin.Context) {
 }
 
 func shareJSON(s share.Share) gin.H {
-	return gin.H{"id": s.ID, "file_id": s.FileID, "permission": s.Permission, "has_password": s.HasPassword(), "watermark_enabled": s.WatermarkEnabled, "watermark_text": s.WatermarkText, "expires_at": s.ExpiresAt, "max_downloads": s.MaxDownloads, "download_count": s.DownloadCount, "revoked_at": s.RevokedAt, "created_at": s.CreatedAt}
+	return gin.H{"id": s.ID, "file_id": s.FileID, "permission": s.Permission, "has_password": s.HasPassword(), "watermark_enabled": s.WatermarkEnabled, "watermark_text": s.WatermarkText, "expires_at": s.ExpiresAt, "max_downloads": s.MaxDownloads, "download_count": s.DownloadCount, "revoked_at": s.RevokedAt, "created_at": s.CreatedAt, "is_bundle": s.IsBundle}
 }
 
 // ---------- 公开分享密码保护（设计 6.6.2 / US-003） ----------
@@ -463,15 +554,28 @@ func (h *Handler) publicShareInfo(c *gin.Context) {
 	}
 	// 目录分享根：无版本/blob 语义，返回目录元数据（子树经 /tree 与 /raw/share）。
 	if r.File.Type == "folder" {
+		name := r.File.Name
+		if r.Share.IsBundle {
+			// 打包分享：标题与水印按可见条目数展示（不泄露锚点目录名/其余子项）。
+			name = "打包分享"
+			if items, ierr := h.shares.BundleItems(r.Share); ierr == nil {
+				name = fmt.Sprintf("打包分享（%d 项）", len(items))
+			}
+		}
+		watermark := any(nil)
+		if r.Share.WatermarkEnabled {
+			watermark = share.RenderWatermark(r.Share.WatermarkTemplate(), name, c.ClientIP(), time.Now())
+		}
 		c.JSON(http.StatusOK, gin.H{
-			"name":              r.File.Name,
+			"name":              name,
 			"type":              "folder",
+			"is_bundle":         r.Share.IsBundle,
 			"permission":        r.Share.Permission,
 			"expires_at":        r.Share.ExpiresAt,
 			"max_downloads":     r.Share.MaxDownloads,
 			"download_count":    r.Share.DownloadCount,
 			"watermark_enabled": r.Share.WatermarkEnabled,
-			"watermark_text":    watermarkTextOf(r, c),
+			"watermark_text":    watermark,
 		})
 		return
 	}

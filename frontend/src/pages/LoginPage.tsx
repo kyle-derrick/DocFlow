@@ -76,6 +76,7 @@ export default function LoginPage() {
         <label className="field">
           <span>邮箱或用户名</span>
           <Input
+            size="large"
             required
             autoCapitalize="none"
             spellCheck={false}
@@ -89,6 +90,7 @@ export default function LoginPage() {
         <label className="field">
           <span>密码</span>
           <Input.Password
+            size="large"
             required
             value={password}
             onChange={(e) => setPassword(e.target.value)}
@@ -104,6 +106,7 @@ export default function LoginPage() {
             <label className="field">
               <span>两步验证码 / 恢复码</span>
               <Input
+                size="large"
                 required
                 allowClear
                 value={totpInput}
@@ -116,7 +119,7 @@ export default function LoginPage() {
           </>
         )}
         {error && <div className="error-text">{error}</div>}
-        <Button className="login-submit" type="primary" htmlType="submit" block disabled={busy}>
+        <Button className="login-submit" type="primary" size="large" htmlType="submit" block disabled={busy}>
           {busy ? `${msg('login')}…` : totpRequired ? (locale === 'zh-CN' ? '验证并登录' : 'Verify and log in') : msg('login')}
         </Button>
         {ssoEnabled && (
@@ -124,6 +127,7 @@ export default function LoginPage() {
             <div className="login-divider">或</div>
             <Button
               block
+              size="large"
               // 整页跳转到后端 /auth/oidc/login（302 → IdP；回调后落地 /sso）。
               onClick={() => {
                 window.location.href = OIDC_LOGIN_PATH

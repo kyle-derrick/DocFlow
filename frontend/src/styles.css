@@ -20,6 +20,10 @@
   --primary-hover: #6b90ff;
   /* 控件级圆角（按钮/输入/下拉面板统一引用；面板类 8px 保持 --radius * 1.33 口径不强制改） */
   --radius: 6px;
+  /* 顶栏高度（紧凑 40px；三栏工作区高度预算引用） */
+  --topbar-h: 40px;
+  /* 等宽字体栈（代码/UUID/哈希等 mono 场景全站统一引用） */
+  --font-mono: ui-monospace, SFMono-Regular, Consolas, 'Courier New', monospace;
   color-scheme: dark;
 }
 
@@ -72,10 +76,13 @@ body,
 }
 
 body {
-  font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+  /* 全站字体栈（与 main.tsx antd token fontFamily 同源；中文字形依次回退
+     PingFang SC → 微软雅黑 → Noto Sans SC，杜绝 system-ui 混用不一致）。 */
+  font-family: 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
   background: var(--bg);
   color: var(--text);
-  font-size: 14px;
+  /* 字号层级：13 正文 / 12 辅助（antd fontSize token 同值对齐，见 main.tsx）。 */
+  font-size: 13px;
   line-height: 1.5;
 }
 
@@ -92,23 +99,25 @@ body {
   width: 100%;
   max-width: 1560px;
   margin: 0 auto;
-  padding: 20px 16px 40px;
+  padding: 16px 16px 24px;
 }
 
+/* 顶栏缩减（48→40px）：与工具栏 mini 尺寸体系一致；搜索框迷你化见
+   .topbar-search。 */
 .topbar {
   display: flex;
   align-items: center;
-  gap: 24px;
-  padding: 0 20px;
-  height: 56px;
+  gap: 16px;
+  padding: 0 16px;
+  height: var(--topbar-h);
   background: var(--surface);
   border-bottom: 1px solid var(--border);
 }
 
 .brand {
   font-weight: 700;
-  font-size: 16px;
-  letter-spacing: 0.5px;
+  font-size: 14px;
+  letter-spacing: 0.3px;
 }
 
 .nav {
@@ -120,8 +129,9 @@ body {
 .nav a {
   color: var(--muted);
   text-decoration: none;
-  padding: 6px 12px;
+  padding: 4px 10px;
   border-radius: 6px;
+  font-size: 13px;
 }
 
 .nav a:hover {
@@ -143,9 +153,9 @@ body {
 
 .bell-btn {
   position: relative;
-  font-size: 16px;
+  font-size: 14px;
   line-height: 1;
-  padding: 7px 10px;
+  padding: 5px 8px;
 }
 
 .bell-badge {
@@ -259,26 +269,22 @@ body {
 
 /* ---------- 顶栏全文搜索 ---------- */
 
+/* 顶栏全文搜索（antd Input allowClear + 前置搜索图标，与全站 antd 输入
+   视觉统一；原自写胶囊 input 样式已退役）。下拉结果面板见 .search-panel。 */
 .topbar-search {
   position: relative;
   display: inline-flex;
-  width: 260px;
+  width: 240px;
 }
 
-.topbar-search input {
-  width: 100%;
-  background: var(--bg);
-  border: 1px solid var(--border);
+/* 仅胶囊圆角（纯视觉，不改几何）：高度/内边距一律 antd 原生（v1.6 删除
+   padding-block:3px 拉高 hack——曾致 29px 非标高度）。 */
+.topbar-search .ant-input-affix-wrapper {
   border-radius: 999px;
-  color: var(--text);
-  font: inherit;
-  font-size: 13px;
-  padding: 7px 14px;
-  outline: none;
 }
 
-.topbar-search input:focus {
-  border-color: var(--primary);
+.topbar-search .ant-input-prefix {
+  color: var(--muted);
 }
 
 .search-panel {
@@ -373,10 +379,9 @@ body {
 .section-sidebar a { padding: 8px 12px; border-radius: 6px; color: var(--muted); text-decoration: none; }
 .section-sidebar a.active, .section-sidebar a:hover { color: var(--text); background: var(--surface-2); }
 .section-content { min-width: 0; flex: 1; }
-.space-switcher { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; padding: 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
-.space-switcher .form-select { width: min(260px, 100%); height: 34px; }
-/* 全局视图（全部/收藏/最近）：下拉选择（替代原三段按钮，工具带省宽）。 */
-.space-view-select { width: auto; height: 34px; padding: 4px 10px; }
+/* 空间切换控件组（文件页全宽顶栏最左的内联组，经 toolbarPrefix 注入）：
+   仅横向排布其内部控件，右侧细分隔线与后续控件分区。 */
+.space-switcher { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; padding-right: 8px; border-right: 1px solid var(--border); margin-right: 2px; }
 /* 团队管理弹窗：创建表单 + 团队列表（点击名称进入空间，owner 可改名/删除）。 */
 .space-manage-create { margin-bottom: 14px; }
 .space-manage-list { list-style: none; margin: 0; padding: 0; max-height: 46vh; overflow: auto; }
@@ -387,7 +392,6 @@ body {
 .space-manage-name-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .space-manage-time { font-size: 11px; margin-left: auto; flex-shrink: 0; }
 .space-manage-actions { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
-.form-control, .form-select { width: 100%; box-sizing: border-box; }
 .user-menu { position: relative; }
 .user-menu-trigger { display: inline-flex; align-items: center; gap: 8px; }
 /* 用户菜单下拉箭头：加大字号/着色，更醒目（展开时旋转 180°）。 */
@@ -399,7 +403,7 @@ body {
 .user-menu-panel { position: absolute; right: 0; top: calc(100% + 6px); z-index: 60; min-width: 150px; padding: 6px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.3); }
 .user-menu-panel a, .user-menu-panel button { display: block; width: 100%; padding: 7px 10px; border: 0; background: none; color: var(--text); text-align: left; text-decoration: none; font: inherit; border-radius: 5px; }
 .user-menu-panel a:hover, .user-menu-panel button:hover { background: var(--surface-2); }
-.audit-filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.audit-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 12px; }
 .audit-filters > * { flex: 1 1 140px; }
 /* TLS 自定义证书上传区（管理页 TLS 面板）：摘要 + 两个文件选择 + 上传。 */
 .tls-cert-box { margin-top: 10px; padding: 12px; border: 1px dashed var(--border); border-radius: 8px; display: flex; flex-direction: column; gap: 8px; }
@@ -423,51 +427,50 @@ body {
   font-size: 18px;
 }
 
-.toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-}
-
-.page-head:has(> .toolbar:first-child) { justify-content: flex-end; }
-/* 顶栏控件统一规格：高度 34px、圆角 6px、垂直居中（按钮均已 antd 化，仅剩 seg 分段）。 */
-.page-head .toolbar > .seg-group > .seg {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  height: 34px;
-  padding: 0 12px;
-  font-size: 13px;
-  border-radius: 6px;
-  white-space: nowrap;
-}
-/* 列表/网格单按钮切换（▦/☰），方形紧凑。 */
-.page-head .toolbar .view-toggle-btn { min-width: 40px; padding: 0; font-size: 15px; line-height: 1; }
-
-/* ---------- 文件页工具带（FileBrowser 顶栏+筛选栏合并为一行，省行高） ----------
-   紧邻 SpaceSwitcher 行下方：新建 / 上传 / 视图切换 / 目录搜索 / 标签、收藏
-   过滤 / 默认打开方式入口一行排布（flex wrap 兜底窄屏）。 */
+/* ---------- 文件页全宽顶栏（v1.6 融合化：工具元素与面包屑同层一行） ----------
+   单行 44px：左（空间切换 + 面包屑 + 列表/网格切换）｜中（目录搜索）｜
+   右（标签 / 网格排序 / 新建 / 上传 / 上传任务 / 回收站）。由 FileBrowser 经
+   toolbarHost portal 渲染到 .files-topbar（三栏布局上方），横跨目录树与
+   右侧栏；窄屏单行 nowrap，空间不足时横向滚动。
+   v1.6：顶栏无独立 surface 背景/边框（页面底色直通，与全局顶栏去重）；
+   面包屑并入本行（左面包屑 + 右工具组）。
+   控件尺寸统一 antd size="small"（24px 原生小尺寸）——不用任何 height
+   拉伸组件外框（拉高会造成输入框光标偏下），字号 13px。 */
 .files-toolbar {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 12px;
-  padding: 8px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
+  gap: 6px;
+  height: 44px;
+  padding: 0 12px;
+  background: transparent;
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
-/* 工具带内拆分按钮（第一阶段已换 antd Dropdown.Button，规则删除；
-   直挂 .btn 规格同步退役——工具带按钮均为 antd Button，高度对齐见适配层）。 */
+.files-toolbar > * { flex: 0 0 auto; }
 
-.files-toolbar .view-toggle-btn { min-width: 40px; padding: 0; font-size: 15px; line-height: 1; }
-.files-toolbar .filter-item select,
-.files-toolbar .filter-item input[type='search'] { height: 34px; }
-/* 弹性空隙：过滤区推到右侧（窄屏 wrap 后退化为普通间距）。 */
-.files-toolbar .toolbar-spacer { flex: 1 1 auto; }
+/* 顶栏内面包屑：去掉独立行的下边距，宽度可收缩省略。 */
+.files-toolbar .files-toolbar-crumbs {
+  margin-bottom: 0;
+  min-width: 0;
+  overflow: hidden;
+  flex: 0 1 auto;
+}
+
+.files-toolbar .files-toolbar-crumbs .crumb {
+  white-space: nowrap;
+}
+
+.files-toolbar .view-toggle-btn { min-width: 28px; padding: 0; font-size: 14px; line-height: 1; }
+/* 弹性空隙：把右侧动作区（标签/排序/新建/上传/回收站）推到行尾。 */
+.files-toolbar .toolbar-spacer { flex: 1 1 auto; min-width: 12px; }
+
+/* ---------- 控件迷你化统一规格（.toolbar-mini）----------
+   尺寸体系：antd componentSize=small（main.tsx ConfigProvider）全站 24px
+   原生小尺寸 + fontSize token 13px——字号微调规则已随之冗余删除，仅保留
+   filter-item 的间距/配色；宽度约束收敛在 antd 适配层（.filter-item 节）。 */
+.toolbar-mini .filter-item { gap: 4px; font-size: 13px; color: var(--muted); }
 
 /* ---------- 面包屑 ---------- */
 
@@ -480,47 +483,26 @@ body {
   color: var(--muted);
 }
 
-/* ---------- 筛选栏 / 批量工具条（标签、收藏、排序与多选批量操作） ---------- */
-
-.filter-bar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 12px;
-}
+/* ---------- 筛选项 / 批量工具条（标签、收藏、排序与多选批量操作） ----------
+   .filter-bar 独立筛选行已随回收站整页删除（弹窗化，见 TrashModal）；
+   .filter-item 仍在顶栏与回收站弹窗工具条复用。 */
 
 .filter-item {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   color: var(--muted);
-  font-size: 14px;
-}
-
-/* 筛选栏控件与顶栏同规格：34px 高、6px 圆角，行内垂直居中（底色统一 var(--bg)）。 */
-.filter-item select,
-.filter-item input[type='search'] {
-  height: 34px;
-  padding: 4px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg);
-  color: var(--text);
-  font: inherit;
   font-size: 13px;
 }
-
-.filter-item input[type='search'] {
-  width: 220px;
-  background: var(--bg);
-}
+/* 筛选控件已全部 antd 化（Select/Input）：尺寸由 antd small（24px）决定，
+   不做任何 height 拉伸（拉高导致输入框光标偏下）；宽度见 antd 适配层。 */
 
 .search-mode-hint {
   margin-bottom: 8px;
 }
 
-/* 列表表头排序：可点击切换排序键，激活键高亮 + 方向箭头。 */
+/* 列表表头排序：可点击切换排序键，激活键高亮 + 方向箭头。v1.6 整个表头
+   单元格可点（th.th-sort-cell onClick），内层 span 沿用视觉规格。 */
 .th-sort {
   display: inline-flex;
   align-items: center;
@@ -537,12 +519,23 @@ body {
   cursor: pointer;
 }
 
-.th-sort:hover {
+/* 表头单元格整体为点击热区（命中面积 = 全格）。 */
+th.th-sort-cell {
+  cursor: pointer;
+  user-select: none;
+}
+
+th.th-sort-cell:hover {
   color: var(--text);
 }
 
-.th-sort.active {
+th.th-sort-cell.active {
   color: var(--primary-hover);
+}
+
+/* 名称单元格整格可点（文件打开 / 目录进入 / 网页目录预览）。 */
+td.name-cell {
+  cursor: pointer;
 }
 
 .th-sort-arrow {
@@ -616,10 +609,7 @@ body {
   display: flex;
   gap: 8px;
 }
-
-.tag-create input {
-  flex: 1;
-}
+/* 弹性撑满由 antd 适配层（.tag-create .ant-input-affix-wrapper flex:1）承担。 */
 
 
 .crumb .sep {
@@ -868,27 +858,28 @@ svg.lucide {
   box-shadow: 0 8px 24px rgba(24, 30, 42, 0.16);
 }
 
-/* 右键 / 列表行「⋯」菜单：复用卡片菜单配色，视口固定定位（限高 420px/60vh，
+/* 右键 / 列表行「⋯」菜单：复用卡片菜单配色，视口固定定位（紧凑尺寸
+   ≤200px 宽 / 行高 30px 见 antd 适配层 .ctx-antd-menu；限高 420px/60vh，
    实际位置由 JS 按实测尺寸做视口翻转/收缩，见 FileBrowser clampFixedMenu）。 */
 .ctx-menu {
   position: fixed;
   z-index: 60;
-  min-width: 200px;
+  min-width: 168px;
   max-width: 220px;
-  max-height: min(420px, 60vh);
+  max-height: min(460px, 64vh);
   overflow-y: auto;
 }
 
-.openwith-group { border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); margin: 3px 0; padding: 3px 0; }
-.ctx-menu-label { padding: 3px 7px; color: var(--muted); font-size: 11px; line-height: 1.3; }
-
 /* ---------- 弹窗内嵌查看器（FileViewerDispatch） ----------
-   查看弹窗的排版约束由 antd 适配层的 .ant-modal.docflow-modal.modal-viewer
-   提供（第一阶段迁移）；此处仅保留内容区撑满规则。 */
+   查看弹窗的尺寸/高度约束统一由 Modal 薄封装层提供（width=min(1180px,94vw)、
+   body 定高 min(76vh,760px) 内部滚动，见 FileBrowser.tsx）；此处内容区
+   flex:1 + min-height:0 撑满 body——高度链（body 定高 → preview-embed →
+   editor-page height:100% → editor-shell flex:1 → OnlyOffice iframe）完整，
+   不再用 min-height:78vh 之类的零散高度 hack（auto 高父级下 100% 失效正是
+   「弹窗内 OnlyOffice 高度极窄」的根因）。 */
 .preview-embed {
   flex: 1;
-  /* 内容区定高 78vh（查看=纯渲染，内容尽量占满弹窗；较少内容也撑住）。 */
-  min-height: 78vh;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -897,17 +888,14 @@ svg.lucide {
   background: var(--bg);
 }
 
-/* 矮视口（<750px 高）：78vh 会顶破弹窗 max-height，降为 60vh。 */
-@media (max-height: 750px) {
-  .preview-embed { min-height: 60vh; }
-}
-
-/* 独立页组件在弹窗内：去掉 100vh/padding，撑满弹窗内容区。 */
+/* 独立页组件在弹窗内：去视口化（100vh → 100%），撑满弹窗内容区。 */
 .preview-embed .text-editor-page {
   min-height: 0;
+  height: 100%;
   flex: 1;
   padding: 0;
   background: transparent;
+  overflow: hidden;
 }
 
 .preview-embed .editor-page {
@@ -916,6 +904,10 @@ svg.lucide {
   max-width: 100%;
   padding: 6px;
 }
+
+/* Excalidraw 静态 SVG 查看（无外壳）：flex 填满（弹窗与独立页同规则）。 */
+.preview-embed .excalidraw-viewer,
+.preview-embed .text-editor-page > .excalidraw-viewer { flex: 1; min-height: 0; }
 
 .preview-embed .markdown-preview,
 .preview-embed .code-editor {
@@ -964,74 +956,47 @@ svg.lucide {
   min-width: 180px;
 }
 
-/* ---------- 表单 ---------- */
-
-/* 控件底色统一：全部 input/select/textarea 一律 var(--bg)——与所在 surface
-   面板形成对比（原 filter 下拉 var(--surface) 与其余 var(--bg) 混杂，已归一）；
-   原生 option 面板由浏览器按 color-scheme 渲染明暗，不再单独铺色。 */
-input:not([type='checkbox']):not([type='radio']):not([type='file']),
-select,
-textarea,
-.form-control,
-.form-select {
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  color: var(--text);
-  font: inherit;
-  padding: 7px 10px;
-  outline: none;
-}
-
-input:not([type='checkbox']):not([type='radio']):not([type='file']):focus,
-select:focus,
-textarea:focus { border-color: var(--primary); box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 16%, transparent); }
-textarea { resize: vertical; }
+/* ---------- 表单 ----------
+   全站表单控件已 antd 化（Input/Select/InputNumber/Textarea），原生的
+   input/select/textarea 全局标签选择器（含 .field input、.form-control 等
+   旧控件规则）已全部退役——它们会命中 antd 控件内部元素造成「双层边框 +
+   内部灰底」；antd 控件外观（底色/边框/明暗）由 ConfigProvider token 统一
+   驱动（见 main.tsx PALETTE）。可见的原生控件仅剩：顶栏搜索框
+   （.topbar-search input，胶囊样式自带全套规则）与 checkbox（仅
+   accent-color 着色，均收敛在各自容器作用域）。 */
 
 .field {
   display: block;
   margin-bottom: 14px;
 }
 
-.field span {
+/* 表单 label（field 的直接子 span；不再用后代选择器，避免波及 antd 控件
+   内部的 span 元素）。注意 :not([class]) 收窄到无类名 span——antd 的
+   Input/Password 根节点同样是 span（.ant-input-affix-wrapper）且挂在
+   label.field 下，裸 .field > span 会命中它：antd v6 规则经 :where() 零
+   特异性，display:block / font-size:12px 会覆盖 antd 原生 inline-flex 与
+   14px 字号，造成 allowClear/眼睛图标错位出框（suffix 错位根因）。 */
+.field > span:not([class]) {
   display: block;
   margin-bottom: 6px;
   color: var(--muted);
   font-size: 12px;
 }
 
-.field input,
-.field select,
-.share-link input,
-.chip-input input {
-  width: 100%;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  color: var(--text);
-  font: inherit;
-  padding: 8px 10px;
-  outline: none;
-}
-
-.chip-input input {
-  flex: 1;
-  width: auto;
-  font-family: ui-monospace, Consolas, 'Courier New', monospace;
-  font-size: 13px;
-}
-
-.field input:focus,
-.field select:focus,
-.share-link input:focus,
-.chip-input input:focus {
-  border-color: var(--primary);
+.chip-input {
+  display: flex;
+  gap: 8px;
 }
 
 /* ---------- 登录页 ---------- */
 
+/* 全屏垂直 + 水平居中。登录系列页（/login、/register、/forgot、/reset、/sso）
+   不经 RequireAuth 外壳（无 .app-shell/.content），直接挂 #root 下——
+   min-height 用 100vh 直接锚定视口（百分比依赖父级高度链，外层不定高时会
+   失效退化为顶端对齐）；min-height 而非 height，内容/提示增高时页面可滚动
+   不裁切。 */
 .login-wrap {
-  min-height: 100%;
+  min-height: 100vh;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1148,6 +1113,18 @@ textarea { resize: vertical; }
   white-space: nowrap;
 }
 
+/* 上传任务弹窗列表（v1.6：浮条改工具栏按钮 + 弹窗；行样式复用 .upload-row）。 */
+.upload-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.upload-list .upload-row:first-child {
+  border-top: none;
+}
+
 .badge {
   font-size: 12px;
   padding: 2px 10px;
@@ -1180,7 +1157,7 @@ textarea { resize: vertical; }
 
 /* ---------- 弹窗 ----------
    弹窗容器本体（backdrop/面板/标题）已由 antd Modal 承担（FileBrowser 的
-   Modal 薄封装 + 适配层 .ant-modal.docflow-modal）；此处仅保留弹窗内容
+   Modal 薄封装 + .docflow-modal 自有类适配节）；此处仅保留弹窗内容
    里的辅助排版类。 */
 
 .modal-actions {
@@ -1194,10 +1171,7 @@ textarea { resize: vertical; }
   display: flex;
   gap: 8px;
 }
-
-.share-link input {
-  flex: 1;
-}
+/* 行内 antd Input 撑满由适配层（.share-link .ant-input-affix-wrapper flex:1）承担。 */
 
 /* ---------- 预览 ---------- */
 
@@ -1223,6 +1197,16 @@ textarea { resize: vertical; }
   background: #fff;
 }
 
+/* 公开分享页 Office 查看器（访客态 DocEditor 容器）：定高承载编辑器。 */
+.share-office-box {
+  height: min(72vh, 720px);
+}
+
+.share-office-box .editor-shell {
+  flex: 1;
+  min-height: 0;
+}
+
 .preview-text {
   max-height: 60vh;
   overflow: auto;
@@ -1233,7 +1217,7 @@ textarea { resize: vertical; }
   border-radius: 6px;
   white-space: pre-wrap;
   word-break: break-word;
-  font-family: ui-monospace, Consolas, 'Courier New', monospace;
+  font-family: var(--font-mono);
   font-size: 13px;
 }
 
@@ -1321,50 +1305,163 @@ textarea { resize: vertical; }
   font-size: 12px;
 }
 
+/* v1.7 团队管理卡片：主体（点击进入）+ 底部操作行（进入/成员管理/编辑/
+   解散/离开）。 */
+.team-card-manage {
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  transition: border-color 0.15s ease;
+}
+
+.team-card-manage:hover {
+  border-color: var(--primary);
+}
+
+.team-card-main {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  text-align: left;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+  color: var(--text);
+  width: 100%;
+}
+
+.team-card-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+}
+
+.team-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
 /* ---------- 团队空间 ---------- */
 
-.team-back {
-  margin-bottom: 8px;
-}
+/* ---------- 文件页三栏铺满视口（v1.5，个人空间与团队空间同一布局） ----------
+   .files-page（页面根）：锁定视口高度的 flex 列（.content 内边距清零见
+   :has 覆盖）——上方瞬时 banners（出现时压缩工作区而非溢出视口），下方
+   .files-shell（flex:1 min-h-0）= 全宽顶栏（.files-topbar 44px，工具行
+   portal 目标）+ 三栏 grid（左目录树 240px / 中文件管理 1fr / 右侧栏
+   280px 仅团队空间）。三栏各自内部滚动（overflow），内容少也撑满不缩减
+   （grid 行 minmax(0,1fr) + 树 max-height:100%）。 */
 
-/* 团队空间布局：中区文件浏览（内部嵌 files-tree-layout：左目录树 + 文件区）
-   + 右侧成员面板（280px，可折叠）。三栏等高（stretch）：整体高度自适应
-   视口（预算 180px：站点导航+工具带+面包屑+页边距，底部尽量不留空），
-   各栏内部滚动；min-height 定值保证内容少时三栏也撑住等高不缩。 */
-.team-workspace {
+/* 文件类全屏页面（v1.6 全出血）：去 1560px 限宽与两侧留白（顶栏工具行与
+   页面骨架直接铺满视口宽度，工作区内部留白由 .files-tree-layout 自管）；
+   垂直仍锁视口高度内滚。 */
+.content:has(> .files-page) { padding: 0; max-width: none; }
+
+.page.files-page {
   display: flex;
-  gap: 12px;
-  align-items: stretch;
-  max-height: calc(100vh - 180px);
-  min-height: 480px;
+  flex-direction: column;
+  height: calc(100vh - var(--topbar-h));
+  min-height: 0;
+  overflow: hidden;
 }
 
-.team-workspace-main {
+/* 瞬时提示（删除撤销/错误/ACL 保存）：占一行高度，压缩工作区。 */
+.page.files-page > .banner { margin: 8px 12px 0; flex: 0 0 auto; }
+.page.files-page > .hint { padding: 8px 12px 0; flex: 0 0 auto; }
+
+.files-shell {
   flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 顶栏宿主（v1.6 融合化）：不再自带背景/边框——工具行直接落在页面底色上，
+   与全局 40px 顶栏（surface 背景 + 下边框）仅保留一条实体栏，消除原先
+   44px + 40px 双栏观感。 */
+.files-topbar { flex: 0 0 auto; background: transparent; }
+
+.files-tree-layout {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  gap: 0 12px;
+  padding: 12px;
+}
+
+.files-tree-layout.has-aside {
+  grid-template-columns: 240px minmax(0, 1fr) 280px;
+}
+
+.files-tree-main {
   min-width: 0;
   min-height: 0;
-  overflow: auto;
-}
-
-/* 内嵌的文件布局不再独立预算视口（由外层 team-workspace 统一约束，
-   双重 max-height 会把中区额外压矮一截）。 */
-.team-workspace-main .files-tree-layout {
-  max-height: none;
-}
-
-.team-member-panel {
-  flex: 0 0 280px;
-  width: 280px;
-  max-height: 100%;
-  overflow-y: auto;
-}
-
-.team-member-panel.collapsed {
-  flex: 0 0 auto;
-  width: auto;
-  padding: 8px 2px;
   display: flex;
-  align-items: center;
+}
+
+.files-tree-main .file-browser {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 右侧栏（团队=成员面板）：铺满列高，标题固定、列表内部滚动。 */
+.workspace-aside {
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+}
+
+.workspace-aside > .member-panel {
+  flex: 1;
+  min-height: 0;
+}
+
+/* 中区文件浏览本体：顶栏已上移（portal），仅剩 .files-body 滚动。 */
+.file-browser {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.files-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 2px;
+  border-radius: 8px;
+}
+
+/* 拖拽上传 drop zone（v1.6）：拖文件悬停时整区高亮（虚线描边 + 主题色淡底）。 */
+.files-body.dropzone-active {
+  outline: 2px dashed var(--primary);
+  outline-offset: -6px;
+  background: color-mix(in srgb, var(--primary) 6%, transparent);
+}
+
+/* 窄屏（≤1100px）：右栏降为整行块（限高滚动），三栏退化为两栏。 */
+@media (max-width: 1100px) {
+  .files-tree-layout.has-aside {
+    grid-template-columns: 240px minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) auto;
+  }
+
+  .files-tree-layout.has-aside .workspace-aside {
+    grid-column: 1 / -1;
+    max-height: 320px;
+  }
 }
 
 .team-member-head {
@@ -1374,33 +1471,48 @@ textarea { resize: vertical; }
   gap: 4px;
 }
 
-.team-member-collapse-btn {
-  padding: 2px 6px;
-}
-
-@media (max-width: 1100px) {
-  .team-workspace {
-    flex-direction: column;
-    max-height: none;
-  }
-
-  .team-member-panel {
-    width: 100%;
-    flex: none;
-    max-height: none;
-  }
-}
-
+/* 成员面板（右侧栏 v1.5）：卡片铺满列高，标题固定（.member-scroll 内部
+   滚动）；默认仅 头像+姓名+角色徽章 紧凑列表（分页 >20 人）；
+   邀请/移除/改角色与自定义角色管理收进「管理成员」弹窗。 */
 .member-panel {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 14px 16px 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .member-panel h3 {
-  margin: 0 0 12px;
-  font-size: 15px;
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+
+.member-panel .avatar {
+  width: 22px;
+  height: 22px;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+/* 面板内列表区：标题固定、此处滚动。 */
+.member-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.member-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.member-pager {
+  margin-top: 8px;
+  display: flex;
+  justify-content: center;
 }
 
 .member-add {
@@ -1411,11 +1523,6 @@ textarea { resize: vertical; }
 
 .member-add .field {
   margin-bottom: 10px;
-}
-
-.member-hint {
-  margin: 0 0 12px;
-  font-size: 12px;
 }
 
 .member-list {
@@ -1429,8 +1536,8 @@ textarea { resize: vertical; }
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 8px 0;
-  border-bottom: 1px solid var(--border);
+  padding: 6px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
 }
 
 .member-row:last-child {
@@ -1445,7 +1552,7 @@ textarea { resize: vertical; }
 }
 
 .member-id {
-  font-family: ui-monospace, Consolas, 'Courier New', monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   white-space: nowrap;
 }
@@ -1465,24 +1572,143 @@ textarea { resize: vertical; }
   border-color: color-mix(in srgb, var(--primary) 50%, transparent);
 }
 
-.badge.role-editor {
+.badge.role-admin {
+  color: var(--primary-hover);
+  border-color: color-mix(in srgb, var(--primary) 35%, transparent);
+}
+
+.badge.role-member-share {
   color: var(--ok);
   border-color: rgba(63, 191, 127, 0.5);
 }
 
-.badge.role-viewer {
+.badge.role-member {
   color: var(--muted);
 }
 
-.badge.role-custom {
-  color: var(--warn, #d19a26);
+.badge.role-guest {
+  color: var(--muted);
+  opacity: 0.8;
+}
+
+/* ---------- 成员管理完善（v1.7.1：antd Table 成员表 + 邀请表 + 危险区） ---------- */
+
+/* 成员单元格：首字母头像 + 显示名。 */
+.member-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.member-avatar {
+  flex: 0 0 auto;
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+}
+
+.member-name {
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.member-email {
+  font-size: 12px;
+}
+
+.member-notice {
+  margin-bottom: 8px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* 成员工具行：搜索 + 批量操作（有勾选时出现）。 */
+.member-list-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+  flex-wrap: wrap;
+}
+
+.member-search-input {
+  max-width: 260px;
+  flex: 1 1 200px;
+}
+
+.member-batch-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.member-batch-bar .ant-select {
+  min-width: 150px;
+  font-size: 12px;
+}
+
+/* antd Table（成员/邀请）紧凑字号，与全局表格口径一致。 */
+.member-antd-table {
+  margin-bottom: 8px;
+}
+
+.member-antd-table .ant-table-cell {
+  font-size: 12.5px;
+  padding: 6px 8px !important;
+}
+
+.member-invites-head {
+  margin: 14px 0 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* owner 危险区（解散团队）：红色描边卡片。 */
+.member-danger-zone {
+  margin-top: 14px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--danger) 6%, var(--surface));
+}
+
+.member-danger-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--danger);
+  font-weight: 600;
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+
+.member-danger-zone .hint {
+  margin: 0 0 8px;
+}
+
+/* 我的分享 antd Table（v1.7.1 服务端分页）。 */
+.share-antd-table .ant-table-cell {
+  font-size: 12.5px;
+}
+
+/* 加入团队落地页操作按钮。 */
+.join-team-actions {
+  margin-top: 8px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
 }
 
 /* ---------- 团队空间：角色管理与成员改派 ---------- */
 
-.member-role-select {
+/* 行内 antd Select（成员改派）：小字号、限宽；内边距由 antd 控制。 */
+.member-role-select.ant-select {
   font-size: 12px;
-  padding: 2px 6px;
   max-width: 130px;
 }
 
@@ -1577,32 +1803,7 @@ textarea { resize: vertical; }
 
 /* ---------- 分享对话框与我的分享 ---------- */
 
-.seg-group {
-  display: flex;
-  gap: 6px;
-}
-
-.seg {
-  flex: 1;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--muted);
-  font: inherit;
-  padding: 7px 10px;
-  cursor: pointer;
-  transition: background 0.15s ease;
-}
-
-.seg:hover {
-  color: var(--text);
-}
-
-.seg.active {
-  color: #fff;
-  background: var(--primary);
-  border-color: var(--primary);
-}
+/* 自写 .seg-group/.seg 分段按钮已随分享页切换控件 antd Segmented 化退役。 */
 
 .share-vis-hint {
   margin: -6px 0 12px;
@@ -1623,7 +1824,7 @@ textarea { resize: vertical; }
   border: 1px solid var(--border);
   border-radius: 999px;
   padding: 3px 10px;
-  font-family: ui-monospace, Consolas, 'Courier New', monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   word-break: break-all;
 }
@@ -1640,11 +1841,6 @@ textarea { resize: vertical; }
 
 .chip button:hover {
   color: var(--danger);
-}
-
-.chip-input {
-  display: flex;
-  gap: 8px;
 }
 
 .check-list {
@@ -1678,27 +1874,121 @@ textarea { resize: vertical; }
   opacity: 0.55;
 }
 
+/* 我的分享页工具行（v1.7）：搜索 + 类型/状态筛选 + 批量撤销。 */
+.share-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.share-toolbar .share-search {
+  width: min(260px, 60vw);
+}
+
+.share-toolbar .share-filter-select {
+  width: 128px;
+}
+
+/* 链接列操作组：打开（新窗口）+ 复制。 */
+.share-link-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.share-table .share-check-col {
+  width: 32px;
+  text-align: center;
+}
+
+.share-table .share-check-col input {
+  accent-color: var(--primary);
+  vertical-align: middle;
+}
+
 /* ---------- 公开分享页 ---------- */
 
+/* v1.5 瘦身：去顶栏（品牌行），文件分享保持居中卡片；目录分享改全幅布局
+   （.share-folder-page = 紧凑顶条 + 最大化内容区），「网页视图/文件列表」
+   切换与下载等杂项收进顶条右上角小控件区（antd small）。 */
 .share-page {
   min-height: 100%;
   display: flex;
   flex-direction: column;
 }
 
-.share-head {
+/* 目录分享：全幅铺满视口（紧凑顶条 + 可滚动主体）。 */
+.share-folder-page {
+  min-height: 100vh;
+  height: 100vh;
+}
+
+.share-folder-bar {
   display: flex;
   align-items: center;
-  padding: 0 20px;
-  height: 56px;
+  gap: 10px;
+  min-height: 40px;
+  padding: 4px 16px;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+  font-size: 13px;
+}
+
+.share-folder-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+}
+
+.share-folder-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.share-folder-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+
+.share-folder-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+}
+
+.share-folder-body .share-site-box {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.share-folder-body .share-site-frame {
+  flex: 1;
+  height: auto;
+  min-height: 0;
+}
+
+.share-folder-body .share-tree-preview iframe {
+  height: 60vh;
 }
 
 .share-card {
   width: 100%;
   max-width: 860px;
-  margin: 32px auto;
+  margin: 24px auto;
   padding: 24px 28px;
   background: var(--surface);
   border: 1px solid var(--border);
@@ -1848,7 +2138,7 @@ textarea { resize: vertical; }
 }
 
 .setting-key {
-  font-family: ui-monospace, Consolas, 'Courier New', monospace;
+  font-family: var(--font-mono);
   font-size: 13px;
   word-break: break-all;
 }
@@ -1871,7 +2161,21 @@ textarea { resize: vertical; }
 }
 
 .setting-value-mono {
-  font-family: ui-monospace, Consolas, 'Courier New', monospace;
+  font-family: var(--font-mono);
+}
+
+/* MCP 客户端配置示例（设置 → 开发者）：等宽滚动块，禁止选中态溢出。 */
+.mcp-config-sample {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 4px 0 0;
+  padding: 10px 12px;
+  background: var(--surface-2, rgba(127, 127, 127, 0.08));
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow-x: auto;
+  white-space: pre;
 }
 
 .setting-edit {
@@ -1880,20 +2184,7 @@ textarea { resize: vertical; }
   gap: 8px;
 }
 
-.setting-edit input {
-  width: 200px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--text);
-  font: inherit;
-  padding: 6px 10px;
-  outline: none;
-}
-
-.setting-edit input:focus {
-  border-color: var(--primary);
-}
+/* 行内编辑输入为 antd Input/InputNumber：宽度由 antd 适配层统一（200px）。 */
 
 .setting-bool {
   display: inline-flex;
@@ -1923,7 +2214,7 @@ textarea { resize: vertical; }
 }
 
 .recovery-codes code {
-  font-family: ui-monospace, Consolas, 'Courier New', monospace;
+  font-family: var(--font-mono);
   font-size: 13px;
   background: var(--bg);
   border: 1px solid var(--border);
@@ -1978,7 +2269,7 @@ textarea { resize: vertical; }
 }
 
 .version-sha {
-  font-family: ui-monospace, Consolas, 'Courier New', monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
 }
 
@@ -2010,14 +2301,7 @@ textarea { resize: vertical; }
   color: var(--muted);
 }
 
-.compare-field select {
-  padding: 6px 8px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--surface);
-  color: var(--text);
-  font-size: 13px;
-}
+/* 版本对比下拉已换 antd Select（外观随主题，无额外样式）。 */
 
 .diff-stats {
   margin: 0 0 10px;
@@ -2038,7 +2322,7 @@ textarea { resize: vertical; }
   background: var(--surface);
   overflow: auto;
   max-height: 60vh;
-  font-family: ui-monospace, Consolas, 'Courier New', monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.55;
 }
@@ -2095,12 +2379,18 @@ textarea { resize: vertical; }
 
 /* ---------- 文本 / Markdown 独立编辑页 ---------- */
 
+/* 页面根容器锁定视口高度（height 而非 min-height）：flex 子项（Monaco /
+   预览区）拿到确定高度，flex:1 才能可靠生效——「编辑器只剩一条缝」的根因
+   即根容器 auto 高（min-height 不参与子项百分比/定高解析）+ Monaco 高度
+   塌陷；滚动一律发生在编辑器/预览区内部，页面自身不滚。 */
 .text-editor-page {
-  min-height: 100vh;
+  height: 100vh;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 12px;
   padding: 20px;
+  overflow: hidden;
   background: var(--bg);
   color: var(--text);
 }
@@ -2110,6 +2400,7 @@ textarea { resize: vertical; }
   align-items: center;
   justify-content: space-between;
   gap: 16px;
+  flex-shrink: 0;
 }
 
 .text-editor-head h1 {
@@ -2120,7 +2411,7 @@ textarea { resize: vertical; }
 .markdown-preview {
   flex: 1;
   width: 100%;
-  min-height: calc(100vh - 130px);
+  min-height: 0;
   padding: 18px;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -2141,6 +2432,62 @@ textarea { resize: vertical; }
   border-radius: 8px;
   background: var(--surface);
   overflow: hidden;
+}
+
+/* ---- Markdown 编辑器视图模式（v1.6）：编辑 / 分栏（左源码右预览同步滚动）/
+   预览。分栏为两列 grid，各自内部滚动（同步滚动在组件内按百分比互推）。 */
+.md-preview-pane {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.md-preview-pane .markdown-preview {
+  border: none;
+  border-radius: 0;
+}
+
+.md-split {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.md-split-editor {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.md-split-preview {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.md-split-preview .markdown-preview {
+  border: none;
+  border-radius: 0;
+}
+
+@media (max-width: 900px) {
+  .md-split {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  }
 }
 
 /* 查看态（viewer-only 独立页）铺满视口、去外框。 */
@@ -2282,6 +2629,15 @@ div.mxTooltip {
   margin-top: 0 !important;
 }
 
+/* Excalidraw 静态 SVG 查看（exportToSvg 直出，viewer-only 页/弹窗共用）：
+   flex 填满剩余高度，SVG 100% 自适应、超高内部滚动。 */
+.excalidraw-viewer {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  overflow: auto;
+}
+
 /* 独立图表查看页（.mmd / .xmind）：纵向占满视口。 */
 .diagram-viewer-page {
   display: flex;
@@ -2387,30 +2743,12 @@ div.mxTooltip {
 
 /* ---------- 文件管理左侧目录树（FolderTreeNav，替代 Wiki 视图） ---------- */
 
-/* 左树 + 右文件区两栏等高（stretch）：整体高度自适应视口（预算与
-   team-workspace 一致的 180px，减小底部空隙），整页不被最长列撑高；
-   min-height 定值（480px）保证内容少时两栏也撑住等高；文件区与树各自
-   内部滚动（团队空间内在 team-workspace-main 内再嵌一层，同规则生效）。 */
-.files-tree-layout {
-  display: flex;
-  gap: 12px;
-  align-items: stretch;
-  max-height: calc(100vh - 180px);
-  min-height: 480px;
-}
+/* 布局骨架（.files-tree-layout/.files-tree-main/.workspace-aside 三栏 grid）
+   已上移至「团队空间」节统一维护：个人空间与团队空间同一布局组件。 */
 
-.files-tree-main {
-  flex: 1;
-  min-width: 0;
-  min-height: 0;
-  overflow: auto;
-}
-
-/* 目录树：240px 宽、与右侧文件区等高（stretch 拉伸），超高时内部滚动；
+/* 目录树：240px 宽、grid 拉伸填满列高，超高时内部滚动；
    行 min-width:max-content 支持横向滚动查看长文件名。 */
 .folder-tree-nav {
-  width: 240px;
-  flex: 0 0 240px;
   max-height: 100%;
   overflow: auto;
   background: var(--surface);
@@ -2511,6 +2849,12 @@ div.mxTooltip {
   background: var(--surface-2);
 }
 
+/* 确认空目录的「·」占位（caretStateOf='empty'）：极淡展示但保持可点击
+   （点击强制重载，数据变化后可恢复——杜绝死状态）。 */
+.folder-tree-caret.caret-empty {
+  opacity: 0.45;
+}
+
 .folder-tree-name {
   flex: 1;
   min-width: 0;
@@ -2533,21 +2877,36 @@ div.mxTooltip {
 }
 
 @media (max-width: 860px) {
+  /* 文件页解除视口锁定：随页面自然滚动，三栏退化为纵向堆叠。 */
+  .page.files-page {
+    height: auto;
+    min-height: calc(100vh - var(--topbar-h));
+    overflow: visible;
+  }
+
   .files-tree-layout {
-    flex-direction: column;
-    max-height: none;
-    min-height: 0;
+    grid-template-columns: 1fr;
+    grid-template-rows: none;
+  }
+
+  .files-tree-layout.has-aside {
+    grid-template-columns: 1fr;
+    grid-template-rows: none;
   }
 
   .files-tree-main {
-    overflow: visible;
+    display: block;
+    min-height: 480px;
   }
 
   .folder-tree-nav {
     position: static;
-    width: 100%;
-    flex: none;
     max-height: 200px;
+  }
+
+  .files-tree-layout.has-aside .workspace-aside {
+    grid-column: auto;
+    max-height: none;
   }
 }
 
@@ -2633,7 +2992,7 @@ kbd {
   border-bottom-width: 2px;
   background: var(--surface-2);
   color: var(--text);
-  font-family: ui-monospace, Consolas, 'Courier New', monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   text-align: center;
   line-height: 1.4;
@@ -2781,7 +3140,7 @@ kbd {
 }
 
 .acl-uuid {
-  font-family: ui-monospace, Consolas, 'Courier New', monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   min-width: 0;
 }
@@ -2804,6 +3163,12 @@ kbd {
   margin-top: 12px;
   padding-top: 12px;
   border-top: 1px solid var(--border);
+}
+
+/* ACL 主体选择（v1.6 搜索化）：Select 撑满主体列。 */
+.acl-add .acl-subject-select {
+  width: 100%;
+  min-width: 160px;
 }
 
 @media (max-width: 720px) {
@@ -2856,17 +3221,6 @@ kbd {
 }
 
 /* ---------- 目录分享树（/s/:token type=folder） ---------- */
-
-.share-card-wide {
-  max-width: 1080px;
-}
-
-.share-tree-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 12px;
-}
 
 .share-site-box {
   border: 1px solid var(--border);
@@ -2972,12 +3326,12 @@ kbd {
 
 /* ---------- 富文本编辑器（Tiptap v2，.rich-text-*） ---------- */
 
-/* 编辑器整体：独立窗口编辑页内占满剩余高度。 */
+/* 编辑器整体：独立窗口编辑页内占满剩余高度（页面根已锁定 100vh 定高）。 */
 .rich-text-wrap {
   display: flex;
   flex-direction: column;
   flex: 1;
-  min-height: calc(100vh - 130px);
+  min-height: 0;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface);
@@ -3019,10 +3373,10 @@ kbd {
   border-right: 0;
 }
 
-/* 工具栏按钮（antd text Button）：图标灰阶、激活态主色高亮。 */
+/* 工具栏按钮（antd text Button size=small）：图标灰阶、激活态主色高亮；
+   内边距/高度走 antd small 原生，仅做宽度保底与配色。 */
 .rich-text-tbtn.ant-btn {
   min-width: 30px;
-  padding: 3px 8px;
   color: var(--muted);
 }
 
@@ -3110,8 +3464,17 @@ kbd {
   padding: 1px 5px;
   border-radius: 4px;
   background: var(--surface-2);
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 0.9em;
+}
+
+/* 高亮 mark（Highlight 扩展，markdown ==…==）：主题感知淡琥珀底，深浅两套
+   均保持正文色可读（不沿用浏览器默认 mark 的纯黄底黑字）。 */
+.rich-text-content mark {
+  padding: 0 2px;
+  border-radius: 3px;
+  background: color-mix(in srgb, #f59e0b 32%, transparent);
+  color: inherit;
 }
 
 .rich-text-content pre {
@@ -3362,15 +3725,9 @@ kbd {
   gap: 8px;
 }
 
-.rich-text-picker-toolbar select {
-  flex-shrink: 0;
-  max-width: 40%;
-}
-
-.rich-text-picker-toolbar input {
-  flex: 1;
-  min-width: 120px;
-}
+/* 工具栏已 antd 化：范围下拉不压缩、搜索输入弹性撑满（仅组件根，> 锁定）。 */
+.rich-text-picker-toolbar .ant-select { flex-shrink: 0; max-width: 40%; }
+.rich-text-picker-toolbar > .ant-input-affix-wrapper { flex: 1; min-width: 120px; }
 
 .rich-text-picker-list {
   flex: 1;
@@ -3512,79 +3869,65 @@ kbd {
   color: #e45649;
 }
 
-/* ---------- 打开方式（条目菜单子菜单 + 管理弹窗） ---------- */
+/* ---------- 打开方式（右键/树节点菜单「打开方式 >」二级分组） ---------- */
 
-.openwith-group {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 4px 0;
-  border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-  margin: 2px 0;
+/* 设置页「打开方式」表格：下拉与操作列紧凑排布。 */
+.openwith-table td {
+  padding: 6px 10px;
+  vertical-align: middle;
 }
 
-.ctx-menu-label {
-  padding: 4px 8px 2px;
+.openwith-table code {
+  font-family: var(--font-mono);
+  color: var(--muted);
+}
+
+/* 用户覆盖行高亮标注（内置默认行无标记；改回内置值行自动恢复普通态）。 */
+.openwith-table tr.openwith-overridden td {
+  background: color-mix(in srgb, var(--primary) 8%, transparent);
+}
+
+.openwith-table .openwith-badge {
+  background: color-mix(in srgb, var(--primary) 22%, transparent);
+  color: var(--primary);
+  border-radius: 999px;
+  padding: 1px 8px;
   font-size: 11px;
-  color: var(--muted);
+  white-space: nowrap;
 }
 
-.openwith-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
+/* ---------- 目录选择器弹窗（复制/移动目标，DirPickerModal） ---------- */
 
-.openwith-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  flex-shrink: 0;
-  background: transparent;
-  border: 1px solid var(--muted);
-}
-
-.openwith-dot.on {
-  background: var(--primary);
-  border-color: var(--primary);
-}
-
-.openwith-mgr {
+.dir-picker {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  max-height: 46vh;
-  overflow-y: auto;
+  padding: 4px 2px;
 }
 
-.openwith-mgr-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
+/* 目标空间切换（v1.6 跨空间复制/移动）。 */
+.dir-picker .dir-picker-space {
+  margin: 0;
 }
 
-.openwith-mgr-row select {
-  flex: 1;
+.dir-picker .dir-picker-space .ant-select {
+  width: 100%;
 }
 
-.openwith-mgr-ext {
-  min-width: 80px;
-  font-family: ui-monospace, Consolas, 'Courier New', monospace;
-  color: var(--muted);
+.dir-picker-tree {
+  max-height: min(420px, 52vh);
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px;
+  background: var(--bg);
 }
 
-/* 新增偏好行：输入框与列表扩展名列同宽对齐，顶部细分隔与已配置项区分。 */
-.openwith-mgr-add {
-  margin-top: 4px;
-  padding-top: 10px;
-  border-top: 1px dashed var(--border);
-}
-
-.openwith-mgr-ext-input {
-  min-width: 80px;
-  width: 90px;
-  font-family: ui-monospace, Consolas, 'Courier New', monospace;
+.dir-picker-path {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ---------- 目录上传结果 banner（成功/失败明细 + 关闭） ---------- */
@@ -3622,88 +3965,184 @@ kbd {
 }
 
 /* ==========================================================================
-   antd 迁移适配层（第一阶段：antd 6 + CSS 变量模式）
+   antd 迁移适配层（antd 6 + CSS 变量模式）
    - antd 弹层挂 body，明暗与底色由 ConfigProvider token（对齐本文件 :root
-     变量，见 main.tsx PALETTE）驱动；本节只做布局/间距/优先级对齐，不改配色；
-   - 第二阶段起 .btn / .modal / .data-table 等自写控件样式已全部退役
-     （各使用点换 antd 对应组件），遗留排版类见各节注释；
-   - 存量标签选择器（.field input、.field span 等）会命中 antd 控件内部
-     元素，以下做隔离重置，antd 组件恢复自身默认外观。
+     变量，见 main.tsx PALETTE）驱动；本节只做布局/间距/尺寸对齐，不改配色；
+   - 原生 input/select/textarea 全局标签选择器已在表单节整体退役（它们命中
+     antd 控件内部元素造成「双层边框+内部灰底」，亦即 Select/Input 观感异常
+     的共因），antd 控件一律使用其原生外观（颜色随 --ant-* 变量走明暗主题）；
+   - .btn/.modal/.data-table/.form-control 等自写控件样式已全部退役，
+     遗留排版类见各节注释。
    ========================================================================== */
 
-/* ---------- 存量表单样式隔离：antd Input / Select / Segmented ---------- */
-/* 裸 Input（root 即 input.ant-input）：撤销 .field input / .share-link input
-   等标签选择器的覆盖，恢复 antd 默认（颜色用 antd CSS 变量，随明暗/accent）。 */
-.field input.ant-input,
-.share-link input.ant-input,
-.chip-input input.ant-input,
-.tag-create input.ant-input,
-.login-card input.ant-input {
-  padding: 4px 11px;
-  background: var(--ant-color-bg-container, var(--bg));
-  border: 1px solid var(--ant-color-border, var(--border));
-  border-radius: 6px;
-  color: var(--ant-color-text, var(--text));
-  font: inherit;
-  font-size: 14px;
-  width: 100%;
-  box-shadow: none;
-}
-
-/* allowClear 等 affix 包裹形态：内部 input 须透明无边框，由 wrapper 提供外观。 */
-.ant-input-affix-wrapper > input.ant-input,
-.ant-input-number-affix-wrapper > input.ant-input-number-input {
-  background: transparent;
-  border: 0;
-  border-radius: 0;
-  padding: 0;
-  color: var(--ant-color-text, var(--text));
-  font: inherit;
-  font-size: 14px;
-  box-shadow: none;
-}
-
-/* .field span（label 小字）不得波及 antd 控件内部 span（清空按钮/箭头等）。 */
-.field .ant-input-affix-wrapper span,
-.field .ant-select span,
-.field .ant-segmented span,
-.field .ant-input-password span,
-.chip-input span,
-.tag-create .ant-input-affix-wrapper span {
-  display: inline;
-  margin: 0;
-  color: inherit;
-  font-size: inherit;
-}
-
-/* Select 占位文字恢复 antd 灰阶（上一条 blanket 覆盖）。 */
-.field .ant-select .ant-select-selection-placeholder {
-  color: var(--ant-color-text-placeholder, var(--muted));
-}
-
-/* flex 行内 antd 输入撑满（对齐原 input { flex: 1 } 语义）。 */
-.chip-input .ant-input-affix-wrapper,
-.tag-create .ant-input-affix-wrapper,
-.tag-create input.ant-input,
-.share-link .ant-input-affix-wrapper,
-.share-link input.ant-input,
-.openwith-mgr-row .ant-select {
+/* ---------- 布局对齐：flex 行内 antd 输入/下拉撑满（对齐原 input{flex:1}） ----------
+   只作用于组件根节点（子代组合器 > 锁定直接子元素，绝不命中 affix wrapper
+   内部的 input/suffix——内部结构一律交给 antd 原生样式）。 */
+.chip-input > .ant-input-affix-wrapper,
+.chip-input > input.ant-input,
+.tag-create > .ant-input-affix-wrapper,
+.tag-create > input.ant-input,
+.share-link > .ant-input-affix-wrapper,
+.share-link > input.ant-input {
   flex: 1;
   min-width: 0;
 }
 
-/* ---------- 文件页工具带（antd Select / Input 尺寸对齐 34px） ---------- */
-.filter-item .ant-select.filter-select { min-width: 112px; }
-.filter-item .ant-select,
-.filter-item .ant-input-affix-wrapper,
-.filter-item input.ant-input { height: 34px; font-size: 13px; }
-.filter-item.directory-search .ant-input-affix-wrapper { width: 220px; }
-.openwith-mgr-select { flex: 1; min-width: 120px; }
-.openwith-mgr-ext-input { min-width: 140px; }
+/* PAT scope 输入（chip-input）保持等宽字体（原 .chip-input input 字体规则）。 */
+.chip-input > .ant-input-affix-wrapper,
+.chip-input > input.ant-input {
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
 
-/* ---------- 空间切换行（antd Select 对齐 34px 高） ---------- */
-.space-switcher .ant-select.space-select { width: min(260px, 100%); }
-.space-switcher .ant-select.space-view-select { width: auto; min-width: 104px; }
+/* ---------- 文件页顶栏（antd Select / Input 尺寸） ----------
+   v1.5：删除对 antd 输入类的 height 拉高 hack（历史 34px 造成光标偏下）——
+   统一 antd 原生 size="small"（24px）+ .toolbar-mini 字号收敛（见布局节）；
+   此处仅保留宽度约束：目录搜索 min(220px)、标签下拉 min-width 88px。 */
+.filter-item .ant-select.filter-select { min-width: 88px; }
+.filter-item.directory-search .ant-input-affix-wrapper { width: min(220px, 30vw); }
+
+/* 窄屏搜索收窄（v1.6 单行工具栏）：<1280px 隐藏常驻搜索框、显示图标按钮
+   （Popover 展开，见 FileBrowser toolbar），缓解单行拥挤。 */
+.toolbar-search-narrow { display: none; min-width: 28px; padding: 0; justify-content: center; align-items: center; }
+@media (max-width: 1279px) {
+  .files-toolbar .filter-item.directory-search { display: none; }
+  .files-toolbar .toolbar-search-narrow { display: inline-flex; }
+}
+
+/* ---------- 条目属性弹窗（右键菜单「属性」）：两列键值行 ---------- */
+.props-list { display: flex; flex-direction: column; gap: 8px; }
+.props-row { display: grid; grid-template-columns: 84px 1fr; gap: 12px; align-items: baseline; }
+.props-row > .muted { font-size: 13px; }
+.props-value { word-break: break-all; }
+.props-value.props-id { font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
+
+/* ---------- 空间切换控件组（顶栏最左）的宽度约束 ---------- */
+.space-switcher .ant-select.space-select { width: min(200px, 28vw); }
+
+/* ---------- 浮层菜单统一 Win11 紧凑规格（全局，v1.6） ----------
+   口径：所有挂 body 的菜单类浮层——antd Dropdown 面板、右键/树节点 Menu 的
+   二级 popup（vertical 模式的 submenu 是独立弹层，不在 .ctx-antd-menu 子树
+   内，必须走全局选择器才能命中）——与一级右键菜单（.ctx-menu）完全同视觉：
+   容器亚克力（半透明 surface + backdrop 模糊 + 1px 边框 + 8px 圆角 + 投影，
+   padding 4px）；条目行高 30 / 字号 13 / padding-inline 10 / 条目圆角 5px /
+   分隔线 margin 4px 8px。antd v6 内部规则经 :where() 零特异性，类选择器
+   直接生效。Select 下拉面板容器同步亚克力（条目保持 28px 紧凑规格）。 */
+
+/* 容器浮层外观（Dropdown 菜单 / Menu 二级 popup / Select 下拉）。 */
+.ant-dropdown > .ant-dropdown-menu,
+.ant-menu-submenu-popup.ant-menu,
+.ant-select-dropdown {
+  padding: 4px;
+  background: color-mix(in srgb, var(--surface) 86%, transparent);
+  backdrop-filter: blur(14px) saturate(1.2);
+  -webkit-backdrop-filter: blur(14px) saturate(1.2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+:root[data-mode='light'] .ant-dropdown > .ant-dropdown-menu,
+:root[data-mode='light'] .ant-menu-submenu-popup.ant-menu,
+:root[data-mode='light'] .ant-select-dropdown { box-shadow: 0 8px 24px rgba(24, 30, 42, 0.16); }
+/* Menu 二级 popup 根元素自身即 ant-menu：去 antd 实底（colorBgElevated）与
+   内建投影，统一透明条目 + 上面的亚克力容器。 */
+.ant-menu-submenu-popup.ant-menu .ant-menu-item { background-color: transparent; }
+
+/* 条目紧凑规格（一级右键 .ctx-antd-menu 与全部嵌套弹层同一份规则）。 */
+.ant-dropdown .ant-dropdown-menu-item,
+.ant-dropdown .ant-menu-item,
+.ant-menu-submenu-popup.ant-menu .ant-menu-item,
+.ctx-antd-menu.ant-menu .ant-menu-item {
+  margin: 1px 0;
+  width: 100%;
+  height: 30px;
+  line-height: 30px;
+  padding-inline: 10px;
+  border-radius: 5px;
+  font-size: 13px;
+}
+/* 分组内条目（「打开方式 >」弹层的查看/编辑组）：antd 专属分组规则
+   `.ant-menu-item-group .ant-menu-item-group-list .ant-menu-item` 以
+   padding-inline: calc(fontSize*2) padding（26px/16px）+ 4 类特异性压过上面
+   3 类紧凑规则——二级条目内边距与一级不一致的根因，须更高特异性覆盖。 */
+.ant-dropdown .ant-menu-item-group .ant-menu-item-group-list .ant-menu-item,
+.ant-dropdown .ant-menu-item-group .ant-menu-item-group-list .ant-menu-submenu .ant-menu-submenu-title,
+.ant-menu-submenu-popup.ant-menu .ant-menu-item-group .ant-menu-item-group-list .ant-menu-item,
+.ant-menu-submenu-popup.ant-menu .ant-menu-item-group .ant-menu-item-group-list .ant-menu-submenu .ant-menu-submenu-title,
+.ctx-antd-menu.ant-menu .ant-menu-item-group .ant-menu-item-group-list .ant-menu-item,
+.ctx-antd-menu.ant-menu .ant-menu-item-group .ant-menu-item-group-list .ant-menu-submenu .ant-menu-submenu-title {
+  padding-inline: 10px;
+}
+.ant-dropdown .ant-menu-item .ant-menu-title-content,
+.ant-menu-submenu-popup.ant-menu .ant-menu-item .ant-menu-title-content,
+.ctx-antd-menu.ant-menu .ant-menu-item .ant-menu-title-content { line-height: inherit; }
+
+/* 子菜单标题（「打开方式 >」等）与条目同规格。 */
+.ant-dropdown .ant-menu-submenu .ant-menu-submenu-title,
+.ant-menu-submenu-popup.ant-menu .ant-menu-submenu .ant-menu-submenu-title,
+.ctx-antd-menu.ant-menu .ant-menu-submenu .ant-menu-submenu-title {
+  margin: 1px 0;
+  height: 30px;
+  line-height: 30px;
+  padding-inline: 10px;
+  border-radius: 5px;
+  font-size: 13px;
+}
+
+/* 分组标题 / 分隔线（弹层内嵌分组，如打开方式的查看/编辑组）。 */
+.ant-dropdown .ant-menu-item-group-title,
+.ant-menu-submenu-popup.ant-menu .ant-menu-item-group-title,
+.ctx-antd-menu.ant-menu .ant-menu-item-group-title {
+  padding: 3px 10px 1px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.ant-dropdown .ant-dropdown-menu-item-divider,
+.ant-dropdown .ant-menu-item-divider,
+.ant-menu-submenu-popup.ant-menu .ant-menu-item-divider,
+.ctx-antd-menu.ant-menu .ant-menu-item-divider { margin: 4px 8px; }
+
+/* Select 下拉条目（28px 紧凑，与顶栏 mini 控件一致；容器已上面板化）。 */
+.ant-select-dropdown .ant-select-item {
+  min-height: 28px;
+  padding: 3px 8px;
+  font-size: 13px;
+}
+
+/* ---------- 回收站弹窗（TrashModal）：顶部工具行（范围/刷新/清空）。 */
+.trash-modal .trash-modal-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.trash-modal .trash-modal-toolbar .toolbar-spacer { flex: 1 1 auto; }
+
+/* ---------- SMTP 设置表单（管理页邮件分区）：两列自适应网格。 */
+.smtp-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 0 20px;
+  align-items: start;
+}
+
+/* ---------- 面包屑前置返回箭头（团队空间「← 返回团队列表」）。 */
+.crumb-back {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin-right: 4px;
+  border-radius: 4px;
+  color: var(--muted);
+}
+
+.crumb-back:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
 
 /* ---------- 通知面板（antd Popover 内嵌：去原 absolute 定位与浮层外观） ---------- */
 .notif-panel-popover {
@@ -3714,57 +4153,61 @@ kbd {
   border: 0;
   box-shadow: none;
 }
-.ant-popover .notif-list { max-height: 320px; }
+.notif-panel-popover .notif-list { max-height: 320px; }
 
 /* ---------- 顶栏用户菜单（antd Button 内嵌 avatar） ---------- */
 .user-menu-trigger.ant-btn { display: inline-flex; align-items: center; gap: 8px; }
 
-/* ---------- antd Modal 薄封装（FileBrowser Modal，对齐旧 .modal 视觉） ---------- */
-.ant-modal.docflow-modal .ant-modal-content {
-  padding: 18px 20px 20px;
-  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.4);
-  max-height: calc(94vh - 32px);
-  overflow: auto;
-}
-.ant-modal.docflow-modal .ant-modal-header {
-  flex: 1;
-  min-width: 0;
-  margin-bottom: 14px;
-  padding: 0;
-  background: transparent;
-}
-.ant-modal.docflow-modal .ant-modal-title {
+/* ---------- antd Modal 薄封装（统一弹窗尺寸体系，width/body 高度见 FileBrowser） ----------
+   antd 6 起不再命中 antd 内部 DOM（.ant-modal-content 等历史选择器已随
+   v6 类名改版失效，随迁移清理）：容器/头部/标题原生样式走 token，body 的
+   overflow/maxHeight/定高由 Modal 封装的 styles prop 官方通道注入；仅剩的
+   少量布局定制经官方 classNames prop 注入自有类（.docflow-modal-*）落地。 */
+.docflow-modal .docflow-modal-header { margin-bottom: 14px; }
+.docflow-modal .docflow-modal-title {
   display: flex;
   align-items: center;
   gap: 8px;
   font-size: 15px;
   line-height: 1.4;
 }
-.ant-modal.docflow-modal .ant-modal-body { padding: 0; display: flex; flex-direction: column; }
-.ant-modal.docflow-modal .ant-modal-close { color: var(--muted); }
+/* body：内容区自身为纵向 flex（内部滚动由 Modal styles prop 统一注入：
+   普通弹窗 maxHeight=calc(94vh-160px)，查看弹窗定高 min(76vh,760px)——
+   内嵌查看器高度链自此完整）。 */
+.docflow-modal .docflow-modal-body { padding: 0; flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: auto; }
+/* 关闭按钮：muted 色随明暗主题（CSS 变量主题适配）。 */
+.docflow-modal .docflow-modal-close { color: var(--muted); }
 .docflow-modal-title-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
 .docflow-modal-title-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .docflow-modal-head-extra { display: flex; align-items: center; gap: 6px; flex-shrink: 0; margin-right: 22px; }
 
-/* 查看弹窗（modal-viewer）：加宽成准全屏（同旧 .modal-viewer 口径，覆盖内联 width）。 */
-.ant-modal.docflow-modal.modal-viewer { width: min(1280px, 96vw) !important; max-width: 96vw; }
-.ant-modal.docflow-modal.modal-viewer .ant-modal-title { font-size: 13px; font-weight: 600; }
+/* 查看弹窗（modal-viewer）标题：字号缩小（宽度/高度由 Modal 封装层注入）。 */
+.docflow-modal.modal-viewer .docflow-modal-title { font-size: 13px; font-weight: 600; }
 
-/* ---------- 右键 / 卡片「⋯」菜单：容器保留 fixed/absolute 定位，面板换 antd Menu ----------
-   .ctx-menu 原与 .file-card-menu 组合取样式，现独立补齐浮层外观；Menu 透明化。 */
+/* ---------- 右键 / 卡片「⋯」菜单：Win11 风格（容器保留 fixed/absolute 定位） ----------
+   .ctx-menu 与 .file-card-menu 提供一级浮层外观：圆角 8px、亚克力感（半透明
+   surface + backdrop 模糊 + 1px 边框 + 投影）；antd Menu 透明化。条目紧凑
+   规格（行高 30 / 13px / padding-inline 10 / 圆角 5px / 分隔线 4px 8px）已
+   上移至「浮层菜单统一 Win11 紧凑规格」节与全部嵌套弹层（Dropdown、二级
+   popup）共用同一份规则——一级二级完全同视觉；危险项红色文字、hover 淡红
+   背景（antd danger 由 rowActions 内按钮自带，菜单行以 .ctx-item-danger
+   标注）。 */
 .ctx-menu {
   padding: 4px;
-  background: var(--surface);
+  background: color-mix(in srgb, var(--surface) 86%, transparent);
+  backdrop-filter: blur(14px) saturate(1.2);
+  -webkit-backdrop-filter: blur(14px) saturate(1.2);
   border: 1px solid var(--border);
   border-radius: 8px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
 }
 :root[data-mode='light'] .ctx-menu { box-shadow: 0 8px 24px rgba(24, 30, 42, 0.16); }
 .file-card-menu { padding: 4px; }
-.ctx-antd-menu.ant-menu { background: transparent; border-inline-end: 0; }
-.ctx-antd-menu .ant-menu-item { margin-inline: 0; width: 100%; border-radius: 5px; }
-.ctx-antd-menu .ant-menu-item-group-title { padding: 3px 8px; font-size: 11px; color: var(--muted); }
-.ctx-antd-menu .ant-menu-item-divider { margin: 4px 8px; }
+.ctx-antd-menu.ant-menu { background: transparent; border-inline-end: 0; font-size: 13px; }
+/* 危险项（如后续「删除」直挂菜单时）：红色文字，仅 hover 淡红背景。 */
+.ctx-antd-menu.ant-menu .ant-menu-item.ctx-item-danger,
+.ctx-antd-menu.ant-menu .ctx-item-danger > .ant-menu-title-content { color: #e45649; }
+.ctx-antd-menu.ant-menu .ant-menu-item.ctx-item-danger:hover { color: #e45649; background: rgba(228, 86, 73, 0.12); }
 /* 右键菜单内嵌调用方操作按钮组（rowActions）。 */
 .ctx-antd-menu .row-actions-group { display: flex; flex-wrap: wrap; gap: 6px; }
 
@@ -3773,61 +4216,34 @@ kbd {
 .files-toolbar .ant-btn-group,
 .create-menu-wrap { display: inline-flex; }
 
-/* ---------- 登录系列页（antd Button/Input） ---------- */
+/* ---------- 登录系列页（antd Button/Input） ----------
+   antd 输入框宽度走原生（affix-wrapper/input 默认即 100%），不做覆盖。 */
 .login-card .login-submit { margin-top: 4px; }
 .login-link-btn { color: inherit; text-decoration: none; }
-.login-card .ant-input-affix-wrapper,
-.login-card input.ant-input { width: 100%; }
 
 /* ==========================================================================
-   antd 迁移适配层（第二阶段：AdminPage Table/Form + 编辑器周边 + 富文本工具栏）
+   antd 迁移适配层（第二阶段：AdminPage Table/Form + 编辑器周边）
    ========================================================================== */
 
-/* InputNumber 内部输入：撤销全局 input 标签选择器覆盖（wrapper 提供外观）。 */
-.ant-input-number .ant-input-number-input {
-  background: transparent;
-  border: 0;
-  border-radius: 0;
-  padding: 0;
-  color: var(--ant-color-text, var(--text));
-  font: inherit;
-  font-size: 14px;
-  box-shadow: none;
-}
-
-/* 管理设置行内编辑（.setting-edit 直挂 antd Input，无 .field 容器）：
-   撤销标签选择器覆盖并给等宽感宽度（与旧 input { width: 200px } 对齐）。 */
-.setting-edit input.ant-input {
-  padding: 4px 11px;
-  background: var(--ant-color-bg-container, var(--bg));
-  border: 1px solid var(--ant-color-border, var(--border));
-  border-radius: 6px;
-  color: var(--ant-color-text, var(--text));
-  font: inherit;
-  font-size: 14px;
-  box-shadow: none;
-}
+/* 行内编辑（.setting-edit）：antd Input/InputNumber 等宽 200px（与旧口径一致）。
+   仅组件根（affix-wrapper / InputNumber 本体）；裸 Input 根在表单 field 中走
+   antd 原生 100% 宽。 */
+.setting-edit .ant-input-affix-wrapper,
 .setting-edit .ant-input-number { width: 200px; }
 
-/* 审计筛选行（.audit-filters flex 布局下 antd 控件撑满 / 按钮不拉伸）；
-   裸 Input 同时撤销全局 input 标签选择器覆盖（恢复 antd 默认外观）。 */
-.audit-filters .ant-input-affix-wrapper,
-.audit-filters input.ant-input { flex: 1 1 160px; min-width: 140px; width: auto; }
-.audit-filters input.ant-input {
-  padding: 4px 11px;
-  background: var(--ant-color-bg-container, var(--bg));
-  border: 1px solid var(--ant-color-border, var(--border));
-  border-radius: 6px;
-  color: var(--ant-color-text, var(--text));
-  font: inherit;
-  font-size: 14px;
-  box-shadow: none;
-}
+/* 审计筛选行（.audit-filters flex 布局下 antd 控件撑满 / 按钮不拉伸）。
+   筛选 Input 均带 allowClear（根即 affix-wrapper，直接子元素）。 */
+.audit-filters > .ant-input-affix-wrapper { flex: 1 1 160px; min-width: 140px; width: auto; }
 .audit-filters .ant-select { flex: 1 1 140px; min-width: 120px; }
 .audit-filters .ant-btn { flex: 0 0 auto; }
+/* datetime-local 原生控件内容盒高于文本输入（23 vs 21px）：flex 默认 stretch 会
+   把同行全部 affix 输入拉到 26px、与 24px 按钮不齐（行内 align-items:center
+   已阻断拉伸）。此处将 datetime 内盒限高对齐 small 输入的 21px 内容高，
+   wrapper 恢复 24px——UA 内建高度不受 antd 管控，唯一需局部适配的场景。 */
+.audit-filters input[type='datetime-local'] { height: 21px; line-height: 21px; }
 
-/* 管理面板内 antd Table：字号/密度对齐面板风格（面板底色上表格透明）。 */
-.setting-group .ant-table.ant-table-middle { font-size: 13px; }
+/* 管理面板内 antd Table：字号随全局 fontSize token（13px），表格密度随
+   componentSize=small（v1.7 起管理页 Table 不再单独声明 size）。 */
 
 /* TLS 证书上传区原生 file input 与 antd 按钮行的间距。 */
 .tls-cert-upload .ant-btn { align-self: flex-start; }

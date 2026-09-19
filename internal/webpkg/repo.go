@@ -25,6 +25,10 @@ type Repo interface {
 	// 时置 extracting（并清空原因/计数），返回是否生效；false 表示他人解包
 	// 进行中（0 行受影响），调用方应直接返回。
 	TryMarkExtracting(fileID uuid.UUID) (bool, error)
+	// ReadyFileIDs 批量返回 ids 中已成功解包（status=ready——Extract 校验
+	// 保证 zip 含 index.html）的文件 ID 集合；列表侧据此给 zip 行打「网页」
+	// 标记。ids 为空时返回空集合。
+	ReadyFileIDs(ids []uuid.UUID) (map[uuid.UUID]bool, error)
 }
 
 // GormRepo 是 Repo 的 GORM/PostgreSQL 实现。
@@ -88,6 +92,22 @@ func (g *GormRepo) TryMarkExtracting(fileID uuid.UUID) (bool, error) {
 			"updated_at":  time.Now(),
 		})
 	return result.RowsAffected > 0, result.Error
+}
+
+// ReadyFileIDs 的 GORM 实现：单条 IN 查询 status=ready 的 file_id。
+func (g *GormRepo) ReadyFileIDs(ids []uuid.UUID) (map[uuid.UUID]bool, error) {
+	out := make(map[uuid.UUID]bool, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	var rows []Package
+	if err := g.db.Select("file_id").Where("file_id IN ? AND status = ?", ids, StatusReady).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		out[r.FileID] = true
+	}
+	return out, nil
 }
 
 // MemoryRepo 是 Repo 的内存实现（测试用）。
@@ -174,4 +194,17 @@ func (m *MemoryRepo) TryMarkExtracting(fileID uuid.UUID) (bool, error) {
 	p.UpdatedAt = time.Now()
 	m.items[id] = p
 	return true, nil
+}
+
+// ReadyFileIDs 的内存实现。
+func (m *MemoryRepo) ReadyFileIDs(ids []uuid.UUID) (map[uuid.UUID]bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make(map[uuid.UUID]bool, len(ids))
+	for _, id := range ids {
+		if pkgID, ok := m.byFile[id]; ok && m.items[pkgID].Status == StatusReady {
+			out[id] = true
+		}
+	}
+	return out, nil
 }
