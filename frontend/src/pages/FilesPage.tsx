@@ -108,7 +108,6 @@ export default function FilesPage() {
     if (spaceIdParam) return spaces.find((s) => s.id === spaceIdParam) ?? null
     return spaces.find((s) => s.is_default) ?? null
   }, [spaces, spaceIdParam])
-  const activeSpaceId = activeSpace?.id ?? spaceIdParam
   const myRole: SpaceRole | null = activeSpace?.my_role ?? null
   const meId = currentUserId()
   const isOwner = activeSpace !== null && meId !== null && activeSpace.owner_id === meId
@@ -451,16 +450,19 @@ export default function FilesPage() {
   })
 
   // 列表/建目录按空间分派：非默认空间走 /spaces/:id 端点；缺省走 /files
-  //（后端缺省即默认空间）。
+  //（后端缺省即默认空间）。v2.6 race 修复：分派依据 spaceIdParam（URL，
+  // 挂载时即确定）而非 activeSpace——后者经 listSpaces 异步加载，挂载瞬间
+  // 为 null 会走默认空间端点，加载完成后无重载（列表仍是默认空间内容，
+  // 再进目录即 folder not found）。
   const listItems = async (parentId: string | null, opts?: FileQueryOptions): Promise<DirListing> => {
-    if (activeSpace && !activeSpace.is_default) {
-      const res = await listSpaceFiles(activeSpace.id, parentId, opts)
+    if (spaceIdParam) {
+      const res = await listSpaceFiles(spaceIdParam, parentId, opts)
       return { items: res.files ?? [], folderId: res.parent_id }
     }
     return { items: await listFiles(parentId, opts), folderId: parentId }
   }
   const doCreateFolder = (name: string, parentId: string | null) =>
-    activeSpace && !activeSpace.is_default ? createSpaceFolder(activeSpace.id, name, parentId) : createFolder(name, parentId)
+    spaceIdParam ? createSpaceFolder(spaceIdParam, name, parentId) : createFolder(name, parentId)
 
   return (
     <div className="page wide-page files-page">
@@ -474,7 +476,17 @@ export default function FilesPage() {
       )}
 
       <FileBrowserWithTree
+        /* v2.6 空间切换刷新（bug 修复）：以空间为 key 重挂载浏览器+树。
+           此前 ?space= 变化只换 listItems 闭包，FileBrowser 首挂载后不再
+           load、FolderTreeNav 的 nodes/expanded 与面包屑 crumbs 均保留旧
+           空间内容（进旧目录 → folder not found）。key = URL space 参数
+           （缺省 '__default__'，spaces 异步加载不引起二次重挂载）。 */
+        key={spaceIdParam || '__default__'}
         rootLabel={activeSpace?.name ?? msg('teamsTitle')}
+        /* 面包屑根目录短名（v2.6）：默认/非默认空间统一「根目录」，完整
+           空间名由左侧空间切换器表达。 */
+        rootCrumbLabel={locale === 'zh-CN' ? '根目录' : 'root'}
+        treeRootLabel={activeSpace?.name ?? msg('teamsTitle')}
         reloadKey={reloadKey}
         toolbarPrefix={
           <>
@@ -514,9 +526,12 @@ export default function FilesPage() {
         createFolderFn={canWrite ? doCreateFolder : undefined}
         uploadFn={canWrite ? uploadFile : undefined}
         activeView={spaceView}
+        /* 树点击目录导航退出检索模式（标签/收藏/最近）时把工具栏视图切回
+           「全部」，保持 Segmented 高亮与中间列表一致。 */
+        onViewReset={() => setSpaceView('all')}
         copyFn={canWrite ? ((fileId, parentId) => copyFile(fileId, parentId)) : undefined}
         fileMetaFn={(fileId) => getFileMeta(fileId).catch(() => null)}
-        ns={activeSpaceId ? { type: 'space', scope: activeSpaceId } : undefined}
+        ns={spaceIdParam ? { type: 'space', scope: spaceIdParam } : undefined}
         /* 回收站入口在工具行左端（toolbarPrefix），弹窗本体经受控信号打开；
            隐藏 FileBrowser 工具行行尾的默认回收站按钮。 */
         hideToolbarTrash

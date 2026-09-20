@@ -334,6 +334,8 @@ export interface FileVersionSummary {
 
 export interface FileWithVersion extends FileItem {
   current_version: FileVersionSummary | null
+  /** 目录子树递归总大小（字节；v2.6 GET /files/:id 对目录附带，属性弹窗用）。 */
+  total_size?: number | null
 }
 
 /** GET /files/{id}/versions 的版本条目（按版本号倒序，内容不可变）。 */

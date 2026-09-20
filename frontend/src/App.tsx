@@ -1,6 +1,6 @@
 import { ReactElement, useEffect, useRef, useState } from 'react'
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
-import { Bell, ChevronDown, FileText, Folder, Palette, Search } from 'lucide-react'
+import { ArrowUpDown, Bell, ChevronDown, FileText, Folder, Palette, Search } from 'lucide-react'
 import { Badge, Button, Dropdown, Input, Popover, Segmented, Tooltip } from 'antd'
 import type { MenuProps } from 'antd'
 import {
@@ -20,10 +20,17 @@ import {
   updateMe,
   websocketToken,
 } from './api'
-import { formatTime, Modal } from './components/FileBrowser'
+import { formatQuota, formatTime, Modal } from './components/FileBrowser'
 import HotkeysHelp from './components/HotkeysHelp'
 import { OfflineBadge, UpdateToast } from './components/PwaStatus'
 import { useHotkeys } from './useHotkeys'
+import {
+  clearFinishedUploadTasks,
+  phaseText,
+  requestUploadCancel,
+  uploadPhaseActive,
+  useUploadTasks,
+} from './uploadTasks'
 import { THEME_ACCENTS, ThemeMode, loadTheme, saveTheme } from './theme'
 import LoginPage from './pages/LoginPage'
 import SsoPage from './pages/SsoPage'
@@ -194,6 +201,67 @@ function NotificationBell() {
 
 /** 检索输入防抖（毫秒）。 */
 const SEARCH_DEBOUNCE_MS = 400
+
+/**
+ * 顶栏「传输」入口（v2.6：上传任务从文件页工具栏上移）：进行中任务数
+ * Badge（完成转静默 = 无徽标），点击弹窗查看任务列表（可取消进行中 /
+ * 清空已完成）。任务状态在模块级 store（uploadTasks.ts），切页面/切
+ * 空间不丢；与「消息」通知铃铛并排。
+ */
+function UploadTasksBell() {
+  const tasks = useUploadTasks()
+  const [open, setOpen] = useState(false)
+  const activeCount = tasks.filter((r) => uploadPhaseActive(r.phase)).length
+  return (
+    <>
+      <Tooltip title={`传输任务${activeCount > 0 ? `（${activeCount} 个进行中）` : ''}`} mouseEnterDelay={0.5}>
+        <Button
+          type="text"
+          className="bell-btn"
+          aria-label={`传输任务（${activeCount} 个进行中）`}
+          onClick={() => setOpen(true)}
+        >
+          <Badge count={activeCount} size="small" offset={[2, -2]}>
+            <ArrowUpDown size={16} strokeWidth={2} aria-hidden="true" />
+          </Badge>
+        </Button>
+      </Tooltip>
+      {open && (
+        <Modal title="传输任务" onClose={() => setOpen(false)}>
+          {tasks.length === 0 ? (
+            <p className="hint">暂无传输任务。</p>
+          ) : (
+            <>
+              <div className="upload-list">
+                {tasks.map((row) => (
+                  <div key={row.key} className="upload-row">
+                    <span className="upload-name">{row.name}</span>
+                    <span className={`badge ${row.phase}`}>{phaseText[row.phase]}</span>
+                    {row.error && <span className="error-text">{row.error}</span>}
+                    {uploadPhaseActive(row.phase) && (
+                      <Button size="small" onClick={() => requestUploadCancel(row.key)}>
+                        取消
+                      </Button>
+                    )}
+                  </div>
+                ))}
+              </div>
+              <div className="modal-actions">
+                <Button
+                  disabled={activeCount === tasks.length}
+                  onClick={() => clearFinishedUploadTasks()}
+                >
+                  清空已完成
+                </Button>
+                <Button onClick={() => setOpen(false)}>关闭</Button>
+              </div>
+            </>
+          )}
+        </Modal>
+      )}
+    </>
+  )
+}
 
 /** 检索下拉面板的条数上限。 */
 const SEARCH_PANEL_LIMIT = 20
@@ -475,7 +543,7 @@ function ProfileInfoModal({ onClose }: { onClose: () => void }) {
             <div><dt>用户名</dt><dd>{me.username}</dd></div>
             <div><dt>账号 ID</dt><dd className="setting-value-mono" title={me.id}>{me.id}</dd></div>
             <div><dt>注册时间</dt><dd>{formatTime(me.created_at)}</dd></div>
-            <div><dt>存储用量</dt><dd>{me.storage.used} / {me.storage.quota} 字节（配额）</dd></div>
+            <div><dt>存储用量</dt><dd>{formatQuota(me.storage.used, false)} / {me.storage.quota > 0 ? formatQuota(me.storage.quota) : '不限'}（配额）</dd></div>
           </dl>
           {/* 资料编辑（原设置页「资料」tab 并入）。 */}
           <div className="profile-edit-fields">
@@ -549,11 +617,12 @@ function AppearanceQuickEntry({ locale }: { locale: 'zh-CN' | 'en-US' }) {
     window.addEventListener('docflow:theme', onTheme)
     return () => window.removeEventListener('docflow:theme', onTheme)
   }, [])
+  // v2.5 防漂移：update 一律基于 localStorage 现值合并（而非本地 state）——
+  // THEME_EVENT 监听的 setState 异步生效，快速跨入口连续操作时本地 state
+  // 可能仍是旧 accent，用它合并会把用户已选主题覆盖回旧值（主题自动漂移
+  // 的竞态根因）；本地 state 仅作 UI 展示（事件同步）。
   const update = (next: { accent?: typeof accent; mode?: ThemeMode }) => {
-    const merged = { accent, mode, ...next }
-    setAccent(merged.accent)
-    setMode(merged.mode)
-    saveTheme(merged)
+    saveTheme({ ...loadTheme(), ...next })
   }
   const switchLocale = (next: 'zh-CN' | 'en-US') => {
     saveLocale(next)
@@ -684,6 +753,8 @@ function TopBar() {
       </nav>
       <TopBarSearch />
       <OfflineBadge />
+      {/* 传输任务入口（v2.6：与「消息」通知并排；任务状态全局 store）。 */}
+      <UploadTasksBell />
       <NotificationBell />
       {/* 外观快捷入口（v2.2）：明暗 + accent 色板 + 语言（原独立语言按钮并入）。 */}
       <AppearanceQuickEntry locale={locale} />

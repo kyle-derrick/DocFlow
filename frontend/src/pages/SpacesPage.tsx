@@ -1,8 +1,8 @@
-import { FormEvent, useEffect, useState } from 'react'
+import { FormEvent, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { App as AntdApp, Button, Dropdown, Input, InputNumber, Space as AntdSpace, Tooltip } from 'antd'
+import { App as AntdApp, Button, Dropdown, Input, Space as AntdSpace, Tooltip } from 'antd'
 import type { MenuProps } from 'antd'
-import { MoreHorizontal } from 'lucide-react'
+import { MoreHorizontal, Search } from 'lucide-react'
 import {
   Space as SpaceType,
   SpaceRole,
@@ -13,6 +13,7 @@ import {
   updateSpaceQuota,
 } from '../api'
 import { Modal, formatQuota, formatTime } from '../components/FileBrowser'
+import QuotaInput from '../components/QuotaInput'
 import SpaceManageModal from '../components/SpaceManageModal'
 import type { SpaceManageTab } from '../components/SpaceManageModal'
 import { SpaceAvatar } from '../components/SpaceSwitcher'
@@ -36,8 +37,8 @@ const ROLE_TIP_KEYS: Record<SpaceRole, MessageKey> = {
   guest: 'roleGuestTip',
 }
 
-/** GiB → 字节。 */
-const GIB = 1 << 30
+/** 空间搜索防抖（毫秒）。 */
+const SEARCH_DEBOUNCE_MS = 250
 
 /**
  * 空间管理页（统一空间模型，顶部导航「空间」入口）：「新建空间」弹窗
@@ -61,9 +62,18 @@ export default function SpacesPage() {
   const [createOpen, setCreateOpen] = useState(false)
   const [name, setName] = useState('')
   const [desc, setDesc] = useState('')
-  const [quotaGib, setQuotaGib] = useState<number | null>(0)
+  // 配额为字节数（0=不限），经 QuotaInput（数值+单位，1024 进制）输入。
+  const [quotaBytes, setQuotaBytes] = useState(0)
   const [busy, setBusy] = useState(false)
   const [formError, setFormError] = useState('')
+
+  // 搜索过滤（v2.6：按名称/描述，250ms 防抖）。
+  const [search, setSearch] = useState('')
+  const [searchApplied, setSearchApplied] = useState('')
+  useEffect(() => {
+    const timer = window.setTimeout(() => setSearchApplied(search.trim().toLowerCase()), SEARCH_DEBOUNCE_MS)
+    return () => window.clearTimeout(timer)
+  }, [search])
 
   // 「空间管理」综合弹窗宿主空间（owner/admin）+ 初始 tab（解散入口直开设置 tab）。
   const [manageSpace, setManageSpace] = useState<SpaceType | null>(null)
@@ -89,6 +99,13 @@ export default function SpacesPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  /** 过滤后的空间列表（名称/描述包含命中，大小写不敏感）。 */
+  const visibleSpaces = useMemo(() => {
+    if (!searchApplied) return spaces
+    return spaces.filter((sp) =>
+      sp.name.toLowerCase().includes(searchApplied) || (sp.description ?? '').toLowerCase().includes(searchApplied))
+  }, [spaces, searchApplied])
+
   const handleCreate = async (e: FormEvent) => {
     e.preventDefault()
     const spaceName = name.trim()
@@ -98,11 +115,10 @@ export default function SpacesPage() {
     try {
       const created = await createSpace(spaceName, desc.trim())
       // 配额可选：>0 时创建后单独设置（0 = 不限，跳过）。
-      const gib = quotaGib ?? 0
-      if (gib > 0) await updateSpaceQuota(created.id, Math.round(gib * GIB))
+      if (quotaBytes > 0) await updateSpaceQuota(created.id, quotaBytes)
       setName('')
       setDesc('')
-      setQuotaGib(0)
+      setQuotaBytes(0)
       setCreateOpen(false)
       await load()
     } catch (err) {
@@ -136,8 +152,18 @@ export default function SpacesPage() {
       <div className="page-head">
         <h2>{msg('teamsTitle')}</h2>
         <div className="page-head-actions">
+          {/* 搜索过滤（v2.6：按名称/描述，250ms 防抖）。 */}
+          <Input
+            allowClear
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            prefix={<Search size={14} strokeWidth={2} aria-hidden="true" />}
+            placeholder={locale === 'zh-CN' ? '搜索空间（名称 / 描述）' : 'Search spaces (name / description)'}
+            aria-label={locale === 'zh-CN' ? '搜索空间' : 'Search spaces'}
+            style={{ width: 240 }}
+          />
           <Button type="text" onClick={() => void load()}>{msg('refresh')}</Button>
-          <Button type="primary" onClick={() => { setCreateOpen(true); setName(''); setDesc(''); setQuotaGib(0) }}>
+          <Button type="primary" onClick={() => { setCreateOpen(true); setName(''); setDesc(''); setQuotaBytes(0) }}>
             {msg('createTeamTitle')}
           </Button>
         </div>
@@ -148,21 +174,24 @@ export default function SpacesPage() {
       {!loading && !error && spaces.length === 0 && (
         <div className="empty">{msg('teamsEmpty')}</div>
       )}
+      {!loading && !error && spaces.length > 0 && visibleSpaces.length === 0 && (
+        <div className="empty">{locale === 'zh-CN' ? '没有匹配的空间' : 'No matching spaces'}</div>
+      )}
 
-      {!loading && !error && spaces.length > 0 && (
+      {!loading && !error && visibleSpaces.length > 0 && (
         <div className="team-grid">
-          {spaces.map((sp) => {
+          {visibleSpaces.map((sp) => {
             const isOwner = myId !== null && sp.owner_id === myId
             const role = sp.my_role ?? (isOwner ? 'owner' : 'member')
             const canManage = role === 'owner' || role === 'admin'
             const quota = sp.quota_bytes ?? 0
             const used = sp.storage_used ?? 0
             const pct = quota > 0 ? Math.min(100, Math.round((used / quota) * 100)) : 0
-            // 右上角「管理」SplitButton 的下拉项（v2.4）：主按钮=管理弹窗，
-            // 下拉只放危险项——解散（owner 非默认，直开管理弹窗设置 tab 危险区）
-            // / 离开（非 owner）。
+            // 右上角「管理」SplitButton 的下拉项（v2.4；v2.5 文案精简）：
+            // 主按钮=管理弹窗（「管理」），下拉只放危险项——解散（owner 非默认，
+            // 直开管理弹窗设置 tab 危险区）/ 离开（非 owner）。
             const menuItems: MenuProps['items'] = [
-              ...(isOwner && !sp.is_default ? [{ key: 'dissolve', label: msg('dissolveTeam'), danger: true }] : []),
+              ...(isOwner && !sp.is_default ? [{ key: 'dissolve', label: msg('dissolveShort'), danger: true }] : []),
               ...(!isOwner ? [{ key: 'leave', label: msg('leaveTeam'), danger: true }] : []),
             ]
             const onMenu: MenuProps['onClick'] = ({ key }) => {
@@ -204,7 +233,7 @@ export default function SpacesPage() {
                 <div className="team-card-actions-split" onClick={(e) => e.stopPropagation()}>
                   {canManage ? (
                     <AntdSpace.Compact size="small">
-                      <Button size="small" type="primary" onClick={() => openManage(sp)}>{msg('spaceManage')}</Button>
+                      <Button size="small" type="primary" title={msg('spaceManage')} onClick={() => openManage(sp)}>{msg('spaceManageShort')}</Button>
                       {menuItems.length > 0 && (
                         <Dropdown menu={{ items: menuItems, onClick: onMenu }} trigger={['click']} placement="bottomRight">
                           <Button size="small" type="primary" aria-label={locale === 'zh-CN' ? '更多操作' : 'More actions'}>
@@ -250,18 +279,10 @@ export default function SpacesPage() {
                 placeholder={locale === 'zh-CN' ? '空间用途说明' : 'What is this space for?'}
               />
             </label>
-            <label className="field">
-              <span>存储配额（GiB；0 = 不限，创建后可在空间设置中修改）</span>
-              <InputNumber
-                min={0}
-                step={1}
-                precision={0}
-                style={{ width: '100%' }}
-                value={quotaGib}
-                onChange={(v) => setQuotaGib(v === null || v === undefined ? 0 : v)}
-                placeholder="如：10 或 0"
-              />
-            </label>
+            <div className="field">
+              <span>{msg('quotaLabel')}（0 = 不限，创建后可在空间设置中修改）</span>
+              <QuotaInput value={quotaBytes} onChange={setQuotaBytes} />
+            </div>
             {formError && <div className="error-text">{formError}</div>}
             <div className="setting-control" style={{ marginTop: 8, justifyContent: 'flex-end' }}>
               <Button type="primary" htmlType="submit" disabled={busy || !name.trim()}>

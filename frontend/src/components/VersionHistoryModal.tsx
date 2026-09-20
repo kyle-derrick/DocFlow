@@ -20,7 +20,8 @@ import {
   uploadFileVersion,
 } from '../api'
 import { DiffResult, lineDiff } from '../diff'
-import { Modal, formatTime, phaseText } from './FileBrowser'
+import { Modal, formatQuota, formatTime } from './FileBrowser'
+import { phaseText } from '../uploadTasks'
 
 const statusText: Record<VersionStatus, string> = {
   created: '已创建',
@@ -31,11 +32,9 @@ const statusText: Record<VersionStatus, string> = {
   deleting: '待回收',
 }
 
+/** 字节数可读格式（v2.6 统一 formatQuota 口径：B→KiB/MiB/GiB/TiB）。 */
 export function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
+  return formatQuota(bytes, false)
 }
 
 /** 写操作错误文案：403 统一为「无写权限」（guest 等），其余透传后端消息。 */

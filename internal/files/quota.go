@@ -114,6 +114,12 @@ func (s *Store) subtreeBytes(root uuid.UUID) (int64, error) {
 	return out, err
 }
 
+// FolderSubtreeBytes 返回目录子树内全部未软删文件当前版本的字节合计
+// （GET /files/:id 的 total_size 字段，属性弹窗「递归总大小」用）。
+func (s *Store) FolderSubtreeBytes(root uuid.UUID) (int64, error) {
+	return s.subtreeBytes(root)
+}
+
 // fileSize 返回文件当前版本字节（无当前版本为 0；单文件复制的配额校验用）。
 func (s *Store) fileSize(id uuid.UUID) int64 {
 	var size int64

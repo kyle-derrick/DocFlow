@@ -5,8 +5,10 @@
 // 「设置」页（admin 可见）；邀请管理并入「人员与组」右上角弹窗。
 import { FormEvent, Key, useEffect, useMemo, useState } from 'react'
 import { NavLink, Navigate, useNavigate, useParams } from 'react-router-dom'
-import { App as AntdApp, Button, Card, Checkbox, Input, InputNumber, Segmented, Select, Table, Tag } from 'antd'
+import { App as AntdApp, Button, Card, Checkbox, Input, InputNumber, Menu, Segmented, Select, Table, Tag } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
+import type { MenuProps } from 'antd'
+import { Edit3, Trash2, Users } from 'lucide-react'
 import {
   AdminStats,
   AdminSpaceItem,
@@ -51,6 +53,7 @@ import {
   searchUsers,
 } from '../api'
 import { Modal, confirmDialog, formatQuota, formatTime, promptViaModal } from '../components/FileBrowser'
+import QuotaInput from '../components/QuotaInput'
 import { MessageKey, t, useLocale } from '../i18n'
 
 /** 凭据状态卡的语义键 → 环境变量名展示（值绝不回显，仅展示配置状态）。 */
@@ -822,51 +825,65 @@ function PeopleAndGroupsPanel({ onError, onNotice }: { onError: (msg: string) =>
         )}
       </form>
       <div className="people-groups-layout">
-        {/* 左侧组树：全部用户 + 各用户组（组节点内联改名/删除）。 */}
+        {/* 左侧组树（v2.5 改 antd Menu 原生风格，与右侧 antd Table 协调）：
+            全部用户 + 各用户组；组节点行尾 Edit3/Trash2 图标按钮（改名/删除），
+            旧「改」「删」文字按钮退役；外框去除（间距与右侧对齐）。 */}
         <aside className="people-group-tree">
-          <div
-            className={`people-group-node${selectedGroup === '' ? ' active' : ''}`}
-            onClick={() => { setSelectedGroup(''); setSelected([]) }}
-            role="button"
-            tabIndex={0}
-            onKeyDown={(e) => { if (e.key === 'Enter') { setSelectedGroup(''); setSelected([]) } }}
-          >
-            <span className="people-group-name">全部用户</span>
-            <span className="muted people-group-count">{total}</span>
-          </div>
-          {groups.map((g) => (
-            <div
-              key={g.id}
-              className={`people-group-node${selectedGroup === g.id ? ' active' : ''}`}
-              onClick={() => { setSelectedGroup(g.id); setSelected([]) }}
-              role="button"
-              tabIndex={0}
-              onKeyDown={(e) => { if (e.key === 'Enter') { setSelectedGroup(g.id); setSelected([]) } }}
-            >
-              <span className="people-group-name" title={g.description || g.name}>{g.name}</span>
-              <span className="people-group-side">
-                <span className="muted people-group-count">{g.member_count}</span>
-                <Button
-                  type="text"
-                  size="small"
-                  title="改名 / 描述"
-                  onClick={(e) => { e.stopPropagation(); setEditing(g); setEditName(g.name); setEditDesc(g.description) }}
-                >
-                  改
-                </Button>
-                <Button
-                  type="text"
-                  size="small"
-                  danger
-                  title="删除组（成员关系清除，用户不受影响）"
-                  onClick={(e) => { e.stopPropagation(); void removeGroup(g) }}
-                >
-                  删
-                </Button>
-              </span>
-            </div>
-          ))}
-          {groups.length === 0 && <p className="hint">尚未创建用户组</p>}
+          <Menu
+            mode="inline"
+            className="people-group-menu"
+            selectedKeys={[selectedGroup === '' ? '__all__' : selectedGroup]}
+            onClick={({ key }) => {
+              const next = key === '__all__' ? '' : String(key)
+              setSelectedGroup(next)
+              setSelected([])
+            }}
+            items={[
+              {
+                key: '__all__',
+                icon: <Users size={14} strokeWidth={2} aria-hidden="true" />,
+                label: (
+                  <span className="people-group-label">
+                    <span className="people-group-name">全部用户</span>
+                    <span className="muted people-group-count">{total}</span>
+                  </span>
+                ),
+              },
+              ...groups.map((g) => ({
+                key: g.id,
+                label: (
+                  <span className="people-group-label" title={g.description || g.name}>
+                    <span className="people-group-name">{g.name}</span>
+                    <span className="people-group-side">
+                      <span className="muted people-group-count">{g.member_count}</span>
+                      <Button
+                        type="text"
+                        size="small"
+                        className="people-group-action"
+                        title="改名 / 描述"
+                        aria-label={`改名：${g.name}`}
+                        onClick={(e) => { e.stopPropagation(); setEditing(g); setEditName(g.name); setEditDesc(g.description) }}
+                      >
+                        <Edit3 size={13} strokeWidth={2} aria-hidden="true" />
+                      </Button>
+                      <Button
+                        type="text"
+                        size="small"
+                        danger
+                        className="people-group-action"
+                        title="删除组（成员关系清除，用户不受影响）"
+                        aria-label={`删除组：${g.name}`}
+                        onClick={(e) => { e.stopPropagation(); void removeGroup(g) }}
+                      >
+                        <Trash2 size={13} strokeWidth={2} aria-hidden="true" />
+                      </Button>
+                    </span>
+                  </span>
+                ),
+              })),
+            ] satisfies MenuProps['items']}
+          />
+          {groups.length === 0 && <p className="hint" style={{ margin: '4px 12px' }}>尚未创建用户组</p>}
         </aside>
         {/* 右侧成员表（按组过滤）。 */}
         <div className="people-group-main">
@@ -1357,17 +1374,10 @@ function auditActionText(action: string): string {
   return AUDIT_ACTION_LABELS[action] ?? action
 }
 
-/** 字节数的人类可读表示（备份文件/总大小展示）。 */
+/** 字节数的人类可读表示（备份文件/总大小展示；v2.6 统一 formatQuota 口径
+ *  B→KiB/MiB/GiB/TiB、1 位小数）。 */
 function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`
-  const units = ['KiB', 'MiB', 'GiB', 'TiB']
-  let v = n
-  let i = -1
-  do {
-    v /= 1024
-    i++
-  } while (v >= 1024 && i < units.length - 1)
-  return `${Math.round(v * 100) / 100} ${units[i]}`
+  return formatQuota(n, false)
 }
 
 /** 备份管理卡片：最近备份状态（时间/是否验证/文件清单）与只读校验；
@@ -1977,7 +1987,8 @@ function SpacesPanel({ onError, onNotice }: { onError: (msg: string) => void; on
   const [editing, setEditing] = useState<AdminSpaceItem | null>(null)
   const [editName, setEditName] = useState('')
   const [editDesc, setEditDesc] = useState('')
-  const [editQuota, setEditQuota] = useState('')
+  // 配额为字节数（0=不限），经 QuotaInput（数值+单位，1024 进制）编辑。
+  const [editQuota, setEditQuota] = useState(0)
 
   const load = async (query: string, dissolved = view === 'dissolved') => {
     setBusy(true)
@@ -2004,9 +2015,8 @@ function SpacesPanel({ onError, onNotice }: { onError: (msg: string) => void; on
   const saveEdit = async (e: FormEvent) => {
     e.preventDefault()
     if (!editing || busy || !editName.trim()) return
-    const quotaGib = Number(editQuota)
-    if (!Number.isFinite(quotaGib) || quotaGib < 0) {
-      onError('配额须为 ≥0 的数字（GiB；0=不限）')
+    if (!Number.isInteger(editQuota) || editQuota < 0) {
+      onError('配额须为 ≥0 的数值（0=不限）')
       return
     }
     setBusy(true)
@@ -2014,7 +2024,7 @@ function SpacesPanel({ onError, onNotice }: { onError: (msg: string) => void; on
       await adminUpdateSpace(editing.id, {
         name: editName.trim(),
         description: editDesc.trim(),
-        quotaBytes: Math.round(quotaGib * GIB),
+        quotaBytes: editQuota,
       })
       setEditing(null)
       onNotice('空间已更新')
@@ -2181,7 +2191,7 @@ function SpacesPanel({ onError, onNotice }: { onError: (msg: string) => void; on
                       <Button
                         size="small"
                         disabled={busy}
-                        onClick={() => { setEditing(s); setEditName(s.name); setEditDesc(s.description); setEditQuota(quotaToGib(s.quota_bytes)) }}
+                        onClick={() => { setEditing(s); setEditName(s.name); setEditDesc(s.description); setEditQuota(s.quota_bytes ?? 0) }}
                       >
                         编辑
                       </Button>
@@ -2207,10 +2217,10 @@ function SpacesPanel({ onError, onNotice }: { onError: (msg: string) => void; on
               <span>描述（留空清除）</span>
               <Input value={editDesc} onChange={(e) => setEditDesc(e.target.value)} />
             </label>
-            <label className="field">
-              <span>配额（GiB；0 = 不限）</span>
-              <Input value={editQuota} onChange={(e) => setEditQuota(e.target.value)} placeholder="如：10 或 0" />
-            </label>
+            <div className="field">
+              <span>配额（0 = 不限）</span>
+              <QuotaInput value={editQuota} onChange={setEditQuota} />
+            </div>
             <div className="setting-control" style={{ marginTop: 8 }}>
               <Button type="primary" htmlType="submit" disabled={busy || !editName.trim()} loading={busy}>保存</Button>
               <Button disabled={busy} onClick={() => setEditing(null)}>取消</Button>

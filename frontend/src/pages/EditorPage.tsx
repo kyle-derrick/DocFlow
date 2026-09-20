@@ -6,9 +6,12 @@
 // - onDocumentStateChange/onChange 后 debounce 提示「已保存为新版本」——回调
 //   落版本无服务端推送，故提供手动「刷新版本」；并写 localStorage 标记，
 //   其他窗口经 storage 事件感知后自动刷新（跨标签页的简单实现）。
+// - v2.6「保存并退出」：executeMethod('Save') 触发 DocumentServer 立即
+//   保存（callback 落版本）后返回文件页（?returnTo 优先）；「← 返回」在
+//   有未保存修改（onDocumentStateChange data=true 未落盘）时二次确认。
 // - 销毁时调用 docEditor.destroyEditor()；脚本加载失败提示「编辑服务不可用」。
 import { useEffect, useRef, useState } from 'react'
-import { Button } from 'antd'
+import { App as AntdApp, Button } from 'antd'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import {
   ApiError,
@@ -21,9 +24,10 @@ import {
 import { useLocale } from '../i18n'
 import { useColorMode } from '../theme'
 
-/** DocsAPI.DocEditor 实例（仅用到的 destroyEditor）。 */
+/** DocsAPI.DocEditor 实例（destroyEditor + executeMethod('Save')）。 */
 interface DocEditorInstance {
   destroyEditor: () => void
+  executeMethod?: (name: string, ...args: unknown[]) => unknown
 }
 
 declare global {
@@ -86,6 +90,11 @@ export default function EditorPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [saveHint, setSaveHint] = useState('')
+  const { modal: antdModal } = AntdApp.useApp()
+
+  // 未保存修改跟踪：onDocumentStateChange data=true（有修改待保存）置位、
+  // data=false（保存完成）清除；「← 返回」时仍有未保存修改则二次确认。
+  const dirtyRef = useRef(false)
 
   // DocEditor 挂载容器（shell）。placeholder 节点在每次 init 时以全新 id
   // 命令式创建（弹窗复用组件实例/主题变化等二次 init 时，旧 placeholder 已
@@ -164,7 +173,11 @@ export default function EditorPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
             uiTheme: colorMode === 'dark' ? 'theme-dark' : 'theme-classic-light',
           },
           events: {
-            onDocumentStateChange: () => scheduleSaveHint(),
+            // data=true：文档有未保存修改（正在保存）；data=false：保存完成。
+            onDocumentStateChange: (e: { data?: boolean } | undefined) => {
+              dirtyRef.current = e?.data === true
+              scheduleSaveHint()
+            },
             onChange: () => scheduleSaveHint(),
           },
         }
@@ -198,13 +211,53 @@ export default function EditorPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
 
   const versionNo = file?.current_version?.version
 
+  // 返回目标：编辑入口 URL 的 ?returnTo（文件页带目录/空间上下文），缺省 /。
+  const returnTo = (() => {
+    const r = searchParams.get('returnTo')
+    if (!r || !r.startsWith('/') || r.startsWith('//')) return '/'
+    return r
+  })()
+
+  /** 保存并退出：OnlyOffice callback 模式下编辑本会自动保存，此处显式
+   *  executeMethod('Save') 触发立即保存（DocumentServer 收到命令后回调
+   *  落版本），提示后返回文件页。 */
+  const saveAndExit = () => {
+    try {
+      editorRef.current?.executeMethod?.('Save')
+    } catch {
+      /* 旧版 DS 不支持命令服务：自动保存仍在工作，不阻塞返回。 */
+    }
+    dirtyRef.current = false
+    setSaveHint('已触发保存，正在返回…')
+    navigate(returnTo, { replace: true })
+  }
+
+  /** 返回（退出）：仍有未保存修改（onDocumentStateChange data=true 未
+   *  落盘）时二次确认；OnlyOffice 自动保存间隔内的窗口很短。 */
+  const exitWithConfirm = () => {
+    if (!dirtyRef.current) {
+      navigate(returnTo, { replace: true })
+      return
+    }
+    antdModal.confirm({
+      title: '有未保存的修改',
+      content: '文档存在尚未保存到服务器的修改，直接退出可能丢失。仍要退出吗？（编辑器通常会在数秒内自动保存）',
+      okText: '仍然退出',
+      okButtonProps: { danger: true },
+      cancelText: '继续编辑',
+      onOk: () => navigate(returnTo, { replace: true }),
+    })
+  }
+
   return (
     <div className={`editor-page${viewMode ? ' viewer-only' : ''}`}>
       {!viewMode && <div className="editor-head">
-        <Button type="text" size="small" onClick={() => navigate('/')}>← 返回</Button>
+        <Button type="text" size="small" onClick={exitWithConfirm}>← 返回</Button>
         <h2 className="editor-title">{file?.name ?? '加载中…'}</h2>
         {versionNo !== undefined && <span className="badge current">当前版本 v{versionNo}</span>}
         <Button size="small" onClick={() => void refreshVersion('版本已刷新')}>刷新版本</Button>
+        {/* 保存并退出（v2.6）：触发 DS 立即保存 + 返回文件页。 */}
+        <Button size="small" type="primary" onClick={saveAndExit}>保存并退出</Button>
       </div>}
 
       {!viewMode && saveHint && <div className="banner ok editor-hint">{saveHint}</div>}

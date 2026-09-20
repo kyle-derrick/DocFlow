@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { Star, Clock, Layers } from 'lucide-react'
-import { Segmented, Select } from 'antd'
+import { Layers, Star, Clock } from 'lucide-react'
+import { Select } from 'antd'
 import { Space, listSpaces } from '../api'
 import { t, useLocale } from '../i18n'
 
@@ -11,8 +11,9 @@ import { t, useLocale } from '../i18n'
  *   以 /files?space=<id> 切换，缺省即默认空间。v2.4：下拉底部「管理空间」
  *   入口移除（空间管理统一入口 = 右侧成员栏顶部按钮 / /spaces 页卡片的
  *   「管理」按钮），下拉只做切换。
- * - 全局视图（全部 / 收藏 / 最近）迷你 Segmented——受控组件，状态由页面
- *   持有并透传给 FileBrowser 的 activeView。
+ * - 全局视图（全部 / 收藏 / 最近）——受控组件，状态由页面持有并透传给
+ *   FileBrowser 的 activeView。v2.6 由 Segmented 改为紧凑 Select 下拉
+ *   （三段 Segmented 占宽过大）。
  * 徽标取空间名首字符（frontend hash 配色，styles.css .space-avatar-*）。
  */
 
@@ -71,15 +72,16 @@ export default function SpaceSwitcher({
         }))}
       />
       {onViewChange && (
-        <Segmented
+        <Select
           size="small"
+          className="view-select"
           aria-label={locale === 'zh-CN' ? '视图' : 'View'}
-          value={activeView}
+          value={activeView ?? 'all'}
           onChange={(v) => onViewChange(v as 'all' | 'starred' | 'recent')}
           options={[
-            { label: t(locale, 'viewAll'), value: 'all', icon: <Layers size={14} /> },
-            { label: t(locale, 'viewStarred'), value: 'starred', icon: <Star size={14} /> },
-            { label: t(locale, 'viewRecent'), value: 'recent', icon: <Clock size={14} /> },
+            { value: 'all', label: <span className="view-option"><Layers size={13} strokeWidth={2} aria-hidden="true" /> {t(locale, 'viewAll')}</span> },
+            { value: 'starred', label: <span className="view-option"><Star size={13} strokeWidth={2} aria-hidden="true" /> {t(locale, 'viewStarred')}</span> },
+            { value: 'recent', label: <span className="view-option"><Clock size={13} strokeWidth={2} aria-hidden="true" /> {t(locale, 'viewRecent')}</span> },
           ]}
         />
       )}

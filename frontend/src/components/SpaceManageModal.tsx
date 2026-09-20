@@ -56,6 +56,7 @@ import {
   updateSpaceQuota,
 } from '../api'
 import { formatQuota, formatTime } from './FileBrowser'
+import QuotaInput from './QuotaInput'
 import { MessageKey, formatMessage, t, useLocale } from '../i18n'
 
 /** 空间管理弹窗的 tab 标识（左导航项 key）。v2.4：独立「邀请」tab 移除——
@@ -277,7 +278,8 @@ export default function SpaceManageModal({
   // ---- 空间设置（owner/admin）：名称/描述/配额 + 危险区 ----
   const [settingsName, setSettingsName] = useState(space.name)
   const [settingsDesc, setSettingsDesc] = useState(space.description)
-  const [settingsQuota, setSettingsQuota] = useState(String(space.quota_bytes ?? 0))
+  // 配额为字节数（0=不限）；输入经 QuotaInput（数值+单位，1024 进制）。
+  const [settingsQuota, setSettingsQuota] = useState(space.quota_bytes ?? 0)
   const [settingsBusy, setSettingsBusy] = useState(false)
   const [settingsError, setSettingsError] = useState('')
   const [settingsNotice, setSettingsNotice] = useState('')
@@ -335,7 +337,7 @@ export default function SpaceManageModal({
   useEffect(() => {
     setSettingsName(space.name)
     setSettingsDesc(space.description)
-    setSettingsQuota(String(space.quota_bytes ?? 0))
+    setSettingsQuota(space.quota_bytes ?? 0)
     setTransferTarget('')
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [space.id])
@@ -634,7 +636,7 @@ export default function SpaceManageModal({
     e.preventDefault()
     const n = settingsName.trim()
     if (!n) return
-    const q = Number(settingsQuota.trim() || '0')
+    const q = settingsQuota
     if (!Number.isInteger(q) || q < 0) {
       setSettingsError(msg('quotaBytesLabel'))
       return
@@ -1239,10 +1241,10 @@ export default function SpaceManageModal({
                   <span>{msg('teamDescLabel')}</span>
                   <Input value={settingsDesc} onChange={(e) => setSettingsDesc(e.target.value)} />
                 </label>
-                <label className="field">
-                  <span>{msg('quotaBytesLabel')}</span>
-                  <Input value={settingsQuota} onChange={(e) => setSettingsQuota(e.target.value)} inputMode="numeric" />
-                </label>
+                <div className="field">
+                  <span>{msg('quotaLabel')}</span>
+                  <QuotaInput value={settingsQuota} onChange={setSettingsQuota} />
+                </div>
                 {settingsError && <div className="error-text">{settingsError}</div>}
                 {settingsNotice && <div className="banner ok member-notice">{settingsNotice}</div>}
                 <div className="team-create-row" style={{ justifyContent: 'flex-end' }}>
@@ -1250,40 +1252,47 @@ export default function SpaceManageModal({
                 </div>
               </form>
 
-              {/* owner 危险区：转让所有权 + 解散空间（输入空间名二次确认）。 */}
+              {/* owner 危险区（v2.5 拆分）：两个独立子卡片——「转让所有权」
+                  （中性卡片，可撤销的管理操作）与「解散空间」（红色区块，
+                  不可恢复），各自标题+描述，视觉明确区分。 */}
               {isOwner && (
-                <div className="member-danger-zone">
-                  <div className="member-danger-title">
-                    <AlertTriangle size={14} strokeWidth={2} aria-hidden="true" /> {msg('dissolveDangerZone')}
+                <>
+                  <div className="danger-card">
+                    <div className="danger-card-title">{msg('transferOwner')}</div>
+                    <p className="hint">{zh ? '把空间所有权转让给其他成员；转让后你将降为管理员（可再被新所有者提升）。' : 'Transfer space ownership to another member; you will become an admin afterwards.'}</p>
+                    {/* 转让候选：成员列表全部非 owner 用户（含组内，成员表行内亦有入口）。 */}
+                    <div className="space-manage-transfer">
+                      <Select
+                        className="member-role-select"
+                        value={transferTarget || undefined}
+                        onChange={setTransferTarget}
+                        placeholder={zh ? '选择新所有者（成员列表全部用户，含组内）' : 'Pick the new owner (any listed member, incl. via groups)'}
+                        options={transferCandidates.map((r) => ({ value: r.user_id, label: `${r.display}${r.email ? ` · ${r.email}` : ''}${r.isDirect ? '' : (zh ? '（组）' : ' (group)')}` }))}
+                        notFoundContent={zh ? '暂无可转让的成员' : 'No eligible members'}
+                      />
+                      <Button danger disabled={!transferTarget} onClick={() => {
+                        const row = memberRows.find((x) => x.user_id === transferTarget)
+                        if (row) handleTransfer({ user_id: row.user_id, display: row.display })
+                      }}>
+                        {msg('transferOwner')}
+                      </Button>
+                    </div>
                   </div>
 
-                  {/* 转让所有权：成员列表全部非 owner 用户（含组内，成员表行内亦有入口）。 */}
-                  <div className="space-manage-transfer">
-                    <Select
-                      className="member-role-select"
-                      value={transferTarget || undefined}
-                      onChange={setTransferTarget}
-                      placeholder={zh ? '选择新所有者（成员列表全部用户，含组内）' : 'Pick the new owner (any listed member, incl. via groups)'}
-                      options={transferCandidates.map((r) => ({ value: r.user_id, label: `${r.display}${r.email ? ` · ${r.email}` : ''}${r.isDirect ? '' : (zh ? '（组）' : ' (group)')}` }))}
-                      notFoundContent={zh ? '暂无可转让的成员' : 'No eligible members'}
-                    />
-                    <Button danger disabled={!transferTarget} onClick={() => {
-                      const row = memberRows.find((x) => x.user_id === transferTarget)
-                      if (row) handleTransfer({ user_id: row.user_id, display: row.display })
-                    }}>
-                      {msg('transferOwner')}
-                    </Button>
+                  <div className="danger-card danger-card-destructive">
+                    <div className="danger-card-title">
+                      <AlertTriangle size={14} strokeWidth={2} aria-hidden="true" /> {msg('dissolveTeam')}
+                    </div>
+                    <p className="hint">{formatMessage(msg('dissolveTeamConfirm'), { name: space.name })}</p>
+                    {space.is_default ? (
+                      <p className="hint">{msg('defaultSpaceNoDelete')}</p>
+                    ) : (
+                      <Button danger onClick={() => { setDissolveOpen(true); setDissolveName('') }}>
+                        {msg('dissolveTeam')}
+                      </Button>
+                    )}
                   </div>
-
-                  <p className="hint">{formatMessage(msg('dissolveTeamConfirm'), { name: space.name })}</p>
-                  {space.is_default ? (
-                    <p className="hint">{msg('defaultSpaceNoDelete')}</p>
-                  ) : (
-                    <Button danger onClick={() => { setDissolveOpen(true); setDissolveName('') }}>
-                      {msg('dissolveTeam')}
-                    </Button>
-                  )}
-                </div>
+                </>
               )}
             </>
           )}

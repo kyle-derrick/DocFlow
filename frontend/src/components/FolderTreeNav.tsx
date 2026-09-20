@@ -7,11 +7,13 @@
 //   复用 .ctx-menu 视觉，见 FileBrowser itemMenuItems 同构结构）。
 // - FileBrowserWithTree：FilesPage 布局层包装器——在
 //   FileBrowser 外面包左侧树栏（240px，可折叠），不修改 FileBrowser 内部
-//   实现：FileBrowser 未暴露受控当前目录 prop，故用「key 重挂载回到根 +
-//   逐段点击其自身渲染的目录行/卡片按钮」最小侵入方式驱动面包屑导航；
-//   同时经注入的 listItems 包装感知每次目录列表结果，完成树节点登记、
-//   当前目录高亮同步（用户在 FileBrowser 内点击目录/面包屑时树跟随）。
-//   文件节点点击经 fileOpenSignal 受控信号触达 FileBrowser 的查看弹窗。
+//   实现；树点击目录经 folderNavSignal 受控信号驱动：FileBrowser 在同一
+//   实例内直接把面包屑切到目标链并加载目标目录（不重挂载、不先回根，
+//   一次列表请求，无根目录闪现——v2.5 重构，替代旧「key 重挂载回根 +
+//   逐段点击其目录行」实现）；同时经注入的 listItems 包装感知每次目录
+//   列表结果，完成树节点登记、当前目录高亮同步（用户在 FileBrowser 内
+//   点击目录/面包屑时树跟随）。文件节点点击经 fileOpenSignal 受控信号
+//   触达 FileBrowser 的查看弹窗。
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { ChevronDown, ChevronRight, FileText, Folder, Home } from 'lucide-react'
@@ -29,7 +31,7 @@ import {
   viewMethodLabel,
   viewOptionsFor,
 } from '../openers'
-import FileBrowser, { clampFixedMenu, treeNavClick } from './FileBrowser'
+import FileBrowser, { clampFixedMenu } from './FileBrowser'
 import type { FileBrowserProps } from './FileBrowser'
 import { useLocale } from '../i18n'
 
@@ -78,37 +80,6 @@ interface TreeNode {
   fileIds: string[]
   /** 目录下存在 index.html/index.htm（作为网页打开入口用）。 */
   hasIndexWeb: boolean
-}
-
-/** 取名称展示文本：剔除图标（.icon）与「网页」徽标（.web-folder-badge）
- *  等附属节点的纯文本。不用 String.replace 子串剔除——目录名本身含
- * 「网页」前缀（如「网页目录A」）时首段会被误删导致导航失配。 */
-function entryNameText(el: HTMLElement | null): string {
-  if (!el) return ''
-  let out = ''
-  el.childNodes.forEach((n) => {
-    if (n instanceof HTMLElement && (n.classList.contains('icon') || n.classList.contains('web-folder-badge'))) return
-    out += n.textContent ?? ''
-  })
-  return out.trim()
-}
-
-/** 在 FileBrowser 渲染结果里按名称查找目录入口（列表视图 .name-btn 无
- *  title 者为目录行；网格视图文件夹卡片 .file-card-body）。同目录同名
- *  唯一（后端 NAME_CONFLICT），按名称匹配可靠。v1.6：目录行的「网页」
- *  徽标与图标须剔除后再比对（entryNameText），否则网页目录行文本为
- * 「目录名网页」，全量 textContent 比对必然失配，树点击导航无法进入。 */
-function findFolderEntry(root: HTMLElement, name: string): HTMLElement | null {
-  for (const btn of Array.from(root.querySelectorAll<HTMLButtonElement>('button.name-btn'))) {
-    // 文件行的 name-btn 带 title（预览提示），目录行没有。
-    if (btn.hasAttribute('title')) continue
-    if (entryNameText(btn) === name) return btn
-  }
-  for (const card of Array.from(root.querySelectorAll<HTMLButtonElement>('button.file-card-body'))) {
-    const nameEl = card.querySelector('.file-card-name')
-    if (nameEl && entryNameText(nameEl as HTMLElement) === name) return card
-  }
-  return null
 }
 
 /** FileBrowser 的列表查询是否处于跨目录检索模式（标签/收藏/最近）。 */
@@ -395,33 +366,36 @@ export default function FolderTreeNav({
  * - 树节点登记：包装 listItems 感知每次非检索目录列表（含 FileBrowser
  *   自身导航与 reload），子目录即时入树——用户在 FileBrowser 内移动时
  *   树的当前目录高亮同步跟随；
- * - 树点击导航：key 重挂载 FileBrowser 回根目录，随后按路径段依次点击
- *   其目录行进入目标目录（面包屑由 FileBrowser 自身构建，语义完整）。
+ * - 树点击导航：经 folderNavSignal 受控信号，FileBrowser 同实例内直接
+ *   把面包屑切到根→目标完整链并加载目标目录（不重挂载、不回根，一次
+ *   列表请求）。
  */
-export function FileBrowserWithTree({ listChildren, aside, ...browserProps }: FileBrowserProps & {
+export function FileBrowserWithTree({ listChildren, aside, treeRootLabel, ...browserProps }: FileBrowserProps & {
   /** 目录树取子目录的数据源；缺省复用 listItems（目录 + 文件全量）。 */
   listChildren?: (parentId: string | null) => Promise<FileItem[]>
   /** 右侧栏内容（空间视图成员面板）；提供时启用三栏布局。 */
   aside?: ReactNode
+  /** 目录树根节点显示名（缺省 rootLabel；v2.6 面包屑根改「根目录」短名
+   *  后树根仍显示空间名，避免丢失空间上下文）。 */
+  treeRootLabel?: string
 }) {
   const rootLabel = browserProps.rootLabel
+  const treeRoot = treeRootLabel ?? rootLabel
   // 顶栏宿主：FileBrowser 工具行 portal 目标（挂载后经 state 传入）。
   const [toolbarHost, setToolbarHost] = useState<HTMLDivElement | null>(null)
   const [nodes, setNodes] = useState<Record<string, TreeNode>>(() => ({
-    [ROOT_KEY]: { id: ROOT_KEY, name: rootLabel, type: 'folder', parentId: ROOT_KEY, childIds: null, fileIds: [], hasIndexWeb: false },
+    [ROOT_KEY]: { id: ROOT_KEY, name: treeRoot, type: 'folder', parentId: ROOT_KEY, childIds: null, fileIds: [], hasIndexWeb: false },
   }))
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set([ROOT_KEY]))
   const [loadingKeys, setLoadingKeys] = useState<Set<string>>(new Set())
   const [treeError, setTreeError] = useState('')
   const [currentKey, setCurrentKey] = useState<string>(ROOT_KEY)
-  // FileBrowser 重挂载 key（树点击导航时 +1，回到根后逐段点击进入）。
-  const [navKey, setNavKey] = useState(0)
-  const hostRef = useRef<HTMLDivElement | null>(null)
+  // 树→FileBrowser 目录导航信号（seq 自增；FileBrowser 同实例内直接切
+  // 面包屑并加载目标目录，见 FileBrowser folderNavSignal）。
+  const folderNavSeqRef = useRef(0)
+  const [folderNavSignal, setFolderNavSignal] = useState<FileBrowserProps['folderNavSignal']>(undefined)
   const nodesRef = useRef(nodes)
   nodesRef.current = nodes
-  // 待点击进入的路径段（根→目标）；navSeq 用于作废旧导航序列。
-  const pendingRef = useRef<string[]>([])
-  const navSeqRef = useRef(0)
   // FileBrowser 最近一次列表是否处于跨目录检索模式（标签/收藏/最近）——
   // 检索模式下中间列表与树高亮脱钩，目录名单击即使 key===currentKey 也须
   // 重挂载回目录视图。
@@ -529,43 +503,7 @@ export function FileBrowserWithTree({ listChildren, aside, ...browserProps }: Fi
     for (const ancestor of chain.slice(0, -1)) void ensureLoaded(ancestor)
   }, [currentKey, ensureLoaded])
 
-  // ---- 树点击 → 驱动 FileBrowser 导航 ----
-
-  const tryNavStep = useCallback((seq: number, segment: string, attempt: number) => {
-    if (navSeqRef.current !== seq) return
-    const host = hostRef.current
-    if (!host) return
-    const entry = findFolderEntry(host, segment)
-    if (entry) {
-      pendingRef.current = pendingRef.current.slice(1)
-      // 置导航点击标记：网页目录行的用户点击语义是「网页预览」，程序化
-      // 步进点击须表现为「进入」（entry.click() 同步派发，标志位即取即收）。
-      treeNavClick.armed = true
-      try {
-        entry.click()
-      } finally {
-        treeNavClick.armed = false
-      }
-      return
-    }
-    // 列表仍在加载/渲染：短间隔重试（约 6s 上限后放弃，停留在已到达目录）。
-    if (attempt < 40) {
-      window.setTimeout(() => {
-        if (navSeqRef.current === seq && pendingRef.current[0] === segment) {
-          tryNavStep(seq, segment, attempt + 1)
-        }
-      }, 150)
-    }
-  }, [])
-
-  const scheduleNavStep = useCallback(() => {
-    const seq = navSeqRef.current
-    const segment = pendingRef.current[0]
-    if (!segment) return
-    window.setTimeout(() => {
-      if (navSeqRef.current === seq && pendingRef.current[0] === segment) tryNavStep(seq, segment, 0)
-    }, 120)
-  }, [tryNavStep])
+  // ---- 树点击 → 驱动 FileBrowser 导航（folderNavSignal 受控信号） ----
 
   /** 包装 listItems：感知目录列表（非检索模式）→ 登记树节点 + 同步当前目录。 */
   const drivenListItems = useCallback(
@@ -577,50 +515,45 @@ export function FileBrowserWithTree({ listChildren, aside, ...browserProps }: Fi
         const key = parentId == null ? ROOT_KEY : parentId
         if (nodesRef.current[key]) registerListing(key, res.items)
         setCurrentKey(key)
-        scheduleNavStep()
       }
       return res
     },
-    [registerListing, scheduleNavStep],
+    [registerListing],
   )
 
-  /** 树节点点击（目录名单击 = 进入）：重挂载回根 + 逐段点击进入（根节点
-   * 直接回根）。已在目标目录且中间列表不在检索模式时短路（避免无谓
-   * 重挂载闪烁）。导航时**清空 fileOpenSignal**——上次「查看文件」的信号
-   * 若残留，重挂载后 FileBrowser 的 mount effect 会按旧信号重新弹查看窗
-   * （v2.2 修复：点目录复开上一次弹窗）。 */
+  /** 树节点点击（目录名单击 = 进入；根节点回根）：向 FileBrowser 发
+   *  folderNavSignal 受控信号——同实例内直接把面包屑切到根→目标完整链
+   *  并加载目标目录，一次列表请求，无「先回根再逐段进入」的闪烁
+   *  （v2.5 重构）。已在目标目录且中间列表不在检索模式时短路（避免
+   *  无谓重载）。同时展开完整链（v2.6：**含目标自身**——点击目录后其
+   *  子节点即展开呈现；只展开不收缩，收缩仍由用户点 caret 箭头），并
+   *  触发目标自身子级懒加载。 */
   const selectFromTree = (key: string) => {
     if (key === currentKey && !lastSearchRef.current) return
-    const path: string[] = []
+    // 根→目标完整节点链（key=ROOT_KEY 时为空数组 = 回根）。
+    const chain: string[] = []
     const seen = new Set<string>()
     let k: string | undefined = key
     while (k && k !== ROOT_KEY && !seen.has(k)) {
       seen.add(k)
       const node: TreeNode | undefined = nodesRef.current[k]
       if (!node) break
-      path.unshift(node.name)
+      chain.unshift(k)
       k = node.parentId
     }
-    navSeqRef.current += 1
-    pendingRef.current = key === ROOT_KEY ? [] : path
     setCurrentKey(key)
-    setNavKey((n) => n + 1)
-    setFileOpenSignal(undefined)
-    // 展开目标**祖先**（不含目标自身——进入不改变展开态，收缩只经 caret
-    // 箭头；用户点击时目标行必然可见，无需代为展开）。
-    let cur: string | undefined = key
-    const chain: string[] = []
-    const seen2 = new Set<string>()
-    while (cur && cur !== ROOT_KEY && !seen2.has(cur)) {
-      seen2.add(cur)
-      chain.unshift(cur)
-      cur = nodesRef.current[cur]?.parentId
-    }
+    setFolderNavSignal({
+      seq: ++folderNavSeqRef.current,
+      path: chain.map((id) => ({ id, name: nodesRef.current[id]?.name ?? '' })),
+    })
+    // 展开完整链（含目标；Set.add 幂等 = 已展开的保持展开，不收缩）。
     setExpanded((prev) => {
       const n = new Set(prev)
-      chain.slice(0, -1).forEach((c) => n.add(c))
+      chain.forEach((c) => n.add(c))
       return n
     })
+    // 目标自身子级懒加载（进入即展开其子节点；已加载则跳过）。
+    if (key !== ROOT_KEY) void ensureLoaded(key)
   }
 
   // ---- 外部「打开文件」信号（树文件节点点击 → FileBrowser 查看弹窗） ----
@@ -735,13 +668,23 @@ export function FileBrowserWithTree({ listChildren, aside, ...browserProps }: Fi
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // 树根显示名随 treeRoot 变化同步（v2.6：宿主 spaces 异步加载后空间名
+  // 才就位，挂载时可能是「空间」占位——仅更新根节点 name，不重置树状态）。
+  useEffect(() => {
+    setNodes((prev) => {
+      const root = prev[ROOT_KEY]
+      if (!root || root.name === treeRoot) return prev
+      return { ...prev, [ROOT_KEY]: { ...root, name: treeRoot } }
+    })
+  }, [treeRoot])
+
   return (
     <div className="files-shell">
       {/* 全宽顶栏宿主：FileBrowser 工具行 portal 到此（44px，见 styles.css）。 */}
       <div className="files-topbar" ref={setToolbarHost} />
       <div className={`files-tree-layout${aside ? ' has-aside' : ''}`}>
         <FolderTreeNav
-          rootLabel={rootLabel}
+          rootLabel={treeRoot}
           nodes={nodes}
           expanded={expanded}
           loadingKeys={loadingKeys}
@@ -756,9 +699,8 @@ export function FileBrowserWithTree({ listChildren, aside, ...browserProps }: Fi
           drawioEnabled={drawioEnabled}
           errorText={treeError}
         />
-        <div className="files-tree-main" ref={hostRef}>
+        <div className="files-tree-main">
           <FileBrowser
-            key={navKey}
             {...browserProps}
             listItems={drivenListItems}
             /* 复制/移动弹窗目录树数据源：回传「未包装」的原始 listItems——
@@ -766,6 +708,7 @@ export function FileBrowserWithTree({ listChildren, aside, ...browserProps }: Fi
                展开目录若走它会把左侧主树也展开（联动 bug），故隔离。 */
             pickerListItems={browserProps.listItems}
             fileOpenSignal={fileOpenSignal}
+            folderNavSignal={folderNavSignal}
             toolbarHost={toolbarHost}
           />
         </div>

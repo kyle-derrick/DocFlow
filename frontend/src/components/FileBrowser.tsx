@@ -17,7 +17,7 @@
 // fileOpenSignal 受控信号触发本组件弹窗（见 FolderTreeNav）。
 import { FormEvent, ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { App as AntdApp, Badge, Button, Dropdown, Input, Menu, Modal as AntdModal, Popover, Select } from 'antd'
+import { App as AntdApp, Button, Dropdown, Input, Menu, Modal as AntdModal, Popover, Select } from 'antd'
 import type { DragEvent as ReactDragEvent } from 'react'
 import type { MenuProps } from 'antd'
 import {
@@ -100,6 +100,14 @@ import type { DirPickerTarget, PickerSpace } from './DirPickerModal'
 import TrashModal from './TrashModal'
 import { useHotkeys } from '../useHotkeys'
 import { MessageKey, formatMessage, t, useLocale } from '../i18n'
+import {
+  addUploadTask,
+  consumeUploadCancel,
+  finishUploadTracking,
+  isUploadCancelRequested,
+  registerUploadAbort,
+  setUploadTaskPhase,
+} from '../uploadTasks'
 // 弹窗内嵌查看：复用独立查看页的按类型分发器（office/drawio/白板/
 // xmind/mermaid/md/网页/文本等），保证弹窗与新窗口打开渲染一致。
 import { FileViewerDispatch } from '../pages/ViewerPage'
@@ -121,14 +129,6 @@ function saveViewMode(mode: ViewMode): void {
   } catch {
     /* ignore */
   }
-}
-
-/** 字节数人类可读格式（网格卡片元信息；口径与版本历史一致）。 */
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
 }
 
 export function formatTime(iso: string): string {
@@ -367,26 +367,7 @@ export function promptViaModal(
   })
 }
 
-export const phaseText: Record<UploadPhase | 'error' | 'canceled', string> = {
-  creating: '创建会话…',
-  uploading: '上传中…',
-  completing: '提交处理…',
-  verifying: '校验中…',
-  scanning: '安全扫描中…',
-  available: '已完成',
-  quarantined: '已隔离',
-  failed: '失败',
-  error: '失败',
-  canceled: '已取消',
-}
-
-/** 上传任务行 phase：UploadPhase + 本地终态（error=失败 / canceled=用户取消）。 */
-type UploadRowPhase = UploadPhase | 'error' | 'canceled'
-
-/** 上传任务是否仍在进行（Badge 计数与「清空已完成」口径：非进行中即可清）。 */
-function uploadPhaseActive(p: UploadRowPhase): boolean {
-  return p !== 'available' && p !== 'error' && p !== 'canceled' && p !== 'quarantined' && p !== 'failed'
-}
+// ---- 全局上传任务（v2.6 提升到模块级 store，切页面/切空间不丢；见 uploadTasks.ts） ----
 
 /**
  * 树导航步进点击标记：FolderTreeNav 双击导航经 DOM click 逐段点击目录行，
@@ -412,13 +393,6 @@ export function describeBatchResults(results: BatchItemResult[]): string {
   if (failures.length === 0) return `全部 ${results.length} 项成功`
   const parts = failures.map((r) => `${r.id.slice(0, 8)}…：${batchErrorText[r.error_code ?? 'INTERNAL'] ?? r.error_code}`)
   return `${summarizeBatchResults(results)}。${parts.join('；')}`
-}
-
-interface UploadRow {
-  key: number
-  name: string
-  phase: UploadRowPhase
-  error?: string
 }
 
 interface Crumb {
@@ -483,6 +457,11 @@ function writeErrorText(err: unknown, fallback: string): string {
 export interface FileBrowserProps {
   /** 面包屑根名称。 */
   rootLabel: string
+  /**
+   * 面包屑首段显示的短名（v2.6：默认/非默认空间统一显示「根目录」，
+   * 空间名由左侧空间切换器表达；缺省回退 rootLabel）。
+   */
+  rootCrumbLabel?: string
   listItems: (parentId: string | null, opts?: FileQueryOptions) => Promise<DirListing>
   /** 提供时显示「新建文件夹」。 */
   createFolderFn?: (name: string, parentId: string | null) => Promise<unknown>
@@ -517,6 +496,16 @@ export interface FileBrowserProps {
    * 已知路径）弹窗内 by-path 路由按其构建，避免面包屑不对应。
    */
   fileOpenSignal?: { fileId: string; seq: number; pathSegments?: string[] }
+  /**
+   * 外部「目录导航」受控信号（左侧目录树目录节点点击触发）：seq 变化时
+   * 直接把面包屑切到 path（根→目标完整链，id=null 表示根）并加载目标目录
+   * 列表——同实例内切换，不重挂载、不先回根。检索模式（标签/收藏/最近）
+   * 下先清筛选（并回调 onViewReset 让宿主同步视图态），由筛选 effect
+   * 重新加载目标目录，保证全程仅一次列表请求。
+   */
+  folderNavSignal?: { seq: number; path: Array<{ id: string | null; name: string }> }
+  /** 目录导航退出检索模式时回调（宿主把「全部/收藏/最近」视图切回 all）。 */
+  onViewReset?: () => void
   /**
    * 工具带前缀槽：渲染在工具行最左（空间切换 + 全部/收藏/最近 Segmented，
    * 见 SpaceSwitcher——v1.4 由独立行并入本行）。
@@ -568,6 +557,7 @@ export interface FileBrowserProps {
 
 export default function FileBrowser({
   rootLabel,
+  rootCrumbLabel,
   listItems,
   createFolderFn,
   uploadFn,
@@ -580,6 +570,8 @@ export default function FileBrowser({
   fileMetaFn,
   ns,
   fileOpenSignal,
+  folderNavSignal,
+  onViewReset,
   toolbarPrefix,
   toolbarHost,
   pickerListItems,
@@ -657,12 +649,13 @@ export default function FileBrowser({
     saveViewMode(mode)
   }
 
-  // 网格视图文件大小：列表接口不返回 size，经 fileMetaFn 惰性补齐（ref 缓存
-  // 避免重复请求；-1 占位表示已请求过/未知，不再重试）。
+  // 文件大小：列表接口不返回 size，经 fileMetaFn 惰性补齐（ref 缓存避免
+  // 重复请求；-1 占位表示已请求过/未知，不再重试）。列表视图大小列与
+  // 网格卡片共用（v2.6 列表也展示大小列）。
   const sizeCache = useRef<Map<string, number>>(new Map())
   const [, setSizesTick] = useState(0)
   useEffect(() => {
-    if (viewMode !== 'grid' || !fileMetaFn) return
+    if (!fileMetaFn) return
     const targets = items.filter((it) => it.type === 'file' && !sizeCache.current.has(it.id))
     if (targets.length === 0) return
     targets.forEach((it) => sizeCache.current.set(it.id, -1))
@@ -822,15 +815,8 @@ export default function FileBrowser({
   const [webPreviewUrl, setWebPreviewUrl] = useState<string | null>(null)
   const [previewPathOverride, setPreviewPathOverride] = useState<string[] | null>(null)
 
-  const [uploads, setUploads] = useState<UploadRow[]>([])
+  // ---- 全局上传任务（v2.6 顶部栏「传输」入口 + 模块级 store，见 uploadTasks.ts） ----
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const uploadKey = useRef(0)
-  // 上传任务面板（v1.6：浮条改工具栏按钮 + 弹窗；Badge 显示进行中数量）。
-  const [uploadPanelOpen, setUploadPanelOpen] = useState(false)
-  // 上传取消（v1.6）：进行中任务的 AbortController（key → controller）与
-  // 「开始前即被取消」的 key 集合（顺序队列里尚未轮到的文件直接跳过）。
-  const uploadAbortRef = useRef(new Map<number, AbortController>())
-  const uploadCancelReqRef = useRef(new Set<number>())
 
   // ---- 拖拽上传（v1.6）：拖文件/文件夹到文件管理区 → 上传到当前目录 ----
   // webkitGetAsEntry 递归展开目录树；悬停高亮 drop zone（计数器法防子元素闪烁）。
@@ -942,6 +928,35 @@ export default function FileBrowser({
     setTagFilter('')
     setStarredFilter(activeView === 'starred' ? 'true' : '')
   }, [activeView])
+
+  // 外部「目录导航」受控信号（左侧目录树目录节点点击）：同实例内直接切换
+  // 面包屑（根→目标完整链）并加载目标目录——不重挂载、不先回根，杜绝
+  // 「先回根再逐段进入」的多段请求与列表闪烁（v2.5 重构）。
+  // - 检索模式（标签/收藏/最近）下不手动 load：清筛选由下方筛选 effect
+  //   重载（crumbs 已同步，currentParent 即目标目录），避免双请求；
+  //   同时回调 onViewReset 让宿主把视图态切回「全部」。
+  // - seq 去重：同一信号重放（父组件重渲染）不重复导航。
+  const folderNavSeqRef = useRef(0)
+  useEffect(() => {
+    if (!folderNavSignal || folderNavSignal.seq <= 0) return
+    if (folderNavSeqRef.current === folderNavSignal.seq) return
+    folderNavSeqRef.current = folderNavSignal.seq
+    const nextCrumbs: Crumb[] = [
+      { id: null, folderId: null, name: rootLabel },
+      ...folderNavSignal.path.map((p) => ({ id: p.id, folderId: p.id, name: p.name })),
+    ]
+    const targetId = nextCrumbs[nextCrumbs.length - 1].id
+    setCrumbs(nextCrumbs)
+    if (searchMode) {
+      setRecentView(false)
+      setTagFilter('')
+      setStarredFilter('')
+      onViewReset?.()
+    } else {
+      void load(targetId)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [folderNavSignal])
 
   const toggleSelect = (id: string) => {
     setSelected((prev) => {
@@ -1565,65 +1580,35 @@ export default function FileBrowser({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [trashSignal])
 
-  // ---- 受控上传队列（v1.6 取消）：文件选择 / 拖拽两条队列逐文件串行，
-  //      每文件一条任务行；取消 = 排队中直接标记跳过 / 进行中 abort 传输。 ----
-
-  /** 排队中的任务在开始前检查取消请求：命中则行标记「已取消」并返回 true。 */
-  const skipCanceledRow = (key: number): boolean => {
-    if (!uploadCancelReqRef.current.has(key)) return false
-    setUploads((prev) => prev.map((r) => (r.key === key ? { ...r, phase: 'canceled', error: undefined } : r)))
-    return true
-  }
+  // ---- 受控上传队列（v1.6 取消；v2.6 任务状态全局化）：文件选择 / 拖拽
+  //      两条队列逐文件串行，每文件一条任务行（store 持有）；取消 = 排队中
+  //      直接标记跳过 / 进行中 abort 传输。 ----
 
   /** 单文件受控上传：登记 AbortController、驱动行内 phase；失败归类
    *（取消 → canceled，其余 → error 中文文案）。返回 ok=成功 / canceled=用户取消 / error=失败。 */
   const runTrackedUpload = async (file: File, parentId: string | null, key: number): Promise<'ok' | 'canceled' | 'error'> => {
     if (!uploadFn) return 'error'
-    if (skipCanceledRow(key)) return 'canceled'
+    if (consumeUploadCancel(key)) return 'canceled'
     const ctrl = new AbortController()
-    uploadAbortRef.current.set(key, ctrl)
+    registerUploadAbort(key, ctrl)
     try {
       await uploadFn(file, parentId, (phase) => {
-        setUploads((prev) => prev.map((r) => (r.key === key ? { ...r, phase } : r)))
+        setUploadTaskPhase(key, phase)
       }, ctrl.signal)
       return 'ok'
     } catch (err) {
-      const canceled = isUploadAborted(err) || uploadCancelReqRef.current.has(key)
-      setUploads((prev) =>
-        prev.map((r) =>
-          r.key === key
-            ? (canceled
-              ? { ...r, phase: 'canceled', error: undefined }
-              : { ...r, phase: 'error', error: writeErrorText(err, '上传失败') })
-            : r,
-        ),
-      )
+      const canceled = isUploadAborted(err) || isUploadCancelRequested(key)
+      setUploadTaskPhase(key, canceled ? 'canceled' : 'error', canceled ? undefined : writeErrorText(err, '上传失败'))
       return canceled ? 'canceled' : 'error'
     } finally {
-      uploadAbortRef.current.delete(key)
-      uploadCancelReqRef.current.delete(key)
+      finishUploadTracking(key)
     }
-  }
-
-  /** 取消上传任务（面板行按钮）：进行中 → abort（api 层抛 AbortError）；
-   *  排队中（顺序队列未轮到）→ 直接标记「已取消」，轮到时跳过。 */
-  const cancelUploadRow = (key: number) => {
-    uploadCancelReqRef.current.add(key)
-    const ctrl = uploadAbortRef.current.get(key)
-    if (ctrl) {
-      ctrl.abort()
-      return
-    }
-    setUploads((prev) =>
-      prev.map((r) => (r.key === key && uploadPhaseActive(r.phase) ? { ...r, phase: 'canceled', error: undefined } : r)),
-    )
   }
 
   const handleFilesPicked = async (files: FileList | null) => {
     if (!uploadFn || !files || files.length === 0) return
     for (const file of Array.from(files)) {
-      const key = ++uploadKey.current
-      setUploads((prev) => [...prev, { key, name: file.name, phase: 'creating' }])
+      const key = addUploadTask(file.name)
       await runTrackedUpload(file, currentFolderId, key)
     }
     if (fileInputRef.current) fileInputRef.current.value = ''
@@ -1686,21 +1671,25 @@ export default function FileBrowser({
     const child = window.open('about:blank', '_blank')
     setDocCreating(true)
     setCreateError('')
-    const key = ++uploadKey.current
-    setUploads((prev) => [...prev, { key, name, phase: 'creating' }])
+    const key = addUploadTask(name)
     try {
       let fileID = ''
       if (createKind === 'word' || createKind === 'spreadsheet' || createKind === 'presentation') {
+        // Office 模板走 POST /files/from-template（后端同步创建，不经上传
+        // 会话）——v2.6 修复：此前任务行 phase 永远停在「创建会话…」
+        //（创建本身并未挂起，仅任务面板行文案误导），成功后须置为已完成。
         const created = await createOfficeTemplate(createKind, currentFolderId, name)
         fileID = created.id
+        setUploadTaskPhase(key, 'available')
       } else if (uploadFn) {
         const created = await uploadFn(new File([createSpec.content], name, { type: fileMime }), currentFolderId, (phase) => {
-          setUploads((prev) => prev.map((r) => (r.key === key ? { ...r, phase } : r)))
+          setUploadTaskPhase(key, phase)
         })
         fileID = typeof created === 'object' && created !== null && 'file_id' in created
           ? String((created as { file_id?: string }).file_id ?? '') : ''
         // 全零 UUID（uuid.Nil）视为无目标文件，避免打开 /text/00000000-…。
         if (fileID === '00000000-0000-0000-0000-000000000000') fileID = ''
+        setUploadTaskPhase(key, 'available')
       }
       await load(currentParent)
       setCreateKind(null)
@@ -1709,7 +1698,7 @@ export default function FileBrowser({
     } catch (err) {
       child?.close()
       setCreateError(writeErrorText(err, '新建失败'))
-      setUploads((prev) => prev.map((r) => r.key === key ? { ...r, phase: 'error', error: writeErrorText(err, '新建失败') } : r))
+      setUploadTaskPhase(key, 'error', writeErrorText(err, '新建失败'))
     } finally {
       setDocCreating(false)
     }
@@ -1754,10 +1743,6 @@ export default function FileBrowser({
       }
       if (batchShareOpen) {
         setBatchShareOpen(false)
-        return
-      }
-      if (uploadPanelOpen) {
-        setUploadPanelOpen(false)
         return
       }
       if (previewTarget) {
@@ -1964,9 +1949,8 @@ export default function FileBrowser({
     for (const { file, relPath } of dropped) {
       const segments = relPath.split('/').filter(Boolean)
       const dirPath = segments.slice(0, -1).join('/')
-      const key = ++uploadKey.current
-      setUploads((prev) => [...prev, { key, name: relPath, phase: 'creating' }])
-      if (skipCanceledRow(key)) continue
+      const key = addUploadTask(relPath)
+      if (consumeUploadCancel(key)) continue
       try {
         const parentId = dirPath ? await ensureDir(dirPath) : currentFolderId ?? ''
         const r = await runTrackedUpload(file, parentId || null, key)
@@ -1975,9 +1959,7 @@ export default function FileBrowser({
       } catch (err) {
         const reason = writeErrorText(err, '上传失败')
         failed.push(relPath)
-        setUploads((prev) =>
-          prev.map((r) => (r.key === key ? { ...r, phase: 'error', error: reason } : r)),
-        )
+        setUploadTaskPhase(key, 'error', reason)
       }
     }
     setBatchNotice('')
@@ -2326,15 +2308,15 @@ export default function FileBrowser({
             className={index === crumbs.length - 1 ? 'current' : ''}
             onClick={() => gotoCrumb(index)}
           >
-            {crumb.name}
+            {index === 0 ? (rootCrumbLabel ?? crumb.name) : crumb.name}
           </button>
         </span>
       ))}
     </nav>
   ) : null
 
-  // 上传任务按钮徽标：进行中（非终态）任务数。
-  const activeUploadCount = uploads.filter((r) => uploadPhaseActive(r.phase)).length
+  // 上传任务入口已移至全局顶栏（v2.6「传输」图标 + Badge，见 App.tsx
+  // UploadTasksBell；任务状态在 uploadTasks store，切页面不丢）。
 
   const toolbar = (
     <div className="files-toolbar toolbar-mini">
@@ -2502,18 +2484,6 @@ export default function FileBrowser({
           )}
         </div>
       )}
-      {/* 上传任务入口（v1.6：浮条改工具栏按钮 + 徽标，点击弹窗查看任务列表）。 */}
-      {uploads.length > 0 && (
-        <Badge count={activeUploadCount} size="small" offset={[-2, 0]}>
-          <Button
-            size="small"
-            title={locale === 'zh-CN' ? '上传任务' : 'Upload tasks'}
-            onClick={() => setUploadPanelOpen(true)}
-          >
-            <Upload size={13} strokeWidth={2} aria-hidden="true" />
-          </Button>
-        </Badge>
-      )}
       {/* 回收站入口（v1.5 弹窗化：原 /trash 整页路由已删除；hideToolbarTrash
           时由宿主在工具行左端自绘入口、经 trashSignal 受控打开）。 */}
       {!hideToolbarTrash && (
@@ -2648,6 +2618,18 @@ export default function FileBrowser({
                 </span>
               </th>
               <th
+                className={`th-sort-cell${sortKey === 'size' ? ' active' : ''}`}
+                title={msg('sort')}
+                onClick={() => toggleSort('size')}
+              >
+                <span className="th-sort">
+                  {msg('sortOrderSize')}
+                  {sortKey === 'size' && (
+                    <span className="th-sort-arrow" aria-hidden="true">{sortOrder === 'asc' ? '↑' : '↓'}</span>
+                  )}
+                </span>
+              </th>
+              <th
                 className={`th-sort-cell${sortKey === 'updated_at' ? ' active' : ''}`}
                 title={msg('sort')}
                 onClick={() => toggleSort('updated_at')}
@@ -2718,6 +2700,13 @@ export default function FileBrowser({
                       {item.has_index_web && <span className="web-folder-badge">网页</span>}
                     </button>
                   )}
+                </td>
+                {/* 大小列（v2.6）：文件 = 可读大小（sizeCache 惰性补齐，口径
+                    formatQuota）；目录不显示（递归总大小见「属性」弹窗）。 */}
+                <td className="muted col-size">
+                  {item.type === 'file'
+                    ? ((sizeCache.current.get(item.id) ?? 0) > 0 ? formatQuota(sizeCache.current.get(item.id) ?? 0, false) : '…')
+                    : '—'}
                 </td>
                 <td className="muted">{formatTime(item.updated_at)}</td>
                 <td className="col-actions">
@@ -2800,7 +2789,7 @@ export default function FileBrowser({
                       : <FileText size={22} strokeWidth={2} aria-hidden="true" />}</span>
                   <span className="file-card-name" title={item.name}>{item.name}{item.has_index_web && <span className="web-folder-badge">网页</span>}</span>
                   <span className="file-card-meta muted">
-                    {size > 0 ? `${formatSize(size)} · ` : ''}
+                    {size > 0 ? `${formatQuota(size, false)} · ` : ''}
                     {formatTime(item.updated_at)}
                   </span>
                 </button>
@@ -2815,8 +2804,8 @@ export default function FileBrowser({
         </div>
       )}
 
-      {/* 上传任务（v1.6）：浮条已移除——工具栏「上传任务」按钮（Badge 进行中
-          数量）点击弹窗展示任务列表（复用同一 uploads 数据）。 */}
+      {/* 上传任务入口已移至全局顶栏（v2.6「传输」图标按钮，App.tsx
+          UploadTasksBell；任务状态在 uploadTasks store，切页面不丢）。 */}
       </div>
 
       {folderOpen && createFolderFn && (
@@ -2899,43 +2888,6 @@ export default function FileBrowser({
           <div className="modal-actions">
             <Button onClick={() => setShareListOpen(false)}>{msg('close')}</Button>
           </div>
-        </Modal>
-      )}
-
-      {/* 上传任务弹窗（v1.6：工具栏按钮入口；列表 = uploads 数据，进行中
-          徽标计数；进行中任务可取消（排队中直接标记跳过 / 传输中 abort）；
-          「清空已完成」保留进行中任务）。 */}
-      {uploadPanelOpen && (
-        <Modal title={locale === 'zh-CN' ? '上传任务' : 'Upload tasks'} onClose={() => setUploadPanelOpen(false)}>
-          {uploads.length === 0 ? (
-            <p className="hint">{locale === 'zh-CN' ? '暂无上传任务。' : 'No upload tasks.'}</p>
-          ) : (
-            <>
-              <div className="upload-list">
-                {uploads.map((row) => (
-                  <div key={row.key} className="upload-row">
-                    <span className="upload-name">{row.name}</span>
-                    <span className={`badge ${row.phase}`}>{phaseText[row.phase]}</span>
-                    {row.error && <span className="error-text">{row.error}</span>}
-                    {uploadPhaseActive(row.phase) && (
-                      <Button size="small" onClick={() => cancelUploadRow(row.key)}>
-                        {locale === 'zh-CN' ? '取消' : 'Cancel'}
-                      </Button>
-                    )}
-                  </div>
-                ))}
-              </div>
-              <div className="modal-actions">
-                <Button
-                  disabled={activeUploadCount === uploads.length}
-                  onClick={() => setUploads((prev) => prev.filter((r) => uploadPhaseActive(r.phase)))}
-                >
-                  {locale === 'zh-CN' ? '清空已完成' : 'Clear finished'}
-                </Button>
-                <Button onClick={() => setUploadPanelOpen(false)}>{msg('close')}</Button>
-              </div>
-            </>
-          )}
         </Modal>
       )}
 
@@ -3129,8 +3081,12 @@ export default function FileBrowser({
                   {propsLoading
                     ? '…'
                     : propsTarget.type === 'file' && propsMeta?.current_version
-                      ? formatSize(propsMeta.current_version.size)
-                      : '—'}
+                      ? formatQuota(propsMeta.current_version.size, false)
+                      : propsTarget.type === 'folder'
+                        ? (propsMeta && 'total_size' in propsMeta && propsMeta.total_size != null
+                          ? `${formatQuota(Number(propsMeta.total_size), false)}${locale === 'zh-CN' ? '（含子项）' : ' (recursive)'}`
+                          : '—')
+                        : '—'}
                 </span>
               </div>
               <div className="props-row">

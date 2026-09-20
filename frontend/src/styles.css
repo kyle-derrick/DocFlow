@@ -89,6 +89,14 @@ html {
 body {
   /* 归零 antd 弹窗滚动锁定的 padding-right 补偿（见上方说明）。 */
   padding-right: 0 !important;
+  /* v2.5：归零 @rc-component/portal useScrollLocker 注入的
+   * `html body { overflow-y: hidden; width: calc(100% - Npx) }` 宽度补偿——
+   * 本站滚动容器是 html（overflow-y:scroll + scrollbar-gutter:stable，槽位
+   * 恒定预留），弹窗打开时 body 被压窄 N px 会使 1560px 居中布局整体左跳
+   * （概览最近文件弹窗打开后页面被挤压跳动的根因）；锁 body 的
+   * overflow 对 html 滚动容器本就无效，一并归零恢复。 */
+  width: auto !important;
+  overflow-y: visible !important;
 }
 
 body {
@@ -871,6 +879,35 @@ svg.lucide {
   margin-left: 4px;
 }
 
+/* 文件列表大小列（v2.6）：定宽右对齐，未补齐的占位「…」弱化。 */
+.col-size {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 配额输入（QuotaInput：数值 + 单位下拉 + 字节换算提示，v2.6）。 */
+.quota-input {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.quota-input .ant-input {
+  flex: 1;
+  min-width: 120px;
+}
+
+.quota-input .ant-select {
+  width: 88px;
+  flex: 0 0 auto;
+}
+
+.quota-input-bytes {
+  font-size: 12px;
+  flex-basis: 100%;
+}
+
 /* ---------- 文件网格视图（设计 6.3.7） ---------- */
 
 /* 响应式卡片网格：auto-fill + minmax(180px)，窄屏自动降列。 */
@@ -1505,15 +1542,16 @@ svg.lucide {
    280px 仅空间视图）。三栏各自内部滚动（overflow），内容少也撑满不缩减
    （grid 行 minmax(0,1fr) + 树 max-height:100%）。 */
 
-/* 文件类全屏页面（v1.6 全出血）：去 1560px 限宽与两侧留白（顶栏工具行与
-   页面骨架直接铺满视口宽度，工作区内部留白由 .files-tree-layout 自管）；
-   垂直仍锁视口高度内滚。 */
-.content:has(> .files-page) { padding: 0; max-width: none; }
+/* 文件页（v2.5）：与其他页同口径——.content 1560px 限宽居中 + 两侧留白
+   （padding 16/16/24），不再全出血；三栏仍铺满剩余视口高度（下方
+   .page.files-page 高度扣去上下 padding）。 */
+.content:has(> .files-page) { padding: 16px 16px 24px; }
 
 .page.files-page {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - var(--topbar-h));
+  /* 视口高度 − 顶栏 − .content 上下 padding（16 + 24）。 */
+  height: calc(100vh - var(--topbar-h) - 40px);
   min-height: 0;
   overflow: hidden;
 }
@@ -1553,12 +1591,16 @@ svg.lucide {
 .files-tree-main {
   min-width: 0;
   min-height: 0;
+  /* 中区容器撑满 grid 行高（与左树同规则）：内容不足/空目录时中间
+     文件列表也等高，不收缩（v2.5 修复）。 */
+  height: 100%;
   display: flex;
 }
 
 .files-tree-main .file-browser {
   flex: 1;
   min-width: 0;
+  min-height: 100%;
 }
 
 /* 右侧栏（文件页=成员栏，默认收起，经工具栏「成员」按钮展开）：铺满列高，
@@ -1655,6 +1697,40 @@ svg.lucide {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 用户组行展开（v2.5）：组行 caret + 组内成员缩进列表（头像+姓名）。
+   v2.6 缩进修复：引导线起点与组行头像对齐（margin-left = caret+gap 宽度），
+   组员行再整体递进一级（padding-left），层级清晰不与组名文字串行。
+   注意选择器带 .member-list 提升特异性（0,2,0 > 0,1,0）——下方 .member-list
+   的 margin:0/padding:0（1751 行）在其后定义会覆盖同特异性的缩进声明
+   （v2.5 缩进失效的根因）。 */
+.member-group-item {
+  display: block;
+}
+
+.member-group-caret {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  color: var(--muted);
+}
+
+.member-group-row .member-info-btn { gap: 4px; }
+
+.member-list.member-group-members {
+  margin: 0 0 2px 18px;
+  padding-left: 16px;
+  border-left: 1px solid var(--border);
+}
+
+.member-list.member-group-members .member-row {
+  padding-block: 1px;
+}
+
+.member-group-empty {
+  margin: 2px 0 4px;
+  font-size: 12px;
 }
 
 .member-pager {
@@ -1854,6 +1930,38 @@ svg.lucide {
 
 .member-danger-zone .hint {
   margin: 0 0 8px;
+}
+
+/* 危险区独立子卡片（v2.5）：转让所有权（中性 surface 卡片）与解散空间
+   （红色 destructive 区块）拆分展示，各自标题+描述，视觉明确分级。 */
+.danger-card {
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.danger-card .hint {
+  margin: 0 0 10px;
+}
+
+.danger-card-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+
+.danger-card.danger-card-destructive {
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+  background: color-mix(in srgb, var(--danger) 6%, var(--surface));
+}
+
+.danger-card.danger-card-destructive .danger-card-title {
+  color: var(--danger);
 }
 
 /* 我的分享 antd Table（v1.7.1 服务端分页）。 */
@@ -4194,6 +4302,9 @@ kbd {
 
 /* ---------- 空间切换控件组（顶栏最左）的宽度约束 ---------- */
 .space-switcher .ant-select.space-select { width: min(200px, 28vw); }
+/* 视图下拉（全部/收藏/最近，v2.6 由 Segmented 改紧凑 Select）。 */
+.space-switcher .ant-select.view-select { width: 96px; }
+.view-option { display: inline-flex; align-items: center; gap: 6px; }
 
 /* ---------- 浮层菜单统一 Win11 紧凑规格（全局，v1.6） ----------
    口径：所有挂 body 的菜单类浮层——antd Dropdown 面板、右键/树节点 Menu 的
@@ -4697,36 +4808,30 @@ kbd {
   align-items: start;
 }
 
+/* 左侧组树（v2.5 改 antd Menu 原生风格）：去掉包裹边框/卡片底——高度随
+   内容自然伸展，与右侧成员表起始对齐不再被边框撑出高度差；保持 sticky。 */
 .people-group-tree {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 10px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 8px;
   position: sticky;
   top: 8px;
 }
 
-.people-group-node {
+.people-group-menu.ant-menu {
+  border-inline-end: none !important;
+  background: transparent;
+  font-size: 13px;
+}
+
+/* Menu 条目内：名称 + 行尾计数/图标按钮组同行排布。 */
+.people-group-label {
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 7px 8px;
-  border-radius: 6px;
-  cursor: pointer;
-  color: var(--text);
-  min-width: 0;
 }
 
-.people-group-node:hover {
-  background: var(--surface-2);
-}
-
-.people-group-node.active {
-  background: color-mix(in srgb, var(--primary) 14%, transparent);
-  color: var(--primary-hover);
+.people-group-menu .ant-menu-item {
+  padding-inline: 10px !important;
 }
 
 .people-group-name {
@@ -4743,6 +4848,16 @@ kbd {
   align-items: center;
   gap: 2px;
   flex: 0 0 auto;
+}
+
+/* 组行尾操作图标按钮（Edit3/Trash2）：紧凑方块，替换旧「改」「删」文字。 */
+.people-group-action.ant-btn.ant-btn-text {
+  padding: 0 4px;
+  height: 22px;
+  min-width: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .people-group-count {

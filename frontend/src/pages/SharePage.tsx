@@ -35,6 +35,7 @@ import {
   publicShareTree,
   verifyPublicShare,
 } from '../api'
+import { formatQuota } from '../components/FileBrowser'
 import { loadDocEditorScript } from './EditorPage'
 import { MarkdownViewer } from './TextEditorPage'
 import { parseScene } from './ExcalidrawPage'
@@ -47,11 +48,9 @@ import { useColorMode } from '../theme'
 // 富文本编辑器（Tiptap 产物 1MB+）懒加载独立 chunk（与 DfdocEditorPage 同法）。
 const RichTextEditor = lazy(() => import('../components/richtext/RichTextEditor'))
 
+/** 字节数可读格式（v2.6 统一 formatQuota 口径：B→KiB/MiB/GiB/TiB）。 */
 function formatSize(size: number): string {
-  if (size < 1024) return `${size} B`
-  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
-  if (size < 1024 * 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MB`
-  return `${(size / 1024 / 1024 / 1024).toFixed(2)} GB`
+  return formatQuota(size, false)
 }
 
 type LoadState =

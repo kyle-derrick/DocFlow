@@ -5,21 +5,8 @@ import { useEffect, useState } from 'react'
 import { FileText } from 'lucide-react'
 import { DashboardData, getDashboard } from '../api'
 import { hotkeyDocs } from '../components/HotkeysHelp'
-import { FileViewModal, formatTime } from '../components/FileBrowser'
+import { FileViewModal, formatQuota, formatTime } from '../components/FileBrowser'
 import { MessageKey, t, useLocale } from '../i18n'
-
-/** 字节数人类可读格式（B/KB/MB/GB/TB，一位小数）。 */
-function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`
-  const units = ['KB', 'MB', 'GB', 'TB']
-  let value = n
-  let i = -1
-  do {
-    value /= 1024
-    i++
-  } while (value >= 1024 && i < units.length - 1)
-  return `${value.toFixed(1)} ${units[i]}`
-}
 
 /** 个人统计卡片配置（值可为数字或字节数格式化）。 */
 const PERSONAL_CARDS: Array<{ key: keyof Pick<DashboardData, 'files' | 'storage_bytes' | 'space_files' | 'shares' | 'uploads_7d'>; labelKey: MessageKey; bytes?: boolean }> = [
@@ -82,7 +69,7 @@ export default function DashboardPage() {
           <div className="stats-grid">
             {PERSONAL_CARDS.map(({ key, labelKey, bytes }) => (
               <div key={key} className="stat-card accent">
-                <div className="stat-value">{bytes ? formatBytes(data[key]) : data[key]}</div>
+                <div className="stat-value">{bytes ? formatQuota(data[key], false) : data[key]}</div>
                 <div className="stat-label">{msg(labelKey)}</div>
               </div>
             ))}

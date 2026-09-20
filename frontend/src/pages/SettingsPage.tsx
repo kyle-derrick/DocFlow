@@ -78,7 +78,7 @@ import {
   editMethodLabel,
   viewMethodLabel,
 } from '../openers'
-import { formatTime, Modal } from '../components/FileBrowser'
+import { formatQuota, formatTime, Modal } from '../components/FileBrowser'
 import { THEME_ACCENTS, ThemeAccent, ThemeMode, ThemePreference, THEME_EVENT, loadTheme, saveTheme } from '../theme'
 import { MessageKey, saveLocale, t, useLocale } from '../i18n'
 
@@ -862,11 +862,12 @@ function AppearancePanel() {
     return () => window.removeEventListener(THEME_EVENT, onTheme)
   }, [])
 
+  // v2.5 防漂移：update 一律基于 localStorage 现值合并（而非本地 state）——
+  // THEME_EVENT 监听的 setState 异步生效，快速跨入口连续操作时本地 state
+  // 可能仍是旧 accent，用它合并会把用户已选主题覆盖回旧值（主题自动漂移
+  // 的竞态根因）；本地 state 仅作 UI 展示（事件同步）。
   const update = (next: Partial<ThemePreference>) => {
-    const merged: ThemePreference = { accent, mode, ...next }
-    setAccent(merged.accent)
-    setMode(merged.mode)
-    saveTheme(merged)
+    saveTheme({ ...loadTheme(), ...next })
   }
 
   return (
@@ -1981,8 +1982,10 @@ function MailPanel({ onNotice, onError }: { onNotice: (m: string) => void; onErr
           {view?.public_base_url ? <span className="setting-value-mono">{view.public_base_url}</span> : <span className="badge">未设置</span>}
         </div>
       </div>
-      {/* 发送测试邮件：用当前生效配置投递一封测试邮件；错误详情回显。 */}
-      <div className="panel-inner" style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--border)' }}>
+      {/* 发送测试邮件：用当前生效配置投递一封测试邮件；错误详情回显。
+          v2.6 双线修复：上方「站点地址」setting-row 自带 border-bottom，
+          本块不再叠加 borderTop（此前两条分隔线相距 12px）。 */}
+      <div className="panel-inner" style={{ marginTop: 12, paddingTop: 12 }}>
         <div className="setting-key" style={{ marginBottom: 4 }}>发送测试邮件</div>
         <div className="setting-desc muted" style={{ marginBottom: 8 }}>
           用当前生效配置（DB 覆盖 → env 回退）投递一封测试邮件验证连通性；
@@ -2050,6 +2053,14 @@ const effectText: Record<string, string> = {
   new_session: '新会话生效',
   restart: '需重启生效',
 }
+
+/** 字节量设置键（配额/大小上限类，值以字节存储；v2.6 展示层统一人类可读）。 */
+const QUOTA_BYTE_KEYS = new Set([
+  'upload.default_quota',
+  'space.default_quota',
+  'space.max_quota',
+  'upload.max_file_size',
+])
 
 /** 全部内置设置键的中文名（v2.3：key 直显 + 中文名 label，覆盖 audit/space
  * 等全部前缀；未命中回退空串仅显示 key）。 */
@@ -2259,7 +2270,7 @@ function SystemSettingsPanel({ onError, onNotice }: { onError: (msg: string) => 
                     </div>
                     <div className="setting-desc muted">{item.description}</div>
                     <div className="setting-meta muted">
-                      类型 {typeText[item.type]} · 默认值 {String(item.default)}
+                      类型 {typeText[item.type]} · 默认值 {QUOTA_BYTE_KEYS.has(item.key) ? formatQuota(Number(item.default)) : String(item.default)}
                       {item.updated_at && ` · 更新于 ${formatTime(item.updated_at)}`}
                     </div>
                   </div>
@@ -2315,7 +2326,12 @@ function SystemSettingsPanel({ onError, onNotice }: { onError: (msg: string) => 
                       </span>
                     ) : (
                       <>
-                        <span className="setting-value-mono">{String(item.value)}</span>
+                        {/* 字节量设置键（配额/大小上限，v2.6）：值显示人类可读
+                            大小（formatQuota 口径），title 悬浮原始字节数；编辑
+                            仍输入原始整数（字节）。 */}
+                        <span className="setting-value-mono" title={QUOTA_BYTE_KEYS.has(item.key) ? `${String(item.value)} 字节` : undefined}>
+                          {QUOTA_BYTE_KEYS.has(item.key) ? formatQuota(Number(item.value)) : String(item.value)}
+                        </span>
                         <Button size="small" onClick={() => {
                           setEditingKey(item.key)
                           setDraft(item.type === 'bool' ? Boolean(item.value) : String(item.value))
@@ -2346,12 +2362,27 @@ export default function SettingsPage() {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   // admin 探测（与顶栏「管理」入口同法）：admin 专属分区（邮件/TLS/系统设置）。
-  const [admin, setAdmin] = useState(false)
+  // v2.5 三态（null = 探测中）：isAdmin() 异步返回前不重定向——旧实现首渲染
+  // 恒为 false，直接访问 /settings/mail 等分区会在探测完成前被 Navigate 弹回
+  // 「外观」（「点邮件配置/TLS/系统设置跳到外观页」的根因）。
+  const [admin, setAdmin] = useState<boolean | null>(null)
   useEffect(() => {
     let alive = true
     void isAdmin().then((v) => { if (alive) setAdmin(v) })
     return () => { alive = false }
   }, [])
+  // 探测中：渲染骨架（不重定向、不闪错分区），探测完成即出正确分区。
+  if (admin === null) {
+    return (
+      <div className="page section-page">
+        <aside className="section-sidebar"><h3>{msg('settings')}</h3></aside>
+        <div className="section-content">
+          <div className="page-head"><h2>{msg('settings')}</h2></div>
+          <div className="hint">{msg('loading')}</div>
+        </div>
+      </div>
+    )
+  }
   const sections = admin ? [...baseSettingsSections, ...adminSettingsSections] : baseSettingsSections
   if (!sections.some(([key]) => key === section)) {
     return <Navigate to="/settings/appearance" replace />

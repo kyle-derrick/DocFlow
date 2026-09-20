@@ -181,6 +181,12 @@ func (h *Handler) getFile(c *gin.Context) {
 			"mime_type": blob.MimeType,
 			"status":    blob.Status,
 		}
+	} else if f.Type == "folder" {
+		// 目录无当前版本：附子树递归总大小（属性弹窗「含子项」；查询失败
+		// 不阻塞元数据返回，字段缺省由前端回退「—」）。
+		if total, ferr := h.files.FolderSubtreeBytes(id); ferr == nil {
+			out["total_size"] = total
+		}
 	} else {
 		out["current_version"] = nil
 	}
