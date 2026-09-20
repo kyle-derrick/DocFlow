@@ -38,9 +38,9 @@ import (
 	"github.com/docflow/docflow/internal/search"
 	"github.com/docflow/docflow/internal/settings"
 	"github.com/docflow/docflow/internal/share"
+	"github.com/docflow/docflow/internal/space"
 	"github.com/docflow/docflow/internal/tagging"
 	"github.com/docflow/docflow/internal/tasks"
-	"github.com/docflow/docflow/internal/team"
 	"github.com/docflow/docflow/internal/upload"
 	"github.com/docflow/docflow/internal/webhook"
 	"github.com/docflow/docflow/internal/webpkg"
@@ -66,19 +66,17 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	// 团队：GormStore 提供成员/角色查询，Service 按设计 6.5 权限模型求值
-	//（系统角色映射 + 自定义角色 permissions JSON + deny 优先 + 角色缺失
-	// fail closed；后续可替换为 Casbin 适配器）。
-	teamStore := team.NewGormStore(db)
-	teamService := team.NewService(teamStore)
-	// 团队写权限（上传/建目录/追加版本/重命名/恢复）：owner/editor/含 write 权限角色。
-	fileStore.SetTeamWriter(teamService.CanWrite)
-	// 团队删除权限（软删除/彻底删除）：系统仅 owner、自定义角色按 delete 勾选。
-	fileStore.SetTeamDeleter(teamService.CanDelete)
-	// 路径级 ACL（设计 6.5.3/6.5.4 最小落地）：团队作用域文件/目录的
-	// read/write/delete/share 判定先求值 folder_acl 链（近覆盖远、同节点
-	// deny 优先、user 覆盖 team），链上无适用条目回退团队角色判定
-	//（无 ACL 行为完全不变）；HTTP 管理端点 GET/PUT /api/v1/folders/:id/acl。
+	// 空间（统一空间模型，migration 040）：GormStore 提供成员/用户组与角色
+	// 查询（直接成员 ∪ 组成员取最高），Service 按五级内置角色矩阵求值权限。
+	spaceStore := space.NewGormStore(db)
+	spaceService := space.NewService(spaceStore)
+	// 空间写权限（上传/建目录/追加版本/重命名/恢复）：角色矩阵含 write。
+	fileStore.SetSpaceWriter(spaceService.CanWrite)
+	// 空间删除权限（软删除/彻底删除）：角色矩阵含 delete。
+	fileStore.SetSpaceDeleter(spaceService.CanDelete)
+	// 路径级 ACL：空间作用域文件/目录的 read/write/delete/share 判定先
+	// 求值 folder_acl 链（近覆盖远、同节点 deny 优先、user 覆盖 space），
+	// 链上无适用条目回退空间角色判定（无 ACL 行为完全不变）。
 	aclService := acl.NewService(acl.NewGormRepo(db))
 	fileStore.SetACLResolver(aclService.ResolveForFile)
 	// 版本管理：每文件保留版本数上限（MAX_VERSIONS_PER_FILE，默认 5）为回退值；
@@ -87,6 +85,26 @@ func main() {
 	fileStore.SetMaxVersions(cfg.MaxVersionsPerFile)
 	settingsStore := settings.NewStore(db)
 	settingsStore.SetAuditRecorder(auditStore)
+	// 空间配额运行时配置（settings 热读取）：新空间默认配额/配额上限。
+	spaceService.SetQuotaDefaultsProvider(func() (int64, int64) {
+		def, derr := settingsStore.GetInt(settings.KeySpaceDefaultQuota)
+		if derr != nil || def < 0 {
+			def = int(space.DefaultDefaultQuota)
+		}
+		max, merr := settingsStore.GetInt(settings.KeySpaceMaxQuota)
+		if merr != nil || max < 0 {
+			max = int(space.DefaultMaxQuota)
+		}
+		return int64(def), int64(max)
+	})
+	// 每用户空间数上限（settings 热读取）。
+	spaceService.SetMaxSpacesProvider(func() int {
+		n, err := settingsStore.GetInt(settings.KeySpaceMaxPerUser)
+		if err != nil || n < 1 {
+			return space.DefaultMaxSpaces
+		}
+		return n
+	})
 	fileStore.SetMaxVersionsProvider(func() int {
 		n, err := settingsStore.GetInt(settings.KeyUploadMaxVersionsPerFile)
 		if err != nil || n < 1 {
@@ -111,9 +129,9 @@ func main() {
 		}
 		return n
 	})
-	// 团队文件读判定（设计 6.5）：CanRead——系统角色任意在册成员可读、
-	// 自定义角色按 read 勾选且未被 deny（角色行缺失 fail closed），实时生效。
-	fileStore.SetTeamReader(teamService.CanRead)
+	// 空间文件读判定：CanRead——任意在册成员（直接成员或经用户组）可读，
+	// 实时生效（成员/组变动即时反映）。
+	fileStore.SetSpaceReader(spaceService.CanRead)
 	userStore := auth.NewUserStore(db)
 	// 新用户开户默认配额（C3）：system_settings 的 upload.default_quota 热读取
 	//（邀请注册 / OIDC 自动开户共用 CreateUser 回填；读失败回退 10GiB 常量）。
@@ -129,35 +147,32 @@ func main() {
 	notifyService := notify.NewService(notify.NewGormStore(db), notify.NewGormPreferenceRepo(db))
 	realtimeHub := realtime.NewHub()
 	notifyService.SetRealtimeSink(func(n notify.Notification) { realtimeHub.Broadcast(n.UserID, n) })
-	// 团队文件版本更新通知（file.updated）：AddVersion 事务提交后回调
-	//（files.dispatchVersionAdded 已过滤——仅 scope_type=team 且 actor≠owner）；
-	// 异步通知团队全部成员（文件 owner 除外，避免噪音）该文件有新版本。
+	// 空间文件版本更新通知（file.updated）：AddVersion 事务提交后回调
+	//（files.dispatchVersionAdded 已过滤——actor≠owner）；异步通知空间
+	// 全部参与者（直接成员 ∪ 组成员，文件 owner 除外，避免噪音）。
 	fileStore.SetNotifyDispatcher(func(f files.File, actor uuid.UUID, version files.FileVersion) {
-		teamID := uuid.Nil
-		if f.TeamID != nil {
-			teamID = *f.TeamID
-		}
+		spaceID := f.SpaceID
 		go func() {
-			members, err := teamStore.ListMembers(teamID)
+			members, err := spaceService.MemberUserIDs(spaceID)
 			if err != nil {
-				log.Printf("[notify] list team %s members: %v", teamID, err)
+				log.Printf("[notify] list space %s members: %v", spaceID, err)
 				return
 			}
 			recipients := make([]uuid.UUID, 0, len(members))
 			for _, m := range members {
-				if m.UserID != f.OwnerID {
-					recipients = append(recipients, m.UserID)
+				if m != f.OwnerID {
+					recipients = append(recipients, m)
 				}
 			}
 			if len(recipients) == 0 {
 				return
 			}
-			actorName := "团队成员"
+			actorName := "空间成员"
 			if name, err := userStore.Username(actor); err == nil && name != "" {
 				actorName = name
 			}
-			body := fmt.Sprintf("%s 更新了团队文件「%s」（新版本 v%d）。", actorName, f.Name, version.Version)
-			if err := notifyService.NotifyMany(recipients, notify.EventFileUpdated, "团队文件已更新："+f.Name, body, f.ID); err != nil {
+			body := fmt.Sprintf("%s 更新了共享文件「%s」（新版本 v%d）。", actorName, f.Name, version.Version)
+			if err := notifyService.NotifyMany(recipients, notify.EventFileUpdated, "共享文件已更新："+f.Name, body, f.ID); err != nil {
 				log.Printf("[notify] file.updated %s: %v", f.ID, err)
 			}
 		}()
@@ -169,12 +184,12 @@ func main() {
 	// 扫描结果与 scan 阶段耗时计入 Prometheus 指标（docflow_scan_results_total、
 	// docflow_upload_processing_duration_seconds{stage=scan}）。
 	uploadService.SetScanner(upload.NewCountingScanner(upload.SelectScanner(cfg.ScanEnabled, cfg.ClamAVAddr, cfg.ClamAVRequired, cfg.ClamAVTimeout)))
-	// 团队文件版本删除通知（file.version.deleted）：DeleteVersion 事务提交后
-	// 回调（files.dispatchVersionDeleted 已过滤——仅 scope_type=team 且
-	// 删除者≠owner）；异步通知文件 owner 该文件的一个历史版本被删除。
+	// 空间文件版本删除通知（file.version.deleted）：DeleteVersion 事务提交后
+	// 回调（files.dispatchVersionDeleted 已过滤——删除者≠owner）；异步通知
+	// 文件 owner 该文件的一个历史版本被删除。
 	fileStore.SetVersionDeletedDispatcher(func(f files.File, actor uuid.UUID, version files.FileVersion) {
 		go func() {
-			actorName := "团队成员"
+			actorName := "空间成员"
 			if name, err := userStore.Username(actor); err == nil && name != "" {
 				actorName = name
 			}
@@ -260,19 +275,19 @@ func main() {
 	// 由任意实例的 worker 消费。两种驱动共用同一组处理函数。
 	// 全文检索（SEARCH_DRIVER 装配 pg|meili）：索引构建经 task:search-index
 	// 队列异步执行（见下方 fileComplete 钩子接线）。meili 为 v2 可选项：
-	// 启动 EnsureIndex 校验连通性（失败即退出）；访问过滤需要用户团队列表，
-	// 由 teamStore.ListForUser 提供（不扩 Repo.QueryDocs 签名，pg/memory
+	// 启动 EnsureIndex 校验连通性（失败即退出）；访问过滤需要用户空间列表，
+	// 由 spaceStore.ListForUser 提供（不扩 Repo.QueryDocs 签名，pg/memory
 	// 实现与既有调用方零改动）。
 	var searchRepo search.Repo = search.NewGormRepo(db)
 	if cfg.SearchDriver == "meili" {
 		meili := search.NewMeiliRepo(cfg.MeiliURL, cfg.MeiliAPIKey, func(user uuid.UUID) ([]uuid.UUID, error) {
-			teams, err := teamStore.ListForUser(user)
+			spaces, err := spaceStore.ListForUser(user)
 			if err != nil {
 				return nil, err
 			}
-			ids := make([]uuid.UUID, 0, len(teams))
-			for _, t := range teams {
-				ids = append(ids, t.ID)
+			ids := make([]uuid.UUID, 0, len(spaces))
+			for _, sp := range spaces {
+				ids = append(ids, sp.ID)
 			}
 			return ids, nil
 		})
@@ -349,13 +364,13 @@ func main() {
 		}
 	})
 	shareService := share.NewService(share.NewGormStore(db), fileStore)
-	shareService.SetTeamMembership(teamStore)
+	shareService.SetSpaceMembership(spaceStore)
 	// 目录分享树源（tree/raw-share 子资源解析与清单，生产恒注入）。
 	shareService.SetTreeSource(fileStore)
-	// 团队文件分享门控（设计 6.5.5）：仅 CanShare（系统 owner/editor、
-	// 自定义角色按 share 勾选且未被 deny）可创建团队文件分享；个人文件不受影响。
-	shareService.SetTeamSharer(teamService.CanShare)
-	// 分享判定的路径级 ACL：folder_acl 链命中（matched）时优先于团队角色。
+	// 空间文件分享门控：仅 CanShare（owner/admin/member_share）可创建空间
+	// 文件分享；文件行 owner 语义由 Get 的授权链保证。
+	shareService.SetSpaceSharer(spaceService.CanShare)
+	// 分享判定的路径级 ACL：folder_acl 链命中（matched）时优先于空间角色。
 	shareService.SetACLResolver(aclService.ResolveForFile)
 	shareService.SetUserDirectory(userStore)
 	// 站内通知接线（share.accessed）：公开/私有分享下载成功（计数已消耗）
@@ -480,7 +495,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	handler := httpapi.NewHandler(service, userStore, fileStore, shareService, teamService, uploadService, storage, cfg.CookieSecure, cfg.CookieDomain, cfg.RefreshTokenTTL)
+	handler := httpapi.NewHandler(service, userStore, fileStore, shareService, spaceService, uploadService, storage, cfg.CookieSecure, cfg.CookieDomain, cfg.RefreshTokenTTL)
 	handler.SetReadinessChecker(readiness.New(sqlDB, cfg, storage))
 	handler.SetAuditRecorder(auditStore)
 	handler.SetAuditQuerySource(auditStore)
@@ -536,6 +551,9 @@ func main() {
 	// 邀请制注册与邮件通道（POST /api/v1/admin/invitations、/api/v1/auth/register、
 	// /forgot-password、/reset-password）。
 	handler.SetInvites(inviteService, mailer, cfg.PublicBaseURL)
+	// 换绑邮箱（账号安全，v2.4）：验证码存储（email_change_codes，migration
+	// 042）+ 账号读写源；邮件经同一 mailer 通道投递到新邮箱。
+	handler.SetEmailChange(auth.NewGormEmailChangeStore(db), userStore)
 	// OIDC 单点登录（v2）：启用时启动即拉取发现文档（失败 fatal——IdP
 	// 不可达则 SSO 形同虚设，宁可拒启）；login/callback 路由随之注册，
 	// config 探测端点恒注册（禁用时 enabled=false）。用户映射：sub 关联

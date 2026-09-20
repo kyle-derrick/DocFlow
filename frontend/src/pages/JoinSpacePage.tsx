@@ -1,21 +1,21 @@
-// 接受团队邀请落地页（/teams/join/:token，v1.7.1 成员管理完善）：
-// 登录用户访问一次性邀请链接 → 调 POST /api/v1/team-invites/join/:token
-// 接受（邮箱须匹配）→ 提示并跳转团队列表/团队空间。未登录时由
+// 接受空间邀请落地页（/spaces/join/:token）：
+// 登录用户访问一次性邀请链接 → 调 POST /api/v1/space-invites/join/:token
+// 接受（邮箱须匹配）→ 提示并跳转空间列表/空间文件页。未登录时由
 // RequireAuth 先引导登录（登录后回跳本页继续接受）。
 import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { Button } from 'antd'
-import { acceptTeamInvite } from '../api'
-import type { AcceptedTeamInvite } from '../api'
+import { acceptSpaceInvite } from '../api'
+import type { AcceptedSpaceInvite } from '../api'
 import { MessageKey, formatMessage, t, useLocale } from '../i18n'
 
-export default function JoinTeamPage() {
+export default function JoinSpacePage() {
   const { token = '' } = useParams()
   const locale = useLocale()
   const msg = (key: MessageKey) => t(locale, key)
   const navigate = useNavigate()
   const [state, setState] = useState<'loading' | 'done' | 'error'>('loading')
-  const [result, setResult] = useState<AcceptedTeamInvite | null>(null)
+  const [result, setResult] = useState<AcceptedSpaceInvite | null>(null)
   const [error, setError] = useState('')
 
   useEffect(() => {
@@ -24,7 +24,7 @@ export default function JoinTeamPage() {
       setError(msg('joinTeamFailed'))
       return
     }
-    void acceptTeamInvite(token)
+    void acceptSpaceInvite(token)
       .then((res) => {
         setResult(res)
         setState('done')
@@ -46,12 +46,12 @@ export default function JoinTeamPage() {
         <div className="banner ok">
           {result.already_member
             ? msg('joinTeamAlready')
-            : formatMessage(msg('joinTeamSuccess'), { name: result.team.name })}
+            : formatMessage(msg('joinTeamSuccess'), { name: result.space.name })}
           <div className="join-team-actions">
-            <Button type="primary" size="small" onClick={() => navigate(`/teams/${result.team.id}`)}>
+            <Button type="primary" size="small" onClick={() => navigate(`/files?space=${result.space.id}`)}>
               {msg('joinTeamOpen')}
             </Button>{' '}
-            <Button size="small" onClick={() => navigate('/teams')}>{msg('joinTeamList')}</Button>
+            <Button size="small" onClick={() => navigate('/spaces')}>{msg('joinTeamList')}</Button>
           </div>
         </div>
       )}
@@ -59,7 +59,7 @@ export default function JoinTeamPage() {
         <div className="banner error">
           {error}
           <div className="join-team-actions">
-            <Link to="/teams">{msg('joinTeamList')}</Link>
+            <Link to="/spaces">{msg('joinTeamList')}</Link>
           </div>
         </div>
       )}

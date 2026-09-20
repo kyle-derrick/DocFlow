@@ -1,44 +1,124 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
-import { Lock } from 'lucide-react'
+import { useSearchParams } from 'react-router-dom'
+import { Lock, Trash2 } from 'lucide-react'
 import { App as AntdApp, Button, Input, Segmented, Select } from 'antd'
 import {
+  ACLAction,
   CreatedShare,
   FileItem,
-  Team,
+  FileQueryOptions,
+  FolderACLEntry,
+  SHARE_WATERMARK_DEFAULT,
+  Space,
+  SpaceRole,
   UserSearchResult,
   copyFile,
   createFolder,
   createShare,
+  createSpaceFolder,
   currentUserId,
   deleteFile,
+  getFolderACL,
   getFileMeta,
   listFiles,
-  listTeams,
+  listSpaceFiles,
+  listSpaces,
+  putFolderACL,
   renameFile,
   restoreFile,
   searchUsers,
   uploadFile,
 } from '../api'
-import { Modal, formatTime } from '../components/FileBrowser'
+import { DirListing, Modal, formatTime } from '../components/FileBrowser'
 import { FileBrowserWithTree } from '../components/FolderTreeNav'
 import VersionHistoryModal from '../components/VersionHistoryModal'
+import SpaceManageModal from '../components/SpaceManageModal'
+import SpaceMemberPanel from '../components/SpaceMemberPanel'
 import SpaceSwitcher from '../components/SpaceSwitcher'
 import { useHotkeys } from '../useHotkeys'
-import { t, useLocale } from '../i18n'
+import { MessageKey, formatMessage, t, useLocale } from '../i18n'
 
-/** 个人空间：文件浏览复用 FileBrowser（左侧目录树见 FolderTreeNav），本页仅保留
- * 重命名 / 删除 / 分享 / 版本历史对话框。视图（全部/收藏/最近）状态由本页
- * 持有，经 SpaceSwitcher 切换、透传 FileBrowser 的 activeView 受控入口。 */
+/** 权限动作 → i18n key（ACL 勾选表单共用）。 */
+const PERM_LABEL_KEYS: Record<string, MessageKey> = {
+  read: 'permRead',
+  write: 'permWrite',
+  delete: 'permDelete',
+  share: 'permShare',
+  admin: 'permAdmin',
+}
+
+/** 路径级 ACL 权限动作清单（不含 admin，与后端 folder ACL 契约一致）。 */
+const ACL_ACTIONS: readonly ACLAction[] = ['read', 'write', 'delete', 'share']
+
+/** ACL 主体类型 → i18n key（条目表格与添加行共用；统一空间模型仅 user/space）。 */
+const ACL_SUBJECT_KEYS: Record<string, MessageKey> = {
+  user: 'aclSubjectUser',
+  space: 'aclSubjectTeam',
+}
+
+/**
+ * 文件页（统一空间模型单页，路由 /files?space=<id>）：
+ * - 空间由 ?space= 查询参数选择（缺省 = 默认空间）；SpaceSwitcher 切换；
+ * - 权限差异（五级内置角色矩阵）只体现在工具栏/菜单可用性：guest 隐藏
+ *   新建/上传/复制（不注入 createFolderFn/uploadFn/copyFn），删除/重命名
+ *   越权由后端 403 统一提示；
+ * - owner/admin：工具栏「空间管理」综合弹窗（成员/用户组/邀请/空间设置，
+ *   其余成员经空间下拉「管理空间」入口只读打开）+ 右侧可折叠成员栏（默认
+ *   收起；guest 也可看）；owner：目录路径级 ACL 面板；
+ * - 本页保留重命名 / 删除 / 分享 / 版本历史对话框（统一空间模型改造前的
+ *   TeamSpacePage 已并入本页）。
+ */
 export default function FilesPage() {
   const locale = useLocale()
   const { modal: antdModal } = AntdApp.useApp()
+  const msg = (key: MessageKey) => t(locale, key)
+  const [searchParams] = useSearchParams()
+  const spaceIdParam = searchParams.get('space') ?? ''
+
+  const [spaces, setSpaces] = useState<Space[]>([])
   const [reloadKey, setReloadKey] = useState(0)
   const refresh = () => setReloadKey((k) => k + 1)
   // 全局视图（全部 / 收藏 / 最近）：驱动 FileBrowser 的检索模式。
   const [spaceView, setSpaceView] = useState<'all' | 'starred' | 'recent'>('all')
-  // 个人空间命名空间（「作为网页打开」resolve 用）：scope = 自己 user UUID（JWT sub）。
+
+  // 空间加载（列表含 my_role；缺省定位默认空间）。reloadKey 一并联动——
+  // 空间管理弹窗 onChanged 后 my_role/isOwner/配额用量即时刷新（转让
+  // 所有权后设置类 tab 权限随之收敛）。
+  useEffect(() => {
+    void listSpaces().then(setSpaces).catch(() => setSpaces([]))
+  }, [spaceIdParam, reloadKey])
+
+  // 右侧成员栏（v2.2 起默认常开；工具栏「成员」切换按钮已移除）：
+  // <1280px 视口自动收起回两栏。
+  const [viewportNarrow, setViewportNarrow] = useState(() => window.matchMedia('(max-width: 1279.98px)').matches)
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 1279.98px)')
+    const onChange = () => setViewportNarrow(mq.matches)
+    mq.addEventListener('change', onChange)
+    return () => mq.removeEventListener('change', onChange)
+  }, [])
+  const memberPanelVisible = !viewportNarrow
+
+  // 回收站受控信号（v2.2：回收站按钮移到工具行左端空间切换旁，弹窗本体仍
+  // 由 FileBrowser 渲染——seq 变化驱动打开）。
+  const [trashSeq, setTrashSeq] = useState(0)
+
+  const activeSpace = useMemo(() => {
+    if (spaceIdParam) return spaces.find((s) => s.id === spaceIdParam) ?? null
+    return spaces.find((s) => s.is_default) ?? null
+  }, [spaces, spaceIdParam])
+  const activeSpaceId = activeSpace?.id ?? spaceIdParam
+  const myRole: SpaceRole | null = activeSpace?.my_role ?? null
   const meId = currentUserId()
+  const isOwner = activeSpace !== null && meId !== null && activeSpace.owner_id === meId
+  // 写权限（矩阵 owner/admin/member_share/member）：guest 不注入写能力。
+  const canWrite = myRole === null || myRole === 'owner' || myRole === 'admin' || myRole === 'member_share' || myRole === 'member'
+  // 成员/用户组管理（owner/admin）。
+  const canManage = myRole === null || myRole === 'owner' || myRole === 'admin'
+
+  // 「空间管理」综合弹窗（owner/admin 全功能；其余成员经空间下拉入口只读）。
+  const [manageOpen, setManageOpen] = useState(false)
 
   const [historyTarget, setHistoryTarget] = useState<FileItem | null>(null)
 
@@ -56,6 +136,134 @@ export default function FilesPage() {
     return () => { window.clearInterval(timer); window.clearTimeout(expiry) }
   }, [recentlyDeletedId])
 
+  // ---- 路径级 ACL（文件夹行「权限」按钮，owner 可见；保存整体 PUT 覆盖） ----
+  const [aclTarget, setAclTarget] = useState<FileItem | null>(null)
+  const [aclEntries, setAclEntries] = useState<FolderACLEntry[]>([])
+  const [aclLoading, setAclLoading] = useState(false)
+  const [aclBusy, setAclBusy] = useState(false)
+  const [aclError, setAclError] = useState('')
+  const [aclNotice, setAclNotice] = useState('')
+  const [aclNewType, setAclNewType] = useState<FolderACLEntry['subject_type']>('user')
+  const [aclNewEffect, setAclNewEffect] = useState<FolderACLEntry['effect']>('allow')
+  const [aclNewPerms, setAclNewPerms] = useState<Record<string, boolean>>({ read: true })
+  // ACL 主体选择：user = 远程搜索用户；space = 我的空间列表。
+  const [aclSubjectUser, setAclSubjectUser] = useState('')
+  const [aclSubjectQuery, setAclSubjectQuery] = useState('')
+  const [aclSubjectOptions, setAclSubjectOptions] = useState<UserSearchResult[]>([])
+  const [aclSubjectSearching, setAclSubjectSearching] = useState(false)
+  const [aclSubjectSpace, setAclSubjectSpace] = useState('')
+
+  useEffect(() => {
+    const q = aclSubjectQuery.trim()
+    if (q.length < 2 || aclSubjectUser) {
+      setAclSubjectOptions([])
+      return
+    }
+    const timer = window.setTimeout(() => {
+      setAclSubjectSearching(true)
+      void searchUsers(q)
+        .then(setAclSubjectOptions)
+        .catch(() => setAclSubjectOptions([]))
+        .finally(() => setAclSubjectSearching(false))
+    }, 300)
+    return () => window.clearTimeout(timer)
+  }, [aclSubjectQuery, aclSubjectUser])
+
+  // 保存成功 toast：4 秒自动消失。
+  useEffect(() => {
+    if (!aclNotice) return
+    const timer = window.setTimeout(() => setAclNotice(''), 4000)
+    return () => window.clearTimeout(timer)
+  }, [aclNotice])
+
+  const openAcl = async (folder: FileItem) => {
+    setAclTarget(folder)
+    setAclEntries([])
+    setAclError('')
+    setAclLoading(true)
+    setAclNewType('user')
+    setAclSubjectUser('')
+    setAclSubjectQuery('')
+    setAclSubjectOptions([])
+    setAclSubjectSpace('')
+    setAclNewEffect('allow')
+    setAclNewPerms({ read: true })
+    try {
+      setAclEntries(await getFolderACL(folder.id))
+    } catch (err) {
+      setAclError(err instanceof Error ? err.message : msg('loadFailed'))
+    } finally {
+      setAclLoading(false)
+    }
+  }
+
+  const closeAcl = () => {
+    if (aclBusy) return
+    setAclTarget(null)
+  }
+
+  const addAclEntry = (e: FormEvent) => {
+    e.preventDefault()
+    const subjectId = aclNewType === 'user' ? aclSubjectUser : aclSubjectSpace
+    if (!subjectId) {
+      setAclError(aclNewType === 'user' ? (locale === 'zh-CN' ? '请先搜索并选择用户' : 'Search and select a user first') : msg('aclNoPerms'))
+      return
+    }
+    const permissions = ACL_ACTIONS.filter((a) => aclNewPerms[a])
+    if (permissions.length === 0) {
+      setAclError(msg('aclNoPerms'))
+      return
+    }
+    setAclEntries((prev) => [
+      ...prev,
+      { subject_type: aclNewType, subject_id: subjectId, effect: aclNewEffect, permissions: [...permissions] },
+    ])
+    setAclSubjectUser('')
+    setAclSubjectQuery('')
+    setAclSubjectOptions([])
+    setAclSubjectSpace('')
+    setAclError('')
+  }
+
+  const removeAclEntry = (index: number) => {
+    setAclEntries((prev) => prev.filter((_, i) => i !== index))
+  }
+
+  const setAclEntryEffect = (index: number, effect: FolderACLEntry['effect']) => {
+    setAclEntries((prev) => prev.map((entry, i) => (i === index ? { ...entry, effect } : entry)))
+  }
+
+  const toggleAclEntryPerm = (index: number, action: ACLAction) => {
+    setAclEntries((prev) =>
+      prev.map((entry, i) =>
+        i === index
+          ? {
+              ...entry,
+              permissions: entry.permissions.includes(action)
+                ? entry.permissions.filter((a) => a !== action)
+                : [...entry.permissions, action],
+            }
+          : entry,
+      ),
+    )
+  }
+
+  const handleSaveAcl = async () => {
+    if (!aclTarget) return
+    setAclBusy(true)
+    setAclError('')
+    try {
+      await putFolderACL(aclTarget.id, aclEntries)
+      setAclTarget(null)
+      setAclNotice(msg('aclSaved'))
+    } catch (err) {
+      setAclError(err instanceof Error ? err.message : msg('saveFailed'))
+    } finally {
+      setAclBusy(false)
+    }
+  }
+
+  // ---- 分享 ----
   const [shareTarget, setShareTarget] = useState<FileItem | null>(null)
   const [shareVisibility, setShareVisibility] = useState<'public' | 'private'>('public')
   const [sharePermission, setSharePermission] = useState<'view' | 'download'>('download')
@@ -65,25 +273,17 @@ export default function FilesPage() {
   const [shareWatermark, setShareWatermark] = useState(true)
   const [shareWatermarkText, setShareWatermarkText] = useState('')
   const [shareUsers, setShareUsers] = useState<string[]>([])
-  // 授权用户远程搜索（v1.6：替代手输 UUID；防抖 300ms，≥2 字触发）。
+  // 授权用户远程搜索（防抖 300ms，≥2 字触发）。
   const [shareUserQuery, setShareUserQuery] = useState('')
   const [shareUserOptions, setShareUserOptions] = useState<UserSearchResult[]>([])
   const [shareUserSearching, setShareUserSearching] = useState(false)
   // 已选用户的显示名缓存（id → 昵称/用户名），供多选框回显。
   const shareUserNameRef = useRef(new Map<string, string>())
-  const [shareTeams, setShareTeams] = useState<string[]>([])
-  const [teams, setTeams] = useState<Team[]>([])
+  const [shareSpaces, setShareSpaces] = useState<string[]>([])
   const [shareResult, setShareResult] = useState<CreatedShare | null>(null)
   const [shareBusy, setShareBusy] = useState(false)
   const [shareError, setShareError] = useState('')
   const [copied, setCopied] = useState(false)
-
-  // 分享对话框的团队多选数据源（我的团队列表）。
-  useEffect(() => {
-    void listTeams()
-      .then(setTeams)
-      .catch(() => {})
-  }, [])
 
   // 授权用户远程搜索（私有分享）：防抖 + 最少 2 字。
   useEffect(() => {
@@ -166,18 +366,20 @@ export default function FilesPage() {
     setShareMax('')
     setSharePassword('')
     setShareWatermark(true)
-    setShareWatermarkText('')
+    // v2.4：水印内容可编辑，默认模板与后端一致（{user} 访问者 {date} 日期
+    // {name} 文件名；服务端渲染时替换占位符）。
+    setShareWatermarkText(SHARE_WATERMARK_DEFAULT)
     setShareUsers([])
     setShareUserQuery('')
     setShareUserOptions([])
-    setShareTeams([])
+    setShareSpaces([])
     setShareResult(null)
     setShareError('')
     setCopied(false)
   }
 
-  const toggleShareTeam = (teamId: string) => {
-    setShareTeams((prev) => (prev.includes(teamId) ? prev.filter((t) => t !== teamId) : [...prev, teamId]))
+  const toggleShareSpace = (spaceId: string) => {
+    setShareSpaces((prev) => (prev.includes(spaceId) ? prev.filter((t) => t !== spaceId) : [...prev, spaceId]))
   }
 
   const handleCreateShare = async (e: FormEvent) => {
@@ -195,7 +397,7 @@ export default function FilesPage() {
         expiresInHours: hours,
         maxDownloads: max,
         userIds: shareVisibility === 'private' ? shareUsers : undefined,
-        teamIds: shareVisibility === 'private' ? shareTeams : undefined,
+        spaceIds: shareVisibility === 'private' ? shareSpaces : undefined,
         password: shareVisibility === 'public' ? sharePassword.trim() : undefined,
         watermarkEnabled: shareWatermark,
         watermarkText: shareWatermarkText.trim() || undefined,
@@ -221,17 +423,21 @@ export default function FilesPage() {
     }
   }
 
-  const privateGrantCount = shareUsers.length + shareTeams.length
+  const privateGrantCount = shareUsers.length + shareSpaces.length
   const sharePasswordLen = sharePassword.trim().length
   const submitDisabled =
     shareBusy ||
     (shareVisibility === 'private' && privateGrantCount === 0) ||
     (shareVisibility === 'public' && sharePasswordLen > 0 && (sharePasswordLen < 4 || sharePasswordLen > 64))
 
-  // Escape 依次关本页对话框（版本历史→重命名→分享）；FileBrowser 的选择与
-  // 内置弹窗由其自身 Escape 处理（见 FileBrowser）。
+  // Escape 依次关本页对话框（ACL→版本历史→重命名→分享）；FileBrowser 的
+  // 选择与内置弹窗由其自身 Escape 处理（见 FileBrowser）。
   useHotkeys({
     Escape: () => {
+      if (aclTarget) {
+        setAclTarget(null)
+        return
+      }
       if (historyTarget) {
         setHistoryTarget(null)
         return
@@ -244,9 +450,22 @@ export default function FilesPage() {
     },
   })
 
+  // 列表/建目录按空间分派：非默认空间走 /spaces/:id 端点；缺省走 /files
+  //（后端缺省即默认空间）。
+  const listItems = async (parentId: string | null, opts?: FileQueryOptions): Promise<DirListing> => {
+    if (activeSpace && !activeSpace.is_default) {
+      const res = await listSpaceFiles(activeSpace.id, parentId, opts)
+      return { items: res.files ?? [], folderId: res.parent_id }
+    }
+    return { items: await listFiles(parentId, opts), folderId: parentId }
+  }
+  const doCreateFolder = (name: string, parentId: string | null) =>
+    activeSpace && !activeSpace.is_default ? createSpaceFolder(activeSpace.id, name, parentId) : createFolder(name, parentId)
+
   return (
     <div className="page wide-page files-page">
       {deleteError && <div className="banner error">{deleteError}</div>}
+      {aclNotice && <div className="banner ok">{aclNotice}</div>}
       {recentlyDeletedId && undoSeconds > 0 && (
         <div className="banner ok">
           {locale === 'zh-CN' ? `已删除，${undoSeconds} 秒内可撤销` : `Deleted. Undo within ${undoSeconds}s.`}
@@ -255,21 +474,61 @@ export default function FilesPage() {
       )}
 
       <FileBrowserWithTree
-        rootLabel="我的文件"
+        rootLabel={activeSpace?.name ?? msg('teamsTitle')}
         reloadKey={reloadKey}
-        toolbarPrefix={<SpaceSwitcher activeView={spaceView} onViewChange={setSpaceView} />}
-        listItems={async (parentId, opts) => ({ items: await listFiles(parentId, opts), folderId: parentId })}
-        createFolderFn={createFolder}
-        uploadFn={uploadFile}
+        toolbarPrefix={
+          <>
+            {/* v2.4：下拉底部「管理空间」入口已移除（空间管理统一入口 =
+                右侧成员栏顶部按钮 / /spaces 卡片「管理」）。 */}
+            <SpaceSwitcher
+              activeView={spaceView}
+              onViewChange={setSpaceView}
+            />
+            {/* 回收站（v2.2 左移到原「空间管理」位置；空间管理入口移到右侧
+                成员栏顶部；「成员」切换按钮移除——成员栏默认展开）。 */}
+            <Button
+              size="small"
+              title={msg('trash')}
+              icon={<Trash2 size={13} strokeWidth={2} aria-hidden="true" />}
+              onClick={() => setTrashSeq((s) => s + 1)}
+            >
+              {msg('trash')}
+            </Button>
+            {/* 窄屏无右侧成员栏时保留空间管理入口（owner/admin）。 */}
+            {canManage && activeSpace && viewportNarrow && (
+              <Button size="small" onClick={() => setManageOpen(true)}>
+                {msg('spaceManage')}
+              </Button>
+            )}
+          </>
+        }
+        aside={memberPanelVisible && activeSpace ? (
+          <SpaceMemberPanel
+            spaceId={activeSpace.id}
+            reloadKey={reloadKey}
+            canManage={canManage}
+            onManage={() => setManageOpen(true)}
+          />
+        ) : undefined}
+        listItems={listItems}
+        createFolderFn={canWrite ? doCreateFolder : undefined}
+        uploadFn={canWrite ? uploadFile : undefined}
         activeView={spaceView}
-        copyFn={(fileId, parentId) => copyFile(fileId, parentId)}
+        copyFn={canWrite ? ((fileId, parentId) => copyFile(fileId, parentId)) : undefined}
         fileMetaFn={(fileId) => getFileMeta(fileId).catch(() => null)}
-        ns={meId ? { type: 'personal', scope: meId } : undefined}
+        ns={activeSpaceId ? { type: 'space', scope: activeSpaceId } : undefined}
+        /* 回收站入口在工具行左端（toolbarPrefix），弹窗本体经受控信号打开；
+           隐藏 FileBrowser 工具行行尾的默认回收站按钮。 */
+        hideToolbarTrash
+        trashSignal={trashSeq}
         shareFn={openShare}
         renameFn={(item) => { setRenameTarget(item); setRenameValue(item.name); setRenameError('') }}
         deleteFn={confirmDelete}
         rowActions={(item) => (
           <div className="row-actions-group">
+            {item.type === 'folder' && isOwner && (
+              <Button size="small" onClick={() => void openAcl(item)}>{msg('acl')}</Button>
+            )}
             {item.type === 'file' && (
               <Button size="small" onClick={() => setHistoryTarget(item)}>历史</Button>
             )}
@@ -339,7 +598,7 @@ export default function FilesPage() {
                 <>
                   <div className="field">
                     <span>授权用户</span>
-                    {/* v1.6：远程搜索多选（昵称/用户名/邮箱 ≥2 字），替代手输 UUID。 */}
+                    {/* 远程搜索多选（昵称/用户名/邮箱 ≥2 字），替代手输 UUID。 */}
                     <Select
                       mode="multiple"
                       showSearch
@@ -364,19 +623,19 @@ export default function FilesPage() {
                     />
                   </div>
                   <div className="field">
-                    <span>授权团队</span>
-                    {teams.length === 0 ? (
-                      <p className="hint">你暂未加入任何团队</p>
+                    <span>{msg('grantedAccess')}</span>
+                    {spaces.length === 0 ? (
+                      <p className="hint">{msg('teamsEmpty')}</p>
                     ) : (
                       <div className="check-list">
-                        {teams.map((t) => (
-                          <label key={t.id} className="check-item">
+                        {spaces.map((s) => (
+                          <label key={s.id} className="check-item">
                             <input
                               type="checkbox"
-                              checked={shareTeams.includes(t.id)}
-                              onChange={() => toggleShareTeam(t.id)}
+                              checked={shareSpaces.includes(s.id)}
+                              onChange={() => toggleShareSpace(s.id)}
                             />
-                            <span>{t.name}</span>
+                            <span>{s.name}</span>
                           </label>
                         ))}
                       </div>
@@ -433,9 +692,11 @@ export default function FilesPage() {
                 {shareWatermark && (
                   <Input
                     allowClear
+                    style={{ marginTop: 8 }}
+                    maxLength={256}
                     value={shareWatermarkText}
                     onChange={(e) => setShareWatermarkText(e.target.value)}
-                    placeholder="默认模板：{date} {name}（占位符：{email} {date} {name}）"
+                    placeholder="水印内容（占位符：{user} 访问者 / {date} 日期 / {name} 文件名）"
                   />
                 )}
               </div>
@@ -449,7 +710,7 @@ export default function FilesPage() {
             </form>
           ) : shareVisibility === 'public' ? (
             <div>
-              <p className="hint">链接已创建。该令牌仅显示一次，关闭对话框后无法再次查看，请立即复制保存。</p>
+              <p className="hint">链接已创建。可立即复制，也可随时在「我的分享」中再次查看链接与密码。</p>
               <div className="share-link">
                 <Input readOnly value={shareLink} onFocus={(e) => e.currentTarget.select()} />
                 <Button type="primary" onClick={() => void copyLink()}>{copied ? '已复制 ✓' : '复制'}</Button>
@@ -472,7 +733,7 @@ export default function FilesPage() {
             </div>
           ) : (
             <div>
-              <p className="hint">私有分享已创建。被授权的用户与团队成员登录 DocFlow 后即可访问，无公开链接。</p>
+              <p className="hint">私有分享已创建。被授权的用户与空间成员登录 DocFlow 后即可访问，无公开链接。</p>
               {shareResult.expires_at && (
                 <p className="hint">过期时间：{formatTime(shareResult.expires_at)}</p>
               )}
@@ -483,6 +744,164 @@ export default function FilesPage() {
                 <Button onClick={() => setShareTarget(null)}>关闭</Button>
               </div>
             </div>
+          )}
+        </Modal>
+      )}
+
+      {/* 空间管理综合弹窗（成员/用户组/邀请/空间设置）：owner/admin 全功能
+          （邀请 / 改派 / 移除 / 用户组 / 配额 / 转让 / 解散），其余成员只读。 */}
+      {manageOpen && activeSpace && (
+        <SpaceManageModal
+          space={activeSpace}
+          myRole={myRole}
+          isOwner={isOwner}
+          onClose={() => setManageOpen(false)}
+          onChanged={refresh}
+        />
+      )}
+
+      {/* 路径级 ACL 管理：条目列表（主体/效果/权限勾选可改、删除行）+ 添加行，
+          保存时整体 PUT 覆盖全部条目（主体仅 user/space）。 */}
+      {aclTarget && (
+        <Modal wide title={formatMessage(msg('aclTitle'), { name: aclTarget.name })} onClose={closeAcl}>
+          <p className="hint">{msg('aclHint')}</p>
+          {aclLoading ? (
+            <p className="hint">{msg('loading')}</p>
+          ) : (
+            <>
+              <div className="acl-list">
+                <div className="acl-row acl-head">
+                  <span>{msg('aclSubjectType')}</span>
+                  <span>{msg('aclSubjectId')}</span>
+                  <span>{msg('aclEffect')}</span>
+                  <span>{msg('permission')}</span>
+                  <span />
+                </div>
+                {aclEntries.length === 0 && <p className="hint">{msg('aclEmpty')}</p>}
+                {aclEntries.map((entry, index) => (
+                  <div key={index} className="acl-row">
+                    <span className="acl-type">{msg(ACL_SUBJECT_KEYS[entry.subject_type] ?? 'aclSubjectUser')}</span>
+                    <Input className="acl-uuid" readOnly value={entry.subject_id} title={entry.subject_id} />
+                    <Select
+                      className="acl-effect-select"
+                      value={entry.effect}
+                      disabled={aclBusy}
+                      onChange={(v) => setAclEntryEffect(index, v as FolderACLEntry['effect'])}
+                      options={[
+                        { value: 'allow', label: msg('aclAllow') },
+                        { value: 'deny', label: msg('aclDeny') },
+                      ]}
+                    />
+                    <span className="acl-perms">
+                      {ACL_ACTIONS.map((a) => (
+                        <label key={a} className="check-item">
+                          <input
+                            type="checkbox"
+                            checked={entry.permissions.includes(a)}
+                            onChange={() => toggleAclEntryPerm(index, a)}
+                          />
+                          {msg(PERM_LABEL_KEYS[a])}
+                        </label>
+                      ))}
+                    </span>
+                    <Button size="small" danger disabled={aclBusy} onClick={() => removeAclEntry(index)}>
+                      {msg('delete')}
+                    </Button>
+                  </div>
+                ))}
+              </div>
+              <form className="acl-add" onSubmit={addAclEntry}>
+                <Select
+                  className="acl-type-select"
+                  value={aclNewType}
+                  onChange={(v) => setAclNewType(v as FolderACLEntry['subject_type'])}
+                  options={[
+                    { value: 'user', label: msg('aclSubjectUser') },
+                    { value: 'space', label: msg('aclSubjectTeam') },
+                  ]}
+                />
+                {aclNewType === 'user' ? (
+                  <Select
+                    className="acl-subject-select"
+                    showSearch
+                    allowClear
+                    filterOption={false}
+                    value={aclSubjectUser || undefined}
+                    searchValue={aclSubjectQuery}
+                    loading={aclSubjectSearching}
+                    placeholder={locale === 'zh-CN' ? '搜索用户（昵称/用户名/邮箱，至少 2 字）' : 'Search users (2+ chars)'}
+                    notFoundContent={aclSubjectSearching ? (locale === 'zh-CN' ? '搜索中…' : 'Searching…') : null}
+                    onSearch={(v) => {
+                      // antd 选中 option 后派发 onSearch('')：不清除已选中
+                      // 主体；仅主动输入非空文本时重置。
+                      setAclSubjectQuery(v)
+                      if (v !== '') setAclSubjectUser('')
+                    }}
+                    onClear={() => {
+                      setAclSubjectQuery('')
+                      setAclSubjectUser('')
+                    }}
+                    onChange={(value, option) => {
+                      if (value === undefined) return
+                      setAclSubjectUser(String(value))
+                      setAclSubjectQuery(String((option as { searchText?: string })?.searchText ?? ''))
+                    }}
+                    options={aclSubjectOptions.map((u) => {
+                      const nickname = u.nickname ?? u.profile?.nickname
+                      return {
+                        value: u.id,
+                        searchText: nickname || u.username,
+                        label: (
+                          <span className="user-search-option">
+                            <strong>{nickname || u.username}</strong>
+                            <span className="muted">{u.username} · {u.email}</span>
+                          </span>
+                        ),
+                      }
+                    })}
+                  />
+                ) : (
+                  <Select
+                    className="acl-subject-select"
+                    value={aclSubjectSpace || undefined}
+                    placeholder={locale === 'zh-CN' ? '选择空间' : 'Select space'}
+                    onChange={(v) => setAclSubjectSpace(v)}
+                    options={spaces.map((s) => ({ value: s.id, label: s.name }))}
+                  />
+                )}
+                <Select
+                  className="acl-effect-select"
+                  value={aclNewEffect}
+                  onChange={(v) => setAclNewEffect(v as FolderACLEntry['effect'])}
+                  options={[
+                    { value: 'allow', label: msg('aclAllow') },
+                    { value: 'deny', label: msg('aclDeny') },
+                  ]}
+                />
+                <span className="acl-perms">
+                  {ACL_ACTIONS.map((a) => (
+                    <label key={a} className="check-item">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(aclNewPerms[a])}
+                        onChange={(e) => setAclNewPerms({ ...aclNewPerms, [a]: e.target.checked })}
+                      />
+                      {msg(PERM_LABEL_KEYS[a])}
+                    </label>
+                  ))}
+                </span>
+                <Button size="small" htmlType="submit" disabled={aclBusy || (aclNewType === 'user' ? !aclSubjectUser : !aclSubjectSpace)}>
+                  {msg('aclAdd')}
+                </Button>
+              </form>
+              {aclError && <div className="error-text">{aclError}</div>}
+              <div className="modal-actions">
+                <Button disabled={aclBusy} onClick={closeAcl}>{msg('close')}</Button>
+                <Button type="primary" disabled={aclBusy} onClick={() => void handleSaveAcl()}>
+                  {aclBusy ? msg('loading') : msg('save')}
+                </Button>
+              </div>
+            </>
           )}
         </Modal>
       )}

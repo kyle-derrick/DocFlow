@@ -11,6 +11,7 @@ import (
 
 	"github.com/docflow/docflow/internal/files"
 	"github.com/docflow/docflow/internal/search"
+	"github.com/docflow/docflow/internal/space"
 )
 
 // ---------- 测试替身 ----------
@@ -23,13 +24,13 @@ type fakeFiles struct {
 	notFound bool
 }
 
-func (f *fakeFiles) EnsureRoot(owner uuid.UUID) (files.File, error) {
-	if f.root.OwnerID == owner {
+func (f *fakeFiles) DefaultSpaceRoot(user uuid.UUID) (files.File, error) {
+	if f.root.OwnerID == user {
 		return f.root, nil
 	}
 	return files.File{}, files.ErrNotFound
 }
-func (f *fakeFiles) List(owner uuid.UUID, parent *uuid.UUID, limit int, sort files.SortOptions) ([]files.File, error) {
+func (f *fakeFiles) ListSpace(spaceID, parent uuid.UUID, limit int, sort files.SpaceListFilter) ([]files.File, error) {
 	return nil, nil
 }
 func (f *fakeFiles) Get(user, id uuid.UUID) (files.File, error) {
@@ -40,7 +41,7 @@ func (f *fakeFiles) CreateFolderIn(user, parent uuid.UUID, name string) (files.F
 		return files.File{}, files.ErrNotFound
 	}
 	f.created = append(f.created, name)
-	return files.File{ID: uuid.New(), Name: name, OwnerID: user, Type: "folder", ScopeType: "personal"}, nil
+	return files.File{ID: uuid.New(), Name: name, OwnerID: user, SpaceID: f.root.SpaceID, Type: "folder"}, nil
 }
 func (f *fakeFiles) Rename(user, id uuid.UUID, name string) (files.File, error) {
 	return files.File{}, files.ErrNotFound
@@ -52,7 +53,7 @@ func (f *fakeFiles) Delete(user, id uuid.UUID) error { return files.ErrNotFound 
 func (f *fakeFiles) Restore(user, id uuid.UUID) (files.File, error) {
 	return files.File{}, files.ErrNotFound
 }
-func (f *fakeFiles) ListTrashScope(user uuid.UUID, scope string, teamID *uuid.UUID, limit int) ([]files.File, error) {
+func (f *fakeFiles) ListTrashSpace(user, spaceID uuid.UUID, limit int) ([]files.File, error) {
 	return nil, nil
 }
 func (f *fakeFiles) ListVersions(user, fileID uuid.UUID) ([]files.VersionDetail, error) {
@@ -70,17 +71,34 @@ func (f *fakeFiles) CurrentVersion(owner, fileID uuid.UUID) (files.FileVersion, 
 func (f *fakeFiles) ResolveReadablePath(actor uuid.UUID, nsType string, scopeID uuid.UUID, path string) (files.File, []files.File, error) {
 	return files.File{}, nil, files.ErrNotFound
 }
-func (f *fakeFiles) TeamRoot(teamID uuid.UUID) (files.File, error) {
+func (f *fakeFiles) SpaceRoot(spaceID uuid.UUID) (files.File, error) {
+	if f.root.SpaceID == spaceID {
+		return f.root, nil
+	}
 	return files.File{}, files.ErrNotFound
 }
-func (f *fakeFiles) ListTeam(teamID, parent uuid.UUID, limit int, fl files.TeamListFilter) ([]files.File, error) {
-	return nil, nil
-}
-func (f *fakeFiles) GetTeamFolder(teamID, id uuid.UUID) (files.File, error) {
+func (f *fakeFiles) GetSpaceFolder(spaceID, id uuid.UUID) (files.File, error) {
 	return files.File{}, files.ErrNotFound
 }
 func (f *fakeFiles) BatchMove(user uuid.UUID, ids []uuid.UUID, target uuid.UUID) ([]files.BatchItemResult, error) {
 	return nil, files.ErrNotFound
+}
+
+// fakeSpaces 是 SpaceService 的最小内存实现（默认空间解析与读权限）。
+type fakeSpaces struct {
+	owner   uuid.UUID
+	spaceID uuid.UUID
+}
+
+func (s *fakeSpaces) ListSpaces(user uuid.UUID) ([]space.Space, error) { return nil, nil }
+func (s *fakeSpaces) CanRead(user, spaceID uuid.UUID) (bool, error) {
+	return user == s.owner && spaceID == s.spaceID, nil
+}
+func (s *fakeSpaces) DefaultSpace(owner uuid.UUID) (space.Space, error) {
+	if owner == s.owner {
+		return space.Space{ID: s.spaceID, Name: "默认空间", OwnerID: owner}, nil
+	}
+	return space.Space{}, space.ErrNotFound
 }
 
 // fakeSearch 记录查询关键词的搜索替身。
@@ -96,9 +114,10 @@ func (s *fakeSearch) Query(user uuid.UUID, opts search.QueryOptions) ([]search.R
 // newTestServer 构造带最小依赖的服务端与测试用户。
 func newTestServer(withSearch bool) (*Server, *fakeFiles, *fakeSearch) {
 	user := uuid.New()
-	ff := &fakeFiles{root: files.File{ID: uuid.New(), Name: "根目录", OwnerID: user, Type: "folder", IsRoot: true, ScopeType: "personal"}}
+	spaceID := uuid.New()
+	ff := &fakeFiles{root: files.File{ID: uuid.New(), Name: "根目录", OwnerID: user, SpaceID: spaceID, Type: "folder", IsRoot: true}}
 	fs := &fakeSearch{}
-	deps := &Deps{Files: ff, Search: nil}
+	deps := &Deps{Files: ff, Spaces: &fakeSpaces{owner: user, spaceID: spaceID}}
 	if withSearch {
 		deps.Search = fs
 	}

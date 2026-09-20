@@ -87,9 +87,9 @@ func (f *fakeMeili) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func newMeiliTestRepo(srvURL string, teams map[uuid.UUID][]uuid.UUID) *MeiliRepo {
+func newMeiliTestRepo(srvURL string, spaces map[uuid.UUID][]uuid.UUID) *MeiliRepo {
 	return NewMeiliRepo(srvURL, "meili-key", func(user uuid.UUID) ([]uuid.UUID, error) {
-		return teams[user], nil
+		return spaces[user], nil
 	})
 }
 
@@ -119,7 +119,7 @@ func TestMeiliEnsureIndexIdempotent(t *testing.T) {
 	if err := repo.EnsureIndex(context.Background()); err == nil {
 		t.Fatal("settings 500: want error")
 	}
-	// 请求体：uid + primaryKey=file_id、过滤字段 owner_id/team_id；带 Bearer Key。
+	// 请求体：uid + primaryKey=file_id、过滤字段 owner_id/space_id；带 Bearer Key。
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
 	if len(fake.requests) < 2 || !strings.Contains(fake.requests[0], "POST /indexes?") ||
@@ -129,7 +129,7 @@ func TestMeiliEnsureIndexIdempotent(t *testing.T) {
 	var putFound bool
 	for _, req := range fake.requests {
 		if strings.HasPrefix(req, "PUT /indexes/docflow-files/settings/filterable-attributes") &&
-			strings.Contains(req, `"owner_id"`) && strings.Contains(req, `"team_id"`) {
+			strings.Contains(req, `"owner_id"`) && strings.Contains(req, `"space_id"`) {
 			putFound = true
 		}
 	}
@@ -139,19 +139,19 @@ func TestMeiliEnsureIndexIdempotent(t *testing.T) {
 }
 
 // TestMeiliUpsertDocBody 验证 upsert 请求：路径带 primaryKey=file_id、
-// 文档字段映射（team_id null / 字符串 UUID）、Content 为空串时原样提交。
+// 文档字段映射（space_id null / 字符串 UUID）、Content 为空串时原样提交。
 func TestMeiliUpsertDocBody(t *testing.T) {
 	fake := newFakeMeili()
 	srv := httptest.NewServer(fake)
 	t.Cleanup(srv.Close)
 	repo := newMeiliTestRepo(srv.URL, nil)
 
-	fileID, versionID, ownerID, teamID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
-	if err := repo.UpsertDoc(Doc{FileID: fileID, VersionID: versionID, OwnerID: ownerID, TeamID: &teamID, Name: "notes.md", Content: "hello"}); err != nil {
-		t.Fatalf("upsert team doc: %v", err)
+	fileID, versionID, ownerID, spaceID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	if err := repo.UpsertDoc(Doc{FileID: fileID, VersionID: versionID, OwnerID: ownerID, SpaceID: &spaceID, Name: "notes.md", Content: "hello"}); err != nil {
+		t.Fatalf("upsert space doc: %v", err)
 	}
 	if err := repo.UpsertDoc(Doc{FileID: uuid.New(), VersionID: versionID, OwnerID: ownerID, Name: "bin.png", Content: ""}); err != nil {
-		t.Fatalf("upsert personal doc: %v", err)
+		t.Fatalf("upsert spaceless doc: %v", err)
 	}
 
 	fake.mu.Lock()
@@ -160,19 +160,19 @@ func TestMeiliUpsertDocBody(t *testing.T) {
 		t.Fatalf("upserts = %d, want 2", len(fake.upsertBodies))
 	}
 	first := fake.upsertBodies[0]
-	secondTeamID := fake.upsertBodies[1]["team_id"]
+	secondSpaceID := fake.upsertBodies[1]["space_id"]
 	firstRequest := ""
 	if len(fake.requests) > 0 {
 		firstRequest = fake.requests[0]
 	}
 	fake.mu.Unlock()
 	if first["file_id"] != fileID.String() || first["version_id"] != versionID.String() ||
-		first["owner_id"] != ownerID.String() || first["team_id"] != teamID.String() ||
+		first["owner_id"] != ownerID.String() || first["space_id"] != spaceID.String() ||
 		first["name"] != "notes.md" || first["content"] != "hello" {
-		t.Fatalf("team doc = %v", first)
+		t.Fatalf("space doc = %v", first)
 	}
-	if secondTeamID != nil {
-		t.Fatalf("personal doc team_id = %v, want nil", secondTeamID)
+	if secondSpaceID != nil {
+		t.Fatalf("spaceless doc space_id = %v, want nil", secondSpaceID)
 	}
 	if !strings.Contains(firstRequest, "/documents?primaryKey=file_id") {
 		t.Fatalf("upsert path = %s", firstRequest)
@@ -190,11 +190,11 @@ func TestMeiliUpsertDocBody(t *testing.T) {
 	}
 }
 
-// TestMeiliQueryDocs 覆盖查询：过滤表达式（owner OR team IN）、结果映射
+// TestMeiliQueryDocs 覆盖查询：过滤表达式（owner OR space IN）、结果映射
 // （file_id/name/type= file/snippet 高亮）、limit 透传。
 func TestMeiliQueryDocs(t *testing.T) {
 	user, other := uuid.New(), uuid.New()
-	teamA, teamB := uuid.New(), uuid.New()
+	spaceA, spaceB := uuid.New(), uuid.New()
 	fileID := uuid.New()
 
 	fake := newFakeMeili()
@@ -204,7 +204,7 @@ func TestMeiliQueryDocs(t *testing.T) {
 	]}`
 	srv := httptest.NewServer(fake)
 	t.Cleanup(srv.Close)
-	repo := newMeiliTestRepo(srv.URL, map[uuid.UUID][]uuid.UUID{user: {teamA, teamB}})
+	repo := newMeiliTestRepo(srv.URL, map[uuid.UUID][]uuid.UUID{user: {spaceA, spaceB}})
 
 	results, err := repo.QueryDocs(user, QueryOptions{Q: "report", Limit: 5})
 	if err != nil {
@@ -229,7 +229,7 @@ func TestMeiliQueryDocs(t *testing.T) {
 	if last == "" {
 		t.Fatal("search request not captured")
 	}
-	wantFilter := "owner_id = \"" + user.String() + "\" OR team_id IN [\"" + teamA.String() + "\", \"" + teamB.String() + "\"]"
+	wantFilter := "owner_id = \"" + user.String() + "\" OR space_id IN [\"" + spaceA.String() + "\", \"" + spaceB.String() + "\"]"
 	var payload struct {
 		Q         string   `json:"q"`
 		Limit     int      `json:"limit"`
@@ -246,7 +246,7 @@ func TestMeiliQueryDocs(t *testing.T) {
 		t.Fatalf("highlight = %v", payload.Highlight)
 	}
 
-	// 无团队用户：仅 owner 过滤（不含 OR team_id）。
+	// 无空间用户：仅 owner 过滤（不含 OR space_id）。
 	if _, err := repo.QueryDocs(other, QueryOptions{Q: "x", Limit: 1}); err != nil {
 		t.Fatalf("query other: %v", err)
 	}
@@ -254,8 +254,8 @@ func TestMeiliQueryDocs(t *testing.T) {
 	defer fake.mu.Unlock()
 	for _, req := range fake.requests {
 		if strings.HasPrefix(req, "POST /indexes/docflow-files/search") && strings.Contains(req, other.String()) {
-			if strings.Contains(req, "team_id") {
-				t.Fatalf("user without teams should not filter by team_id: %s", req)
+			if strings.Contains(req, "space_id") {
+				t.Fatalf("user without spaces should not filter by space_id: %s", req)
 			}
 		}
 	}

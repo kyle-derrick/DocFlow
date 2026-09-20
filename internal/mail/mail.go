@@ -15,6 +15,7 @@ import (
 	"mime"
 	"net"
 	"net/smtp"
+	"time"
 )
 
 // TLS 模式（与 settings.SMTPTLSMode* 常量一致，独立定义避免包依赖）。
@@ -33,6 +34,9 @@ type Mailer interface {
 	SendPasswordReset(email, link string) error
 	// SendNotification 发送站内通知事件的邮件副本（纯文本简单格式）。
 	SendNotification(email, title, body string) error
+	// SendEmailChangeCode 发送换绑邮箱验证码（账号安全，v2.4）：username
+	// 为请求账号的用户名；验证码 10 分钟有效。
+	SendEmailChangeCode(email, code, username string) error
 }
 
 // NoopMailer 不发送任何邮件，仅把链接写入日志（默认邮件通道）。
@@ -53,6 +57,11 @@ func (NoopMailer) SendPasswordReset(email, link string) error {
 
 func (NoopMailer) SendNotification(email, title, body string) error {
 	log.Printf("[mail:noop] notification for %s: %s", email, title)
+	return nil
+}
+
+func (NoopMailer) SendEmailChangeCode(email, code, username string) error {
+	log.Printf("[mail:noop] email change code for %s (user %s): %s", email, username, code)
 	return nil
 }
 
@@ -94,6 +103,13 @@ func (s *SMTPMailer) SendNotification(email, title, body string) error {
 	return s.send(email, "[DocFlow] "+title, text)
 }
 
+// SendEmailChangeCode 发送换绑邮箱验证码（账号安全）：10 分钟内有效，
+// 仅对请求中提交的新邮箱投递（新邮箱归属验证即由本邮件完成）。
+func (s *SMTPMailer) SendEmailChangeCode(email, code, username string) error {
+	body := fmt.Sprintf("您好 %s，\n\n您正在更换 DocFlow 账号的绑定邮箱。验证码：\n\n%s\n\n10 分钟内有效。若非本人操作，请立即检查账号安全（修改密码并撤销活跃会话）。\n\n—— DocFlow", username, code)
+	return s.send(email, "DocFlow 换绑邮箱验证码", body)
+}
+
 // send 组装最简 RFC 5322 报文并投递（显式 smtp.Client：按 TLS 模式拨号，
 // STARTTLS 在 MAIL 命令前协商）。
 func (s *SMTPMailer) send(to, subject, body string) error {
@@ -105,12 +121,15 @@ func (s *SMTPMailer) send(to, subject, body string) error {
 		"\r\n" +
 		body + "\r\n")
 	addr := fmt.Sprintf("%s:%d", s.host, s.port)
+	// 拨号带 30s 超时：SMTP 服务器不可达时快速失败（管理页「发送测试邮件」
+	// 等同步请求不得无限挂起），超时错误原样回传给调用方。
+	dialer := &net.Dialer{Timeout: 30 * time.Second}
 	var conn net.Conn
 	var err error
 	if s.tlsMode == TLSModeSSL {
-		conn, err = tls.Dial("tcp", addr, &tls.Config{ServerName: s.host})
+		conn, err = tls.DialWithDialer(dialer, "tcp", addr, &tls.Config{ServerName: s.host})
 	} else {
-		conn, err = net.Dial("tcp", addr)
+		conn, err = dialer.Dial("tcp", addr)
 	}
 	if err != nil {
 		return err
@@ -198,6 +217,10 @@ func (m *SettingsMailer) SendPasswordReset(email, link string) error {
 
 func (m *SettingsMailer) SendNotification(email, title, body string) error {
 	return m.route().SendNotification(email, title, body)
+}
+
+func (m *SettingsMailer) SendEmailChangeCode(email, code, username string) error {
+	return m.route().SendEmailChangeCode(email, code, username)
 }
 
 var _ Mailer = (*NoopMailer)(nil)

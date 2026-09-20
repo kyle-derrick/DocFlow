@@ -17,6 +17,11 @@ import MarkmapDiagram from './MarkmapDiagram'
 interface XMindViewerProps {
   fileId: string
   title: string
+  /** 自定义字节流加载器（默认认证下载 /files/:id/download；公开分享页传
+   * raw URL fetch，v2.4）。 */
+  loadBuffer?: () => Promise<ArrayBuffer>
+  /** 是否展示「转为 Markdown」（默认 true；公开分享页无认证端点，传 false）。 */
+  convertible?: boolean
 }
 
 /** 单次解析的 .xmind 文件大小上限（超过提示下载查看）。 */
@@ -99,7 +104,7 @@ async function xmindToMarkdown(buffer: ArrayBuffer): Promise<string> {
   return sheetsToMarkdown(sheets)
 }
 
-export default function XMindViewer({ fileId, title }: XMindViewerProps) {
+export default function XMindViewer({ fileId, title, loadBuffer, convertible = true }: XMindViewerProps) {
   const [markdown, setMarkdown] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
@@ -115,7 +120,7 @@ export default function XMindViewer({ fileId, title }: XMindViewerProps) {
       setError('')
       setLoading(true)
       try {
-        const buffer = await fetchFileArrayBuffer(fileId)
+        const buffer = await (loadBuffer ? loadBuffer() : fetchFileArrayBuffer(fileId))
         if (!alive) return
         if (buffer.byteLength > MAX_XMIND_BYTES) {
           throw new Error(zh
@@ -133,7 +138,8 @@ export default function XMindViewer({ fileId, title }: XMindViewerProps) {
     }
     void load()
     return () => { alive = false }
-  }, [fileId, zh])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fileId, zh, loadBuffer])
 
   /** 转为 Markdown：产物落源文件所在目录（<源名>.md），成功后新窗口打开编辑页。 */
   const handleConvert = async () => {
@@ -154,13 +160,15 @@ export default function XMindViewer({ fileId, title }: XMindViewerProps) {
 
   return (
     <div className="xmind-viewer" title={title}>
-      <div className="xmind-toolbar">
-        <Button size="small" disabled={converting} loading={converting} onClick={() => void handleConvert()}>
-          {converting ? (zh ? '转换中…' : 'Converting…') : (zh ? '转为 Markdown' : 'Convert to Markdown')}
-        </Button>
-        {convertNotice && <span className="muted xmind-toolbar-note">{convertNotice}</span>}
-        {convertError && <span className="error-text">{convertError}</span>}
-      </div>
+      {convertible && (
+        <div className="xmind-toolbar">
+          <Button size="small" disabled={converting} loading={converting} onClick={() => void handleConvert()}>
+            {converting ? (zh ? '转换中…' : 'Converting…') : (zh ? '转为 Markdown' : 'Convert to Markdown')}
+          </Button>
+          {convertNotice && <span className="muted xmind-toolbar-note">{convertNotice}</span>}
+          {convertError && <span className="error-text">{convertError}</span>}
+        </div>
+      )}
       {error ? (
         <div className="banner error xmind-error">{error}</div>
       ) : loading ? (

@@ -1,11 +1,11 @@
 // 个人仪表盘（/dashboard，v1.1）：概览统计大数字卡片 + 最近文件列表 +
-// 快捷键提示卡；admin 附全局统计卡组。统计口径为个人空间（owner 维度），
-// 团队文件单列 team_files。
+// 快捷键提示卡；admin 附全局统计卡组。统计口径为默认空间（owner 维度），
+// 其他空间文件单列 space_files。
 import { useEffect, useState } from 'react'
 import { FileText } from 'lucide-react'
 import { DashboardData, getDashboard } from '../api'
 import { hotkeyDocs } from '../components/HotkeysHelp'
-import { formatTime } from '../components/FileBrowser'
+import { FileViewModal, formatTime } from '../components/FileBrowser'
 import { MessageKey, t, useLocale } from '../i18n'
 
 /** 字节数人类可读格式（B/KB/MB/GB/TB，一位小数）。 */
@@ -22,10 +22,10 @@ function formatBytes(n: number): string {
 }
 
 /** 个人统计卡片配置（值可为数字或字节数格式化）。 */
-const PERSONAL_CARDS: Array<{ key: keyof Pick<DashboardData, 'files' | 'storage_bytes' | 'team_files' | 'shares' | 'uploads_7d'>; labelKey: MessageKey; bytes?: boolean }> = [
+const PERSONAL_CARDS: Array<{ key: keyof Pick<DashboardData, 'files' | 'storage_bytes' | 'space_files' | 'shares' | 'uploads_7d'>; labelKey: MessageKey; bytes?: boolean }> = [
   { key: 'files', labelKey: 'statMyFiles' },
   { key: 'storage_bytes', labelKey: 'statStorage', bytes: true },
-  { key: 'team_files', labelKey: 'statTeamFiles' },
+  { key: 'space_files', labelKey: 'statTeamFiles' },
   { key: 'shares', labelKey: 'statShares' },
   { key: 'uploads_7d', labelKey: 'statUploads7d' },
 ]
@@ -46,6 +46,9 @@ export default function DashboardPage() {
   const [data, setData] = useState<DashboardData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  // 「最近文件」弹窗查看目标（v2.4：点击行内弹窗查看，不再新开窗口；
+  // 复用文件页 FileViewModal 分发）。
+  const [preview, setPreview] = useState<{ id: string; name: string } | null>(null)
 
   useEffect(() => {
     let alive = true
@@ -107,11 +110,7 @@ export default function DashboardPage() {
               <ul className="dash-recent">
                 {data.recent_files.map((f) => (
                   <li key={f.id}>
-                    <button type="button" className="dash-recent-item" onClick={() => {
-                      const url = new URL(`/view/${f.id}`, window.location.origin)
-                      url.searchParams.set('returnTo', f.scope_type === 'team' && f.team_id ? `/teams/${f.team_id}` : '/')
-                      window.open(`${url.pathname}${url.search}`, '_blank', 'noopener')
-                    }} title={msg('goFiles')}>
+                    <button type="button" className="dash-recent-item" onClick={() => setPreview({ id: f.id, name: f.name })} title={msg('goFiles')}>
                       <span className="icon"><FileText size={14} strokeWidth={2} aria-hidden="true" /></span>
                       <span className="dash-recent-name">{f.name}</span>
                       <span className="muted">{formatTime(f.updated_at)}</span>
@@ -139,6 +138,9 @@ export default function DashboardPage() {
           </div>
         </>
       )}
+
+      {/* 最近文件点击 = 弹窗查看（复用文件页查看弹窗分发，不新开窗口）。 */}
+      {preview && <FileViewModal file={preview} onClose={() => setPreview(null)} />}
     </div>
   )
 }

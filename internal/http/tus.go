@@ -119,12 +119,12 @@ func (h *Handler) tusCreate(c *gin.Context) {
 			return
 		}
 	} else {
-		root, e := h.files.EnsureRoot(userID(c))
+		rootID, e := h.defaultSpaceRootID(userID(c))
 		if e != nil {
-			tusError(c, http.StatusInternalServerError, "unable to ensure root folder")
+			tusError(c, http.StatusInternalServerError, "unable to ensure default space root")
 			return
 		}
-		parent = root.ID
+		parent = rootID
 	}
 	// file_id metadata（可选）：覆盖为新版本会话；此时 filename/parent_id 被忽略，
 	// 会话沿用目标文件现有名称与父目录。

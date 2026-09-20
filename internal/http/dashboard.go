@@ -16,7 +16,7 @@ import (
 type DashboardSummary struct {
 	Files        int64
 	StorageBytes int64
-	TeamFiles    int64
+	SpaceFiles   int64
 	Shares       int64
 	Uploads7d    int64
 	RecentFiles  []files.File
@@ -50,7 +50,7 @@ func (g *gormDashboard) Dashboard(user uuid.UUID, now time.Time) (DashboardSumma
 	summary := DashboardSummary{
 		Files:        agg.FileCount,
 		StorageBytes: agg.StorageBytes,
-		TeamFiles:    agg.TeamFileCount,
+		SpaceFiles:   agg.SpaceFileCount,
 		RecentFiles:  agg.RecentFiles,
 	}
 	// 有效分享数（公开 + 私有）：未撤销且未过期；下载次数耗尽不视为失效。
@@ -75,8 +75,8 @@ func (h *Handler) SetDashboardSource(s dashboardSource) {
 	}
 }
 
-// dashboardStats GET /api/v1/dashboard：个人统计（我的文件数 / 存储占用 / 团队
-// 空间文件数 / 有效分享数 / 近 7 天上传会话数 / 最近文件 5 条）；请求者为
+// dashboardStats GET /api/v1/dashboard：个人统计（默认空间文件数 / 存储占用 /
+// 其他空间文件数 / 有效分享数 / 近 7 天上传会话数 / 最近文件 5 条）；请求者为
 // admin 时附加全局统计（复用 admin stats）。角色查询失败时静默降级为个人
 // 视图（仪表盘非安全敏感端点，不做 fail closed）；admin 的全局统计查询
 // 失败仍返回 500（与 /admin/stats 口径一致）。
@@ -96,14 +96,14 @@ func (h *Handler) dashboardStats(c *gin.Context) {
 	for _, f := range summary.RecentFiles {
 		recent = append(recent, gin.H{
 			"id": f.ID, "name": f.Name, "parent_id": f.ParentID,
-			"current_version_id": f.CurrentVersionID, "scope_type": f.ScopeType,
-			"team_id": f.TeamID, "updated_at": f.UpdatedAt,
+			"current_version_id": f.CurrentVersionID,
+			"space_id":           f.SpaceID, "updated_at": f.UpdatedAt,
 		})
 	}
 	resp := gin.H{
 		"files":         summary.Files,
 		"storage_bytes": summary.StorageBytes,
-		"team_files":    summary.TeamFiles,
+		"space_files":   summary.SpaceFiles,
 		"shares":        summary.Shares,
 		"uploads_7d":    summary.Uploads7d,
 		"recent_files":  recent,

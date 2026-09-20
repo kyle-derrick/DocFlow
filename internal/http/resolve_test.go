@@ -19,15 +19,15 @@ import (
 )
 
 // rawFakeTree 是 resolveAPI/unpackAPI 的内存实现：维护父子树与版本/blob，
-// 读授权模拟「owner 或团队成员（members）」，写授权模拟「owner 或 editor
-// （writers）」——退团场景删除 members[user] 即可即时生效。
+// 读授权模拟「owner 或空间在册成员（members）」，写授权模拟「owner 或
+// editor（writers）」——移出空间场景删除 members[user] 即可即时生效。
 type rawFakeTree struct {
 	files    map[uuid.UUID]files.File
 	byName   map[uuid.UUID]map[string]uuid.UUID
 	versions map[uuid.UUID]files.FileVersion // fileID → 当前版本
 	blobs    map[uuid.UUID]files.ObjectBlob  // fileID → 当前版本 blob
 	contents map[uuid.UUID]string            // fileID → 存储内容（长度与 blob.Size 一致）
-	members  map[uuid.UUID]bool              // actor → 可读团队资源
+	members  map[uuid.UUID]bool              // actor → 可读空间资源
 	writers  map[uuid.UUID]bool              // actor → 可写
 	seq      int
 }
@@ -81,13 +81,13 @@ func (t *rawFakeTree) child(parent uuid.UUID, name string) (files.File, bool) {
 	return t.files[id], true
 }
 
-// authorizeRead 模拟 authorizeFileAccess：owner 短路；团队资源须成员；
-// 个人资源他人 ErrNotFound（不泄露存在性）。
+// authorizeRead 模拟 authorizeFileAccess：owner 短路；空间文件须在册成员；
+// 非成员一律 ErrNotFound（不泄露存在性）。
 func (t *rawFakeTree) authorizeRead(f files.File, user uuid.UUID) error {
 	if f.OwnerID == user {
 		return nil
 	}
-	if f.ScopeType == "team" {
+	if f.SpaceID != uuid.Nil {
 		if !t.members[user] {
 			return files.ErrNotFound
 		}
@@ -148,22 +148,12 @@ func (t *rawFakeTree) ResolveWritablePath(actor uuid.UUID, nsType string, scopeI
 
 func (t *rawFakeTree) namespaceRoot(actor uuid.UUID, nsType string, scopeID uuid.UUID) (files.File, error) {
 	switch nsType {
-	case files.NamespacePersonal:
-		if scopeID != actor {
-			return files.File{}, files.ErrNotFound
-		}
-		for _, f := range t.files {
-			if f.IsRoot && f.OwnerID == actor && f.TeamID == nil {
-				return f, nil
-			}
-		}
-		return files.File{}, files.ErrNotFound
-	case files.NamespaceTeam:
+	case files.NamespaceSpace:
 		if !t.members[actor] {
 			return files.File{}, files.ErrNotFound
 		}
 		for _, f := range t.files {
-			if f.IsRoot && f.TeamID != nil && *f.TeamID == scopeID {
+			if f.IsRoot && f.SpaceID == scopeID {
 				return f, nil
 			}
 		}
@@ -200,14 +190,15 @@ func (t *rawFakeTree) FindChildByName(parent uuid.UUID, name string) (files.File
 const testRawSecret = "raw-test-secret-0123456789abcdef"
 
 type rawTestEnv struct {
-	h        *Handler
-	router   *gin.Engine
-	tree     *rawFakeTree
-	signer   *contenturl.Signer
-	personal uuid.UUID // 个人空间 owner
-	teamID   uuid.UUID
-	root     files.File // 个人根
-	teamRoot files.File
+	h         *Handler
+	router    *gin.Engine
+	tree      *rawFakeTree
+	signer    *contenturl.Signer
+	personal  uuid.UUID // 主空间 owner
+	spaceID   uuid.UUID // 主空间（owner 的空间）
+	otherID   uuid.UUID // 他人空间（成员判定走 members）
+	root      files.File
+	otherRoot files.File
 }
 
 func newRawTestEnv(t *testing.T) *rawTestEnv {
@@ -215,19 +206,21 @@ func newRawTestEnv(t *testing.T) *rawTestEnv {
 	gin.SetMode(gin.TestMode)
 	tree := newRawFakeTree()
 	owner := uuid.New()
-	root := files.File{ID: uuid.New(), Name: "根目录", OwnerID: owner, Type: "folder", IsRoot: true, ScopeType: "personal"}
+	spaceID := uuid.New()
+	tree.members[owner] = true
+	root := files.File{ID: uuid.New(), Name: "根目录", OwnerID: owner, SpaceID: spaceID, Type: "folder", IsRoot: true}
 	tree.add(root, 0, "", "")
-	docs := files.File{ID: uuid.New(), Name: "docs", ParentID: &root.ID, OwnerID: owner, Type: "folder", ScopeType: "personal"}
+	docs := files.File{ID: uuid.New(), Name: "docs", ParentID: &root.ID, OwnerID: owner, SpaceID: spaceID, Type: "folder"}
 	tree.add(docs, 0, "", "")
-	tree.add(files.File{ID: uuid.New(), Name: "index.html", ParentID: &docs.ID, OwnerID: owner, Type: "file", ScopeType: "personal"}, 21, "text/html", files.BlobStatusAvailable)
-	tree.add(files.File{ID: uuid.New(), Name: "app.js", ParentID: &docs.ID, OwnerID: owner, Type: "file", ScopeType: "personal"}, 9, "text/javascript", files.BlobStatusAvailable)
-	tree.add(files.File{ID: uuid.New(), Name: "data.bin", ParentID: &docs.ID, OwnerID: owner, Type: "file", ScopeType: "personal"}, 4, "application/octet-stream", files.BlobStatusAvailable)
-	tree.add(files.File{ID: uuid.New(), Name: "quarantined.txt", ParentID: &root.ID, OwnerID: owner, Type: "file", ScopeType: "personal"}, 4, "text/plain", files.BlobStatusQuarantined)
+	tree.add(files.File{ID: uuid.New(), Name: "index.html", ParentID: &docs.ID, OwnerID: owner, SpaceID: spaceID, Type: "file"}, 21, "text/html", files.BlobStatusAvailable)
+	tree.add(files.File{ID: uuid.New(), Name: "app.js", ParentID: &docs.ID, OwnerID: owner, SpaceID: spaceID, Type: "file"}, 9, "text/javascript", files.BlobStatusAvailable)
+	tree.add(files.File{ID: uuid.New(), Name: "data.bin", ParentID: &docs.ID, OwnerID: owner, SpaceID: spaceID, Type: "file"}, 4, "application/octet-stream", files.BlobStatusAvailable)
+	tree.add(files.File{ID: uuid.New(), Name: "quarantined.txt", ParentID: &root.ID, OwnerID: owner, SpaceID: spaceID, Type: "file"}, 4, "text/plain", files.BlobStatusQuarantined)
 
-	teamID := uuid.New()
-	teamRoot := files.File{ID: uuid.New(), Name: "团队根", OwnerID: uuid.New(), Type: "folder", IsRoot: true, ScopeType: "team", TeamID: &teamID}
-	tree.add(teamRoot, 0, "", "")
-	tree.add(files.File{ID: uuid.New(), Name: "report.pdf", ParentID: &teamRoot.ID, OwnerID: teamRoot.OwnerID, Type: "file", ScopeType: "team", TeamID: &teamID}, 11, "application/pdf", files.BlobStatusAvailable)
+	otherID := uuid.New()
+	otherRoot := files.File{ID: uuid.New(), Name: "空间根", OwnerID: uuid.New(), SpaceID: otherID, Type: "folder", IsRoot: true}
+	tree.add(otherRoot, 0, "", "")
+	tree.add(files.File{ID: uuid.New(), Name: "report.pdf", ParentID: &otherRoot.ID, OwnerID: otherRoot.OwnerID, SpaceID: otherID, Type: "file"}, 11, "application/pdf", files.BlobStatusAvailable)
 
 	h := NewHandler(nil, nil, nil, nil, nil, nil, newMemStorage(), false, "", time.Hour)
 	h.resolver = tree
@@ -241,7 +234,7 @@ func newRawTestEnv(t *testing.T) *rawTestEnv {
 	}
 	router := gin.New()
 	h.Register(router, "jwt-test-secret-0123456789abcdef", 1_000_000, 1_000_000, 1_000_000)
-	return &rawTestEnv{h: h, router: router, tree: tree, signer: signer, personal: owner, teamID: teamID, root: root, teamRoot: teamRoot}
+	return &rawTestEnv{h: h, router: router, tree: tree, signer: signer, personal: owner, spaceID: spaceID, otherID: otherID, root: root, otherRoot: otherRoot}
 }
 
 func testJWTFor(secret string, user uuid.UUID) string {
@@ -288,7 +281,7 @@ func (e *rawTestEnv) signRaw(t *testing.T, user uuid.UUID, nsType string, scope 
 
 func TestResolvePathAPI(t *testing.T) {
 	env := newRawTestEnv(t)
-	code, out := env.resolveJSON(t, files.NamespacePersonal, env.personal, "docs/app.js", "")
+	code, out := env.resolveJSON(t, files.NamespaceSpace, env.spaceID, "docs/app.js", "")
 	if code != http.StatusOK {
 		t.Fatalf("status = %d body %s", code, mustJSON(t, out))
 	}
@@ -299,14 +292,14 @@ func TestResolvePathAPI(t *testing.T) {
 		t.Fatalf("mime = %v", mime)
 	}
 	rawURL, _ := out["raw_url"].(string)
-	if !strings.HasPrefix(rawURL, "/raw/auth/") || !strings.Contains(rawURL, "/personal/"+env.personal.String()+"/docs/app.js") {
+	if !strings.HasPrefix(rawURL, "/raw/auth/") || !strings.Contains(rawURL, "/space/"+env.spaceID.String()+"/docs/app.js") {
 		t.Fatalf("raw_url = %q", rawURL)
 	}
 	if _, ok := out["grant_expires_at"].(string); !ok {
 		t.Fatalf("grant_expires_at missing: %v", out)
 	}
 	// 目录解析：raw_url/view_url 以尾斜杠结尾（index.html 语义）。
-	code, out = env.resolveJSON(t, files.NamespacePersonal, env.personal, "docs", "")
+	code, out = env.resolveJSON(t, files.NamespaceSpace, env.spaceID, "docs", "")
 	if code != http.StatusOK || out["type"] != "folder" {
 		t.Fatalf("folder resolve: %d %v", code, out)
 	}
@@ -315,7 +308,7 @@ func TestResolvePathAPI(t *testing.T) {
 	}
 	// origin_content=1 且配置基地址 → 绝对 raw_url。
 	env.h.SetContentPublicBaseURL("https://content.example.com")
-	code, out = env.resolveJSON(t, files.NamespacePersonal, env.personal, "docs/app.js", "origin_content=1")
+	code, out = env.resolveJSON(t, files.NamespaceSpace, env.spaceID, "docs/app.js", "origin_content=1")
 	if code != http.StatusOK {
 		t.Fatalf("status = %d", code)
 	}
@@ -323,7 +316,7 @@ func TestResolvePathAPI(t *testing.T) {
 		t.Fatalf("absolute raw_url = %q", raw)
 	}
 	// 未带 origin_content 时保持相对。
-	_, out = env.resolveJSON(t, files.NamespacePersonal, env.personal, "docs/app.js", "")
+	_, out = env.resolveJSON(t, files.NamespaceSpace, env.spaceID, "docs/app.js", "")
 	if raw, _ := out["raw_url"].(string); !strings.HasPrefix(raw, "/raw/auth/") {
 		t.Fatalf("relative raw_url = %q", raw)
 	}
@@ -332,35 +325,35 @@ func TestResolvePathAPI(t *testing.T) {
 func TestResolvePathAuthAndErrors(t *testing.T) {
 	env := newRawTestEnv(t)
 	// 未登录 401。
-	if w := env.get("/api/v1/resolve/personal/"+env.personal.String()+"/docs", ""); w.Code != http.StatusUnauthorized {
+	if w := env.get("/api/v1/resolve/space/"+env.spaceID.String()+"/docs", ""); w.Code != http.StatusUnauthorized {
 		t.Fatalf("no auth: %d", w.Code)
 	}
-	// 他人 scope → 404（personal 要求 scopeID==actor）。
-	other := uuid.New()
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/resolve/personal/"+env.personal.String()+"/docs/app.js", nil)
-	req.Header.Set("Authorization", "Bearer "+testJWTFor("jwt-test-secret-0123456789abcdef", other))
+	// 非成员（他人空间）→ 404（不泄露存在性）。
+	outsider := uuid.New()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/resolve/space/"+env.otherID.String()+"/report.pdf", nil)
+	req.Header.Set("Authorization", "Bearer "+testJWTFor("jwt-test-secret-0123456789abcdef", outsider))
 	w := httptest.NewRecorder()
 	env.router.ServeHTTP(w, req)
 	if w.Code != http.StatusNotFound {
-		t.Fatalf("other actor: %d", w.Code)
+		t.Fatalf("outsider actor: %d", w.Code)
 	}
 	// 不存在 → 404；非法命名空间 → 400；穿越段 → 400。
-	if code, _ := env.resolveJSON(t, files.NamespacePersonal, env.personal, "missing/x.txt", ""); code != http.StatusNotFound {
+	if code, _ := env.resolveJSON(t, files.NamespaceSpace, env.spaceID, "missing/x.txt", ""); code != http.StatusNotFound {
 		t.Fatalf("missing: %d", code)
 	}
-	if code, _ := env.resolveJSON(t, "bogus", env.personal, "x", ""); code != http.StatusBadRequest {
+	if code, _ := env.resolveJSON(t, "bogus", env.spaceID, "x", ""); code != http.StatusBadRequest {
 		t.Fatalf("bogus ns: %d", code)
 	}
-	if code, _ := env.resolveJSON(t, files.NamespacePersonal, env.personal, "../etc/passwd", ""); code != http.StatusBadRequest {
+	if code, _ := env.resolveJSON(t, files.NamespaceSpace, env.spaceID, "../etc/passwd", ""); code != http.StatusBadRequest {
 		t.Fatalf("traversal: %d", code)
 	}
 	// mode=edit：owner 可写。
-	editCode, _ := env.resolveJSON(t, files.NamespacePersonal, env.personal, "docs/app.js", "mode=edit")
+	editCode, _ := env.resolveJSON(t, files.NamespaceSpace, env.spaceID, "docs/app.js", "mode=edit")
 	if editCode != http.StatusOK {
 		t.Fatalf("owner edit mode: %d", editCode)
 	}
 	// 非法 scope（非 UUID）→ 400。
-	if w := env.get("/api/v1/resolve/personal/not-a-uuid/x", testJWTFor("jwt-test-secret-0123456789abcdef", env.personal)); w.Code != http.StatusBadRequest {
+	if w := env.get("/api/v1/resolve/space/not-a-uuid/x", testJWTFor("jwt-test-secret-0123456789abcdef", env.personal)); w.Code != http.StatusBadRequest {
 		t.Fatalf("bad scope id: %d", w.Code)
 	}
 }
@@ -374,8 +367,8 @@ func (e *rawTestEnv) rawAuth(t *testing.T, grant, nsType string, scope uuid.UUID
 
 func TestRawAuthServesFile(t *testing.T) {
 	env := newRawTestEnv(t)
-	grant := env.signRaw(t, env.personal, files.NamespacePersonal, env.personal)
-	w := env.rawAuth(t, grant, files.NamespacePersonal, env.personal, "docs/app.js")
+	grant := env.signRaw(t, env.personal, files.NamespaceSpace, env.spaceID)
+	w := env.rawAuth(t, grant, files.NamespaceSpace, env.spaceID, "docs/app.js")
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d body %s", w.Code, w.Body.String())
 	}
@@ -413,69 +406,69 @@ func lookupFileID(e *rawTestEnv, name string) uuid.UUID {
 
 func TestRawAuthGrantMatrix(t *testing.T) {
 	env := newRawTestEnv(t)
-	valid := env.signRaw(t, env.personal, files.NamespacePersonal, env.personal)
+	valid := env.signRaw(t, env.personal, files.NamespaceSpace, env.spaceID)
 	// 篡改 grant。
 	tampered := "x" + valid[1:]
-	if w := env.rawAuth(t, tampered, files.NamespacePersonal, env.personal, "docs/app.js"); w.Code != http.StatusNotFound {
+	if w := env.rawAuth(t, tampered, files.NamespaceSpace, env.spaceID, "docs/app.js"); w.Code != http.StatusNotFound {
 		t.Fatalf("tampered grant: %d", w.Code)
 	}
 	// 过期 grant（签发时显式指定过去时间）。
-	expired, err := env.signer.Sign(contenturl.Claims{Purpose: contenturl.PurposeRaw, UserID: env.personal.String(), NSType: files.NamespacePersonal, NSScope: env.personal.String(), Exp: time.Now().Add(-time.Minute).Unix()})
+	expired, err := env.signer.Sign(contenturl.Claims{Purpose: contenturl.PurposeRaw, UserID: env.personal.String(), NSType: files.NamespaceSpace, NSScope: env.spaceID.String(), Exp: time.Now().Add(-time.Minute).Unix()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if w := env.rawAuth(t, expired, files.NamespacePersonal, env.personal, "docs/app.js"); w.Code != http.StatusNotFound {
+	if w := env.rawAuth(t, expired, files.NamespaceSpace, env.spaceID, "docs/app.js"); w.Code != http.StatusNotFound {
 		t.Fatalf("expired grant: %d", w.Code)
 	}
 	// 跨命名空间 / 跨 scope：grant 与 URL 不一致 → 404。
-	if w := env.rawAuth(t, valid, "team", env.teamID, "report.pdf"); w.Code != http.StatusNotFound {
-		t.Fatalf("cross ns: %d", w.Code)
+	if w := env.rawAuth(t, valid, files.NamespaceSpace, env.otherID, "report.pdf"); w.Code != http.StatusNotFound {
+		t.Fatalf("cross scope: %d", w.Code)
 	}
-	if w := env.rawAuth(t, valid, files.NamespacePersonal, uuid.New(), "docs/app.js"); w.Code != http.StatusNotFound {
+	if w := env.rawAuth(t, valid, files.NamespaceSpace, uuid.New(), "docs/app.js"); w.Code != http.StatusNotFound {
 		t.Fatalf("cross scope: %d", w.Code)
 	}
 	// JWT access token 冒充 grant → 404。
 	jwtGrant := testJWTFor("jwt-test-secret-0123456789abcdef", env.personal)
-	if w := env.rawAuth(t, jwtGrant, files.NamespacePersonal, env.personal, "docs/app.js"); w.Code != http.StatusNotFound {
+	if w := env.rawAuth(t, jwtGrant, files.NamespaceSpace, env.spaceID, "docs/app.js"); w.Code != http.StatusNotFound {
 		t.Fatalf("jwt as grant: %d", w.Code)
 	}
 	// raw-share grant 冒充 raw grant → 404（purpose 隔离）。
-	shareGrant, _ := env.signer.Sign(contenturl.Claims{Purpose: contenturl.PurposeRawShare, ShareID: uuid.New().String(), UserID: env.personal.String(), NSType: files.NamespacePersonal, NSScope: env.personal.String()})
-	if w := env.rawAuth(t, shareGrant, files.NamespacePersonal, env.personal, "docs/app.js"); w.Code != http.StatusNotFound {
+	shareGrant, _ := env.signer.Sign(contenturl.Claims{Purpose: contenturl.PurposeRawShare, ShareID: uuid.New().String(), UserID: env.personal.String(), NSType: files.NamespaceSpace, NSScope: env.spaceID.String()})
+	if w := env.rawAuth(t, shareGrant, files.NamespaceSpace, env.spaceID, "docs/app.js"); w.Code != http.StatusNotFound {
 		t.Fatalf("raw-share as raw: %d", w.Code)
 	}
 	// 路径不存在 → 404；穿越段 → 404（raw 域不泄露细节）。
-	if w := env.rawAuth(t, valid, files.NamespacePersonal, env.personal, "nope/x.js"); w.Code != http.StatusNotFound {
+	if w := env.rawAuth(t, valid, files.NamespaceSpace, env.spaceID, "nope/x.js"); w.Code != http.StatusNotFound {
 		t.Fatalf("missing path: %d", w.Code)
 	}
-	if w := env.rawAuth(t, valid, files.NamespacePersonal, env.personal, "../app.js"); w.Code != http.StatusNotFound {
+	if w := env.rawAuth(t, valid, files.NamespaceSpace, env.spaceID, "../app.js"); w.Code != http.StatusNotFound {
 		t.Fatalf("traversal: %d", w.Code)
 	}
 }
 
-// TestRawAuthACLChangeImmediately404 模拟退团后立即 404（集成式：ACL 变更
-// 生效后同 grant 请求被拒）。
+// TestRawAuthACLChangeImmediately404 模拟移出空间后立即 404（集成式：
+// 成员表变更生效后同 grant 请求被拒）。
 func TestRawAuthACLChangeImmediately404(t *testing.T) {
 	env := newRawTestEnv(t)
-	// viewer 是团队成员可读团队文件。
+	// viewer 是空间在册成员可读空间文件。
 	viewer := uuid.New()
 	env.tree.members[viewer] = true
-	grant := env.signRaw(t, viewer, files.NamespaceTeam, env.teamID)
-	if w := env.rawAuth(t, grant, files.NamespaceTeam, env.teamID, "report.pdf"); w.Code != http.StatusOK {
+	grant := env.signRaw(t, viewer, files.NamespaceSpace, env.otherID)
+	if w := env.rawAuth(t, grant, files.NamespaceSpace, env.otherID, "report.pdf"); w.Code != http.StatusOK {
 		t.Fatalf("member read: %d", w.Code)
 	}
-	// 退团（ACL/成员表变更）→ 同一 grant 立即 404。
+	// 移出空间（成员表变更）→ 同一 grant 立即 404。
 	delete(env.tree.members, viewer)
-	if w := env.rawAuth(t, grant, files.NamespaceTeam, env.teamID, "report.pdf"); w.Code != http.StatusNotFound {
-		t.Fatalf("after leaving team: %d", w.Code)
+	if w := env.rawAuth(t, grant, files.NamespaceSpace, env.otherID, "report.pdf"); w.Code != http.StatusNotFound {
+		t.Fatalf("after leaving space: %d", w.Code)
 	}
 }
 
 func TestRawAuthFolderIndexAndRedirect(t *testing.T) {
 	env := newRawTestEnv(t)
-	grant := env.signRaw(t, env.personal, files.NamespacePersonal, env.personal)
+	grant := env.signRaw(t, env.personal, files.NamespaceSpace, env.spaceID)
 	// 目录无尾斜杠 → 308 加斜杠（保留查询串）。
-	req := httptest.NewRequest(http.MethodGet, "/raw/auth/"+grant+"/personal/"+env.personal.String()+"/docs?x=1", nil)
+	req := httptest.NewRequest(http.MethodGet, "/raw/auth/"+grant+"/space/"+env.spaceID.String()+"/docs?x=1", nil)
 	req.RemoteAddr = "192.0.2.10:1111"
 	w := httptest.NewRecorder()
 	env.router.ServeHTTP(w, req)
@@ -486,7 +479,7 @@ func TestRawAuthFolderIndexAndRedirect(t *testing.T) {
 		t.Fatalf("location = %q", loc)
 	}
 	// 目录尾斜杠 → index.html。
-	w = env.rawAuth(t, grant, files.NamespacePersonal, env.personal, "docs/")
+	w = env.rawAuth(t, grant, files.NamespaceSpace, env.spaceID, "docs/")
 	if w.Code != http.StatusOK {
 		t.Fatalf("index: %d %s", w.Code, w.Body.String())
 	}
@@ -494,7 +487,7 @@ func TestRawAuthFolderIndexAndRedirect(t *testing.T) {
 		t.Fatalf("content-type = %q", ct)
 	}
 	// 无 index.html 的目录（根目录）→ 404。
-	w = env.rawAuth(t, grant, files.NamespacePersonal, env.personal, "/")
+	w = env.rawAuth(t, grant, files.NamespaceSpace, env.spaceID, "/")
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("root without index: %d", w.Code)
 	}
@@ -502,17 +495,17 @@ func TestRawAuthFolderIndexAndRedirect(t *testing.T) {
 
 func TestRawAuthWhitelistRangeHEAD(t *testing.T) {
 	env := newRawTestEnv(t)
-	grant := env.signRaw(t, env.personal, files.NamespacePersonal, env.personal)
+	grant := env.signRaw(t, env.personal, files.NamespaceSpace, env.spaceID)
 	// 未知扩展 → 415。
-	if w := env.rawAuth(t, grant, files.NamespacePersonal, env.personal, "docs/data.bin"); w.Code != http.StatusUnsupportedMediaType {
+	if w := env.rawAuth(t, grant, files.NamespaceSpace, env.spaceID, "docs/data.bin"); w.Code != http.StatusUnsupportedMediaType {
 		t.Fatalf("unknown ext: %d", w.Code)
 	}
 	// blob 非 available（quarantined）→ 404。
-	if w := env.rawAuth(t, grant, files.NamespacePersonal, env.personal, "quarantined.txt"); w.Code != http.StatusNotFound {
+	if w := env.rawAuth(t, grant, files.NamespaceSpace, env.spaceID, "quarantined.txt"); w.Code != http.StatusNotFound {
 		t.Fatalf("quarantined: %d", w.Code)
 	}
 	// 单区间 Range → 206。
-	req := httptest.NewRequest(http.MethodGet, "/raw/auth/"+grant+"/personal/"+env.personal.String()+"/docs/app.js", nil)
+	req := httptest.NewRequest(http.MethodGet, "/raw/auth/"+grant+"/space/"+env.spaceID.String()+"/docs/app.js", nil)
 	req.Header.Set("Range", "bytes=0-3")
 	req.RemoteAddr = "192.0.2.10:1111"
 	w := httptest.NewRecorder()
@@ -532,7 +525,7 @@ func TestRawAuthWhitelistRangeHEAD(t *testing.T) {
 	}
 	// HEAD：状态与安全头一致（httptest.ResponseRecorder 会记录 body 写入，
 	// 真实 net/http 服务端对 HEAD 丢弃 body——此处仅断言元数据）。
-	req = httptest.NewRequest(http.MethodHead, "/raw/auth/"+grant+"/personal/"+env.personal.String()+"/docs/app.js", nil)
+	req = httptest.NewRequest(http.MethodHead, "/raw/auth/"+grant+"/space/"+env.spaceID.String()+"/docs/app.js", nil)
 	req.RemoteAddr = "192.0.2.10:1111"
 	w = httptest.NewRecorder()
 	env.router.ServeHTTP(w, req)

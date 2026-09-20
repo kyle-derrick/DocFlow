@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 var (
@@ -207,42 +208,51 @@ func purgeBlobsLogic(r trashRepo, blobs []ObjectBlob, deleteObject func(storageK
 	return nil
 }
 
-// ListTrash 列出当前用户个人空间的软删除文件。
-func (s *Store) ListTrash(owner uuid.UUID, limit int) ([]File, error) {
-	return s.ListTrashScope(owner, "personal", nil, limit)
+// ListTrash 列出用户默认空间的软删除文件。
+func (s *Store) ListTrash(user uuid.UUID, limit int) ([]File, error) {
+	defaultSpace := s.defaultSpaceID(user)
+	return s.ListTrashSpace(user, defaultSpace, limit)
 }
 
-// ListTrashScope 按个人或指定团队空间列出顶层删除项。团队查询先验证成员读权限，
-// 再按 team_id 限定，不能用创建者 owner_id 代替团队授权。
-func (s *Store) ListTrashScope(user uuid.UUID, scope string, teamID *uuid.UUID, limit int) ([]File, error) {
+// ListTrashSpace 列出指定空间（统一空间模型）的顶层软删除项：先验证
+// 用户对空间的读权限（文件行 owner 或在册成员），再按 space_id 限定。
+func (s *Store) ListTrashSpace(user, spaceID uuid.UUID, limit int) ([]File, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	q := s.db.Where("deleted_at IS NOT NULL AND is_root = false AND NOT EXISTS (SELECT 1 FROM files p WHERE p.id = files.parent_id AND p.deleted_at IS NOT NULL)")
-	if scope == "team" {
-		if teamID == nil || s.teamReader == nil {
+	if spaceID == uuid.Nil {
+		return nil, ErrNotFound
+	}
+	// 授权：文件行 owner 命中即可；否则要求空间在册成员。
+	var ownerHit int64
+	if err := s.db.Model(&File{}).
+		Where("space_id = ? AND owner_id = ? AND deleted_at IS NOT NULL AND is_root = false", spaceID, user).
+		Limit(1).Count(&ownerHit).Error; err != nil {
+		return nil, err
+	}
+	if ownerHit == 0 {
+		if s.spaceReader == nil {
 			return nil, ErrForbidden
 		}
-		ok, err := s.teamReader(user, *teamID)
+		ok, err := s.spaceReader(user, spaceID)
 		if err != nil {
 			return nil, err
 		}
 		if !ok {
 			return nil, ErrForbidden
 		}
-		q = q.Where("scope_type = ? AND team_id = ?", "team", *teamID)
-	} else {
-		q = q.Where("scope_type = ? AND owner_id = ?", "personal", user)
 	}
+	q := s.db.Where("deleted_at IS NOT NULL AND is_root = false AND NOT EXISTS (SELECT 1 FROM files p WHERE p.id = files.parent_id AND p.deleted_at IS NOT NULL)")
+	q = q.Where("space_id = ?", spaceID)
 	var out []File
 	err := q.Order("deleted_at DESC, id").Limit(limit).Find(&out).Error
 	return out, err
 }
 
 // Restore 恢复软删除文件；冲突时返回 ErrParentDeleted/ErrConflict（409），不静默改名。
-// 权限：个人文件 owner；团队文件 CanWrite（含自定义角色，authorizeFileWrite）。
+// 权限：文件行 owner 或空间成员写权限（authorizeFileWrite）。
 func (s *Store) Restore(user, id uuid.UUID) (File, error) {
-	authorize := func(f File) error { return authorizeFileWrite(f, user, s.teamWriter, s.acl) }
+	authorize := func(f File) error { return authorizeFileWrite(f, user, s.spaceWriter, s.acl) }
 	var f File
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		var e error
@@ -256,13 +266,13 @@ func (s *Store) Restore(user, id uuid.UUID) (File, error) {
 }
 
 // Purge 彻底删除（硬删除）软删除文件及其全部后代，并按引用计数处理 object_blobs。
-// 权限：个人文件 owner；团队文件 CanDelete（authorizeTeamDelete，含自定义角色）。
+// 权限：文件行 owner 或空间成员 CanDelete（authorizeSpaceDelete）。
 // 返回被删除的文件与引用计数归零（待物理删除）的 blob。
 // 事务提交后经注入的 webpkg 清理回调（SetWebpkgCleaner）删除关联网页包的
 // webpkg/<public_id>/ 前缀对象（best-effort）；HTTP purge 与 janitor sweepTrash
 // 均经本方法，两路清理统一生效（janitor 走不做用户判定的 PurgeSystem）。
 func (s *Store) Purge(user, id uuid.UUID) (purged []File, deleting []ObjectBlob, err error) {
-	authorize := func(f File) error { return authorizeTeamDelete(f, user, s.teamDeleter, s.acl) }
+	authorize := func(f File) error { return authorizeSpaceDelete(f, user, s.spaceDeleter, s.acl) }
 	return s.purgeWithAuthorize(id, authorize)
 }
 
@@ -301,4 +311,76 @@ func (s *Store) cleanupWebpkgObjects(prefixes []string) {
 // PurgeBlobs 删除已标记 deleting 的 blob 对应的物理对象并删除其行记录。
 func (s *Store) PurgeBlobs(blobs []ObjectBlob, deleteObject func(storageKey string) error) error {
 	return purgeBlobsLogic(&gormTrashRepo{tx: s.db}, blobs, deleteObject)
+}
+
+// PurgeSpace 整空间彻底删除（管理端「已解散 → 彻底删除」）：在同一事务内
+// 物理删除该空间全部文件（含根目录与软删除项）、file_versions，并按引用
+// 计数处理 object_blobs；返回待物理删除的 blob（调用方经 PurgeBlobs 删除，
+// janitor sweepDeletingBlobs 兜底重试）。与 Purge 的差异：按 space_id 全集
+// 处理、不做用户授权、允许根目录；关联网页包对象前缀同样 best-effort 清理。
+func (s *Store) PurgeSpace(spaceID uuid.UUID) (deleting []ObjectBlob, err error) {
+	var webpkgPrefixes []string
+	err = s.db.Transaction(func(tx *gorm.DB) error {
+		r := &gormTrashRepo{tx: tx}
+		var ids []uuid.UUID
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Model(&File{}).Where("space_id = ?", spaceID).Pluck("id", &ids).Error; err != nil {
+			return err
+		}
+		if len(ids) == 0 {
+			return nil
+		}
+		pids, err := r.WebpkgPublicIDs(ids)
+		if err != nil {
+			return err
+		}
+		for _, pid := range pids {
+			webpkgPrefixes = append(webpkgPrefixes, "webpkg/"+pid)
+		}
+		refs, err := r.BlobRefsForFiles(ids)
+		if err != nil {
+			return err
+		}
+		// FK 顺序同 purgeLogic：先清 current_version_id → 删版本 → 删文件行。
+		if err := r.ClearCurrentVersions(ids); err != nil {
+			return err
+		}
+		if err := r.DeleteVersions(ids); err != nil {
+			return err
+		}
+		if err := r.DeleteFiles(ids); err != nil {
+			return err
+		}
+		for _, ref := range refs {
+			blob, err := r.GetBlob(ref.BlobID)
+			if err != nil {
+				if errors.Is(err, ErrNotFound) {
+					continue
+				}
+				return err
+			}
+			remaining, err := r.CountBlobRefs(ref.BlobID)
+			if err != nil {
+				return err
+			}
+			if remaining > 0 {
+				if err := r.DecrementBlobBy(ref.BlobID, ref.Count); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := r.ZeroBlobAndMarkDeleting(ref.BlobID); err != nil {
+				return err
+			}
+			blob.RefCount = 0
+			blob.Status = BlobStatusDeleting
+			deleting = append(deleting, blob)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	s.cleanupWebpkgObjects(webpkgPrefixes)
+	return deleting, nil
 }

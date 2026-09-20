@@ -8,35 +8,35 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/docflow/docflow/internal/files"
-	"github.com/docflow/docflow/internal/team"
+	"github.com/docflow/docflow/internal/space"
 )
 
-// newPrivateTestEnv 构造带团队判定器的内存环境：
-// share 服务通过 team.Service（内存 store）实时判定团队成员关系。
-func newPrivateTestEnv(t *testing.T) (*Service, *MemoryStore, *fakeFiles, *team.Service, *team.MemoryStore, uuid.UUID, uuid.UUID, *time.Time) {
+// newPrivateTestEnv 构造带空间判定器的内存环境：
+// share 服务通过 space.Service（内存 store）实时判定空间成员关系。
+func newPrivateTestEnv(t *testing.T) (*Service, *MemoryStore, *fakeFiles, *space.Service, *space.MemoryStore, uuid.UUID, uuid.UUID, *time.Time) {
 	t.Helper()
 	repo := NewMemoryStore()
 	ff := newFakeFiles()
-	teamRepo := team.NewMemoryStore()
-	teamSvc := team.NewService(teamRepo)
+	spaceRepo := space.NewMemoryStore()
+	spaceSvc := space.NewService(spaceRepo)
 	svc := NewService(repo, ff)
-	svc.SetTeamMembership(teamSvc)
+	svc.SetSpaceMembership(spaceSvc)
 	owner := uuid.New()
 	fileID := ff.addFile(owner, "secret.txt", "file", files.BlobStatusAvailable)
 	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 	svc.now = func() time.Time { return now }
-	return svc, repo, ff, teamSvc, teamRepo, owner, fileID, &now
+	return svc, repo, ff, spaceSvc, spaceRepo, owner, fileID, &now
 }
 
 func TestCreatePrivateNoTokenAndAuthorizationRows(t *testing.T) {
-	svc, repo, _, teamSvc, _, owner, fileID, _ := newPrivateTestEnv(t)
-	teamOwner, explicit := uuid.New(), uuid.New()
-	tm, _, err := teamSvc.CreateTeam(teamOwner, "设计组", "")
+	svc, repo, _, spaceSvc, _, owner, fileID, _ := newPrivateTestEnv(t)
+	spaceOwner, explicit := uuid.New(), uuid.New()
+	sp, _, err := spaceSvc.CreateSpace(spaceOwner, "设计组", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	sh, err := svc.CreatePrivate(owner, fileID, PermissionDownload, time.Hour, nil, []uuid.UUID{explicit, explicit, uuid.Nil}, []uuid.UUID{tm.ID})
+	sh, err := svc.CreatePrivate(owner, fileID, PermissionDownload, time.Hour, nil, []uuid.UUID{explicit, explicit, uuid.Nil}, []uuid.UUID{sp.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,9 +51,9 @@ func TestCreatePrivateNoTokenAndAuthorizationRows(t *testing.T) {
 	if len(users) != 1 || users[0] != explicit {
 		t.Fatalf("share_users = %v, want [%v]", users, explicit)
 	}
-	teams, _ := repo.ListShareTeamIDs(sh.ID)
-	if len(teams) != 1 || teams[0] != tm.ID {
-		t.Fatalf("share_teams = %v, want [%v]", teams, tm.ID)
+	spaces, _ := repo.ListShareSpaceIDs(sh.ID)
+	if len(spaces) != 1 || spaces[0] != sp.ID {
+		t.Fatalf("share_spaces = %v, want [%v]", spaces, sp.ID)
 	}
 	// 私有分享不影响 files.is_public。
 	if repo.IsPublic(fileID) {
@@ -66,19 +66,19 @@ func TestCreatePrivateNoTokenAndAuthorizationRows(t *testing.T) {
 }
 
 func TestPrivateShareAccessMatrix(t *testing.T) {
-	svc, _, _, teamSvc, _, owner, fileID, _ := newPrivateTestEnv(t)
-	teamOwner, explicit, member, viewer, outsider := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
-	tm, _, err := teamSvc.CreateTeam(teamOwner, "矩阵组", "")
+	svc, _, _, spaceSvc, _, owner, fileID, _ := newPrivateTestEnv(t)
+	spaceOwner, explicit, member, viewer, outsider := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	sp, _, err := spaceSvc.CreateSpace(spaceOwner, "矩阵组", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := teamSvc.AddMember(teamOwner, tm.ID, member, team.RoleMember); err != nil {
+	if _, err := spaceSvc.AddMember(spaceOwner, sp.ID, member, space.RoleMember); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := teamSvc.AddMember(teamOwner, tm.ID, viewer, team.RoleGuest); err != nil {
+	if _, err := spaceSvc.AddMember(spaceOwner, sp.ID, viewer, space.RoleGuest); err != nil {
 		t.Fatal(err)
 	}
-	sh, err := svc.CreatePrivate(owner, fileID, PermissionView, 0, nil, []uuid.UUID{explicit}, []uuid.UUID{tm.ID})
+	sh, err := svc.CreatePrivate(owner, fileID, PermissionView, 0, nil, []uuid.UUID{explicit}, []uuid.UUID{sp.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,8 +89,8 @@ func TestPrivateShareAccessMatrix(t *testing.T) {
 	}{
 		{"share owner", owner, true},
 		{"explicitly granted user", explicit, true},
-		{"team member (editor)", member, true},
-		{"team member (viewer role still reads share)", viewer, true},
+		{"space member (editor)", member, true},
+		{"space member (viewer role still reads share)", viewer, true},
 		{"outsider", outsider, false},
 	}
 	for _, tc := range tests {
@@ -105,24 +105,24 @@ func TestPrivateShareAccessMatrix(t *testing.T) {
 }
 
 func TestPrivateShareAccessInvalidatedByRemovalAndRevoke(t *testing.T) {
-	svc, _, _, teamSvc, _, owner, fileID, _ := newPrivateTestEnv(t)
-	teamOwner, member := uuid.New(), uuid.New()
-	tm, _, err := teamSvc.CreateTeam(teamOwner, "移除组", "")
+	svc, _, _, spaceSvc, _, owner, fileID, _ := newPrivateTestEnv(t)
+	spaceOwner, member := uuid.New(), uuid.New()
+	sp, _, err := spaceSvc.CreateSpace(spaceOwner, "移除组", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := teamSvc.AddMember(teamOwner, tm.ID, member, team.RoleMember); err != nil {
+	if _, err := spaceSvc.AddMember(spaceOwner, sp.ID, member, space.RoleMember); err != nil {
 		t.Fatal(err)
 	}
-	sh, err := svc.CreatePrivate(owner, fileID, PermissionView, 0, nil, nil, []uuid.UUID{tm.ID})
+	sh, err := svc.CreatePrivate(owner, fileID, PermissionView, 0, nil, nil, []uuid.UUID{sp.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !svc.CanAccess(sh, member) {
-		t.Fatal("team member must have access before removal")
+		t.Fatal("space member must have access before removal")
 	}
-	// 团队移除成员 → 实时失效。
-	if err := teamSvc.RemoveMember(teamOwner, tm.ID, member); err != nil {
+	// 空间移除成员 → 实时失效。
+	if err := spaceSvc.RemoveMember(spaceOwner, sp.ID, member); err != nil {
 		t.Fatal(err)
 	}
 	if svc.CanAccess(sh, member) {
@@ -132,7 +132,7 @@ func TestPrivateShareAccessInvalidatedByRemovalAndRevoke(t *testing.T) {
 		t.Fatalf("resolve after removal: err = %v, want ErrForbidden", err)
 	}
 	// 重新加入后可访问，随后撤销分享 → ErrGone。
-	if _, err := teamSvc.AddMember(teamOwner, tm.ID, member, team.RoleGuest); err != nil {
+	if _, err := spaceSvc.AddMember(spaceOwner, sp.ID, member, space.RoleGuest); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := svc.ResolveForUser(sh.ID, fileID, member); err != nil {
@@ -155,13 +155,13 @@ func TestPrivateShareAccessInvalidatedByRemovalAndRevoke(t *testing.T) {
 }
 
 func TestResolveForUserLifecycle(t *testing.T) {
-	svc, _, ff, teamSvc, _, owner, fileID, now := newPrivateTestEnv(t)
-	teamOwner, explicit := uuid.New(), uuid.New()
-	tm, _, err := teamSvc.CreateTeam(teamOwner, "生命周期组", "")
+	svc, _, ff, spaceSvc, _, owner, fileID, now := newPrivateTestEnv(t)
+	spaceOwner, explicit := uuid.New(), uuid.New()
+	sp, _, err := spaceSvc.CreateSpace(spaceOwner, "生命周期组", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	sh, err := svc.CreatePrivate(owner, fileID, PermissionDownload, time.Hour, nil, []uuid.UUID{explicit}, []uuid.UUID{tm.ID})
+	sh, err := svc.CreatePrivate(owner, fileID, PermissionDownload, time.Hour, nil, []uuid.UUID{explicit}, []uuid.UUID{sp.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +235,7 @@ func TestPublicShareNotAccessibleByUserEntry(t *testing.T) {
 		t.Fatal(err)
 	}
 	if sh.Visibility != VisibilityPublic {
-		t.Fatalf("public share visibility = %q", sh.Visibility)
+		t.Fatalf("public share visibility = %q, want public", sh.Visibility)
 	}
 	other := uuid.New()
 	if svc.CanAccess(sh, other) {
@@ -271,15 +271,15 @@ func (d *fakeDirectory) Username(id uuid.UUID) (string, error) {
 }
 
 // newSharedWithMeEnv 在内存环境上接入成员判定与用户目录。
-func newSharedWithMeEnv(t *testing.T) (*Service, *MemoryStore, *fakeFiles, *team.Service, uuid.UUID, uuid.UUID, *time.Time) {
+func newSharedWithMeEnv(t *testing.T) (*Service, *MemoryStore, *fakeFiles, *space.Service, uuid.UUID, uuid.UUID, *time.Time) {
 	t.Helper()
-	svc, repo, ff, teamSvc, _, owner, fileID, now := newPrivateTestEnv(t)
-	repo.SetMembership(func(user, teamID uuid.UUID) bool {
-		ok, _ := teamSvc.UserInAnyTeam(user, []uuid.UUID{teamID})
+	svc, repo, ff, spaceSvc, _, owner, fileID, now := newPrivateTestEnv(t)
+	repo.SetMembership(func(user, spaceID uuid.UUID) bool {
+		ok, _ := spaceSvc.UserInAnySpace(user, []uuid.UUID{spaceID})
 		return ok
 	})
 	svc.SetUserDirectory(&fakeDirectory{names: map[uuid.UUID]string{owner: "alice"}})
-	return svc, repo, ff, teamSvc, owner, fileID, now
+	return svc, repo, ff, spaceSvc, owner, fileID, now
 }
 
 func TestSharedWithMeExplicitGrant(t *testing.T) {
@@ -333,17 +333,17 @@ func TestSharedWithMeExplicitGrant(t *testing.T) {
 	}
 }
 
-func TestSharedWithMeTeamGrantAndRemoval(t *testing.T) {
-	svc, _, _, teamSvc, owner, fileID, _ := newSharedWithMeEnv(t)
-	teamOwner, member := uuid.New(), uuid.New()
-	tm, _, err := teamSvc.CreateTeam(teamOwner, "与我共享组", "")
+func TestSharedWithMeSpaceGrantAndRemoval(t *testing.T) {
+	svc, _, _, spaceSvc, owner, fileID, _ := newSharedWithMeEnv(t)
+	spaceOwner, member := uuid.New(), uuid.New()
+	sp, _, err := spaceSvc.CreateSpace(spaceOwner, "与我共享组", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := teamSvc.AddMember(teamOwner, tm.ID, member, team.RoleGuest); err != nil {
+	if _, err := spaceSvc.AddMember(spaceOwner, sp.ID, member, space.RoleGuest); err != nil {
 		t.Fatal(err)
 	}
-	sh, err := svc.CreatePrivate(owner, fileID, PermissionView, 0, nil, nil, []uuid.UUID{tm.ID})
+	sh, err := svc.CreatePrivate(owner, fileID, PermissionView, 0, nil, nil, []uuid.UUID{sp.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -352,10 +352,10 @@ func TestSharedWithMeTeamGrantAndRemoval(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(items) != 1 || items[0].Share.ID != sh.ID {
-		t.Fatalf("team member items = %+v, want single share %v", items, sh.ID)
+		t.Fatalf("space member items = %+v, want single share %v", items, sh.ID)
 	}
-	// 团队移除成员 → 实时失效。
-	if err := teamSvc.RemoveMember(teamOwner, tm.ID, member); err != nil {
+	// 空间移除成员 → 实时失效。
+	if err := spaceSvc.RemoveMember(spaceOwner, sp.ID, member); err != nil {
 		t.Fatal(err)
 	}
 	if items, _ := svc.SharedWithMe(member, 100); len(items) != 0 {

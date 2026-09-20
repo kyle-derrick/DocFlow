@@ -3,6 +3,7 @@ package http
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"github.com/docflow/docflow/internal/auth"
 	"github.com/docflow/docflow/internal/backup"
 	"github.com/docflow/docflow/internal/group"
+	"github.com/docflow/docflow/internal/mail"
 	"github.com/docflow/docflow/internal/metrics"
 	"github.com/docflow/docflow/internal/settings"
 	"github.com/gin-gonic/gin"
@@ -40,9 +42,9 @@ type AdminStats struct {
 	Sessions int64 `json:"sessions"`
 	Shares   int64 `json:"shares"`
 	Tokens   int64 `json:"tokens"`
-	// Teams/Groups 为团队（未软删）与用户组计数；StorageBytes 为对象存储
+	// Spaces/Groups 为空间（未软删）与用户组计数；StorageBytes 为对象存储
 	// 用量（object_blobs.size 合计，字节）——概览页统计卡片展示。
-	Teams        int64 `json:"teams"`
+	Spaces       int64 `json:"spaces"`
 	Groups       int64 `json:"groups"`
 	StorageBytes int64 `json:"storage_bytes"`
 }
@@ -51,7 +53,7 @@ type gormStats struct{ db *gorm.DB }
 func NewAdminStats(db *gorm.DB) *gormStats { return &gormStats{db: db} }
 func (g *gormStats) Stats() (AdminStats, error) {
 	var s AdminStats
-	// teams 软删除（migration 026 起 deleted_at），计数排除已删团队；
+	// spaces 软删除（migration 040），计数排除已删空间；
 	// groups 为硬删除（migration 035），直接计数。
 	for _, c := range []struct {
 		table string
@@ -60,7 +62,7 @@ func (g *gormStats) Stats() (AdminStats, error) {
 	}{
 		{"users", "", &s.Users}, {"files", "", &s.Files}, {"upload_sessions", "", &s.Uploads},
 		{"sessions", "", &s.Sessions}, {"shares", "", &s.Shares}, {"api_tokens", "", &s.Tokens},
-		{"teams", "deleted_at IS NULL", &s.Teams}, {"groups", "", &s.Groups},
+		{"spaces", "deleted_at IS NULL", &s.Spaces}, {"groups", "", &s.Groups},
 	} {
 		query := g.db.Table(c.table)
 		if c.where != "" {
@@ -84,6 +86,9 @@ func (h *Handler) SetSettingsService(s settingsService) {
 func (h *Handler) SetStatsSource(s statsSource) {
 	if s != nil {
 		h.stats = s
+		if g, ok := s.(*gormStats); ok {
+			h.statsDB = g.db
+		}
 	}
 }
 func (h *Handler) SetRoleLookup(l auth.RoleLookup) {
@@ -223,7 +228,7 @@ func smtpEnvBaseline() settings.SMTPSettings {
 }
 
 // smtpSettingsResponse 为 GET/PUT /admin/settings/smtp 的响应：生效配置
-//（DB 覆盖 → env 回退）+ env 基线对照 + 密码配置状态（只报 configured，
+// （DB 覆盖 → env 回退）+ env 基线对照 + 密码配置状态（只报 configured，
 // 永不回显值）。public_base_url 仅供邮件链接拼接参考（env-only）。
 type smtpSettingsResponse struct {
 	Enabled            bool   `json:"enabled"`
@@ -301,6 +306,49 @@ func (h *Handler) putSMTPSettings(c *gin.Context) {
 	default:
 		c.JSON(500, gin.H{"error": "unable to update smtp settings"})
 	}
+}
+
+// testSMTPSettings 用当前生效配置发送一封测试邮件（POST /admin/settings/smtp/test
+// {to}）：读生效 SMTP 配置（DB 覆盖 → env 回退，与真实投递同源）后就地装配
+// SMTPMailer 投递。请求体非法/配置缺失 400，投递失败 502（返回错误详情），
+// 成功 200。管理页「发送测试邮件」按钮消费。
+func (h *Handler) testSMTPSettings(c *gin.Context) {
+	if h.settings == nil {
+		c.JSON(500, gin.H{"error": "settings service is not configured"})
+		return
+	}
+	var req struct {
+		To string `json:"to"`
+	}
+	if c.ShouldBindJSON(&req) != nil {
+		c.JSON(400, gin.H{"error": "invalid request"})
+		return
+	}
+	to := strings.TrimSpace(req.To)
+	if to == "" || len(to) > 254 || !strings.Contains(to, "@") || strings.HasPrefix(to, "@") || strings.HasSuffix(to, "@") {
+		c.JSON(400, gin.H{"error": "请输入有效的收件邮箱"})
+		return
+	}
+	env := smtpEnvBaseline()
+	effective := env
+	if ov, err := h.settings.SMTPOverrides(); err == nil {
+		effective = ov.Apply(env)
+	}
+	if !effective.Enabled {
+		c.JSON(400, gin.H{"error": "SMTP 通道未启用（当前为日志通道）：请先在上方开启并保存配置"})
+		return
+	}
+	if effective.Host == "" || effective.From == "" {
+		c.JSON(400, gin.H{"error": "服务器地址与发件人不能为空：请先保存配置"})
+		return
+	}
+	mailer := mail.NewSMTPMailer(effective.Host, effective.Port, effective.User, effective.Pass, effective.From, effective.TLSMode)
+	body := fmt.Sprintf("这是一封 DocFlow SMTP 配置测试邮件。\n\n收到本邮件说明当前 SMTP 配置可正常投递。\n\n服务器：%s:%d（加密方式 %s）\n发件人：%s", effective.Host, effective.Port, effective.TLSMode, effective.From)
+	if err := mailer.SendNotification(to, "SMTP 测试邮件", body); err != nil {
+		c.JSON(502, gin.H{"error": fmt.Sprintf("发送失败：%v", err)})
+		return
+	}
+	c.JSON(200, gin.H{"ok": true, "message": fmt.Sprintf("测试邮件已发送至 %s，请查收（记得检查垃圾箱）", to)})
 }
 
 // backupStatusResponse 为 GET /admin/backups/status 的结构化响应：

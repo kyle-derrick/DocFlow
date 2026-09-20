@@ -31,7 +31,7 @@ type MemoryRepo struct {
 	docs    map[uuid.UUID]Doc
 	files   map[uuid.UUID]MemoryFile
 	tags    map[uuid.UUID]map[uuid.UUID]bool // file_id -> tag_id
-	members map[uuid.UUID]map[uuid.UUID]bool // team_id -> user_id
+	members map[uuid.UUID]map[uuid.UUID]bool // space_id -> user_id
 }
 
 func NewMemoryRepo() *MemoryRepo {
@@ -57,7 +57,7 @@ func (m *MemoryRepo) PutDoc(d Doc) {
 	m.docs[d.FileID] = d
 }
 
-// AddTag 给文件打标签；AddMember 登记团队成员（访问判定数据源）。
+// AddTag 给文件打标签；AddMember 登记空间成员（访问判定数据源）。
 func (m *MemoryRepo) AddTag(fileID, tagID uuid.UUID) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -67,13 +67,13 @@ func (m *MemoryRepo) AddTag(fileID, tagID uuid.UUID) {
 	m.tags[fileID][tagID] = true
 }
 
-func (m *MemoryRepo) AddMember(teamID, userID uuid.UUID) {
+func (m *MemoryRepo) AddMember(spaceID, userID uuid.UUID) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.members[teamID] == nil {
-		m.members[teamID] = make(map[uuid.UUID]bool)
+	if m.members[spaceID] == nil {
+		m.members[spaceID] = make(map[uuid.UUID]bool)
 	}
-	m.members[teamID][userID] = true
+	m.members[spaceID][userID] = true
 }
 
 func (m *MemoryRepo) UpsertDoc(d Doc) error {
@@ -99,9 +99,9 @@ func (m *MemoryRepo) QueryDocs(user uuid.UUID, opts QueryOptions) ([]Result, err
 		if !ok || f.Deleted {
 			continue // 文件不存在（孤儿由清理路径负责）或软删：排除
 		}
-		// 访问控制：个人 owner 命中；团队文件要求在册成员。
+		// 访问控制（统一空间模型）：owner 命中或空间在册成员。
 		readable := d.OwnerID == user
-		if !readable && d.TeamID != nil && m.members[*d.TeamID][user] {
+		if !readable && d.SpaceID != nil && m.members[*d.SpaceID][user] {
 			readable = true
 		}
 		if !readable {

@@ -19,16 +19,17 @@ import (
 
 type shareRequest struct {
 	FileID           string   `json:"file_id"`
-	FileIDs          []string `json:"file_ids"`        // 多文件打包分享（≥2 项，一个目录式链接）；与 file_id 二选一
+	FileIDs          []string `json:"file_ids"` // 多文件打包分享（≥2 项，一个目录式链接）；与 file_id 二选一
 	Permission       string   `json:"permission"`
-	Visibility       string   `json:"visibility"`      // public|private，缺省 public
-	UserIDs          []string `json:"user_ids"`        // 私有分享：显式授权用户
-	TeamIDs          []string `json:"team_ids"`        // 私有分享：授权团队
-	ExpiresIn        *int64   `json:"expires_in"`      // 秒；缺省或 0 表示永久
-	MaxDownloads     *int     `json:"max_downloads"`   // 缺省表示不限
-	Password         string   `json:"password"`        // 公开分享访问密码（4-64 字符，存哈希）
+	Visibility       string   `json:"visibility"`        // public|private，缺省 public
+	UserIDs          []string `json:"user_ids"`          // 私有分享：显式授权用户
+	SpaceIDs         []string `json:"space_ids"`         // 私有分享：授权空间（全体成员可访问）
+	ExpiresIn        *int64   `json:"expires_in"`        // 秒；缺省或 0 表示永久
+	MaxDownloads     *int     `json:"max_downloads"`     // 缺省表示不限
+	Password         string   `json:"password"`          // 公开分享访问密码（4-64 字符，存哈希）
 	WatermarkEnabled *bool    `json:"watermark_enabled"` // 缺省用 settings 默认
-	WatermarkText    *string  `json:"watermark_text"`  // 自定义模板；缺省用 settings 默认
+	WatermarkText    *string  `json:"watermark_text"`    // 自定义模板；缺省用 settings 默认
+	Title            string   `json:"title"`             // 打包分享自定义标题（≤200 rune；缺省回退默认命名）
 }
 
 // parseIDList 解析 UUID 列表（去重顺序保留）。
@@ -52,7 +53,7 @@ func parseIDList(c *gin.Context, values []string) ([]uuid.UUID, bool) {
 
 // createShare POST /api/v1/shares 为当前用户文件创建分享。
 // visibility=public（默认）返回公开 token（仅本次响应可见一次，之后只能通过 token_hash 匹配）；
-// visibility=private 创建私有分享（不生成 token，授权给 user_ids/team_ids）。
+// visibility=private 创建私有分享（不生成 token，授权给 user_ids/space_ids）。
 // 公开分享可附 password（存哈希，响应仅返回 has_password 标记）；
 // 水印开关/模板未显式指定时采用 settings 默认（share.default_watermark /
 // share.watermark_text）。
@@ -79,7 +80,7 @@ func (h *Handler) createShare(c *gin.Context) {
 	if req.ExpiresIn != nil {
 		expiresIn = time.Duration(*req.ExpiresIn) * time.Second
 	}
-	opts := share.ShareOptions{Password: req.Password, WatermarkEnabled: req.WatermarkEnabled, WatermarkText: req.WatermarkText}
+	opts := share.ShareOptions{Password: req.Password, WatermarkEnabled: req.WatermarkEnabled, WatermarkText: req.WatermarkText, Title: req.Title}
 	// 多文件打包分享（file_ids，仅公开）：一个目录式链接承载全部选中项。
 	if len(req.FileIDs) > 0 {
 		if req.FileID != "" {
@@ -90,8 +91,8 @@ func (h *Handler) createShare(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "bundle shares must be public"})
 			return
 		}
-		if len(req.UserIDs) > 0 || len(req.TeamIDs) > 0 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "user_ids/team_ids are only allowed for private shares"})
+		if len(req.UserIDs) > 0 || len(req.SpaceIDs) > 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "user_ids/space_ids are only allowed for private shares"})
 			return
 		}
 		fileIDs, ok := parseIDList(c, req.FileIDs)
@@ -133,22 +134,22 @@ func (h *Handler) createShare(c *gin.Context) {
 		if !ok {
 			return
 		}
-		teamIDs, ok := parseIDList(c, req.TeamIDs)
+		spaceIDs, ok := parseIDList(c, req.SpaceIDs)
 		if !ok {
 			return
 		}
-		created, err := h.shares.CreatePrivateWithOptions(owner, fileID, permission, expiresIn, req.MaxDownloads, userIDs, teamIDs, opts)
+		created, err := h.shares.CreatePrivateWithOptions(owner, fileID, permission, expiresIn, req.MaxDownloads, userIDs, spaceIDs, opts)
 		if err != nil {
 			h.shareCreateError(c, err)
 			return
 		}
-		h.recordAudit(c, audit.Entry{UserID: &owner, Action: audit.ActionShareCreate, ResourceType: audit.ResourceShare, ResourceID: created.ID.String(), Metadata: `{"file_id":"` + created.FileID.String() + `","permission":"` + created.Permission + `","visibility":"private","users":` + strconv.Itoa(len(userIDs)) + `,"teams":` + strconv.Itoa(len(teamIDs)) + `}`})
+		h.recordAudit(c, audit.Entry{UserID: &owner, Action: audit.ActionShareCreate, ResourceType: audit.ResourceShare, ResourceID: created.ID.String(), Metadata: `{"file_id":"` + created.FileID.String() + `","permission":"` + created.Permission + `","visibility":"private","users":` + strconv.Itoa(len(userIDs)) + `,"spaces":` + strconv.Itoa(len(spaceIDs)) + `}`})
 		out = shareJSON(created)
 		out["visibility"] = share.VisibilityPrivate
 		// 私有分享无 token / share_url。
 	} else {
-		if len(req.UserIDs) > 0 || len(req.TeamIDs) > 0 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "user_ids/team_ids are only allowed for private shares"})
+		if len(req.UserIDs) > 0 || len(req.SpaceIDs) > 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "user_ids/space_ids are only allowed for private shares"})
 			return
 		}
 		created, token, err := h.shares.CreatePublic(owner, fileID, permission, expiresIn, req.MaxDownloads, opts)
@@ -178,7 +179,7 @@ func nullableIntJSON(v *int) string {
 
 func (h *Handler) shareCreateError(c *gin.Context, err error) {
 	switch {
-	case errors.Is(err, share.ErrInvalidPermission), errors.Is(err, share.ErrInvalidExpiry), errors.Is(err, share.ErrInvalidMaxDownloads), errors.Is(err, share.ErrInvalidPassword), errors.Is(err, share.ErrInvalidWatermarkText), errors.Is(err, share.ErrInvalidVisibility):
+	case errors.Is(err, share.ErrInvalidPermission), errors.Is(err, share.ErrInvalidExpiry), errors.Is(err, share.ErrInvalidMaxDownloads), errors.Is(err, share.ErrInvalidPassword), errors.Is(err, share.ErrInvalidWatermarkText), errors.Is(err, share.ErrInvalidVisibility), errors.Is(err, share.ErrInvalidTitle):
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 	case errors.Is(err, share.ErrPublicDisabled):
 		c.JSON(http.StatusForbidden, gin.H{"error": err.Error(), "code": "PUBLIC_SHARING_DISABLED"})
@@ -276,7 +277,7 @@ func (h *Handler) listShares(c *gin.Context) {
 }
 
 // listSharedWithMe GET /api/v1/shares/shared-with-me：分享给当前用户的有效私有分享列表
-// （share_users 显式授权或 share_teams 团队成员；公开分享与已撤销/过期/达上限的不含）。
+// （share_users 显式授权或 share_spaces 空间成员；公开分享与已撤销/过期/达上限的不含）。
 // 每条附文件元数据（name/size/mime_type）与分享者用户名（owner_username，不含 email）。
 func (h *Handler) listSharedWithMe(c *gin.Context) {
 	limit := 100
@@ -314,7 +315,9 @@ func (h *Handler) listSharedWithMe(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"shares": out})
 }
 
-// revokeShare DELETE /api/v1/shares/:id 撤销分享（幂等）。
+// revokeShare DELETE /api/v1/shares/:id 撤销分享（幂等）。v2.4 措辞回归
+// 「撤销」：撤销仅失效链接、记录保留（不做自动清理），满 30 天后可经
+// purgeShare 手动「清除记录」。
 func (h *Handler) revokeShare(c *gin.Context) {
 	id, ok := parseID(c, c.Param("id"))
 	if !ok {
@@ -331,6 +334,33 @@ func (h *Handler) revokeShare(c *gin.Context) {
 		return
 	}
 	h.recordAudit(c, audit.Entry{UserID: &owner, Action: audit.ActionShareRevoke, ResourceType: audit.ResourceShare, ResourceID: revoked.ID.String(), Metadata: `{"file_id":"` + revoked.FileID.String() + `"}`})
+	c.Status(http.StatusNoContent)
+}
+
+// purgeShare DELETE /api/v1/shares/:id/purge 清除已撤销分享的记录（物理
+// 删除，仅创建者）：须已撤销且撤销满 30 天保留期；未撤销 409 NOT_REVOKED、
+// 保留期内 409 RETENTION（不做自动清理——记录保留供审计回溯，是否清除由
+// 用户自行决定）。
+func (h *Handler) purgeShare(c *gin.Context) {
+	id, ok := parseID(c, c.Param("id"))
+	if !ok {
+		return
+	}
+	owner := userID(c)
+	if err := h.shares.Purge(owner, id); err != nil {
+		switch {
+		case errors.Is(err, share.ErrNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": "share not found"})
+		case errors.Is(err, share.ErrNotRevoked):
+			c.JSON(http.StatusConflict, gin.H{"error": "share is not revoked", "code": "NOT_REVOKED"})
+		case errors.Is(err, share.ErrPurgeRetention):
+			c.JSON(http.StatusConflict, gin.H{"error": "share record is kept for 30 days after revocation", "code": "RETENTION"})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to purge share"})
+		}
+		return
+	}
+	h.recordAudit(c, audit.Entry{UserID: &owner, Action: audit.ActionShareRevoke, ResourceType: audit.ResourceShare, ResourceID: id.String(), Metadata: `{"purge":true}`})
 	c.Status(http.StatusNoContent)
 }
 
@@ -351,9 +381,11 @@ func shareStatsJSON(stats share.AccessStats) gin.H {
 	return gin.H{"total_access": stats.TotalAccess, "unique_visitors": stats.UniqueVisitors, "recent": recent}
 }
 
-// getShare GET /api/v1/shares/:id：分享详情（仅 owner）。脱敏全字段（不含
-// token/password 哈希，仅 has_password 标记）+ 关联文件名 + 访问统计
-// （total_access / unique_visitors / 最近 20 条访问记录，IP 已脱敏为前缀）。
+// getShare GET /api/v1/shares/:id：分享详情（仅 owner）。脱敏全字段 + 关联
+// 文件名 + 访问统计（total_access / unique_visitors / 最近 20 条访问记录，
+// IP 已脱敏为前缀）。v2.4 起（migration 041）公开分享回传明文 token 与
+// 访问密码（创建时留存的 token / password_plain；旧记录为空串，前端提示
+// 撤销后重建），供「我的分享」随时再次查看链接与密码。
 func (h *Handler) getShare(c *gin.Context) {
 	id, ok := parseID(c, c.Param("id"))
 	if !ok {
@@ -372,6 +404,10 @@ func (h *Handler) getShare(c *gin.Context) {
 	out["visibility"] = detail.Share.Visibility
 	out["file_name"] = detail.FileName
 	out["stats"] = shareStatsJSON(detail.Stats)
+	if detail.Share.Visibility == share.VisibilityPublic {
+		out["token"] = detail.Share.Token
+		out["password"] = detail.Share.PasswordPlain
+	}
 	c.JSON(http.StatusOK, out)
 }
 
@@ -421,7 +457,7 @@ func (h *Handler) updateShare(c *gin.Context) {
 }
 
 func shareJSON(s share.Share) gin.H {
-	return gin.H{"id": s.ID, "file_id": s.FileID, "permission": s.Permission, "has_password": s.HasPassword(), "watermark_enabled": s.WatermarkEnabled, "watermark_text": s.WatermarkText, "expires_at": s.ExpiresAt, "max_downloads": s.MaxDownloads, "download_count": s.DownloadCount, "revoked_at": s.RevokedAt, "created_at": s.CreatedAt, "is_bundle": s.IsBundle}
+	return gin.H{"id": s.ID, "file_id": s.FileID, "permission": s.Permission, "has_password": s.HasPassword(), "watermark_enabled": s.WatermarkEnabled, "watermark_text": s.WatermarkText, "expires_at": s.ExpiresAt, "max_downloads": s.MaxDownloads, "download_count": s.DownloadCount, "revoked_at": s.RevokedAt, "created_at": s.CreatedAt, "is_bundle": s.IsBundle, "title": s.Title}
 }
 
 // ---------- 公开分享密码保护（设计 6.6.2 / US-003） ----------
@@ -556,15 +592,19 @@ func (h *Handler) publicShareInfo(c *gin.Context) {
 	if r.File.Type == "folder" {
 		name := r.File.Name
 		if r.Share.IsBundle {
-			// 打包分享：标题与水印按可见条目数展示（不泄露锚点目录名/其余子项）。
-			name = "打包分享"
-			if items, ierr := h.shares.BundleItems(r.Share); ierr == nil {
+			// 打包分享：自定义标题优先（不泄露锚点目录名/其余子项）；
+			// 未设置时回退按可见条目数命名。
+			if r.Share.Title != "" {
+				name = r.Share.Title
+			} else if items, ierr := h.shares.BundleItems(r.Share); ierr == nil {
 				name = fmt.Sprintf("打包分享（%d 项）", len(items))
+			} else {
+				name = "打包分享"
 			}
 		}
 		watermark := any(nil)
 		if r.Share.WatermarkEnabled {
-			watermark = share.RenderWatermark(r.Share.WatermarkTemplate(), name, c.ClientIP(), time.Now())
+			watermark = share.RenderWatermark(r.Share.WatermarkTemplate(), name, c.ClientIP(), "", time.Now())
 		}
 		c.JSON(http.StatusOK, gin.H{
 			"name":              name,
@@ -581,7 +621,7 @@ func (h *Handler) publicShareInfo(c *gin.Context) {
 	}
 	var watermarkText any
 	if r.Share.WatermarkEnabled {
-		watermarkText = share.RenderWatermark(r.Share.WatermarkTemplate(), r.File.Name, c.ClientIP(), time.Now())
+		watermarkText = share.RenderWatermark(r.Share.WatermarkTemplate(), r.File.Name, c.ClientIP(), "", time.Now())
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"name":              r.File.Name,
@@ -604,7 +644,7 @@ func watermarkTextOf(r share.Resolved, c *gin.Context) any {
 	if !r.Share.WatermarkEnabled {
 		return nil
 	}
-	return share.RenderWatermark(r.Share.WatermarkTemplate(), r.File.Name, c.ClientIP(), time.Now())
+	return share.RenderWatermark(r.Share.WatermarkTemplate(), r.File.Name, c.ClientIP(), "", time.Now())
 }
 
 // publicShareDownload GET /api/v1/public/shares/:token/download 公开流式下载。

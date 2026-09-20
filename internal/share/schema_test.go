@@ -10,7 +10,7 @@ import (
 
 // TestAccessSessionTableName 验证 GORM schema 解析将 AccessSession 映射到
 // share_access_sessions（复数化默认值是 access_sessions——运行时真实
-// PostgreSQL 才会暴露该问题，与 team.Member/user.UserTOTP 同型）。
+// PostgreSQL 才会暴露该问题，与 space.Member/user.UserTOTP 同型）。
 func TestAccessSessionTableName(t *testing.T) {
 	s, err := schema.Parse(&AccessSession{}, &sync.Map{}, schema.NamingStrategy{})
 	if err != nil {

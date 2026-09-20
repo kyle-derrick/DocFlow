@@ -97,17 +97,17 @@ type fixture struct {
 	repo  *MemoryRepo
 
 	owner, member, stranger uuid.UUID
-	team1, team2            uuid.UUID
+	space1, space2          uuid.UUID
 
-	personalFile, teamFile, team2File, deletedFile, strangerFile uuid.UUID
+	personalFile, spaceFile, space2File, deletedFile, strangerFile uuid.UUID
 }
 
 func newFixture() *fixture {
 	now := time.Now()
 	f := &fixture{
 		owner: uuid.New(), member: uuid.New(), stranger: uuid.New(),
-		team1: uuid.New(), team2: uuid.New(),
-		personalFile: uuid.New(), teamFile: uuid.New(), team2File: uuid.New(),
+		space1: uuid.New(), space2: uuid.New(),
+		personalFile: uuid.New(), spaceFile: uuid.New(), space2File: uuid.New(),
 		deletedFile: uuid.New(), strangerFile: uuid.New(),
 	}
 	f.repo = NewMemoryRepo()
@@ -116,12 +116,12 @@ func newFixture() *fixture {
 	f.repo.PutDoc(Doc{FileID: f.personalFile, OwnerID: f.owner, Name: "notes", Content: "quarterly report numbers"})
 	f.repo.PutFile(f.personalFile, MemoryFile{Name: "notes-2026.md", Type: "file", UpdatedAt: now.Add(-time.Hour)})
 
-	f.repo.PutDoc(Doc{FileID: f.teamFile, OwnerID: uuid.New(), TeamID: &f.team1, Name: "team-plan", Content: "roadmap for q3"})
-	f.repo.PutFile(f.teamFile, MemoryFile{Name: "team-plan.md", Type: "file", UpdatedAt: now})
-	f.repo.AddMember(f.team1, f.member)
+	f.repo.PutDoc(Doc{FileID: f.spaceFile, OwnerID: uuid.New(), SpaceID: &f.space1, Name: "space-plan", Content: "roadmap for q3"})
+	f.repo.PutFile(f.spaceFile, MemoryFile{Name: "space-plan.md", Type: "file", UpdatedAt: now})
+	f.repo.AddMember(f.space1, f.member)
 
-	f.repo.PutDoc(Doc{FileID: f.team2File, OwnerID: uuid.New(), TeamID: &f.team2, Name: "secret", Content: "secret plan"})
-	f.repo.PutFile(f.team2File, MemoryFile{Name: "secret.md", Type: "file", UpdatedAt: now})
+	f.repo.PutDoc(Doc{FileID: f.space2File, OwnerID: uuid.New(), SpaceID: &f.space2, Name: "secret", Content: "secret plan"})
+	f.repo.PutFile(f.space2File, MemoryFile{Name: "secret.md", Type: "file", UpdatedAt: now})
 
 	f.repo.PutDoc(Doc{FileID: f.deletedFile, OwnerID: f.owner, Name: "deleted report", Content: "removed"})
 	f.repo.PutFile(f.deletedFile, MemoryFile{Name: "deleted.md", Type: "file", UpdatedAt: now, Deleted: true})
@@ -153,32 +153,32 @@ func TestQueryNameAndContentMatch(t *testing.T) {
 	}
 }
 
-// 访问控制：owner 个人可读；团队在册成员可读；非成员团队文件、他人个人
-// 文件、软删文件一律不可见。
+// 访问控制：owner 本人可读；空间在册成员可读；非成员空间文件、他人文件、
+// 软删文件一律不可见。
 func TestQueryAccessControl(t *testing.T) {
 	f := newFixture()
-	// 团队在册成员：命中团队文件内容。
+	// 空间在册成员：命中空间文件内容。
 	out, err := f.store.Query(f.member, QueryOptions{Q: "roadmap"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(out) != 1 || out[0].Name != "team-plan.md" {
-		t.Fatalf("team member content match: %+v", out)
+	if len(out) != 1 || out[0].Name != "space-plan.md" {
+		t.Fatalf("space member content match: %+v", out)
 	}
-	// 非成员：团队文件 / 他人个人文件 / 软删文件全部不可见。
+	// 非成员：空间文件 / 他人文件 / 软删文件全部不可见。
 	out, err = f.store.Query(f.member, QueryOptions{Q: "secret"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(out) != 0 {
-		t.Fatalf("non-member must not see team2/stranger/soft-deleted: %+v", out)
+		t.Fatalf("non-member must not see space2/stranger/soft-deleted: %+v", out)
 	}
 	out, err = f.store.Query(f.member, QueryOptions{Q: "plan"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(out) != 1 || out[0].Name != "team-plan.md" {
-		t.Fatalf("member name search should only hit own team: %+v", out)
+	if len(out) != 1 || out[0].Name != "space-plan.md" {
+		t.Fatalf("member name search should only hit own space: %+v", out)
 	}
 	// owner 视角：软删与陌生人文件不出现（"report" 命中名称/内容）。
 	out, err = f.store.Query(f.owner, QueryOptions{Q: "report"})

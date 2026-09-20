@@ -136,7 +136,7 @@ export default function RichTextEditor({
     return () => { alive = false }
   }, [fileId])
 
-  /** 图片上传：assets 目录定位/创建（按文档所在目录探测个人/团队空间分发
+  /** 图片上传：assets 目录定位/创建（按文档所在目录探测命名空间分发
    * 端点）→ 上传 → 插入 file 嵌入块。 */
   const uploadImages = async (files: File[]) => {
     const editor = editorRef.current

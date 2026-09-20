@@ -43,14 +43,15 @@ func TestDashboardPersonal(t *testing.T) {
 	updated := time.Date(2026, 9, 1, 8, 0, 0, 0, time.UTC)
 	parentID := uuid.New()
 	versionID := uuid.New()
+	spaceID := uuid.New()
 	fake := &fakeDashboardSource{summary: DashboardSummary{
 		Files:        12,
 		StorageBytes: 2048,
-		TeamFiles:    3,
+		SpaceFiles:   3,
 		Shares:       4,
 		Uploads7d:    7,
 		RecentFiles: []files.File{
-			{ID: uuid.New(), Name: "a.txt", ParentID: &parentID, CurrentVersionID: &versionID, ScopeType: "personal", UpdatedAt: updated},
+			{ID: uuid.New(), Name: "a.txt", ParentID: &parentID, CurrentVersionID: &versionID, SpaceID: spaceID, UpdatedAt: updated},
 		},
 	}}
 	// 非 admin：无全局统计节。
@@ -65,7 +66,7 @@ func TestDashboardPersonal(t *testing.T) {
 		t.Fatalf("dashboard queried user %s, want %s", fake.lastUser, user)
 	}
 	body := w.Body.String()
-	for _, want := range []string{`"files":12`, `"storage_bytes":2048`, `"team_files":3`, `"shares":4`, `"uploads_7d":7`} {
+	for _, want := range []string{`"files":12`, `"storage_bytes":2048`, `"space_files":3`, `"shares":4`, `"uploads_7d":7`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("body %s must contain %s", body, want)
 		}
@@ -73,7 +74,7 @@ func TestDashboardPersonal(t *testing.T) {
 	if strings.Contains(body, `"admin"`) {
 		t.Fatalf("non-admin body must not contain admin section: %s", body)
 	}
-	for _, want := range []string{`"name":"a.txt"`, `"parent_id":"` + parentID.String() + `"`, `"current_version_id":"` + versionID.String() + `"`, `"scope_type":"personal"`, updated.Format(time.RFC3339Nano)} {
+	for _, want := range []string{`"name":"a.txt"`, `"parent_id":"` + parentID.String() + `"`, `"current_version_id":"` + versionID.String() + `"`, `"space_id":"` + spaceID.String() + `"`, updated.Format(time.RFC3339Nano)} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("body %s must contain recent file field %s", body, want)
 		}

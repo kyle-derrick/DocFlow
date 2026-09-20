@@ -3,7 +3,6 @@ package http
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -18,27 +17,28 @@ import (
 	"github.com/docflow/docflow/internal/mcp"
 	"github.com/docflow/docflow/internal/search"
 	"github.com/docflow/docflow/internal/share"
-	"github.com/docflow/docflow/internal/team"
+	"github.com/docflow/docflow/internal/space"
 	"github.com/docflow/docflow/internal/upload"
 )
 
 // ---------- rawFakeTree 补齐 mcp.FileStore / share.FileSource ----------
 
-// mcpFindRoot 返回 owner 的个人根目录（不存在则按 EnsureRoot 语义创建）。
+// mcpFindRoot 返回 owner 的根目录（默认空间根）。
 func (t *rawFakeTree) mcpFindRoot(owner uuid.UUID) (files.File, bool) {
 	for _, f := range t.files {
-		if f.IsRoot && f.OwnerID == owner && f.TeamID == nil {
+		if f.IsRoot && f.OwnerID == owner && f.DeletedAt == nil {
 			return f, true
 		}
 	}
 	return files.File{}, false
 }
 
-func (t *rawFakeTree) EnsureRoot(owner uuid.UUID) (files.File, error) {
-	if root, ok := t.mcpFindRoot(owner); ok {
+// DefaultSpaceRoot 返回 owner 的默认空间根目录（不存在则创建）。
+func (t *rawFakeTree) DefaultSpaceRoot(user uuid.UUID) (files.File, error) {
+	if root, ok := t.mcpFindRoot(user); ok {
 		return root, nil
 	}
-	root := files.File{ID: uuid.New(), Name: "根目录", OwnerID: owner, Type: "folder", IsRoot: true, ScopeType: "personal"}
+	root := files.File{ID: uuid.New(), Name: "根目录", OwnerID: user, SpaceID: uuid.New(), Type: "folder", IsRoot: true}
 	t.files[root.ID] = root
 	return root, nil
 }
@@ -53,37 +53,19 @@ func (t *rawFakeTree) children(parent uuid.UUID) []files.File {
 	return out
 }
 
-func (t *rawFakeTree) List(owner uuid.UUID, parent *uuid.UUID, limit int, sort files.SortOptions) ([]files.File, error) {
-	if parent == nil {
-		return nil, fmt.Errorf("root listing unsupported in fake")
-	}
-	p, ok := t.files[*parent]
-	if !ok || p.DeletedAt != nil {
-		return nil, files.ErrNotFound
-	}
-	if p.OwnerID != owner {
-		return nil, files.ErrNotFound
-	}
-	out := t.children(*parent)
-	if len(out) > limit {
-		out = out[:limit]
-	}
-	return out, nil
-}
-
-func (t *rawFakeTree) TeamRoot(teamID uuid.UUID) (files.File, error) {
+func (t *rawFakeTree) SpaceRoot(spaceID uuid.UUID) (files.File, error) {
 	for _, f := range t.files {
-		if f.IsRoot && f.TeamID != nil && *f.TeamID == teamID && f.DeletedAt == nil {
+		if f.IsRoot && f.SpaceID == spaceID && f.DeletedAt == nil {
 			return f, nil
 		}
 	}
 	return files.File{}, files.ErrNotFound
 }
 
-func (t *rawFakeTree) ListTeam(teamID, parent uuid.UUID, limit int, f files.TeamListFilter) ([]files.File, error) {
+func (t *rawFakeTree) ListSpace(spaceID, parent uuid.UUID, limit int, f files.SpaceListFilter) ([]files.File, error) {
 	out := make([]files.File, 0)
 	for _, item := range t.children(parent) {
-		if item.TeamID != nil && *item.TeamID == teamID {
+		if item.SpaceID == spaceID {
 			out = append(out, item)
 		}
 	}
@@ -93,9 +75,9 @@ func (t *rawFakeTree) ListTeam(teamID, parent uuid.UUID, limit int, f files.Team
 	return out, nil
 }
 
-func (t *rawFakeTree) GetTeamFolder(teamID, id uuid.UUID) (files.File, error) {
+func (t *rawFakeTree) GetSpaceFolder(spaceID, id uuid.UUID) (files.File, error) {
 	f, ok := t.files[id]
-	if !ok || f.DeletedAt != nil || f.Type != "folder" || f.TeamID == nil || *f.TeamID != teamID {
+	if !ok || f.DeletedAt != nil || f.Type != "folder" || f.SpaceID != spaceID {
 		return files.File{}, files.ErrNotFound
 	}
 	return f, nil
@@ -156,7 +138,7 @@ func (t *rawFakeTree) Copy(user, id, parent uuid.UUID, name string) (files.File,
 	}
 	t.seq++
 	newID := uuid.New()
-	copied := files.File{ID: newID, Name: name, ParentID: &parent, OwnerID: user, Type: "file", ScopeType: p.ScopeType, TeamID: p.TeamID}
+	copied := files.File{ID: newID, Name: name, ParentID: &parent, OwnerID: user, SpaceID: p.SpaceID, Type: "file"}
 	t.files[newID] = copied
 	t.byName[parent][strings.ToLower(name)] = newID
 	v := t.versions[id]
@@ -206,17 +188,14 @@ func (t *rawFakeTree) Restore(user, id uuid.UUID) (files.File, error) {
 	return f, nil
 }
 
-func (t *rawFakeTree) ListTrashScope(user uuid.UUID, scope string, teamID *uuid.UUID, limit int) ([]files.File, error) {
+func (t *rawFakeTree) ListTrashSpace(user, spaceID uuid.UUID, limit int) ([]files.File, error) {
 	out := make([]files.File, 0)
 	for _, f := range t.files {
-		if f.DeletedAt == nil || f.IsRoot {
+		if f.DeletedAt == nil || f.IsRoot || f.SpaceID != spaceID {
 			continue
 		}
-		if scope == "team" {
-			if teamID == nil || f.TeamID == nil || *f.TeamID != *teamID {
-				continue
-			}
-		} else if f.OwnerID != user || f.TeamID != nil {
+		// owner 命中或空间在册成员可读（与生产 ListTrashSpace 口径一致）。
+		if f.OwnerID != user && !t.members[user] {
 			continue
 		}
 		out = append(out, f)
@@ -396,7 +375,7 @@ type mcpTestEnv struct {
 	authSvc  *auth.Service
 	tokens   *mcpFakeTokenStore
 	storage  *memStorage
-	teamSvc  *team.Service
+	spaceSvc *space.Service
 	searchOn *fakeMCPSearch
 }
 
@@ -413,7 +392,14 @@ func newMCPTestEnv(t *testing.T, withSearch bool) *mcpTestEnv {
 	gin.SetMode(gin.TestMode)
 	tree := newRawFakeTree()
 	owner := uuid.New()
-	root := files.File{ID: uuid.New(), Name: "根目录", OwnerID: owner, Type: "folder", IsRoot: true, ScopeType: "personal"}
+	// 真实 space.Service（内存 store）：owner 预置默认空间，根目录挂其下。
+	spaceSvc := space.NewService(space.NewMemoryStore())
+	defaultSpace, _, err := spaceSvc.EnsureDefaultSpace(owner, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree.members[owner] = true
+	root := files.File{ID: uuid.New(), Name: "根目录", OwnerID: owner, SpaceID: defaultSpace.ID, Type: "folder", IsRoot: true}
 	tree.add(root, 0, "", "")
 
 	storage := newMemStorage()
@@ -422,11 +408,12 @@ func newMCPTestEnv(t *testing.T, withSearch bool) *mcpTestEnv {
 	// 覆盖为新版本经 SetVersionTarget 注入 fake 的 validate/replace。
 	uploadSvc := upload.NewService(upload.NewMemoryStore(), storage, time.Hour, 1<<30, false, tree.ValidateFolder, tree.createUploaded)
 	uploadSvc.SetVersionTarget(tree.ValidateReplaceTarget, tree.ReplaceFileVersion)
-	teamSvc := team.NewService(team.NewMemoryStore())
 	h.mcpDeps.Files = tree
 	h.mcpDeps.Uploads = uploadSvc
-	h.mcpDeps.Shares = share.NewService(share.NewMemoryStore(), tree)
-	h.mcpDeps.Teams = teamSvc
+	shareSvc := share.NewService(share.NewMemoryStore(), tree)
+	shareSvc.SetSpaceSharer(spaceSvc.CanShare)
+	h.mcpDeps.Shares = shareSvc
+	h.mcpDeps.Spaces = spaceSvc
 
 	// 真实 auth.Service + 内存 PAT 存储：PAT 全链路（创建/校验/scope）。
 	tokens := &mcpFakeTokenStore{}
@@ -443,7 +430,7 @@ func newMCPTestEnv(t *testing.T, withSearch bool) *mcpTestEnv {
 
 	router := gin.New()
 	h.Register(router, mcpTestSecret, 1_000_000, 1_000_000, 1_000_000)
-	return &mcpTestEnv{h: h, router: router, tree: tree, owner: owner, authSvc: svc, tokens: tokens, storage: storage, teamSvc: teamSvc, searchOn: fs}
+	return &mcpTestEnv{h: h, router: router, tree: tree, owner: owner, authSvc: svc, tokens: tokens, storage: storage, spaceSvc: spaceSvc, searchOn: fs}
 }
 
 // callMCP 以给定 Authorization 头发起一次 /mcp JSON-RPC 调用。
@@ -665,8 +652,8 @@ func TestMCPCreateWriteReadResolveDeleteChain(t *testing.T) {
 		t.Fatalf("mime_type = %v", read["mime_type"])
 	}
 
-	// 4. 路径定位（个人空间根下相对路径）。
-	resolved := toolPayload(t, env.callTool(t, authHeader, "df_resolve_path", map[string]any{"scope": "personal", "path": "AI 工作区/note.md"}))
+	// 4. 路径定位（默认空间根下相对路径，space_id 缺省）。
+	resolved := toolPayload(t, env.callTool(t, authHeader, "df_resolve_path", map[string]any{"path": "AI 工作区/note.md"}))
 	if resolved["file_id"] != fileID || resolved["canonical_path"] != "AI 工作区/note.md" {
 		t.Fatalf("df_resolve_path result = %v", resolved)
 	}
@@ -719,18 +706,18 @@ func TestMCPVersionOps(t *testing.T) {
 	}
 }
 
-// 团队列表 + 分享创建/撤销。
-func TestMCPSharesAndTeams(t *testing.T) {
+// 空间列表 + 分享创建/撤销。
+func TestMCPSharesAndSpaces(t *testing.T) {
 	env := newMCPTestEnv(t, false)
 	authHeader := env.jwt()
 
-	// df_list_teams：新建团队后可见（team.Service + MemoryStore）。
-	if _, _, err := env.teamSvc.CreateTeam(env.owner, "平台组", ""); err != nil {
+	// df_list_spaces：注册默认空间 + 新建空间后可见（space.Service + MemoryStore）。
+	if _, _, err := env.spaceSvc.CreateSpace(env.owner, "平台组", ""); err != nil {
 		t.Fatal(err)
 	}
-	teams := toolPayload(t, env.callTool(t, authHeader, "df_list_teams", map[string]any{}))
-	if list, _ := teams["teams"].([]any); len(list) != 1 {
-		t.Fatalf("df_list_teams = %v", teams)
+	spaces := toolPayload(t, env.callTool(t, authHeader, "df_list_spaces", map[string]any{}))
+	if list, _ := spaces["spaces"].([]any); len(list) != 2 {
+		t.Fatalf("df_list_spaces = %v, want default + created", spaces)
 	}
 
 	// df_create_share（公开，带密码）→ df_list_shares → df_revoke_share。
@@ -836,7 +823,7 @@ func TestMCPReadFileTooLarge(t *testing.T) {
 	// 直接在 fake 树里放一个 3MB blob（内容用零填充，不真正写满存储：
 	// ReadSection 读前先做大小检查，不会触达存储）。
 	root, _ := env.tree.mcpFindRoot(env.owner)
-	env.tree.add(files.File{ID: uuid.New(), Name: "big.txt", ParentID: &root.ID, OwnerID: env.owner, Type: "file", ScopeType: "personal"}, 3<<20, "text/plain", files.BlobStatusAvailable)
+	env.tree.add(files.File{ID: uuid.New(), Name: "big.txt", ParentID: &root.ID, OwnerID: env.owner, SpaceID: root.SpaceID, Type: "file"}, 3<<20, "text/plain", files.BlobStatusAvailable)
 	var bigID uuid.UUID
 	for _, f := range env.tree.files {
 		if f.Name == "big.txt" {
@@ -856,7 +843,7 @@ func TestMCPReadBinaryHint(t *testing.T) {
 	authHeader := env.jwt()
 	root, _ := env.tree.mcpFindRoot(env.owner)
 	binID := uuid.New()
-	env.tree.add(files.File{ID: binID, Name: "image.png", ParentID: &root.ID, OwnerID: env.owner, Type: "file", ScopeType: "personal"}, 8, "image/png", files.BlobStatusAvailable)
+	env.tree.add(files.File{ID: binID, Name: "image.png", ParentID: &root.ID, OwnerID: env.owner, SpaceID: root.SpaceID, Type: "file"}, 8, "image/png", files.BlobStatusAvailable)
 	env.tree.contents[binID] = "PNGDATA "
 	_ = env.storage.Put(env.tree.blobs[binID].StorageKey, strings.NewReader("PNGDATA "))
 	_, out := env.callMCP(t, authHeader, "tools/call", map[string]any{"name": "df_read_file", "arguments": map[string]any{"file_id": binID.String()}})

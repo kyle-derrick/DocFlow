@@ -122,11 +122,11 @@ func (g *GormRepo) Replace(folderID uuid.UUID, entries []Entry) error {
 // 上界，防 parent 环导致死循环）。
 const maxChainDepth = 64
 
-// ChainForFile 沿 parent 链自 file/folder 向上到团队根收集条目（由近及远）：
+// ChainForFile 沿 parent 链自 file/folder 向上到空间根收集条目（由近及远）：
 //   - 目标为文件：链自其父目录开始（文件自身不挂条目）；无父目录返回空链；
 //   - 目标为目录：链含该目录自身；
 //   - 途中目录缺失/软删（断链）：截断已收集部分（best-effort，不失败）；
-//   - 到团队根（is_root）或无父目录终止。
+//   - 到空间根（is_root）或无父目录终止。
 func (g *GormRepo) ChainForFile(fileOrFolderID uuid.UUID) ([]ChainNode, error) {
 	var start files.File
 	err := g.db.Select("id", "parent_id", "type").

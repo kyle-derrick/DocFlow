@@ -2,12 +2,12 @@
 // - antd Modal + antd Tree：目录树懒加载（展开时经注入的 listChildren 拉取
 //   并过滤 folder-only，复用文件列表的目录列举逻辑，同 FolderTreeNav）；
 // - 单选目标目录（根目录可选），选中后底部显示路径面包屑；
-// - 根节点空间切换（v1.6）：spaces 提供多个根（当前空间 + 个人空间 + 我的
-//   团队空间），经顶部 Select 切换——复制/移动可跨空间（后端 move/copy
+// - 根节点空间切换（v1.6）：spaces 提供多个根（当前空间 + 我的其余空间），
+//   经顶部 Select 切换——复制/移动可跨空间（后端 move/copy
 //   继承目标作用域并做写权限校验）；未提供 spaces 时回退单空间（listChildren）；
 // - onConfirm({ id, name, path })：id 为目标目录 UUID——根目录返回探测到的
-//   根真实 ID（任一根级条目的 parent_id：个人根 UUID / 团队根 UUID），
-//   探测不到时为 ''（调用方按 batch/move 的「个人根」语义解释）；
+//   根真实 ID（任一根级条目的 parent_id：空间根 UUID），
+//   探测不到时为 ''（调用方按 batch/move 的「默认空间根」语义解释）；
 // - excludeId：移动时从树中排除被移动项自身（移入更深层子目录由后端
 //   INVALID_TARGET 兜底拒绝）。
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -20,18 +20,18 @@ import { useLocale } from '../i18n'
 /** 树节点 key：根目录 pseudo-key（UUID 不会与之冲突）。 */
 const ROOT_KEY = '__root__'
 
-/** 可选空间（根节点）：当前空间 / 个人空间 / 团队空间。 */
+/** 可选空间（根节点）：当前空间 / 我的其余空间。 */
 export interface PickerSpace {
-  /** 稳定 key（空间内唯一，如 'current' / 'personal' / 'team:<uuid>'）。 */
+  /** 稳定 key（空间内唯一，如 'current' / 'space:<uuid>'）。 */
   key: string
-  /** 展示名（如「我的文件」「<团队名>」）。 */
+  /** 展示名（如「我的文件」「<空间名>」）。 */
   label: string
   /** 拉取该空间某目录的直接子项（parentId=null 表示空间根；内部过滤目录）。 */
   listChildren: (parentId: string | null) => Promise<FileItem[]>
   /**
-   * 解析该空间根目录真实 UUID（v1.7）：团队根即使为空也能经
-   * listTeamFiles 响应的 parent_id 拿到；缺省回退「根级条目 parent_id」
-   * 探测（个人根为空时探测失败 → ''，batch/move 按「个人根」缺省语义解释）。
+   * 解析该空间根目录真实 UUID（v1.7）：空间根即使为空也能经
+   * listSpaceFiles 响应的 parent_id 拿到；缺省回退「根级条目 parent_id」
+   * 探测（默认空间根为空时探测失败 → ''，batch/move 按「默认空间根」缺省语义解释）。
    */
   resolveRootId?: () => Promise<string>
 }
@@ -69,7 +69,7 @@ export default function DirPickerModal({
 }: {
   open: boolean
   title: string
-  /** 根节点展示名（如「我的文件」/团队名）；未提供 spaces 时的单空间根标签。 */
+  /** 根节点展示名（如「我的文件」/空间名）；未提供 spaces 时的单空间根标签。 */
   rootLabel: string
   /** 单空间模式的目录列举（parentId=null 表示根）；spaces 优先。 */
   listChildren: (parentId: string | null) => Promise<FileItem[]>
@@ -101,7 +101,7 @@ export default function DirPickerModal({
   const [loading, setLoading] = useState(false)
   const [loadError, setLoadError] = useState('')
   const [keyword, setKeyword] = useState('')
-  // 根目录真实 ID：任一根级条目的 parent_id（个人根/团队根均为真实 UUID）。
+  // 根目录真实 ID：任一根级条目的 parent_id（默认空间根/空间根均为真实 UUID）。
   const rootIdRef = useRef('')
   // 已请求过子级的节点（懒加载去重；重开弹窗/切空间时清空）。
   const loadedKeysRef = useRef<Set<string>>(new Set())
@@ -122,8 +122,8 @@ export default function DirPickerModal({
       try {
         const items = await target.listChildren(nodeKey === ROOT_KEY ? null : nodeKey)
         if (nodeKey === ROOT_KEY) {
-          // 根 ID 解析：优先注入的 resolveRootId（团队根为空也可靠），
-          // 回退根级条目 parent_id 探测（个人根为空时留 ''，按个人根语义）。
+          // 根 ID 解析：优先注入的 resolveRootId（空间根为空也可靠），
+          // 回退根级条目 parent_id 探测（默认空间根为空时留 ''，按默认根语义）。
           if (target.resolveRootId) {
             try {
               const rid = await target.resolveRootId()

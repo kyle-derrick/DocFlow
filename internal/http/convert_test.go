@@ -59,10 +59,10 @@ func newConvertEnv(t *testing.T, name string, content []byte, blobStatus string)
 	gin.SetMode(gin.TestMode)
 	tree := newRawFakeTree()
 	owner := uuid.New()
-	root := files.File{ID: uuid.New(), Name: "根目录", OwnerID: owner, Type: "folder", IsRoot: true, ScopeType: "personal"}
+	root := files.File{ID: uuid.New(), Name: "根目录", OwnerID: owner, Type: "folder", IsRoot: true}
 	tree.add(root, 0, "", "")
 	srcID := uuid.New()
-	tree.add(files.File{ID: srcID, Name: name, ParentID: &root.ID, OwnerID: owner, Type: "file", ScopeType: "personal"}, int64(len(content)), "application/octet-stream", blobStatus)
+	tree.add(files.File{ID: srcID, Name: name, ParentID: &root.ID, OwnerID: owner, Type: "file"}, int64(len(content)), "application/octet-stream", blobStatus)
 	tree.contents[srcID] = string(content)
 
 	h := NewHandler(nil, nil, nil, nil, nil, nil, newMemStorage(), false, "", time.Hour)

@@ -17,7 +17,7 @@ type fakeFileSource struct {
 func (f fakeFileSource) Get(user, id uuid.UUID) (files.File, error) {
 	for _, fid := range f.ownerFiles[user] {
 		if fid == id {
-			return files.File{ID: id, OwnerID: user, Type: "file", ScopeType: "personal"}, nil
+			return files.File{ID: id, OwnerID: user, Type: "file"}, nil
 		}
 	}
 	return files.File{}, files.ErrNotFound

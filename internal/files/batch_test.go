@@ -79,17 +79,16 @@ func TestMoveItemDecision(t *testing.T) {
 }
 
 // TestAuthorizeBatchWriteMatrix 覆盖批量写授权矩阵：
-// 个人文件仅 owner（非 owner 归一 NOT_FOUND）；团队文件要求写权限
-// （无授权器/无权限 FORBIDDEN）。
+// 文件行 owner 短路；空间文件要求写权限（无授权器/无权限 FORBIDDEN）。
 func TestAuthorizeBatchWriteMatrix(t *testing.T) {
 	owner, other := uuid.New(), uuid.New()
-	teamA := uuid.New()
-	personal := File{ID: uuid.New(), OwnerID: owner, Type: "file", ScopeType: "personal"}
-	teamFile := File{ID: uuid.New(), OwnerID: owner, Type: "file", ScopeType: "team", TeamID: &teamA}
+	spaceA := uuid.New()
+	ownFile := File{ID: uuid.New(), OwnerID: owner, Type: "file", SpaceID: spaceA}
+	spaceFile := File{ID: uuid.New(), OwnerID: owner, Type: "file", SpaceID: spaceA}
 
 	editor := uuid.New()
-	writer := fakeTeamWriter(map[uuid.UUID][]uuid.UUID{
-		editor: {teamA},
+	writer := fakeSpaceWriter(map[uuid.UUID][]uuid.UUID{
+		editor: {spaceA},
 		// other / viewer 不在可写集合。
 	})
 
@@ -100,11 +99,11 @@ func TestAuthorizeBatchWriteMatrix(t *testing.T) {
 		file    File
 		wantErr error
 	}{
-		{"personal by owner", &Store{}, owner, personal, nil},
-		{"personal by other", &Store{}, other, personal, ErrNotFound},
-		{"team file by editor", &Store{teamWriter: writer}, editor, teamFile, nil},
-		{"team file by non-writer", &Store{teamWriter: writer}, other, teamFile, ErrForbidden},
-		{"team file without writer", &Store{}, editor, teamFile, ErrForbidden},
+		{"own file by owner", &Store{}, owner, ownFile, nil},
+		{"space file by non-owner without writer", &Store{}, other, ownFile, ErrForbidden},
+		{"space file by editor", &Store{spaceWriter: writer}, editor, spaceFile, nil},
+		{"space file by non-writer", &Store{spaceWriter: writer}, other, spaceFile, ErrForbidden},
+		{"space file without writer", &Store{}, editor, spaceFile, ErrForbidden},
 	}
 	for _, tc := range tests {
 		err := tc.store.authorizeBatchWrite(tc.file, tc.user)

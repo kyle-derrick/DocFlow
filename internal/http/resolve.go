@@ -48,6 +48,21 @@ var rawContentTypes = map[string]string{
 	".mp4":   "video/mp4",
 	".webm":  "video/webm",
 	".mp3":   "audio/mpeg",
+	// v2.4 分享页查看器分发补充（均以文本直显/下载呈现，无脚本执行面）：
+	// markdown / mermaid / drawio（XML）/ 普通XML / 白板场景 JSON / 富文本
+	// 文档（Tiptap JSON，.dfrt 主后缀 / .dfdoc 兼容别名）。Content-Type 用
+	// text/plain（浏览器直显、未知类型不嗅探）；.xmind 为 zip 二进制，用
+	// octet-stream（浏览器下载，前端 fetch 后本地解析）。
+	".md":         "text/plain; charset=utf-8",
+	".markdown":   "text/plain; charset=utf-8",
+	".mmd":        "text/plain; charset=utf-8",
+	".mermaid":    "text/plain; charset=utf-8",
+	".drawio":     "text/plain; charset=utf-8",
+	".xml":        "text/plain; charset=utf-8",
+	".excalidraw": "text/plain; charset=utf-8",
+	".dfrt":       "text/plain; charset=utf-8",
+	".dfdoc":      "text/plain; charset=utf-8",
+	".xmind":      "application/octet-stream",
 }
 
 // rawContentType 按文件名扩展返回白名单 Content-Type；无扩展或不在白名单

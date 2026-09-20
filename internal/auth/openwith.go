@@ -58,9 +58,9 @@ func NormalizeOpenWithExt(ext string) (string, error) {
 }
 
 // ValidateOpenWithOpener 校验 opener 取值：
-// - 旧版单值枚举（office/drawio/excalidraw/text/markdown/code/web/default）；或
-// - 复合编码 "v:<view>" / "e:<edit>" / "v:<view>+e:<edit>"（view/edit 分别
-//   须在各自枚举白名单内；"e:none" 合法 = 显式声明不支持编辑）。
+//   - 旧版单值枚举（office/drawio/excalidraw/text/markdown/code/web/default）；或
+//   - 复合编码 "v:<view>" / "e:<edit>" / "v:<view>+e:<edit>"（view/edit 分别
+//     须在各自枚举白名单内；"e:none" 合法 = 显式声明不支持编辑）。
 func ValidateOpenWithOpener(opener string) error {
 	if openWithOpeners[opener] {
 		return nil

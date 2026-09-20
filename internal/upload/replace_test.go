@@ -18,8 +18,8 @@ type fakeTargetFile struct {
 	name    string
 	parent  uuid.UUID
 	owner   uuid.UUID
-	team    *uuid.UUID
-	writers map[uuid.UUID]bool // 团队成员写权限（editor/owner）
+	space   *uuid.UUID
+	writers map[uuid.UUID]bool // 空间成员写权限（editor/owner）
 	deleted bool
 	// 版本内容 sha 列表（下标+1 即版本号）。
 	versions []string
@@ -62,12 +62,12 @@ func (f *fakeTargetFile) seedVersion(sha string) {
 	f.current = len(f.versions)
 }
 
-// canWrite 模拟 authorizeFileWrite：个人文件 owner；团队文件成员写权限。
+// canWrite 模拟 authorizeFileWrite：owner 本人；空间文件成员写权限。
 func (f *fakeTargetFile) canWrite(user uuid.UUID) error {
 	if f.owner == user {
 		return nil
 	}
-	if f.team == nil {
+	if f.space == nil {
 		return files.ErrNotFound
 	}
 	if !f.writers[user] {
@@ -85,7 +85,7 @@ func (s *fakeVersionStore) validate(user, fileID uuid.UUID) (files.File, error) 
 	if err := f.canWrite(user); err != nil {
 		return files.File{}, err
 	}
-	return files.File{ID: fileID, Name: f.name, ParentID: &f.parent, OwnerID: f.owner, Type: "file", ScopeType: "personal"}, nil
+	return files.File{ID: fileID, Name: f.name, ParentID: &f.parent, OwnerID: f.owner, Type: "file"}, nil
 }
 
 // replace 模拟 files.Store.ReplaceFileVersion：AddVersion（去重复用/新建）+ PruneVersions(keep)。
@@ -163,9 +163,9 @@ func TestStartReplaceValidatesTarget(t *testing.T) {
 
 	store := newFakeVersionStore(5)
 	personal := store.addFile(&fakeTargetFile{name: "mine.txt", parent: parent, owner: user})
-	teamID := uuid.New()
+	spaceID := uuid.New()
 	viewer := uuid.New()
-	teamFile := store.addFile(&fakeTargetFile{name: "team.txt", parent: parent, owner: uuid.New(), team: &teamID, writers: map[uuid.UUID]bool{user: true}})
+	spaceFile := store.addFile(&fakeTargetFile{name: "space.txt", parent: parent, owner: uuid.New(), space: &spaceID, writers: map[uuid.UUID]bool{user: true}})
 
 	svc, _, _ := newReplaceService(t, store)
 	if _, err := svc.StartReplace(user, uuid.New(), 3, ""); !errors.Is(err, files.ErrNotFound) {
@@ -174,11 +174,11 @@ func TestStartReplaceValidatesTarget(t *testing.T) {
 	if _, err := svc.StartReplace(other, personal, 3, ""); !errors.Is(err, files.ErrNotFound) {
 		t.Fatalf("personal file by other: err = %v, want ErrNotFound", err)
 	}
-	if _, err := svc.StartReplace(viewer, teamFile, 3, ""); !errors.Is(err, files.ErrForbidden) {
-		t.Fatalf("team file by viewer: err = %v, want ErrForbidden", err)
+	if _, err := svc.StartReplace(viewer, spaceFile, 3, ""); !errors.Is(err, files.ErrForbidden) {
+		t.Fatalf("space file by viewer: err = %v, want ErrForbidden", err)
 	}
-	if _, err := svc.StartReplace(user, teamFile, 3, ""); err != nil {
-		t.Fatalf("team file by editor: %v", err)
+	if _, err := svc.StartReplace(user, spaceFile, 3, ""); err != nil {
+		t.Fatalf("space file by editor: %v", err)
 	}
 }
 

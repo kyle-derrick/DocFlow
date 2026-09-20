@@ -47,12 +47,12 @@ func uploadStartError(c *gin.Context, err error, tus bool) {
 			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
 		}
 	case errors.Is(err, files.ErrQuotaExceeded):
-		// 存储配额超限（C3，设计 6.12.4）：403 + 机器可读 code（tus 路径无
+		// 空间配额超限（统一空间模型）：413 + 机器可读 code（tus 路径无
 		// code 载荷，按 tus 协议以错误文案区分）。
 		if tus {
-			tusError(c, http.StatusForbidden, err.Error())
+			tusError(c, http.StatusRequestEntityTooLarge, err.Error())
 		} else {
-			c.JSON(http.StatusForbidden, gin.H{"error": err.Error(), "code": "QUOTA_EXCEEDED"})
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": err.Error(), "code": "SPACE_QUOTA_EXCEEDED"})
 		}
 	case errors.Is(err, files.ErrNotFound):
 		// 目标文件不存在（或个人文件非 owner）：404 不泄露存在性。
@@ -108,12 +108,12 @@ func (h *Handler) createUpload(c *gin.Context) {
 	} else {
 		parent := uuid.Nil
 		if req.ParentID == "" {
-			root, err := h.files.EnsureRoot(userID(c))
+			rootID, err := h.defaultSpaceRootID(userID(c))
 			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to ensure root folder"})
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to ensure default space root"})
 				return
 			}
-			parent = root.ID
+			parent = rootID
 		} else {
 			var ok bool
 			parent, ok = parseID(c, req.ParentID)

@@ -7,8 +7,9 @@ import (
 )
 
 // Group 对应 groups 表（migrations/035）：管理端用户组（仅 admin 管理），
-// 组织维度的人员集合——不挂文件空间、不参与文件权限判定，与团队
-// （teams，协作空间）互补。MemberCount 为列表查询的聚合列（只读）。
+// 组织维度的人员集合——经 space_group_members（migration 040）加入空间后
+// 组内用户按该角色参与权限判定（与直接成员取最高）。MemberCount 为列表
+// 查询的聚合列（只读）。
 type Group struct {
 	ID          uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
 	Name        string    `gorm:"size:100;uniqueIndex;not null" json:"name"`
@@ -22,7 +23,7 @@ type Group struct {
 
 // Member 对应 group_members 表，复合主键 (group_id, user_id)。
 // Username/Nickname 为列表查询 JOIN users 补齐的展示列（只读），
-// 供成员列表展示用户名（替代 UUID，模式同 team_members）。
+// 供成员列表展示用户名（替代 UUID，模式同 space_members）。
 type Member struct {
 	GroupID  uuid.UUID `gorm:"type:uuid;primaryKey" json:"-"`
 	UserID   uuid.UUID `gorm:"type:uuid;primaryKey" json:"user_id"`

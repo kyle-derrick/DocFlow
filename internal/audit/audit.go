@@ -32,6 +32,7 @@ const (
 	ActionInviteCreate  = "invite.create"
 	ActionInviteRevoke  = "invite.revoke"
 	ActionInviteAccept  = "invite.accept"
+	ActionInviteResend  = "invite.resend"
 	ActionPasswordReset = "auth.password_reset"
 	// 个人访问令牌（PAT）管理：创建与撤销（PAT 认证本身不审计，噪音）。
 	ActionTokenCreate = "token.create"
@@ -51,6 +52,9 @@ const (
 	ActionFileCopy          = "file.copy"
 	ActionUserUpdate        = "user.update"
 	ActionUserResetPassword = "user.reset_password"
+	// ActionUserEmailChange 换绑邮箱（账号安全，v2.4）：请求（验证码已投递）
+	// 与确认（email 已更新）两段均记录，metadata.stage 区分。
+	ActionUserEmailChange = "user.email_change"
 	// 备份管理：POST /admin/backups/verify 的只读 sha256 复核（成功/失败均记录；
 	// 备份执行在服务进程外，run 端点恒 501 不审计）。
 	ActionBackupVerify = "backup.verify"
@@ -66,11 +70,18 @@ const (
 	ActionGroupDelete       = "group.delete"
 	ActionGroupMemberAdd    = "group.member.add"
 	ActionGroupMemberRemove = "group.member.remove"
-	// 团队生命周期（v1.7 成员管理重构）：解散（仅 owner）、所有权转让
-	//（仅 owner，事务内新旧 owner 角色互换）与主动退出（非 owner 成员）。
-	ActionTeamDelete        = "team.delete"
-	ActionTeamLeave         = "team.leave"
-	ActionTeamOwnerTransfer = "team.owner_transfer"
+	// 空间生命周期（统一空间模型，migration 040）：解散（仅 owner 且非默认
+	// 空间）、所有权转让（仅 owner，事务内新旧 owner 角色互换）与主动退出
+	//（非 owner 直接成员）。
+	ActionSpaceDelete        = "space.delete"
+	ActionSpaceLeave         = "space.leave"
+	ActionSpaceOwnerTransfer = "space.owner_transfer"
+	// ActionSpacePurge 已解散空间的彻底删除（物理删文件/成员/分享，仅 admin）。
+	ActionSpacePurge = "space.purge"
+	// 空间用户组授权变更（owner/admin 管理空间用户组）。
+	ActionSpaceGroupAdd    = "space.group.add"
+	ActionSpaceGroupUpdate = "space.group.update"
+	ActionSpaceGroupRemove = "space.group.remove"
 )
 
 // resource_type 常量。
@@ -93,10 +104,10 @@ const (
 	ResourceWebhook = "webhook"
 	// ResourceBackup 为备份产物（BACKUP_DIR 下的 docflow-backup-<ts> 目录）。
 	ResourceBackup = "backup"
-	// ResourceGroup 为用户组（groups 行，migration 035）。
+	// ResourceGroup 为用户组（groups 行）。
 	ResourceGroup = "group"
-	// ResourceTeam 为团队（teams 行，v1.7 成员管理重构审计）。
-	ResourceTeam = "team"
+	// ResourceSpace 为空间（spaces 行，统一空间模型审计）。
+	ResourceSpace = "space"
 )
 
 // status 常量。

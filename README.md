@@ -11,7 +11,7 @@
 | | |
 |---|---|
 | ![登录](docs/screenshots/login.png) | ![文件管理](docs/screenshots/files.png) |
-| ![目录树文件浏览](docs/screenshots/wiki.png) | ![富文本编辑](docs/screenshots/richtext.png) |
+| ![目录树文件浏览](docs/screenshots/files.png) | ![富文本编辑](docs/screenshots/richtext.png) |
 | ![在线查看](docs/screenshots/viewer.png) | ![管理后台-审计](docs/screenshots/admin-audit.png) |
 | ![管理后台-TLS](docs/screenshots/admin-tls.png) | ![设置-安全](docs/screenshots/settings-security.png) |
 

@@ -1,11 +1,11 @@
 // 回收站弹窗（v1.5 布局整改：原 /trash 整页路由删除，改为文件页工具栏
-// 「回收站」按钮打开的 Modal）：范围下拉（个人 / 各团队）+ 多选批量恢复
-// + 单项恢复 / 彻底删除 + 一键清空（逐项 purge，部分成功语义）。
+// 「回收站」按钮打开的 Modal）：范围下拉（默认空间「我的文件」/ 其他空间）
+// + 多选批量恢复 + 单项恢复 / 彻底删除 + 一键清空（逐项 purge，部分成功语义）。
 // 尺寸：width min(920px, 92vw)，body 定高 70vh 内部滚动。
 import { useCallback, useEffect, useState } from 'react'
 import { FileText, Folder } from 'lucide-react'
 import { App as AntdApp, Button, Modal as AntdModal, Select } from 'antd'
-import { FileItem, Team, batchRestoreFiles, listTeams, listTrash, purgeFile, restoreFile } from '../api'
+import { FileItem, Space, batchRestoreFiles, listSpaces, listTrash, purgeFile, restoreFile } from '../api'
 import { describeBatchResults } from './FileBrowser'
 import { MessageKey, formatMessage, t, useLocale } from '../i18n'
 
@@ -32,15 +32,16 @@ export default function TrashModal({
   const [notice, setNotice] = useState('')
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [batchBusy, setBatchBusy] = useState(false)
-  const [teams, setTeams] = useState<Team[]>([])
-  const [scope, setScope] = useState('personal')
+  const [spaces, setSpaces] = useState<Space[]>([])
+  // 范围取空间 ID；'' 即缺省空间（后端缺省=默认空间「我的文件」）。
+  const [scope, setScope] = useState('')
 
   const load = useCallback(
     async (nextScope = scope) => {
       setLoading(true)
       setError('')
       try {
-        const list = await listTrash(nextScope === 'personal' ? 'personal' : 'team', nextScope === 'personal' ? '' : nextScope)
+        const list = await listTrash(nextScope)
         list.sort((a, b) => a.name.localeCompare(b.name))
         setItems(list)
         setSelected(new Set())
@@ -55,11 +56,13 @@ export default function TrashModal({
     [locale],
   )
 
-  // 打开时加载（关闭期间不轮询）；首次打开拉取团队列表。
+  // 打开时加载（关闭期间不轮询）；每次打开拉取空间列表（默认空间置顶）。
   useEffect(() => {
     if (!open) return
-    void listTeams().then(setTeams).catch(() => setTeams([]))
-    void load('personal')
+    void listSpaces()
+      .then((list) => setSpaces([...list].sort((a, b) => Number(b.is_default ?? false) - Number(a.is_default ?? false))))
+      .catch(() => setSpaces([]))
+    void load('')
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
 
@@ -193,10 +196,12 @@ export default function TrashModal({
             size="small"
             value={scope}
             onChange={(v) => { setScope(v); setSelected(new Set()); void load(v) }}
-            options={[
-              { value: 'personal', label: locale === 'zh-CN' ? '我的文件' : 'My files' },
-              ...teams.map((team) => ({ value: team.id, label: team.name })),
-            ]}
+            options={spaces.map((space) => ({
+              value: space.is_default ? '' : space.id,
+              label: space.is_default
+                ? (locale === 'zh-CN' ? '我的文件' : 'My files')
+                : space.name,
+            }))}
           />
         </label>
         <Button size="small" onClick={() => void load()}>{msg('refresh')}</Button>

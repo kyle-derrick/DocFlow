@@ -74,7 +74,9 @@ function diagramFromPre(children: ReactNode): { lang: 'mermaid' | 'markmap'; cod
   return { lang: match[1] as 'mermaid' | 'markmap', code: child.props.children.replace(/\n$/, '') }
 }
 
-function MarkdownViewer({ source }: { source: string }) {
+/** Markdown 只读渲染（mermaid/markmap 围栏代码块转只读图表）；
+ * 导出供公开分享页查看器复用（v2.4：分享页点击 md 弹窗与文件页一致）。 */
+export function MarkdownViewer({ source }: { source: string }) {
   const dark = useColorMode() === 'dark'
   // ```mermaid / ```markmap 围栏代码块渲染为只读图表，其余代码块原样展示。
   const components: Components = {

@@ -41,6 +41,12 @@ var (
 	ErrInvalidWatermarkText = errors.New("invalid watermark text")
 	// ErrBundleTooFew 表示打包分享（一个链接多个文件）至少需要两个条目。
 	ErrBundleTooFew = errors.New("bundle share requires at least two files")
+	// ErrInvalidTitle 表示打包分享标题非法（>200 rune 或含控制字符）。
+	ErrInvalidTitle = errors.New("invalid share title")
+	// ErrNotRevoked 表示分享尚未撤销（清除记录仅对已撤销分享开放）。
+	ErrNotRevoked = errors.New("share is not revoked")
+	// ErrPurgeRetention 表示撤销未满 30 天保留期，暂不可清除记录。
+	ErrPurgeRetention = errors.New("share record is within the 30-day retention window")
 )
 
 // NewToken 生成明文分享 token：32 字节随机数的 URL-safe base64（43 字符）。
@@ -100,10 +106,11 @@ func IPPrefix(ip string) string {
 	return ""
 }
 
-// RenderWatermark 渲染公开访问水印文案：替换 {email}/{ip} → 脱敏 IP 前缀
-// （公开访问无登录身份）、{date} → 当地日期、{name} → 文件名；未知占位符
-// 原样保留。模板为空时回退 DefaultWatermarkTemplate。
-func RenderWatermark(template, fileName, ip string, now time.Time) string {
+// RenderWatermark 渲染公开访问水印文案：替换 {user} → 访问者标识（viewer
+// 非空为登录用户名/ID，公开匿名访问回退脱敏 IP 前缀）、{email}/{ip} → 脱敏
+// IP 前缀（公开访问无登录身份）、{date} → 当地日期（YYYY-MM-DD）、{name} →
+// 文件名；未知占位符原样保留。模板为空时回退 DefaultWatermarkTemplate。
+func RenderWatermark(template, fileName, ip, viewer string, now time.Time) string {
 	if template == "" {
 		template = DefaultWatermarkTemplate
 	}
@@ -111,12 +118,36 @@ func RenderWatermark(template, fileName, ip string, now time.Time) string {
 	if prefix == "" {
 		prefix = "unknown"
 	}
+	user := strings.TrimSpace(viewer)
+	if user == "" {
+		user = prefix
+	}
 	return strings.NewReplacer(
+		"{user}", user,
 		"{email}", prefix,
 		"{ip}", prefix,
 		"{date}", now.Format("2006-01-02"),
 		"{name}", fileName,
 	).Replace(template)
+}
+
+// validateTitle 校验打包分享标题：≤200 rune 且不含控制字符（空串合法 =
+// 未自定义，公开页回退默认命名）。
+func validateTitle(title string) error {
+	if title == "" {
+		return nil
+	}
+	n := 0
+	for _, r := range title {
+		if r < 0x20 || r == 0x7f {
+			return ErrInvalidTitle
+		}
+		n++
+	}
+	if n > 200 {
+		return ErrInvalidTitle
+	}
+	return nil
 }
 
 // validateWatermarkText 校验自定义水印模板：1..MaxWatermarkTextLen 个 rune
@@ -180,10 +211,14 @@ type Repo interface {
 	// 当页数据与过滤后总数。
 	ListByOwnerFiltered(owner uuid.UUID, f OwnerListFilter, limit, offset int) ([]Share, int64, error)
 	// ListSharedWithUser 返回分享给 user 的有效私有分享（share_users 显式授权，
-	// 或 user 属于 share_teams 任一授权团队的成员；公开分享不含），
-	// 按 created_at 倒序。团队判定由实现方实时完成（GormStore JOIN team_members）。
+	// 或 user 属于 share_spaces 任一授权空间的成员；公开分享不含），
+	// 按 created_at 倒序。空间判定由实现方实时完成（GormStore 判定
+	// space_members/space_group_members）。
 	ListSharedWithUser(user uuid.UUID, now time.Time, limit int) ([]Share, error)
 	Revoke(id uuid.UUID, now time.Time) error
+	// Delete 物理删除分享行（「清除记录」：仅撤销满保留期的记录；关联表
+	// 经 FK 级联清理）。行不存在静默成功。
+	Delete(id uuid.UUID) error
 	// ConsumeDownload 在分享仍有效（未撤销、未过期、未达下载上限）时原子递增 download_count，
 	// 返回是否成功；失败时由调用方重新读取以区分原因。
 	ConsumeDownload(id uuid.UUID, now time.Time) (bool, error)
@@ -195,11 +230,11 @@ type Repo interface {
 	CountActiveByFile(fileID uuid.UUID, now time.Time) (int64, error)
 	// SetFilePublic 维护 files.is_public 冗余辅助字段。
 	SetFilePublic(fileID uuid.UUID, value bool) error
-	// 私有分享显式授权（share_users / share_teams，见 migrations/008_teams_shares.sql）。
+	// 私有分享显式授权（share_users / share_spaces，见 migrations/040_unified_spaces.sql）。
 	AddShareUsers(shareID uuid.UUID, userIDs []uuid.UUID, now time.Time) error
-	AddShareTeams(shareID uuid.UUID, teamIDs []uuid.UUID, now time.Time) error
+	AddShareSpaces(shareID uuid.UUID, spaceIDs []uuid.UUID, now time.Time) error
 	ListShareUserIDs(shareID uuid.UUID) ([]uuid.UUID, error)
-	ListShareTeamIDs(shareID uuid.UUID) ([]uuid.UUID, error)
+	ListShareSpaceIDs(shareID uuid.UUID) ([]uuid.UUID, error)
 	// 打包分享可见条目（share_files，见 migrations/036_share_files.sql）。
 	AddShareFiles(shareID uuid.UUID, fileIDs []uuid.UUID, now time.Time) error
 	ListShareFileIDs(shareID uuid.UUID) ([]uuid.UUID, error)
@@ -232,10 +267,10 @@ func shareActive(sh Share, now time.Time) bool {
 	return true
 }
 
-// TeamMembership 实时判定用户是否属于给定团队之一（由 team 包实现，
-// JOIN team_members 查询；未来可替换为 Casbin 等策略引擎适配器）。
-type TeamMembership interface {
-	UserInAnyTeam(userID uuid.UUID, teamIDs []uuid.UUID) (bool, error)
+// SpaceMembership 实时判定用户是否属于给定空间之一（由 space 包实现，
+// 直接成员或经用户组命中；未来可替换为 Casbin 等策略引擎适配器）。
+type SpaceMembership interface {
+	UserInAnySpace(userID uuid.UUID, spaceIDs []uuid.UUID) (bool, error)
 }
 
 // UserDirectory 按用户 ID 解析用户名（auth.UserStore 实现），
@@ -248,13 +283,13 @@ type UserDirectory interface {
 type Service struct {
 	repo       Repo
 	files      FileSource
-	membership TeamMembership
+	membership SpaceMembership
 	directory  UserDirectory
-	// teamSharer 团队文件分享门控（main 注入 team.CanShare）：nil 时团队文件
-	// 分享一律拒绝（fail closed），个人文件分享不受影响。
-	teamSharer TeamSharer
-	// acl 团队文件 share 判定的路径级 ACL 求值器（main 注入 acl.Service.
-	// ResolveForFile；设计 6.5.3/6.5.4）；nil 未接线（行为不变）。
+	// spaceSharer 空间文件分享门控（main 注入 space.CanShare）：nil 时空间
+	// 文件分享一律拒绝（fail closed）。
+	spaceSharer SpaceSharer
+	// acl 空间文件 share 判定的路径级 ACL 求值器（main 注入 acl.Service.
+	// ResolveForFile）；nil 未接线（行为不变）。
 	acl files.ACLResolver
 	// defaultExpiryHours 为「创建请求未指定有效期」时的默认时长（小时）
 	// 热读取（system_settings 的 share.default_expiry_hours，main 注入）；
@@ -362,43 +397,43 @@ func (s *Service) resolveWatermark(enabled *bool, text *string) (bool, string, e
 	return outEnabled, outText, nil
 }
 
-// SetTeamMembership 注入团队成员关系判定器；未注入时 share_teams 授权不可达（安全默认拒绝）。
-func (s *Service) SetTeamMembership(m TeamMembership) {
+// SetSpaceMembership 注入空间成员关系判定器；未注入时 share_spaces 授权不可达（安全默认拒绝）。
+func (s *Service) SetSpaceMembership(m SpaceMembership) {
 	if m != nil {
 		s.membership = m
 	}
 }
 
-// TeamSharer 判定用户能否为团队文件创建分享（team 包 CanShare 注入实现：
-// 系统角色 owner/editor、自定义角色按 share 勾选且未被 deny）。
-type TeamSharer func(userID, teamID uuid.UUID) (bool, error)
+// SpaceSharer 判定用户能否为空间文件创建分享（space 包 CanShare 注入实现：
+// 角色矩阵含 share：owner/admin/member_share）。
+type SpaceSharer func(userID, spaceID uuid.UUID) (bool, error)
 
-// SetTeamSharer 注入团队文件分享门控（设计 6.5.5；幂等）：
-// 未注入时团队文件分享一律拒绝（fail closed），个人文件不受影响。
-func (s *Service) SetTeamSharer(fn TeamSharer) {
+// SetSpaceSharer 注入空间文件分享门控（幂等）：
+// 未注入时空间文件分享一律拒绝（fail closed）。
+func (s *Service) SetSpaceSharer(fn SpaceSharer) {
 	if fn != nil {
-		s.teamSharer = fn
+		s.spaceSharer = fn
 	}
 }
 
-// SetACLResolver 注入路径级 ACL 求值器（幂等；设计 6.5.3/6.5.4）：
-// 团队文件的 share 判定先走 ACL（沿 parent 链求值 folder_acl 条目），
-// 链上无适用条目（matched=false）回退 teamSharer；未注入时行为不变。
+// SetACLResolver 注入路径级 ACL 求值器（幂等）：
+// 空间文件的 share 判定先走 ACL（沿 parent 链求值 folder_acl 条目），
+// 链上无适用条目（matched=false）回退 spaceSharer；未注入时行为不变。
 func (s *Service) SetACLResolver(a files.ACLResolver) {
 	if a != nil {
 		s.acl = a
 	}
 }
 
-// authorizeShare 团队文件分享门控：先经路径级 ACL（share，matched 则用其
-// 结果），未匹配走 CanShare（系统 owner/editor 或含 share 权限的自定义角色）；
-// 个人文件不经过本判定（Get 已校验 owner）。
+// authorizeShare 空间文件分享门控：先经路径级 ACL（share，matched 则用其
+// 结果），未匹配走 CanShare（owner/admin/member_share）；个人语义不存在
+// （统一空间模型，Get 已校验文件行 owner）。
 func (s *Service) authorizeShare(f files.File, user uuid.UUID) error {
-	if f.ScopeType != "team" || f.TeamID == nil {
+	if f.SpaceID == uuid.Nil {
 		return nil
 	}
 	if s.acl != nil {
-		allowed, matched, err := s.acl(f.ID, *f.TeamID, user, "share")
+		allowed, matched, err := s.acl(f.ID, f.SpaceID, user, "share")
 		if err != nil {
 			return err
 		}
@@ -409,10 +444,10 @@ func (s *Service) authorizeShare(f files.File, user uuid.UUID) error {
 			return nil
 		}
 	}
-	if s.teamSharer == nil {
+	if s.spaceSharer == nil {
 		return ErrForbidden
 	}
-	ok, err := s.teamSharer(user, *f.TeamID)
+	ok, err := s.spaceSharer(user, f.SpaceID)
 	if err != nil {
 		return err
 	}
@@ -439,13 +474,16 @@ type Resolved struct {
 }
 
 // ShareOptions 聚合创建分享的可选字段（密码保护与水印，见设计 6.6.2/6.17）。
-// Password 仅对公开分享生效（4-64 字符，存 SHA-256(password||id) 哈希，
-// 明文不落库）；私有分享不受密码影响，显式传入返回 ErrInvalidPassword。
+// Password 仅对公开分享生效（4-64 字符，存 SHA-256(password||id) 哈希；
+// 041 起明文另存 password_plain 供分享者再次查看复制）；私有分享不受密码
+// 影响，显式传入返回 ErrInvalidPassword。
 // WatermarkEnabled / WatermarkText 未指定（nil）时采用水印默认值热读取。
+// Title 为打包分享自定义标题（≤200 rune；空串 = 未自定义）。
 type ShareOptions struct {
 	Password         string
 	WatermarkEnabled *bool
 	WatermarkText    *string
+	Title            string
 }
 
 // Create 为 owner 名下未删除、当前版本对象为 available 的文件创建公开分享，
@@ -509,10 +547,11 @@ func (s *Service) CreatePublic(owner, fileID uuid.UUID, permission string, expir
 		return Share{}, "", err
 	}
 	now := s.now()
-	sh := Share{ID: uuid.New(), OwnerID: owner, FileID: fileID, TokenHash: HashToken(token), Visibility: VisibilityPublic, Permission: permission, MaxDownloads: maxDownloads, WatermarkEnabled: watermarkEnabled, WatermarkText: &watermarkText, CreatedAt: now}
+	sh := Share{ID: uuid.New(), OwnerID: owner, FileID: fileID, TokenHash: HashToken(token), Visibility: VisibilityPublic, Permission: permission, MaxDownloads: maxDownloads, WatermarkEnabled: watermarkEnabled, WatermarkText: &watermarkText, Token: token, CreatedAt: now}
 	if opts.Password != "" {
 		// 密码哈希依赖 share_id 作盐，须在生成 ID 后计算。
 		sh.PasswordHash = HashSharePassword(sh.ID, opts.Password)
+		sh.PasswordPlain = opts.Password
 	}
 	if expiresIn > 0 {
 		expiresAt := now.Add(expiresIn)
@@ -560,6 +599,10 @@ func (s *Service) CreateBundle(owner uuid.UUID, fileIDs []uuid.UUID, permission 
 	if len(items) < 2 {
 		return Share{}, "", ErrBundleTooFew
 	}
+	title := strings.TrimSpace(opts.Title)
+	if err := validateTitle(title); err != nil {
+		return Share{}, "", err
+	}
 	var anchor *uuid.UUID
 	for _, id := range items {
 		f, ferr := s.files.Get(owner, id)
@@ -606,9 +649,10 @@ func (s *Service) CreateBundle(owner uuid.UUID, fileIDs []uuid.UUID, permission 
 		return Share{}, "", terr
 	}
 	now := s.now()
-	sh := Share{ID: uuid.New(), OwnerID: owner, FileID: *anchor, TokenHash: HashToken(token), Visibility: VisibilityPublic, Permission: permission, MaxDownloads: maxDownloads, WatermarkEnabled: watermarkEnabled, WatermarkText: &watermarkText, IsBundle: true, CreatedAt: now}
+	sh := Share{ID: uuid.New(), OwnerID: owner, FileID: *anchor, TokenHash: HashToken(token), Visibility: VisibilityPublic, Permission: permission, MaxDownloads: maxDownloads, WatermarkEnabled: watermarkEnabled, WatermarkText: &watermarkText, IsBundle: true, Token: token, Title: title, CreatedAt: now}
 	if opts.Password != "" {
 		sh.PasswordHash = HashSharePassword(sh.ID, opts.Password)
+		sh.PasswordPlain = opts.Password
 	}
 	if expiresIn > 0 {
 		expiresAt := now.Add(expiresIn)
@@ -640,16 +684,16 @@ func (s *Service) BundleItems(sh Share) ([]files.File, error) {
 }
 
 // CreatePrivate 为 owner 名下文件创建私有分享：不生成公开 token（token_hash 为空），
-// 访问仅限 share_users 显式授权用户与 share_teams 授权团队的成员。
-// userIds/teamIds 自动去重；私有分享不受密码影响（显式传入密码返回错误）。
-func (s *Service) CreatePrivate(owner, fileID uuid.UUID, permission string, expiresIn time.Duration, maxDownloads *int, userIds, teamIds []uuid.UUID) (Share, error) {
-	return s.CreatePrivateWithOptions(owner, fileID, permission, expiresIn, maxDownloads, userIds, teamIds, ShareOptions{})
+// 访问仅限 share_users 显式授权用户与 share_spaces 授权空间的成员。
+// userIds/spaceIds 自动去重；私有分享不受密码影响（显式传入密码返回错误）。
+func (s *Service) CreatePrivate(owner, fileID uuid.UUID, permission string, expiresIn time.Duration, maxDownloads *int, userIds, spaceIds []uuid.UUID) (Share, error) {
+	return s.CreatePrivateWithOptions(owner, fileID, permission, expiresIn, maxDownloads, userIds, spaceIds, ShareOptions{})
 }
 
 // CreatePrivateWithOptions 在 CreatePrivate 基础上支持水印字段；
 // 密码仅适用于公开分享，显式传入返回 ErrInvalidPassword。
-// 团队文件须经 CanShare 门控（同 CreatePublic）。
-func (s *Service) CreatePrivateWithOptions(owner, fileID uuid.UUID, permission string, expiresIn time.Duration, maxDownloads *int, userIds, teamIds []uuid.UUID, opts ShareOptions) (Share, error) {
+// 空间文件须经 CanShare 门控（同 CreatePublic）。
+func (s *Service) CreatePrivateWithOptions(owner, fileID uuid.UUID, permission string, expiresIn time.Duration, maxDownloads *int, userIds, spaceIds []uuid.UUID, opts ShareOptions) (Share, error) {
 	if permission != PermissionView && permission != PermissionDownload {
 		return Share{}, ErrInvalidPermission
 	}
@@ -702,8 +746,8 @@ func (s *Service) CreatePrivateWithOptions(owner, fileID uuid.UUID, permission s
 			return Share{}, err
 		}
 	}
-	if ids := dedupeIDs(teamIds); len(ids) > 0 {
-		if err := s.repo.AddShareTeams(sh.ID, ids, now); err != nil {
+	if ids := dedupeIDs(spaceIds); len(ids) > 0 {
+		if err := s.repo.AddShareSpaces(sh.ID, ids, now); err != nil {
 			return Share{}, err
 		}
 	}
@@ -728,7 +772,8 @@ func dedupeIDs(ids []uuid.UUID) []uuid.UUID {
 }
 
 // CanAccess 判定用户能否访问分享：分享 owner、share_users 显式授权用户，
-// 或属于 share_teams 任一团队的成员（实时 JOIN team_members 判定，成员变动立即生效）。
+// 或属于 share_spaces 任一空间的成员（实时判定：直接成员或经用户组，
+// 成员变动立即生效）。
 // 公开分享不走此入口（按 token 解析），非 owner 一律无显式授权记录故返回 false。
 func (s *Service) CanAccess(sh Share, user uuid.UUID) bool {
 	if user == uuid.Nil {
@@ -747,11 +792,11 @@ func (s *Service) CanAccess(sh Share, user uuid.UUID) bool {
 			}
 		}
 	}
-	teamIDs, err := s.repo.ListShareTeamIDs(sh.ID)
-	if err != nil || len(teamIDs) == 0 || s.membership == nil {
+	spaceIDs, err := s.repo.ListShareSpaceIDs(sh.ID)
+	if err != nil || len(spaceIDs) == 0 || s.membership == nil {
 		return false
 	}
-	ok, err := s.membership.UserInAnyTeam(user, teamIDs)
+	ok, err := s.membership.UserInAnySpace(user, spaceIDs)
 	return err == nil && ok
 }
 
@@ -844,6 +889,8 @@ func (s *Service) DecrementDownload(r Resolved) error {
 }
 
 // Revoke 撤销 owner 名下的分享（幂等）；文件再无其他有效分享时清除 files.is_public。
+// v2.4 起「删除」措辞回归「撤销」：撤销仅置 revoked_at，记录保留（不做自动
+// 清理），满 30 天后可经 Purge 手动清除。
 func (s *Service) Revoke(owner, shareID uuid.UUID) (Share, error) {
 	sh, err := s.repo.GetByOwner(owner, shareID)
 	if err != nil {
@@ -860,6 +907,26 @@ func (s *Service) Revoke(owner, shareID uuid.UUID) (Share, error) {
 		_ = s.repo.SetFilePublic(sh.FileID, false)
 	}
 	return sh, nil
+}
+
+// PurgeRetention 为撤销记录的手动清除保留期：撤销满 30 天后才可清除。
+const PurgeRetention = 30 * 24 * time.Hour
+
+// Purge 物理删除 owner 名下已撤销且撤销满 30 天的分享记录（手动「清除
+// 记录」；分享行删除经 FK 级联清理 share_users/share_spaces/share_files
+// 等关联）。未撤销返回 ErrNotRevoked；保留期内返回 ErrPurgeRetention。
+func (s *Service) Purge(owner, shareID uuid.UUID) error {
+	sh, err := s.repo.GetByOwner(owner, shareID)
+	if err != nil {
+		return err
+	}
+	if sh.RevokedAt == nil {
+		return ErrNotRevoked
+	}
+	if s.now().Sub(*sh.RevokedAt) < PurgeRetention {
+		return ErrPurgeRetention
+	}
+	return s.repo.Delete(sh.ID)
 }
 
 // List 返回 owner 的分享列表（created_at 倒序）。
@@ -924,7 +991,7 @@ type SharedWithMeItem struct {
 }
 
 // SharedWithMe 返回分享给 user 的有效私有分享列表（created_at 倒序）：
-// share_users 显式授权或 share_teams 团队成员命中（repo 实时判定），
+// share_users 显式授权或 share_spaces 空间成员命中（repo 实时判定），
 // 公开分享、已撤销、已过期、达下载上限的分享，以及文件已删除/不可用的条目不含。
 // OwnerName 经 UserDirectory 解析；未注入或解析失败时为空串，不影响列表。
 func (s *Service) SharedWithMe(user uuid.UUID, limit int) ([]SharedWithMeItem, error) {

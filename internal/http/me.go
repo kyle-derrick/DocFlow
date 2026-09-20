@@ -15,8 +15,10 @@ import (
 //   PATCH /api/v1/me  更新档案（nickname/department/position/phone/bio/
 //                      language/timezone；language ∈ zh-CN|en-US）
 
-// storageUsage 抽象个人空间存储占用查询（生产实现为 *files.Store.UsedStorage，
-// 软删文件计入；接口化便于单测注入内存实现）。
+// storageUsage 抽象用户默认空间存储占用查询（生产实现为
+// *files.Store.UsedStorage：用户默认空间当前版本字节合计，软删文件计入；
+// 接口化便于单测注入内存实现）。统一空间模型下个人用量 = 默认空间用量，
+// u.StorageQuota 仅为历史档案字段（配额拦截以空间配额为准）。
 type storageUsage interface {
 	UsedStorage(owner uuid.UUID) (int64, error)
 }

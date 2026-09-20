@@ -23,3 +23,7 @@ frontend/blob-report/
 # 本地调试/验证临时脚本与产物（不进 git）
 .tmp/
 .tmp-diag.sh
+frontend/.tmp-verify/
+frontend/.tmp-npm-cache/
+.pw-browsers/
+frontend/test-results-deploy/

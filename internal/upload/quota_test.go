@@ -10,12 +10,13 @@ import (
 	"github.com/google/uuid"
 )
 
-// TestStartQuotaCheckMatrix 配额校验矩阵（C3）：未超放行 / 恰好等于放行 /
-// 超限拒绝（files.ErrQuotaExceeded）；未注入回调不校验；StartReplace 同样
-// 走校验。软删计入语义：quotaCheck 的已用值由注入方（files.UsedStorage）
-// 提供——含回收站软删文件，本测试以 used 值直接模拟该口径。
+// TestStartQuotaCheckMatrix 配额校验矩阵（统一空间模型）：未超放行 /
+// 恰好等于放行 / 超限拒绝（files.ErrQuotaExceeded）；未注入回调不校验；
+// StartReplace 同样走校验。软删计入语义：quotaCheck 的已用值由注入方
+// （files.UsedSpaceStorage）提供——含回收站软删文件，本测试以 used 值
+// 直接模拟该口径。
 func TestStartQuotaCheckMatrix(t *testing.T) {
-	newSvc := func(quotaCheck func(uuid.UUID, int64) error) *Service {
+	newSvc := func(quotaCheck func(user, parent uuid.UUID, size int64) error) *Service {
 		store := NewMemoryStore()
 		storage, err := NewLocalStorage(t.TempDir())
 		if err != nil {
@@ -30,7 +31,7 @@ func TestStartQuotaCheckMatrix(t *testing.T) {
 	// quotaGuard 模拟 files.Store.CheckUploadQuota：used 含软删（回收站）文件。
 	user, parent := uuid.New(), uuid.New()
 	const used = 900 // 含软删文件的当前版本总占用
-	quotaGuard := func(_ uuid.UUID, size int64) error {
+	quotaGuard := func(_, _ uuid.UUID, size int64) error {
 		if files.QuotaExceeded(used, 1000, size) {
 			return files.ErrQuotaExceeded
 		}

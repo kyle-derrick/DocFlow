@@ -91,7 +91,7 @@ func (s *GormStore) Delete(id uuid.UUID) error {
 func (s *GormStore) ListMembers(groupID uuid.UUID) ([]Member, error) {
 	var out []Member
 	// JOIN users 补齐 username/nickname（成员列表展示用户名，替代 UUID；
-	// 用户行随账户删除时成员关系亦不保留，JOIN 不会引入丢行——同 team_members）。
+	// 用户行随账户删除时成员关系亦不保留，JOIN 不会引入丢行——同 space_members）。
 	err := s.db.Model(&Member{}).
 		Select("group_members.*, u.username AS username, COALESCE(u.nickname, '') AS nickname").
 		Joins("JOIN users u ON u.id = group_members.user_id").

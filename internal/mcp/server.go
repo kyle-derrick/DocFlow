@@ -13,7 +13,7 @@ import (
 	"github.com/docflow/docflow/internal/files"
 	"github.com/docflow/docflow/internal/search"
 	"github.com/docflow/docflow/internal/share"
-	"github.com/docflow/docflow/internal/team"
+	"github.com/docflow/docflow/internal/space"
 	"github.com/docflow/docflow/internal/upload"
 )
 
@@ -49,25 +49,25 @@ const (
 
 // FileStore 抽象 MCP 文件工具所需的文件服务能力（生产实现 *files.Store；
 // 接口化便于单测注入内存实现，模式同 http 包 resolver/unpacker）。
-// 全部方法自带用户级授权（authorizeFile* / 团队 ACL），MCP 层不做旁路。
+// 全部方法自带用户级授权（authorizeFile* / 空间 ACL），MCP 层不做旁路。
 type FileStore interface {
-	EnsureRoot(owner uuid.UUID) (files.File, error)
-	List(owner uuid.UUID, parent *uuid.UUID, limit int, sort files.SortOptions) ([]files.File, error)
+	// DefaultSpaceRoot 返回用户默认空间根目录（缺省空间入口）。
+	DefaultSpaceRoot(user uuid.UUID) (files.File, error)
+	ListSpace(spaceID, parent uuid.UUID, limit int, sort files.SpaceListFilter) ([]files.File, error)
 	Get(user, id uuid.UUID) (files.File, error)
 	CreateFolderIn(user, parent uuid.UUID, name string) (files.File, error)
 	Rename(user, id uuid.UUID, name string) (files.File, error)
 	Copy(user, id, parent uuid.UUID, name string) (files.File, error)
 	Delete(user, id uuid.UUID) error
 	Restore(user, id uuid.UUID) (files.File, error)
-	ListTrashScope(user uuid.UUID, scope string, teamID *uuid.UUID, limit int) ([]files.File, error)
+	ListTrashSpace(user, spaceID uuid.UUID, limit int) ([]files.File, error)
 	ListVersions(user, fileID uuid.UUID) ([]files.VersionDetail, error)
 	SetCurrentVersion(user, fileID, versionID uuid.UUID) (files.File, files.FileVersion, error)
 	ReadVersion(user, fileID, versionID uuid.UUID) (files.File, files.FileVersion, files.ObjectBlob, error)
 	CurrentVersion(owner, fileID uuid.UUID) (files.FileVersion, files.ObjectBlob, error)
 	ResolveReadablePath(actor uuid.UUID, nsType string, scopeID uuid.UUID, path string) (files.File, []files.File, error)
-	TeamRoot(teamID uuid.UUID) (files.File, error)
-	ListTeam(teamID, parent uuid.UUID, limit int, f files.TeamListFilter) ([]files.File, error)
-	GetTeamFolder(teamID, id uuid.UUID) (files.File, error)
+	SpaceRoot(spaceID uuid.UUID) (files.File, error)
+	GetSpaceFolder(spaceID, id uuid.UUID) (files.File, error)
 	BatchMove(user uuid.UUID, ids []uuid.UUID, target uuid.UUID) ([]files.BatchItemResult, error)
 }
 
@@ -85,14 +85,15 @@ type UploadService interface {
 type ShareService interface {
 	ListWithFileNames(owner uuid.UUID, limit int) ([]share.ShareWithFile, error)
 	CreatePublic(owner, fileID uuid.UUID, permission string, expiresIn time.Duration, maxDownloads *int, opts share.ShareOptions) (share.Share, string, error)
-	CreatePrivateWithOptions(owner, fileID uuid.UUID, permission string, expiresIn time.Duration, maxDownloads *int, userIds, teamIds []uuid.UUID, opts share.ShareOptions) (share.Share, error)
+	CreatePrivateWithOptions(owner, fileID uuid.UUID, permission string, expiresIn time.Duration, maxDownloads *int, userIds, spaceIds []uuid.UUID, opts share.ShareOptions) (share.Share, error)
 	Revoke(owner, shareID uuid.UUID) (share.Share, error)
 }
 
-// TeamService 抽象团队能力（生产实现 *team.Service）。
-type TeamService interface {
-	ListTeams(user uuid.UUID) ([]team.Team, error)
-	CanRead(userID, teamID uuid.UUID) (bool, error)
+// SpaceService 抽象空间能力（生产实现 *space.Service）。
+type SpaceService interface {
+	ListSpaces(user uuid.UUID) ([]space.Space, error)
+	CanRead(userID, spaceID uuid.UUID) (bool, error)
+	DefaultSpace(owner uuid.UUID) (space.Space, error)
 }
 
 // SearchService 抽象全文检索能力（生产实现 *search.Store；未启用时注入
@@ -107,7 +108,7 @@ type Deps struct {
 	Uploads UploadService
 	Storage upload.Storage
 	Shares  ShareService
-	Teams   TeamService
+	Spaces  SpaceService
 	Search  SearchService
 }
 
@@ -185,10 +186,11 @@ func (s *Server) Handle(ctx context.Context, body []byte, identity Identity) []b
 }
 
 func (s *Server) initializeResult() map[string]any {
-	instructions := "DocFlow 文档中台 MCP 服务端。工具均以 df_ 前缀命名；scope 支持 personal（个人空间）" +
-		"与 team（团队空间，需 team_id）。写入走上传管线（office 校验/扫描/配额生效）；" +
-		"文本类（md/txt/xml/json/excalidraw 等）可用 df_read_file 直读、df_write_version 覆盖编辑；" +
-		"drawio 的 .drawio 文件即 XML，excalidraw 的 .excalidraw 即 JSON，均可按文本直接读写。"
+	instructions := "DocFlow 文档中台 MCP 服务端（统一空间模型）。工具均以 df_ 前缀命名；" +
+		"文件操作按空间定位：space_id 缺省为你的默认空间，df_list_spaces 可列出全部可见空间。" +
+		"写入走上传管线（office 校验/扫描/配额生效）；文本类（md/txt/xml/json/excalidraw 等）" +
+		"可用 df_read_file 直读、df_write_version 覆盖编辑；drawio 的 .drawio 文件即 XML，" +
+		"excalidraw 的 .excalidraw 即 JSON，均可按文本直接读写。"
 	return map[string]any{
 		"protocolVersion": ProtocolVersion,
 		"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},

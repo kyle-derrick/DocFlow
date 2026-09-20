@@ -18,7 +18,7 @@ export function hotkeyDocs(locale: Locale): Array<{ group: string; items: Hotkey
       items: [
         { keys: ['/'], desc: locale === 'zh-CN' ? '聚焦顶栏全文搜索' : 'Focus the top search bar' },
         { keys: ['g', 'f'], desc: locale === 'zh-CN' ? '前往文件' : 'Go to Files' },
-        { keys: ['g', 't'], desc: locale === 'zh-CN' ? '前往团队' : 'Go to Teams' },
+        { keys: ['g', 't'], desc: locale === 'zh-CN' ? '前往空间' : 'Go to Spaces' },
         { keys: ['g', 's'], desc: locale === 'zh-CN' ? '前往我的分享' : 'Go to My shares' },
         { keys: ['?'], desc: locale === 'zh-CN' ? '显示快捷键帮助' : 'Show keyboard shortcuts' },
       ],

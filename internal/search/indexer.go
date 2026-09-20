@@ -61,7 +61,8 @@ func (ix *Indexer) Index(fileID uuid.UUID) error {
 			}
 		}
 	}
-	return ix.store.IndexFile(fileID, versionID, f.OwnerID, f.TeamID, f.Name, content)
+	spaceID := f.SpaceID
+	return ix.store.IndexFile(fileID, versionID, f.OwnerID, &spaceID, f.Name, content)
 }
 
 // ReadContent 读取 blob 的文本内容：大小超上限（2MB）或非文本 mime/扩展名

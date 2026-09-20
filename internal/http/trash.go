@@ -8,10 +8,10 @@ import (
 	"github.com/docflow/docflow/internal/audit"
 	"github.com/docflow/docflow/internal/files"
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 )
 
-// listTrash GET /api/v1/trash 列出当前用户软删除文件（limit 简单分页）。
+// listTrash GET /api/v1/trash?space= 列出空间软删除文件（统一空间模型；
+// space 缺省=用户默认空间；limit 简单分页）。
 func (h *Handler) listTrash(c *gin.Context) {
 	limit := 100
 	if raw := c.Query("limit"); raw != "" {
@@ -26,23 +26,19 @@ func (h *Handler) listTrash(c *gin.Context) {
 			limit = 1000
 		}
 	}
-	scope := c.DefaultQuery("scope", "personal")
-	var teamID *uuid.UUID
-	if scope == "team" {
-		id, err := uuid.Parse(c.Query("team_id"))
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid team_id"})
-			return
-		}
-		teamID = &id
-	} else if scope != "personal" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid scope"})
+	user := userID(c)
+	spaceID, ok := h.resolveListSpace(c, user)
+	if !ok {
 		return
 	}
-	out, err := h.files.ListTrashScope(userID(c), scope, teamID, limit)
+	out, err := h.files.ListTrashSpace(user, spaceID, limit)
 	if err != nil {
 		if errors.Is(err, files.ErrForbidden) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+			return
+		}
+		if errors.Is(err, files.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "space not found"})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to list trash"})

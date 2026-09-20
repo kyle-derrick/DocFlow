@@ -190,7 +190,7 @@ func (h *Handler) setFileStarred(c *gin.Context) {
 	c.JSON(http.StatusOK, fileJSON(f))
 }
 
-// parseTagFilter 解析 GET /files 与 /teams/:id/files 的 tag_id 查询参数：
+// parseTagFilter 解析 GET /files 与 /spaces/:id/files 的 tag_id 查询参数：
 // 提供时校验标签归属（他人的标签按 404 处理，不泄露存在性）。
 func (h *Handler) parseTagFilter(c *gin.Context) (*uuid.UUID, bool) {
 	raw := c.Query("tag_id")

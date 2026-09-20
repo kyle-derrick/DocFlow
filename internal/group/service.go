@@ -17,7 +17,7 @@ var (
 )
 
 // validateName 校验组名：TrimSpace、非空、无控制字符、不超过 100 字符
-// （与团队名同规则，见 team.validateName）。
+// （与空间名同规则，见 space.validateName）。
 func validateName(name string) (string, error) {
 	name = strings.TrimSpace(name)
 	if name == "" || len([]rune(name)) > 100 {
@@ -33,7 +33,7 @@ func validateName(name string) (string, error) {
 
 // Service 提供用户组 CRUD 与成员管理。管理权限（仅 admin）由 HTTP 层
 // /admin 路由组的 RequireRole(admin) 保证，Service 不按 actor 二次校验
-// （组无 owner 概念，与 team.Service 的 owner 校验区分）。
+// （组无 owner 概念，与 space.Service 的 owner 校验区分）。
 type Service struct {
 	repo Repo
 	now  func() time.Time

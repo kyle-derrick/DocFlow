@@ -48,7 +48,7 @@ type Claims struct {
 	UserID string `json:"uid,omitempty"`
 	// ShareID 绑定的公开分享 ID（purpose=raw-share 必填）。
 	ShareID string `json:"shid,omitempty"`
-	// NSType / NSScope 命名空间（purpose=raw 必填，personal|team + scope uuid）。
+	// NSType / NSScope 命名空间（purpose=raw 必填，space + scope uuid）。
 	NSType  string `json:"ns,omitempty"`
 	NSScope string `json:"scope,omitempty"`
 	// Nonce 随机数（签发时自动生成，保证 token 不可预测、不可复用推断）。

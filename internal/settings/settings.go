@@ -78,6 +78,11 @@ const (
 	// KeyUploadBlockedExtensions 上传扩展名黑名单（逗号分隔，如
 	// "exe,bat,sh"）；默认空 = 不拦截。建会话与 Complete 双侧校验。
 	KeyUploadBlockedExtensions = "upload.blocked_extensions"
+	// 空间模型（migration 040，统一空间）运行时配置：新空间默认配额 /
+	// 空间配额上限 / 每用户空间数上限（admin 可改，热读取）。
+	KeySpaceDefaultQuota = "space.default_quota"
+	KeySpaceMaxQuota     = "space.max_quota"
+	KeySpaceMaxPerUser   = "space.max_per_user"
 )
 
 // SMTP 运行时配置键（system_settings 存储，邮件发送处优先读库回退 env）。
@@ -228,7 +233,10 @@ var Definitions = []Definition{
 	{Key: KeyBackupRetentionDays, Type: TypeInt, Default: int64(30), Min: intPtr(1), Max: intPtr(3650), Effect: EffectRestart, Description: "备份保留天数"},
 	{Key: KeyBackupEncryptionRequired, Type: TypeBool, Default: true, Effect: EffectRestart, Description: "是否要求备份加密"},
 	{Key: KeyBackupLastVerify, Type: TypeString, Default: "", Effect: EffectRestart, Description: "最近一次备份验证时间"},
-	{Key: KeyAuditRetentionDays, Type: TypeInt, Default: int64(90), Min: intPtr(1), Max: intPtr(3650), Effect: EffectImmediate, Description: "审计日志保留天数"},
+	{Key: KeyAuditRetentionDays, Type: TypeInt, Default: int64(90), Min: intPtr(0), Max: intPtr(3650), Effect: EffectImmediate, Description: "审计日志保留天数（0 = 永久保留）：后台清理任务每日删除超过保留期的审计记录"},
+	{Key: KeySpaceDefaultQuota, Type: TypeInt, Default: int64(10 << 30), Min: intPtr(0), Max: intPtr(1 << 50), Effect: EffectImmediate, Description: "新空间默认存储配额（字节，默认 10GiB；0 = 不限）：新建空间与注册默认空间的初始配额"},
+	{Key: KeySpaceMaxQuota, Type: TypeInt, Default: int64(1 << 40), Min: intPtr(0), Max: intPtr(1 << 50), Effect: EffectImmediate, Description: "空间配额上限（字节，默认 1TiB；0 = 不限）：空间 owner/admin 调整配额时不得超过，系统 admin 不受限"},
+	{Key: KeySpaceMaxPerUser, Type: TypeInt, Default: int64(20), Min: intPtr(1), Max: intPtr(1000), Effect: EffectImmediate, Description: "每用户空间数上限（owner 维度计数，含默认空间）：超出后创建空间返回 413"},
 }
 
 // DefinitionByKey 返回键定义；未知键返回 ErrUnknownKey。

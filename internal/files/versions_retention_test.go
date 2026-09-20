@@ -15,7 +15,7 @@ func agedFile(t *testing.T, repo *memVersionsRepo, owner uuid.UUID, agesDays []f
 	t.Helper()
 	shas := []string{shaA, shaB, shaC, shaD, shaE, shaF, shaG, shaH}
 	now := time.Now().UTC()
-	f := File{ID: uuid.New(), Name: "doc.txt", OwnerID: owner, Type: "file", ScopeType: "personal"}
+	f := File{ID: uuid.New(), Name: "doc.txt", OwnerID: owner, Type: "file"}
 	repo.files[f.ID] = f
 	for i, age := range agesDays {
 		sha := shas[i%len(shas)]
@@ -178,30 +178,25 @@ func TestDeleteVersionBoundary(t *testing.T) {
 }
 
 // TestDispatchVersionDeletedFilters 版本删除通知的过滤语义（与
-// dispatchVersionAdded 一致）：仅团队文件且删除者非 owner 时回调。
+// dispatchVersionAdded 一致）：删除者非文件行 owner 时回调。
 func TestDispatchVersionDeletedFilters(t *testing.T) {
 	owner, editor := uuid.New(), uuid.New()
-	teamID := uuid.New()
+	spaceID := uuid.New()
 	version := FileVersion{ID: uuid.New(), FileID: uuid.New(), Version: 1}
 
 	calls := 0
 	cb := func(File, uuid.UUID, FileVersion) { calls++ }
 
-	teamFile := File{ID: version.FileID, OwnerID: owner, TeamID: &teamID, ScopeType: "team", Type: "file"}
-	dispatchVersionDeleted(cb, teamFile, editor, version)
+	spaceFile := File{ID: version.FileID, OwnerID: owner, SpaceID: spaceID, Type: "file"}
+	dispatchVersionDeleted(cb, spaceFile, editor, version)
 	if calls != 1 {
-		t.Fatalf("team file by non-owner: calls = %d, want 1", calls)
+		t.Fatalf("space file by non-owner: calls = %d, want 1", calls)
 	}
-	dispatchVersionDeleted(cb, teamFile, owner, version)
+	dispatchVersionDeleted(cb, spaceFile, owner, version)
 	if calls != 1 {
 		t.Fatalf("owner self-delete must not notify, calls = %d", calls)
 	}
-	personal := File{ID: uuid.New(), OwnerID: owner, ScopeType: "personal", Type: "file"}
-	dispatchVersionDeleted(cb, personal, editor, version)
-	if calls != 1 {
-		t.Fatalf("personal file must not notify, calls = %d", calls)
-	}
-	dispatchVersionDeleted(nil, teamFile, editor, version) // nil 回调不 panic
+	dispatchVersionDeleted(nil, spaceFile, editor, version) // nil 回调不 panic
 }
 
 // TestFolderDepthValidationPureLogic 目录深度校验纯逻辑矩阵：

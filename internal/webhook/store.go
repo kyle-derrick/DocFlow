@@ -53,7 +53,7 @@ func NewGormStore(db *gorm.DB) *GormStore { return &GormStore{db: db} }
 var _ Store = (*GormStore)(nil)
 
 // isUniqueViolation 识别唯一约束冲突（SQLSTATE 23505 或驱动错误文本），
-// 与 internal/team 同款实现（不引 pgconn，兼容测试替身错误）。
+// 与 internal/space 同款实现（不引 pgconn，兼容测试替身错误）。
 func isUniqueViolation(err error) bool {
 	if err == nil {
 		return false

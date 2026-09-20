@@ -100,12 +100,12 @@ func (h *Handler) createOnlyOfficeSession(c *gin.Context) {
 
 // publicShareOfficeConfig GET /api/v1/public/shares/:token/office?lang=：
 // 公开分享的 OnlyOffice 只读查看会话（访客无需登录）。解析分享 token
-//（有效期/撤销/密码会话同 publicSharePreview 口径，view 与 download 权限均
+// （有效期/撤销/密码会话同 publicSharePreview 口径，view 与 download 权限均
 // 可预览、不消耗 download_count），成功时返回 {server_url, config}（config
 // 为可直接传给 DocsAPI.DocEditor 的 JWT 签名配置，恒 view 模式；分享
 // permission=download 时编辑器内开放下载/打印）。集成未启用时 404（前端
 // 回退「不支持在线预览」分支）。预览成功计入 view_count 与访问事件
-//（action=preview，与 publicSharePreview 一致）。
+// （action=preview，与 publicSharePreview 一致）。
 func (h *Handler) publicShareOfficeConfig(c *gin.Context) {
 	if h.onlyoffice == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "onlyoffice integration disabled"})

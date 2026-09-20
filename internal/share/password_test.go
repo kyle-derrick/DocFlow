@@ -180,26 +180,32 @@ func TestWatermarkDefaultsResolution(t *testing.T) {
 	}
 }
 
-// RenderWatermark 占位符替换矩阵：{email}/{ip} → 脱敏 IP 前缀、{date}、{name}、
-// 未知占位符原样、空模板回退默认、IPv6 前缀。
+// RenderWatermark 占位符替换矩阵：{user}/{email}/{ip} → 访问者/脱敏 IP 前缀、
+// {date}、{name}、未知占位符原样、空模板回退默认、IPv6 前缀。
 func TestRenderWatermark(t *testing.T) {
 	now := time.Date(2026, 9, 14, 8, 30, 0, 0, time.UTC)
-	if got := RenderWatermark("{date} {name}", "report.pdf", "203.0.113.9", now); got != "2026-09-14 report.pdf" {
+	if got := RenderWatermark("{date} {name}", "report.pdf", "203.0.113.9", "", now); got != "2026-09-14 report.pdf" {
 		t.Fatalf("default template render = %q", got)
 	}
-	if got := RenderWatermark("{email} {name}", "a.txt", "198.51.100.7", now); got != "198.51.* a.txt" {
+	if got := RenderWatermark("{user} {date} {name}", "a.txt", "198.51.100.7", "", now); got != "198.51.* 2026-09-14 a.txt" {
+		t.Fatalf("anonymous {user} render = %q", got)
+	}
+	if got := RenderWatermark("{user} {name}", "b.txt", "198.51.100.7", "alice", now); got != "alice b.txt" {
+		t.Fatalf("named {user} render = %q", got)
+	}
+	if got := RenderWatermark("{email} {name}", "a.txt", "198.51.100.7", "", now); got != "198.51.* a.txt" {
 		t.Fatalf("{email} render = %q", got)
 	}
-	if got := RenderWatermark("{ip}/{name}", "b.txt", "2001:db8::1", now); got != "2001:db8:*/b.txt" {
+	if got := RenderWatermark("{ip}/{name}", "b.txt", "2001:db8::1", "", now); got != "2001:db8:*/b.txt" {
 		t.Fatalf("ipv6 {ip} render = %q", got)
 	}
-	if got := RenderWatermark("", "c.txt", "1.2.3.4", now); got != "2026-09-14 c.txt" {
+	if got := RenderWatermark("", "c.txt", "1.2.3.4", "", now); got != "1.2.* 2026-09-14 c.txt" {
 		t.Fatalf("empty template fallback = %q", got)
 	}
-	if got := RenderWatermark("{unknown} {name}", "d.txt", "1.2.3.4", now); got != "{unknown} d.txt" {
+	if got := RenderWatermark("{unknown} {name}", "d.txt", "1.2.3.4", "", now); got != "{unknown} d.txt" {
 		t.Fatalf("unknown placeholder must be kept: %q", got)
 	}
-	if got := RenderWatermark("{ip}", "e.txt", "", now); got != "unknown" {
+	if got := RenderWatermark("{ip}", "e.txt", "", "", now); got != "unknown" {
 		t.Fatalf("missing ip fallback = %q", got)
 	}
 }

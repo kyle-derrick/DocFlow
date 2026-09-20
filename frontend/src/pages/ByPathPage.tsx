@@ -46,7 +46,7 @@ function useByPathParams(): {
 } {
   const params = useParams()
   const rawNs = params.nsType ?? ''
-  const nsType: ResolveNamespaceType | null = rawNs === 'personal' || rawNs === 'team' ? rawNs : null
+  const nsType: ResolveNamespaceType | null = rawNs === 'space' ? rawNs : null
   // React Router 对 params（含 splat）逐段 decodeURIComponent，此处仅去空段。
   const segments = (params['*'] ?? '')
     .split('/')
@@ -142,7 +142,7 @@ export function ViewByPathPage() {
   }, [nsType, nsScope, rawPath, folderMode, originContent])
 
   if (!nsType) {
-    return <ByPathError title="无效的访问路径" detail="命名空间类型仅支持 personal（个人空间）与 team（团队空间）。" />
+    return <ByPathError title="无效的访问路径" detail="命名空间类型仅支持 space（空间）。" />
   }
   if (phase === 'loading') {
     return <main className="text-editor-page"><div className="text-editor-state">正在解析路径…</div></main>
@@ -191,7 +191,7 @@ export function EditByPathPage() {
         setPhase('edit')
       } catch (err) {
         if (!alive) return
-        if (err instanceof ApiError && err.status === 403) setError('没有编辑该文件的权限（团队 viewer 或只读目录）')
+        if (err instanceof ApiError && err.status === 403) setError('没有编辑该文件的权限（guest 或只读目录）')
         else if (err instanceof ApiError && err.status === 404) setError('路径不存在或无权访问（404）')
         else setError(err instanceof Error ? err.message : '路径解析失败')
         setPhase('error')
@@ -204,7 +204,7 @@ export function EditByPathPage() {
   }, [nsType, nsScope, rawPath])
 
   if (!nsType) {
-    return <ByPathError title="无效的访问路径" detail="命名空间类型仅支持 personal（个人空间）与 team（团队空间）。" />
+    return <ByPathError title="无效的访问路径" detail="命名空间类型仅支持 space（空间）。" />
   }
   if (phase === 'loading') {
     return <main className="text-editor-page"><div className="text-editor-state">正在解析路径…</div></main>

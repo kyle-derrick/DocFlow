@@ -225,10 +225,10 @@ type Service struct {
 	// blockedExtensionsProvider 扩展名黑名单热读取（system_settings 的
 	// upload.blocked_extensions，main 注入，逗号分隔）；nil 或空列表不拦截。
 	blockedExtensionsProvider func() []string
-	// quotaCheck 建会话时的存储配额校验回调（C3，main 注入
-	// files.Store.CheckUploadQuota）：超限返回 files.ErrQuotaExceeded，
-	// HTTP 层映射 403 QUOTA_EXCEEDED。
-	quotaCheck func(uuid.UUID, int64) error
+	// quotaCheck 建会话时的空间配额校验回调（统一空间模型，main 注入
+	// files.Store.CheckUploadQuota：按上传目标父目录定位空间）：超限返回
+	// files.ErrQuotaExceeded，HTTP 层映射 413 SPACE_QUOTA_EXCEEDED。
+	quotaCheck func(user, parent uuid.UUID, size int64) error
 	// quotaWarn 上传成功落库后（新文件/覆盖新版本两路径）回调一次
 	//（user/name/fileID），供配额用量警告通知（quota.warning）注入；
 	// 回调内部错误由注入方自理，不影响会话终态。
@@ -412,9 +412,9 @@ func (s *Service) SetVersionTarget(validate func(uuid.UUID, uuid.UUID) (files.Fi
 // 读失败回退构造值。
 func (s *Service) MaxSize() int64 { return s.effectiveMaxSize() }
 
-// SetQuotaCheck 注入存储配额校验回调（幂等）：Start/StartReplace 建会话时
-// 调用（user+size）；返回错误（含 files.ErrQuotaExceeded）即拒绝创建。
-func (s *Service) SetQuotaCheck(fn func(uuid.UUID, int64) error) {
+// SetQuotaCheck 注入空间配额校验回调（幂等）：Start/StartReplace 建会话时
+// 调用（user+parent+size）；返回错误（含 files.ErrQuotaExceeded）即拒绝创建。
+func (s *Service) SetQuotaCheck(fn func(user, parent uuid.UUID, size int64) error) {
 	if fn != nil {
 		s.quotaCheck = fn
 	}
@@ -512,10 +512,10 @@ func (s *Service) createSession(user, parent uuid.UUID, name string, size int64,
 	if size < 0 || size > s.effectiveMaxSize() {
 		return UploadSession{}, ErrSize
 	}
-	// 存储配额校验（C3）：软删文件计入已用（files.UsedStorage 口径），
-	// 超限拒绝建会话（HTTP 403 QUOTA_EXCEEDED）。
+	// 空间配额校验（统一空间模型）：按目标父目录定位空间，软删文件计入
+	// 已用，超限拒绝建会话（HTTP 413 SPACE_QUOTA_EXCEEDED）。
 	if s.quotaCheck != nil {
-		if err := s.quotaCheck(user, size); err != nil {
+		if err := s.quotaCheck(user, parent, size); err != nil {
 			return UploadSession{}, err
 		}
 	}

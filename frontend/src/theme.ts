@@ -14,6 +14,10 @@ export type ThemeMode = 'dark' | 'light' | 'system'
 
 export const THEME_STORAGE_KEY = 'docflow.theme'
 
+/** 主题变更广播事件（saveTheme 派发）：顶栏外观快捷入口与设置页外观面板
+ * 各自持有本地态，监听本事件互相同步（与 i18n 的 docflow:locale 同模式）。 */
+export const THEME_EVENT = 'docflow:theme'
+
 /** 各 accent 的展示名与色块颜色（设置页外观卡片与帮助展示用）。 */
 export const THEME_ACCENTS: Array<{ value: ThemeAccent; label: string; color: string }> = [
   { value: 'indigo', label: '靛蓝', color: '#4f7cff' },
@@ -77,7 +81,7 @@ export function applyTheme(theme: ThemePreference): void {
     ?.setAttribute('content', mode === 'light' ? '#f4f5f7' : '#0f1115')
 }
 
-/** 保存偏好（localStorage + 立即应用）。 */
+/** 保存偏好（localStorage + 立即应用 + 广播 THEME_EVENT 供各入口同步）。 */
 export function saveTheme(theme: ThemePreference): void {
   applyTheme(theme)
   try {
@@ -85,6 +89,7 @@ export function saveTheme(theme: ThemePreference): void {
   } catch {
     // 隐私模式等写入失败：仅本次会话生效（已 apply）。
   }
+  window.dispatchEvent(new Event(THEME_EVENT))
 }
 
 /**

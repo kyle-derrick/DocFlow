@@ -45,12 +45,12 @@ func (h *Handler) createOfficeTemplate(c *gin.Context) {
 	owner := userID(c)
 	parent := uuid.Nil
 	if req.ParentID == "" {
-		root, rootErr := h.files.EnsureRoot(owner)
+		rootID, rootErr := h.defaultSpaceRootID(owner)
 		if rootErr != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to ensure root folder"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to ensure default space root"})
 			return
 		}
-		parent = root.ID
+		parent = rootID
 	} else {
 		var ok bool
 		parent, ok = parseID(c, req.ParentID)

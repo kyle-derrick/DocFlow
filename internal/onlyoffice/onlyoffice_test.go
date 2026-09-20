@@ -54,7 +54,7 @@ func (f *fakeFileStore) seedFile(owner uuid.UUID, name, content string) (files.F
 		Size: int64(len(content)), MimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 		RefCount: 1, Status: files.BlobStatusAvailable,
 	}
-	file := files.File{ID: uuid.New(), Name: name, OwnerID: owner, Type: "file", ScopeType: "personal"}
+	file := files.File{ID: uuid.New(), Name: name, OwnerID: owner, Type: "file"}
 	version := files.FileVersion{ID: uuid.New(), FileID: file.ID, Version: 1, ObjectBlobID: blob.ID, ContentSHA256: blob.SHA256, Size: blob.Size, UserID: owner}
 	file.CurrentVersionID = &version.ID
 	f.files[file.ID] = file

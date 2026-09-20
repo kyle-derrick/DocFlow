@@ -1,10 +1,10 @@
 // 版本历史对话框：列出文件全部版本（版本号/大小/时间/sha/status/当前标记），
 // 支持回滚到既有版本、「上传新版本」（POST /uploads 携带 file_id 覆盖）与
 // 文本版本对比（A/B 两版逐行 LCS diff，行级增/删着色 + 统计）。
-// 个人空间与团队空间共用；写权限由后端强制（403 统一提示「无写权限」）。
-import { useEffect, useRef, useState } from 'react'
+// 默认空间与空间视图共用；写权限由后端强制（403 统一提示「无写权限」）。
+import { useEffect, useState } from 'react'
 import { ArrowLeftRight, ArrowRightLeft, Upload } from 'lucide-react'
-import { App as AntdApp, Button, Select } from 'antd'
+import { App as AntdApp, Button, Select, Upload as AntdUpload } from 'antd'
 import {
   ApiError,
   FileItem,
@@ -38,7 +38,7 @@ export function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
 }
 
-/** 写操作错误文案：403 统一为「无写权限」（团队 viewer 等），其余透传后端消息。 */
+/** 写操作错误文案：403 统一为「无写权限」（guest 等），其余透传后端消息。 */
 function writeErrorText(err: unknown, fallback: string): string {
   if (err instanceof ApiError && err.status === 403) return '无写权限'
   return err instanceof Error ? err.message : fallback
@@ -61,7 +61,6 @@ export default function VersionHistoryModal({ file, onClose, onChanged }: Props)
   const [busyId, setBusyId] = useState<string | null>(null)
   const [uploadPhase, setUploadPhase] = useState<UploadPhase | 'error' | null>(null)
   const [uploadError, setUploadError] = useState('')
-  const fileInputRef = useRef<HTMLInputElement>(null)
   // 对比模式：A（旧）/ B（新）两个版本 ID，diff 结果与加载态。
   const [compareMode, setCompareMode] = useState(false)
   const [aId, setAId] = useState('')
@@ -165,8 +164,8 @@ export default function VersionHistoryModal({ file, onClose, onChanged }: Props)
     })
   }
 
-  const handleFilePicked = async (files: FileList | null) => {
-    const picked = files?.[0]
+  // 单文件上传（v2.2 antd Upload：beforeUpload 拦截自管，不自动上传）。
+  const handleFilePicked = async (picked: File) => {
     if (!picked) return
     setUploadError('')
     setNotice('')
@@ -179,8 +178,6 @@ export default function VersionHistoryModal({ file, onClose, onChanged }: Props)
     } catch (err) {
       setUploadPhase('error')
       setUploadError(writeErrorText(err, '上传失败'))
-    } finally {
-      if (fileInputRef.current) fileInputRef.current.value = ''
     }
   }
 
@@ -257,9 +254,18 @@ export default function VersionHistoryModal({ file, onClose, onChanged }: Props)
       ) : (
         <>
           <div className="version-toolbar">
-            <Button type="primary" size="small" onClick={() => fileInputRef.current?.click()}>
-              <Upload size={14} strokeWidth={2} aria-hidden="true" /> 上传新版本
-            </Button>
+            <AntdUpload
+              maxCount={1}
+              showUploadList={false}
+              beforeUpload={(f) => {
+                void handleFilePicked(f)
+                return false
+              }}
+            >
+              <Button type="primary" size="small" disabled={uploadPhase !== null && uploadPhase !== 'error'}>
+                <Upload size={14} strokeWidth={2} aria-hidden="true" /> 上传新版本
+              </Button>
+            </AntdUpload>
             <Button
               size="small"
               disabled={!textLike || versions.length < 2}
@@ -268,12 +274,6 @@ export default function VersionHistoryModal({ file, onClose, onChanged }: Props)
             >
               <ArrowRightLeft size={14} strokeWidth={2} aria-hidden="true" /> 对比版本
             </Button>
-            <input
-              ref={fileInputRef}
-              type="file"
-              hidden
-              onChange={(e) => void handleFilePicked(e.target.files)}
-            />
             {uploadPhase && <span className={`badge ${uploadPhase}`}>{phaseText[uploadPhase]}</span>}
             {uploadError && <span className="error-text">{uploadError}</span>}
           </div>

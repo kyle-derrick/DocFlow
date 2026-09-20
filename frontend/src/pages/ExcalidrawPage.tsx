@@ -35,14 +35,15 @@ type SceneAppState = Parameters<ExcalidrawChange>[1]
 type SceneFiles = Parameters<ExcalidrawChange>[2]
 
 /** 编辑器内最新场景快照（onChange 更新，保存时序列化）。 */
-interface SceneSnapshot {
+export interface SceneSnapshot {
   elements: SceneElements
   appState: Partial<SceneAppState>
   files: SceneFiles
 }
 
-/** 解析 .excalidraw JSON 场景；空文本/损坏 JSON/非数组 elements 回退空场景。 */
-function parseScene(text: string): SceneSnapshot {
+/** 解析 .excalidraw JSON 场景；空文本/损坏 JSON/非数组 elements 回退空场景。
+ * 导出供公开分享页静态查看复用（v2.4：分享页点击白板弹窗渲染同源）。 */
+export function parseScene(text: string): SceneSnapshot {
   const trimmed = text.trim()
   if (trimmed) {
     try {

@@ -18,6 +18,7 @@ const (
 	BatchCodeParentDeleted = "PARENT_DELETED"
 	BatchCodeNotDeleted    = "NOT_DELETED"
 	BatchCodeDepthLimit    = "DEPTH_LIMIT"
+	BatchCodeQuota         = "SPACE_QUOTA_EXCEEDED"
 	BatchCodeInternal      = "INTERNAL"
 )
 
@@ -53,26 +54,24 @@ func batchErrorCode(err error) string {
 		return BatchCodeNotDeleted
 	case errors.Is(err, ErrFolderDepth):
 		return BatchCodeDepthLimit
+	case errors.Is(err, ErrQuotaExceeded):
+		return BatchCodeQuota
 	default:
 		return BatchCodeInternal
 	}
 }
 
 // authorizeBatchWrite 判定 user 能否变更（移动/移入回收站）单个文件：
-// 个人文件仅 owner（非 owner 归一为 ErrNotFound，不泄露存在性）；
-// 团队文件要求成员写权限（owner/editor，viewer 403）。
+// 文件行 owner 短路；其余要求空间成员写权限（owner/admin/member_share/
+// member，guest 403；非成员归一为 ErrNotFound，不泄露存在性）。
 func (s *Store) authorizeBatchWrite(f File, user uuid.UUID) error {
 	if f.OwnerID == user {
 		return nil
 	}
-	teamID := teamScope(f)
-	if teamID == nil {
-		return ErrNotFound
-	}
-	if s.teamWriter == nil {
+	if s.spaceWriter == nil {
 		return ErrForbidden
 	}
-	ok, err := s.teamWriter(user, *teamID)
+	ok, err := s.spaceWriter(user, f.SpaceID)
 	if err != nil {
 		return err
 	}
@@ -121,10 +120,10 @@ func (s *Store) isWithin(candidate, ancestor uuid.UUID) (bool, error) {
 // 整体不因单项失败回滚（部分成功语义），冲突项（目标目录存在同名活跃项）
 // 跳过并记 NAME_CONFLICT。目标目录整体校验失败（不存在/无写权限）时
 // 整个请求失败（返回错误，HTTP 层映射 404/403）。
-// 移动继承目标目录作用域（个人↔团队移动时更新 scope_type/team_id，
-// 与 CreateFolderIn 的继承语义一致）。
+// 跨空间移动继承目标空间（space_id 更新）并校验目标空间配额（超限
+// SPACE_QUOTA_EXCEEDED）。
 func (s *Store) BatchMove(user uuid.UUID, ids []uuid.UUID, target uuid.UUID) ([]BatchItemResult, error) {
-	t, err := authorizeParentFolder(s, user, target, s.teamWriter, s.acl)
+	t, err := authorizeParentFolder(s, user, target, s.spaceWriter, s.acl)
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +140,7 @@ func (s *Store) BatchMove(user uuid.UUID, ids []uuid.UUID, target uuid.UUID) ([]
 }
 
 // moveOne 执行单个移动：读权限归属校验（写级）、目标合法性、同名冲突
-// 检查后更新 parent_id 并继承目标作用域。
+// 检查后更新 parent_id 并继承目标空间；跨空间移动前校验目标空间配额。
 func (s *Store) moveOne(user, id uuid.UUID, target File) error {
 	var f File
 	if err := s.db.Where("id = ? AND deleted_at IS NULL", id).First(&f).Error; err != nil {
@@ -188,12 +187,25 @@ func (s *Store) moveOne(user, id uuid.UUID, target File) error {
 	if conflict > 0 {
 		return ErrConflict
 	}
-	scopeType, teamID := "personal", (*uuid.UUID)(nil)
-	if tid := teamScope(target); tid != nil {
-		scopeType, teamID = "team", tid
+	// 跨空间移动：目标空间配额校验（子树当前版本字节合计；软删计入的
+	// 配额口径以未软删近似——移动不复制软删项）。
+	if f.SpaceID != target.SpaceID {
+		var bytes int64
+		if f.Type == "folder" {
+			b, serr := s.subtreeBytes(f.ID)
+			if serr != nil && !errors.Is(serr, ErrNotFound) {
+				return serr
+			}
+			bytes = b
+		} else {
+			bytes = s.fileSize(f.ID)
+		}
+		if err := s.checkSpaceQuota(target.SpaceID, bytes); err != nil {
+			return err
+		}
 	}
 	result := s.db.Model(&File{}).Where("id = ? AND deleted_at IS NULL", id).
-		Updates(map[string]any{"parent_id": target.ID, "scope_type": scopeType, "team_id": teamID})
+		Updates(map[string]any{"parent_id": target.ID, "space_id": target.SpaceID})
 	if result.Error != nil {
 		// 并发窗口内目标目录出现同名项：唯一部分索引兜底为名称冲突。
 		if strings.Contains(strings.ToLower(result.Error.Error()), "unique") {

@@ -1,14 +1,14 @@
 import { ReactElement, useEffect, useRef, useState } from 'react'
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
-import { Bell, FileText, Folder, Languages, Search } from 'lucide-react'
-import { Badge, Button, Dropdown, Input, Popover, Tooltip } from 'antd'
+import { Bell, ChevronDown, FileText, Folder, Palette, Search } from 'lucide-react'
+import { Badge, Button, Dropdown, Input, Popover, Segmented, Tooltip } from 'antd'
 import type { MenuProps } from 'antd'
 import {
+  MeData,
   SearchResultItem,
   hasAccessToken,
   isAdmin,
   getMe,
-  MeData,
   listNotifications,
   logout,
   markAllNotificationsRead,
@@ -17,12 +17,14 @@ import {
   refreshSession,
   searchFiles,
   SESSION_EXPIRED_EVENT,
+  updateMe,
   websocketToken,
 } from './api'
-import { formatTime } from './components/FileBrowser'
+import { formatTime, Modal } from './components/FileBrowser'
 import HotkeysHelp from './components/HotkeysHelp'
 import { OfflineBadge, UpdateToast } from './components/PwaStatus'
 import { useHotkeys } from './useHotkeys'
+import { THEME_ACCENTS, ThemeMode, loadTheme, saveTheme } from './theme'
 import LoginPage from './pages/LoginPage'
 import SsoPage from './pages/SsoPage'
 import RegisterPage from './pages/RegisterPage'
@@ -30,9 +32,8 @@ import ForgotPage from './pages/ForgotPage'
 import ResetPage from './pages/ResetPage'
 import FilesPage from './pages/FilesPage'
 import SharePage from './pages/SharePage'
-import TeamsPage from './pages/TeamsPage'
-import TeamSpacePage from './pages/TeamSpacePage'
-import JoinTeamPage from './pages/JoinTeamPage'
+import SpacesPage from './pages/SpacesPage'
+import JoinSpacePage from './pages/JoinSpacePage'
 import SharedPage from './pages/SharedPage'
 import AdminPage from './pages/AdminPage'
 import EditorPage from './pages/EditorPage'
@@ -388,7 +389,7 @@ function GlobalHotkeys() {
         document.querySelector<HTMLElement>('[data-hotkey="search"]')?.focus()
       },
       'g f': () => navigate('/'),
-      'g t': () => navigate('/teams'),
+      'g t': () => navigate('/spaces'),
       'g s': () => navigate('/shared'),
       '?': () => setHelpOpen(true),
     },
@@ -397,22 +398,244 @@ function GlobalHotkeys() {
   return helpOpen ? <HotkeysHelp onClose={() => setHelpOpen(false)} /> : null
 }
 
+/**
+ * 「个人信息」独立弹窗（v2.3 资料编辑并入）：头像/姓名/邮箱/账号信息只读
+ * 展示 + 可编辑资料字段（显示名/部门/职位/电话/简介/时区，PATCH /me）。
+ * 设置页「资料」tab 已删除，本弹窗是唯一的资料编辑入口。
+ */
+function ProfileInfoModal({ onClose }: { onClose: () => void }) {
+  const [me, setMe] = useState<MeData | null>(null)
+  const [nickname, setNickname] = useState('')
+  const [department, setDepartment] = useState('')
+  const [position, setPosition] = useState('')
+  const [phone, setPhone] = useState('')
+  const [bio, setBio] = useState('')
+  const [timezone, setTimezone] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
+  useEffect(() => {
+    let alive = true
+    void getMe()
+      .then((data) => {
+        if (!alive) return
+        setMe(data)
+        setNickname(data.profile.nickname ?? '')
+        setDepartment(data.profile.department ?? '')
+        setPosition(data.profile.position ?? '')
+        setPhone(data.profile.phone ?? '')
+        setBio(data.profile.bio ?? '')
+        setTimezone(data.profile.timezone ?? '')
+      })
+      .catch(() => { if (alive) setError('个人信息加载失败') })
+    return () => { alive = false }
+  }, [])
+  const save = async () => {
+    if (busy || !me) return
+    setBusy(true)
+    setError('')
+    setNotice('')
+    try {
+      const updated = await updateMe({
+        nickname,
+        department,
+        position,
+        phone,
+        bio,
+        timezone: timezone.trim(),
+      })
+      setMe(updated)
+      setNotice('资料已保存')
+      window.dispatchEvent(new Event('docflow:me'))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '保存失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+  const display = me?.profile.nickname || me?.username || '用户'
+  return (
+    <Modal title="个人信息" onClose={onClose}>
+      {error && !me && <div className="error-text">{error}</div>}
+      {me && (
+        <div className="profile-info-modal">
+          <div className="profile-info-head">
+            <span className="avatar">{display.slice(0, 1).toUpperCase()}</span>
+            <div>
+              <div className="profile-info-name">{display}</div>
+              <div className="muted profile-info-sub">
+                {me.username} · {me.role === 'admin' ? '管理员' : '普通用户'}
+                {me.status !== 'active' && ` · 状态异常（${me.status}）`}
+              </div>
+            </div>
+          </div>
+          {/* 账号信息（只读）。 */}
+          <dl className="profile-info-list">
+            <div><dt>邮箱</dt><dd title={me.email}>{me.email}</dd></div>
+            <div><dt>用户名</dt><dd>{me.username}</dd></div>
+            <div><dt>账号 ID</dt><dd className="setting-value-mono" title={me.id}>{me.id}</dd></div>
+            <div><dt>注册时间</dt><dd>{formatTime(me.created_at)}</dd></div>
+            <div><dt>存储用量</dt><dd>{me.storage.used} / {me.storage.quota} 字节（配额）</dd></div>
+          </dl>
+          {/* 资料编辑（原设置页「资料」tab 并入）。 */}
+          <div className="profile-edit-fields">
+            <label className="field">
+              <span>显示名（昵称，≤64 字符）</span>
+              <Input
+                allowClear
+                maxLength={64}
+                value={nickname}
+                onChange={(e) => setNickname(e.target.value)}
+                placeholder="展示名称（留空显示用户名）"
+              />
+            </label>
+            <div className="team-create-row">
+              <label className="field">
+                <span>部门</span>
+                <Input allowClear maxLength={128} value={department} onChange={(e) => setDepartment(e.target.value)} placeholder="如：工程部" />
+              </label>
+              <label className="field">
+                <span>职位</span>
+                <Input allowClear maxLength={128} value={position} onChange={(e) => setPosition(e.target.value)} placeholder="如：工程师" />
+              </label>
+            </div>
+            <div className="team-create-row">
+              <label className="field">
+                <span>电话</span>
+                <Input allowClear maxLength={32} value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="13800000000" />
+              </label>
+              <label className="field">
+                <span>时区（IANA 名称）</span>
+                <Input allowClear maxLength={64} value={timezone} onChange={(e) => setTimezone(e.target.value)} placeholder="Asia/Shanghai" />
+              </label>
+            </div>
+            <label className="field">
+              <span>简介（≤512 字符）</span>
+              <Input.TextArea rows={3} maxLength={512} value={bio} onChange={(e) => setBio(e.target.value)} placeholder="个人简介" />
+            </label>
+          </div>
+          {error && <div className="error-text">{error}</div>}
+          {notice && <div className="banner ok" style={{ margin: '8px 0 0' }}>{notice}</div>}
+          <div className="setting-control" style={{ marginTop: 12, justifyContent: 'flex-end' }}>
+            <Button type="primary" disabled={busy || timezone.trim() === ''} loading={busy} onClick={() => void save()}>
+              {busy ? '保存中…' : '保存资料'}
+            </Button>
+            <Button disabled={busy} onClick={onClose}>关闭</Button>
+          </div>
+          <p className="hint" style={{ marginBottom: 0 }}>邮箱与用户名为账号标识，不可在此修改；界面语言与主题见右上角「外观」入口。</p>
+        </div>
+      )}
+    </Modal>
+  )
+}
+
+/**
+ * 外观快捷入口（v2.2）：Popover 内明暗切换 + accent 色板 + 语言，紧凑单列。
+ * 与设置页「外观」面板共享 theme.ts 偏好（saveTheme 广播 docflow:theme，
+ * 双向实时同步）；语言沿用 docflow:locale 事件。
+ */
+function AppearanceQuickEntry({ locale }: { locale: 'zh-CN' | 'en-US' }) {
+  const zh = locale === 'zh-CN'
+  const [open, setOpen] = useState(false)
+  const [accent, setAccent] = useState(() => loadTheme().accent)
+  const [mode, setMode] = useState<ThemeMode>(() => loadTheme().mode)
+  // 设置页外观面板改动主题时同步本入口。
+  useEffect(() => {
+    const onTheme = () => {
+      const cur = loadTheme()
+      setAccent(cur.accent)
+      setMode(cur.mode)
+    }
+    window.addEventListener('docflow:theme', onTheme)
+    return () => window.removeEventListener('docflow:theme', onTheme)
+  }, [])
+  const update = (next: { accent?: typeof accent; mode?: ThemeMode }) => {
+    const merged = { accent, mode, ...next }
+    setAccent(merged.accent)
+    setMode(merged.mode)
+    saveTheme(merged)
+  }
+  const switchLocale = (next: 'zh-CN' | 'en-US') => {
+    saveLocale(next)
+    window.dispatchEvent(new Event('docflow:locale'))
+  }
+  const panel = (
+    <div className="appearance-pop">
+      <div className="appearance-pop-row">
+        <span className="appearance-pop-label">{zh ? '明暗' : 'Theme'}</span>
+        <Segmented
+          size="small"
+          value={mode}
+          onChange={(v) => update({ mode: v as ThemeMode })}
+          options={[
+            { value: 'dark', label: zh ? '深色' : 'Dark' },
+            { value: 'light', label: zh ? '浅色' : 'Light' },
+            { value: 'system', label: zh ? '系统' : 'Auto' },
+          ]}
+        />
+      </div>
+      <div className="appearance-pop-row">
+        <span className="appearance-pop-label">{zh ? '主题色' : 'Accent'}</span>
+        <div className="appearance-pop-swatches">
+          {THEME_ACCENTS.map((a) => (
+            <button
+              key={a.value}
+              type="button"
+              className={`theme-swatch${accent === a.value ? ' active' : ''}`}
+              style={{ background: a.color }}
+              title={a.label}
+              aria-label={`${zh ? '主题色' : 'Accent'}：${a.label}`}
+              aria-pressed={accent === a.value}
+              onClick={() => update({ accent: a.value })}
+            />
+          ))}
+        </div>
+      </div>
+      <div className="appearance-pop-row">
+        <span className="appearance-pop-label">{zh ? '语言' : 'Language'}</span>
+        <Segmented
+          size="small"
+          value={locale}
+          onChange={(v) => switchLocale(v === 'en-US' ? 'en-US' : 'zh-CN')}
+          options={[
+            { value: 'zh-CN', label: '中文' },
+            { value: 'en-US', label: 'EN' },
+          ]}
+        />
+      </div>
+      <div className="appearance-pop-foot muted">{zh ? '完整外观设置见 设置 → 外观' : 'Full options in Settings → Appearance'}</div>
+    </div>
+  )
+  return (
+    <Popover trigger="click" placement="bottomRight" arrow={false} open={open} onOpenChange={setOpen} content={panel}>
+      <Tooltip title={zh ? '外观：明暗 / 主题色 / 语言' : 'Appearance'} mouseEnterDelay={0.5}>
+        <Button type="text" className="appearance-entry" aria-label={zh ? '外观' : 'Appearance'}>
+          <Palette size={15} strokeWidth={2} aria-hidden="true" />
+        </Button>
+      </Tooltip>
+    </Popover>
+  )
+}
+
 function TopBar() {
   const navigate = useNavigate()
   const location = useLocation()
   const locale = useLocale()
   const msg = (key: keyof typeof messages['zh-CN']) => t(locale, key)
-  const switchLocale = () => {
-    const next = locale === 'zh-CN' ? 'en-US' : 'zh-CN'
-    saveLocale(next)
-    window.dispatchEvent(new Event('docflow:locale'))
-  }
   // admin 探测：JWT 无 role 声明，降级为请求 /admin/stats（200/403）判定，
   // 结果按会话缓存（登录/登出后失效）；非 admin 隐藏「管理」入口。
   const [admin, setAdmin] = useState(false)
   const [me, setMe] = useState<MeData | null>(null)
+  // 「个人信息」独立弹窗（v2.2 用户下拉重组：profile → Modal 而非跳设置页）。
+  const [profileOpen, setProfileOpen] = useState(false)
   useEffect(() => {
     void getMe().then(setMe).catch(() => setMe(null))
+  }, [])
+  // 资料在别处（如个人信息弹窗）更新后刷新顶栏显示名。
+  useEffect(() => {
+    const onMe = () => { void getMe().then(setMe).catch(() => undefined) }
+    window.addEventListener('docflow:me', onMe)
+    return () => window.removeEventListener('docflow:me', onMe)
   }, [])
   useEffect(() => {
     let alive = true
@@ -427,11 +650,13 @@ function TopBar() {
     await logout()
     navigate('/login', { replace: true })
   }
-  // 用户菜单（antd Dropdown）：资料 / 设置 / 管理（admin）/ 退出。
+  // 用户菜单（v2.2 重组）：个人信息（独立弹窗）/ 设置（设置页）/ 管理
+  //（admin，管理后台 /admin）/ 分隔线 / 退出登录（底部，危险项）。
+  // 快捷键帮助（?）属设置性质入口，仍由全局 ? 键与 HotkeysHelp 提供。
   const userMenuItems: MenuProps['items'] = [
-    { key: 'profile', label: '资料' },
-    { key: 'settings', label: '设置' },
-    ...(admin ? [{ key: 'admin', label: '管理' }] : []),
+    { key: 'profile', label: '个人信息' },
+    { key: 'settings', label: msg('settings') },
+    ...(admin ? [{ key: 'admin', label: msg('admin') }] : []),
     { type: 'divider' },
     { key: 'logout', label: msg('logout'), danger: true },
   ]
@@ -440,7 +665,11 @@ function TopBar() {
       void handleLogout()
       return
     }
-    const target = key === 'profile' ? '/settings/profile' : key === 'settings' ? '/settings/security' : key === 'admin' ? '/admin/overview' : null
+    if (key === 'profile') {
+      setProfileOpen(true)
+      return
+    }
+    const target = key === 'settings' ? '/settings' : key === 'admin' ? '/admin' : null
     if (target) navigate(target)
   }
   return (
@@ -449,30 +678,36 @@ function TopBar() {
       <nav className="nav">
         <Link to="/dashboard" className={location.pathname === '/dashboard' ? 'active' : ''}>{msg('overview')}</Link>
         <Link to="/" className={location.pathname === '/' ? 'active' : ''}>{msg('files')}</Link>
-        {/* 团队管理页（v1.7）：我的团队卡片 + 成员管理/解散/转让入口。 */}
-        <Link to="/teams" className={location.pathname.startsWith('/teams') ? 'active' : ''}>{msg('teams')}</Link>
+        {/* 空间管理页（v2.0 统一空间模型）：我的空间卡片 + 成员/用户组/配额/解散/转让入口。 */}
+        <Link to="/spaces" className={location.pathname.startsWith('/spaces') ? 'active' : ''}>{msg('teams')}</Link>
           <Link to="/shared" className={location.pathname === '/shared' ? 'active' : ''}>{msg('shared')}</Link>
       </nav>
       <TopBarSearch />
       <OfflineBadge />
       <NotificationBell />
-      <Tooltip title={msg('language')}>
-        <Button type="text" onClick={switchLocale} icon={<Languages size={14} strokeWidth={2} aria-hidden="true" />}>
-          {locale === 'zh-CN' ? '中' : 'EN'}
-        </Button>
-      </Tooltip>
+      {/* 外观快捷入口（v2.2）：明暗 + accent 色板 + 语言（原独立语言按钮并入）。 */}
+      <AppearanceQuickEntry locale={locale} />
       <Dropdown menu={{ items: userMenuItems, onClick: onUserMenuClick }} trigger={['click']} placement="bottomRight">
-        <Button type="text" className="user-menu-trigger">
+        <Button type="text" className="user-menu-trigger" title={zhName(me)}>
           <span className="avatar">{(me?.profile.nickname || me?.username || '?').slice(0, 1).toUpperCase()}</span>
           {me?.profile.nickname || me?.username || '用户'}
+          {/* v2.2：头像旁下拉箭头（表达可展开）。 */}
+          <ChevronDown size={13} strokeWidth={2} aria-hidden="true" className="user-menu-caret" />
         </Button>
       </Dropdown>
+      {profileOpen && <ProfileInfoModal onClose={() => setProfileOpen(false)} />}
     </header>
   )
 }
 
+/** 用户菜单触发按钮的 tooltip 文本。 */
+function zhName(me: MeData | null): string {
+  return me ? `${me.profile.nickname || me.username}（${me.username}）` : '账户菜单'
+}
+
 function RequireAuth({ children, bare = false }: { children: ReactElement; bare?: boolean }) {
   const navigate = useNavigate()
+  const location = useLocation()
   // access_token 仅存内存：页面刷新后为空，先用 refresh cookie 静默续期恢复
   // 会话（api.ts 头注释约定的行为），失败再跳登录页。
   const [authed, setAuthed] = useState(hasAccessToken())
@@ -499,7 +734,9 @@ function RequireAuth({ children, bare = false }: { children: ReactElement; bare?
     <div className="app-shell">
       <TopBar />
       <GlobalHotkeys />
-      <main className="content">{children}</main>
+      {/* key=pathname：路由切换时重挂载 .content，触发 180ms 淡入过渡
+          （styles.css @keyframes content-fadein）。 */}
+      <main className="content" key={location.pathname}>{children}</main>
     </div>
   )
 }
@@ -520,12 +757,14 @@ export default function App() {
         {/* 公开分享页：无需登录，不包 RequireAuth。 */}
         <Route path="/s/:token" element={<SharePage />} />
         <Route path="/" element={<RequireAuth><FilesPage /></RequireAuth>} />
+        {/* 文件页别名单路由（/files?space=<id> 切换空间；与 / 同一页面）。 */}
+        <Route path="/files" element={<RequireAuth><FilesPage /></RequireAuth>} />
         {/* 个人仪表盘概览（v1.1）。 */}
         <Route path="/dashboard" element={<RequireAuth><DashboardPage /></RequireAuth>} />
-        <Route path="/teams" element={<RequireAuth><TeamsPage /></RequireAuth>} />
-        <Route path="/teams/:id" element={<RequireAuth><TeamSpacePage /></RequireAuth>} />
-        {/* 接受团队邀请落地页（/teams/join/:token，一次性链接）。 */}
-        <Route path="/teams/join/:token" element={<RequireAuth><JoinTeamPage /></RequireAuth>} />
+        {/* 空间管理页（v2.0）：我的空间卡片；空间内文件统一由 /files?space= 承载。 */}
+        <Route path="/spaces" element={<RequireAuth><SpacesPage /></RequireAuth>} />
+        {/* 接受空间邀请落地页（/spaces/join/:token，一次性链接）。 */}
+        <Route path="/spaces/join/:token" element={<RequireAuth><JoinSpacePage /></RequireAuth>} />
         <Route path="/shared" element={<RequireAuth><SharedPage /></RequireAuth>} />
         {/* 按路径访问（v1.1，登录）：resolve 现取 grant/file_id 后复用查看与
             编辑器分发；须置于 /view/:fileId、/edit/:fileId 之前匹配。 */}
@@ -550,7 +789,9 @@ export default function App() {
         <Route path="/admin/:section" element={<RequireAuth><AdminPage /></RequireAuth>} />
         {/* 回收站已弹窗化（文件页工具栏按钮，见 TrashModal），整页路由删除；
             旧地址 /trash 落入通配重定向回文件页。 */}
-        <Route path="/settings" element={<Navigate to="/settings/profile" replace />} />
+        {/* 账户设置（v2.3「资料」tab 删除——资料编辑并入右上角「个人信息」弹窗；
+            /settings 缺省重定向到「外观」）。 */}
+        <Route path="/settings" element={<Navigate to="/settings/appearance" replace />} />
         {/* 账户设置：登录会话与个人访问令牌（PAT）管理。 */}
         <Route path="/settings/:section" element={<RequireAuth><SettingsPage /></RequireAuth>} />
         <Route path="*" element={<Navigate to="/" replace />} />

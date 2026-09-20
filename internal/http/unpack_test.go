@@ -53,7 +53,11 @@ func (t *rawFakeTree) CreateFolderIn(user, parent uuid.UUID, name string) (files
 	}
 	id := uuid.New()
 	pid := parent
-	f := files.File{ID: id, Name: name, ParentID: &pid, OwnerID: user, Type: "folder", ScopeType: "personal"}
+	spaceID := uuid.Nil
+	if p, ok := t.files[parent]; ok {
+		spaceID = p.SpaceID
+	}
+	f := files.File{ID: id, Name: name, ParentID: &pid, OwnerID: user, Type: "folder", SpaceID: spaceID}
 	t.files[id] = f
 	if t.byName[parent] == nil {
 		t.byName[parent] = map[string]uuid.UUID{}
@@ -71,7 +75,11 @@ func (t *rawFakeTree) createUploaded(user, parent uuid.UUID, name, storageKey st
 	t.seq++
 	id := uuid.New()
 	pid := parent
-	t.files[id] = files.File{ID: id, Name: name, ParentID: &pid, OwnerID: user, Type: "file", ScopeType: "personal"}
+	spaceID := uuid.Nil
+	if p, ok := t.files[parent]; ok {
+		spaceID = p.SpaceID
+	}
+	t.files[id] = files.File{ID: id, Name: name, ParentID: &pid, OwnerID: user, Type: "file", SpaceID: spaceID}
 	if t.byName[parent] == nil {
 		t.byName[parent] = map[string]uuid.UUID{}
 	}
@@ -114,10 +122,10 @@ func newUnpackEnv(t *testing.T, zipBytes []byte) *unpackEnv {
 	gin.SetMode(gin.TestMode)
 	tree := newRawFakeTree()
 	owner := uuid.New()
-	root := files.File{ID: uuid.New(), Name: "根目录", OwnerID: owner, Type: "folder", IsRoot: true, ScopeType: "personal"}
+	root := files.File{ID: uuid.New(), Name: "根目录", OwnerID: owner, Type: "folder", IsRoot: true}
 	tree.add(root, 0, "", "")
 	zipID := uuid.New()
-	tree.add(files.File{ID: zipID, Name: "bundle.zip", ParentID: &root.ID, OwnerID: owner, Type: "file", ScopeType: "personal"}, int64(len(zipBytes)), "application/zip", files.BlobStatusAvailable)
+	tree.add(files.File{ID: zipID, Name: "bundle.zip", ParentID: &root.ID, OwnerID: owner, Type: "file"}, int64(len(zipBytes)), "application/zip", files.BlobStatusAvailable)
 
 	h := NewHandler(nil, nil, nil, nil, nil, nil, newMemStorage(), false, "", time.Hour)
 	h.unpacker = tree

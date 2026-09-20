@@ -46,49 +46,60 @@ func (m *memPathTree) softDelete(id uuid.UUID) {
 	delete(m.files, id)
 }
 
-// newTestPathEnv 组装覆盖 personal/team 根与权限判定的 pathEnv。
-func newTestPathEnv(m *memPathTree, personalRoot, teamRoot File, reader, writer func(user, team uuid.UUID) (bool, error)) pathEnv {
+// newTestPathEnv 组装覆盖两个空间根与权限判定的 pathEnv。
+func newTestPathEnv(m *memPathTree, rootA, rootB File, reader, writer func(user, space uuid.UUID) (bool, error)) pathEnv {
+	roots := map[uuid.UUID]File{rootA.SpaceID: rootA, rootB.SpaceID: rootB}
 	return pathEnv{
-		findChild:    m.findChild,
-		personalRoot: func(actor uuid.UUID) (File, error) { return personalRoot, nil },
-		teamRoot:     func(teamID uuid.UUID) (File, error) { return teamRoot, nil },
-		teamReader:   reader,
-		teamWriter:   writer,
+		findChild: m.findChild,
+		spaceRoot: func(spaceID uuid.UUID) (File, error) {
+			if r, ok := roots[spaceID]; ok {
+				return r, nil
+			}
+			return File{}, ErrNotFound
+		},
+		spaceReader: reader,
+		spaceWriter: writer,
 	}
 }
 
-func newTestTree(t *testing.T) (pathEnv, *memPathTree, File, File, uuid.UUID, uuid.UUID, uuid.UUID) {
+func newTestTree(t *testing.T) (pathEnv, *memPathTree, File, File, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID) {
 	t.Helper()
 	m := newMemPathTree()
-	personalRoot := File{ID: uuid.New(), Name: "根目录", OwnerID: uuid.New(), Type: "folder", IsRoot: true, ScopeType: "personal"}
-	teamID := uuid.New()
-	teamRoot := File{ID: uuid.New(), Name: "团队根目录", OwnerID: uuid.New(), Type: "folder", IsRoot: true, ScopeType: "team", TeamID: &teamID}
-	m.add(personalRoot)
-	m.add(teamRoot)
-	// 个人：/项目资料/2026 计划/年度报告.docx + /notes.txt
-	proj := File{ID: uuid.New(), Name: "项目资料", ParentID: &personalRoot.ID, OwnerID: personalRoot.OwnerID, Type: "folder", ScopeType: "personal"}
+	spaceA := uuid.New()
+	ownerA := uuid.New()
+	rootA := File{ID: uuid.New(), Name: "根目录", OwnerID: ownerA, SpaceID: spaceA, Type: "folder", IsRoot: true}
+	m.add(rootA)
+	// 空间 A：/项目资料/2026 计划/年度报告.docx + /notes.txt
+	proj := File{ID: uuid.New(), Name: "项目资料", ParentID: &rootA.ID, OwnerID: ownerA, SpaceID: spaceA, Type: "folder"}
 	m.add(proj)
-	sub := File{ID: uuid.New(), Name: "2026 计划", ParentID: &proj.ID, OwnerID: personalRoot.OwnerID, Type: "folder", ScopeType: "personal"}
+	sub := File{ID: uuid.New(), Name: "2026 计划", ParentID: &proj.ID, OwnerID: ownerA, SpaceID: spaceA, Type: "folder"}
 	m.add(sub)
-	report := File{ID: uuid.New(), Name: "年度报告.docx", ParentID: &sub.ID, OwnerID: personalRoot.OwnerID, Type: "file", ScopeType: "personal"}
+	report := File{ID: uuid.New(), Name: "年度报告.docx", ParentID: &sub.ID, OwnerID: ownerA, SpaceID: spaceA, Type: "file"}
 	m.add(report)
-	notes := File{ID: uuid.New(), Name: "readme.txt", ParentID: &personalRoot.ID, OwnerID: personalRoot.OwnerID, Type: "file", ScopeType: "personal"}
+	notes := File{ID: uuid.New(), Name: "readme.txt", ParentID: &rootA.ID, OwnerID: ownerA, SpaceID: spaceA, Type: "file"}
 	m.add(notes)
-	// 团队：/共享/budget.xlsx
-	shared := File{ID: uuid.New(), Name: "共享", ParentID: &teamRoot.ID, OwnerID: teamRoot.OwnerID, Type: "folder", ScopeType: "team", TeamID: &teamID}
+
+	// 空间 B（他人空间）：/共享/budget.xlsx
+	spaceB := uuid.New()
+	rootB := File{ID: uuid.New(), Name: "协作根目录", OwnerID: uuid.New(), SpaceID: spaceB, Type: "folder", IsRoot: true}
+	m.add(rootB)
+	shared := File{ID: uuid.New(), Name: "共享", ParentID: &rootB.ID, OwnerID: rootB.OwnerID, SpaceID: spaceB, Type: "folder"}
 	m.add(shared)
-	budget := File{ID: uuid.New(), Name: "budget.xlsx", ParentID: &shared.ID, OwnerID: teamRoot.OwnerID, Type: "file", ScopeType: "team", TeamID: &teamID}
+	budget := File{ID: uuid.New(), Name: "budget.xlsx", ParentID: &shared.ID, OwnerID: rootB.OwnerID, SpaceID: spaceB, Type: "file"}
 	m.add(budget)
 
 	editor := uuid.New()
 	viewer := uuid.New()
-	member := func(user, team uuid.UUID) (bool, error) {
-		return team == teamID && (user == editor || user == viewer), nil
+	member := func(user, space uuid.UUID) (bool, error) {
+		if space == spaceA {
+			return user == ownerA, nil
+		}
+		return space == spaceB && (user == editor || user == viewer), nil
 	}
-	env := newTestPathEnv(m, personalRoot, teamRoot, member, func(user, team uuid.UUID) (bool, error) {
-		return team == teamID && user == editor, nil // 仅 editor 可写
+	env := newTestPathEnv(m, rootA, rootB, member, func(user, space uuid.UUID) (bool, error) {
+		return space == spaceB && user == editor, nil // 空间 B 仅 editor 可写
 	})
-	return env, m, personalRoot, teamRoot, editor, viewer, teamID
+	return env, m, rootA, rootB, ownerA, editor, viewer, spaceB
 }
 
 func TestSplitPathSegments(t *testing.T) {
@@ -130,10 +141,10 @@ func TestSplitPathSegments(t *testing.T) {
 	}
 }
 
-func TestResolveNamespacePathPersonal(t *testing.T) {
-	env, m, personalRoot, _, editor, _, _ := newTestTree(t)
+func TestResolveNamespacePathOwn(t *testing.T) {
+	env, m, rootA, _, ownerA, editor, _, _ := newTestTree(t)
 	// 正常路径命中；canonical 链含实际存储名称。
-	f, chain, err := resolveNamespacePath(env, personalRoot.OwnerID, NamespacePersonal, personalRoot.OwnerID, "/项目资料/2026 计划/年度报告.docx", false)
+	f, chain, err := resolveNamespacePath(env, ownerA, NamespaceSpace, rootA.SpaceID, "/项目资料/2026 计划/年度报告.docx", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,24 +152,21 @@ func TestResolveNamespacePathPersonal(t *testing.T) {
 		t.Fatalf("f=%+v chain=%d", f, len(chain))
 	}
 	// 大小写规范化：请求 README.TXT 命中存储的 readme.txt。
-	f2, _, err := resolveNamespacePath(env, personalRoot.OwnerID, NamespacePersonal, personalRoot.OwnerID, "README.txt", false)
+	f2, _, err := resolveNamespacePath(env, ownerA, NamespaceSpace, rootA.SpaceID, "README.txt", false)
 	if err != nil || f2.Name != "readme.txt" {
 		t.Fatalf("大小写规范化: f=%+v err=%v", f2, err)
 	}
 	// 中间段是文件 → ErrNotFound（统一不泄露）。
-	if _, _, err := resolveNamespacePath(env, personalRoot.OwnerID, NamespacePersonal, personalRoot.OwnerID, "readme.txt/inner", false); !errors.Is(err, ErrNotFound) {
+	if _, _, err := resolveNamespacePath(env, ownerA, NamespaceSpace, rootA.SpaceID, "readme.txt/inner", false); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("file as intermediate: %v", err)
 	}
 	// 断链/不存在 → ErrNotFound。
-	if _, _, err := resolveNamespacePath(env, personalRoot.OwnerID, NamespacePersonal, personalRoot.OwnerID, "不存在/x.txt", false); !errors.Is(err, ErrNotFound) {
+	if _, _, err := resolveNamespacePath(env, ownerA, NamespaceSpace, rootA.SpaceID, "不存在/x.txt", false); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing: %v", err)
 	}
-	// 越权 personal：scopeID != actor 或他人访问。
-	if _, _, err := resolveNamespacePath(env, personalRoot.OwnerID, NamespacePersonal, editor, "x", false); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("scope mismatch: %v", err)
-	}
-	if _, _, err := resolveNamespacePath(env, editor, NamespacePersonal, personalRoot.OwnerID, "readme.txt", false); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("other user: %v", err)
+	// 非成员（editor 不在空间 A）→ ErrNotFound。
+	if _, _, err := resolveNamespacePath(env, editor, NamespaceSpace, rootA.SpaceID, "readme.txt", false); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("non-member user: %v", err)
 	}
 	// 软删除中间层 → ErrNotFound。
 	var projID uuid.UUID
@@ -168,41 +176,41 @@ func TestResolveNamespacePathPersonal(t *testing.T) {
 		}
 	}
 	m.softDelete(projID)
-	if _, _, err := resolveNamespacePath(env, personalRoot.OwnerID, NamespacePersonal, personalRoot.OwnerID, "项目资料/2026 计划/年度报告.docx", false); !errors.Is(err, ErrNotFound) {
+	if _, _, err := resolveNamespacePath(env, ownerA, NamespaceSpace, rootA.SpaceID, "项目资料/2026 计划/年度报告.docx", false); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("soft-deleted intermediate: %v", err)
 	}
 }
 
-func TestResolveNamespacePathTeam(t *testing.T) {
-	env, _, _, teamRoot, editor, viewer, teamID := newTestTree(t)
-	// 成员（viewer）可读团队文件。
-	if _, _, err := resolveNamespacePath(env, viewer, NamespaceTeam, teamID, "共享/budget.xlsx", false); err != nil {
+func TestResolveNamespacePathSpace(t *testing.T) {
+	env, _, _, rootB, _, editor, viewer, spaceB := newTestTree(t)
+	// 成员（viewer）可读空间文件。
+	if _, _, err := resolveNamespacePath(env, viewer, NamespaceSpace, spaceB, "共享/budget.xlsx", false); err != nil {
 		t.Fatal(err)
 	}
-	// 非成员 404；未注入 teamReader 时 fail closed 403。
+	// 非成员 404；未注入 spaceReader 时 fail closed 403。
 	outsider := uuid.New()
-	if _, _, err := resolveNamespacePath(env, outsider, NamespaceTeam, teamID, "共享/budget.xlsx", false); !errors.Is(err, ErrNotFound) {
+	if _, _, err := resolveNamespacePath(env, outsider, NamespaceSpace, spaceB, "共享/budget.xlsx", false); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("non-member read: %v", err)
 	}
 	noReader := env
-	noReader.teamReader = nil
-	if _, _, err := resolveNamespacePath(noReader, viewer, NamespaceTeam, teamID, "共享", false); !errors.Is(err, ErrForbidden) {
-		t.Fatalf("no teamReader: %v", err)
+	noReader.spaceReader = nil
+	if _, _, err := resolveNamespacePath(noReader, viewer, NamespaceSpace, spaceB, "共享", false); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("no spaceReader: %v", err)
 	}
 	// viewer 写（mode=edit）→ ErrForbidden；editor 可写。
-	if _, _, err := resolveNamespacePath(env, viewer, NamespaceTeam, teamID, "共享/budget.xlsx", true); !errors.Is(err, ErrForbidden) {
+	if _, _, err := resolveNamespacePath(env, viewer, NamespaceSpace, spaceB, "共享/budget.xlsx", true); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("viewer write: %v", err)
 	}
-	if _, _, err := resolveNamespacePath(env, editor, NamespaceTeam, teamID, "共享/budget.xlsx", true); err != nil {
+	if _, _, err := resolveNamespacePath(env, editor, NamespaceSpace, spaceB, "共享/budget.xlsx", true); err != nil {
 		t.Fatalf("editor write: %v", err)
 	}
-	// 团队根目录自身可解析（空路径）。
-	root, _, err := resolveNamespacePath(env, editor, NamespaceTeam, teamID, "", false)
-	if err != nil || root.ID != teamRoot.ID {
-		t.Fatalf("team root resolve: %+v %v", root, err)
+	// 空间根目录自身可解析（空路径）。
+	root, _, err := resolveNamespacePath(env, editor, NamespaceSpace, spaceB, "", false)
+	if err != nil || root.ID != rootB.ID {
+		t.Fatalf("space root resolve: %+v %v", root, err)
 	}
 	// 非法 nsType。
-	if _, _, err := resolveNamespacePath(env, editor, "bogus", teamID, "", false); !errors.Is(err, ErrInvalidNamespace) {
+	if _, _, err := resolveNamespacePath(env, editor, "bogus", spaceB, "", false); !errors.Is(err, ErrInvalidNamespace) {
 		t.Fatalf("bogus ns: %v", err)
 	}
 }

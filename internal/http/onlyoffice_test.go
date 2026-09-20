@@ -228,7 +228,7 @@ func TestOnlyOfficeSessionAndCallbackEndpoints(t *testing.T) {
 	const apiSecret = "0123456789abcdef0123456789abcdef"
 	owner := uuid.New()
 	store := &ooFileStore{
-		file:    files.File{ID: uuid.New(), Name: "PRD.docx", OwnerID: owner, Type: "file", ScopeType: "personal"},
+		file:    files.File{ID: uuid.New(), Name: "PRD.docx", OwnerID: owner, Type: "file"},
 		version: files.FileVersion{ID: uuid.New(), Version: 1},
 		blob:    files.ObjectBlob{StorageKey: "objects/x/1", Size: 11, MimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", Status: files.BlobStatusAvailable},
 	}

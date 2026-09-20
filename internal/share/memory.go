@@ -14,28 +14,28 @@ var _ Repo = (*MemoryStore)(nil)
 
 // MemoryStore 是 Repo 的内存实现，供测试使用（不依赖 PostgreSQL）。
 type MemoryStore struct {
-	mu         sync.RWMutex
-	items      map[uuid.UUID]Share
-	public     map[uuid.UUID]bool
-	shareUsers map[uuid.UUID]map[uuid.UUID]time.Time // share_id -> user_id -> created_at
-	shareTeams map[uuid.UUID]map[uuid.UUID]time.Time // share_id -> team_id -> created_at
-	shareFiles map[uuid.UUID]map[uuid.UUID]time.Time // share_id -> file_id -> created_at（打包分享可见条目）
-	sessions   map[string]AccessSession              // session_hash -> 会话
-	events     []AccessEvent                         // created_at 升序追加
-	eventSeq   int64
-	// membership 注入的团队成员判定（测试用）：user 是否属于 team；
-	// nil 时 share_teams 命中不可达（与未注入 membership 的 Service 一致）。
-	membership func(userID, teamID uuid.UUID) bool
+	mu          sync.RWMutex
+	items       map[uuid.UUID]Share
+	public      map[uuid.UUID]bool
+	shareUsers  map[uuid.UUID]map[uuid.UUID]time.Time // share_id -> user_id -> created_at
+	shareSpaces map[uuid.UUID]map[uuid.UUID]time.Time // share_id -> space_id -> created_at
+	shareFiles  map[uuid.UUID]map[uuid.UUID]time.Time // share_id -> file_id -> created_at（打包分享可见条目）
+	sessions    map[string]AccessSession              // session_hash -> 会话
+	events      []AccessEvent                         // created_at 升序追加
+	eventSeq    int64
+	// membership 注入的空间成员判定（测试用）：user 是否属于 space；
+	// nil 时 share_spaces 命中不可达（与未注入 membership 的 Service 一致）。
+	membership func(userID, spaceID uuid.UUID) bool
 }
 
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		items:      make(map[uuid.UUID]Share),
-		public:     make(map[uuid.UUID]bool),
-		shareUsers: make(map[uuid.UUID]map[uuid.UUID]time.Time),
-		shareTeams: make(map[uuid.UUID]map[uuid.UUID]time.Time),
-		shareFiles: make(map[uuid.UUID]map[uuid.UUID]time.Time),
-		sessions:   make(map[string]AccessSession),
+		items:       make(map[uuid.UUID]Share),
+		public:      make(map[uuid.UUID]bool),
+		shareUsers:  make(map[uuid.UUID]map[uuid.UUID]time.Time),
+		shareSpaces: make(map[uuid.UUID]map[uuid.UUID]time.Time),
+		shareFiles:  make(map[uuid.UUID]map[uuid.UUID]time.Time),
+		sessions:    make(map[string]AccessSession),
 	}
 }
 
@@ -172,15 +172,15 @@ func (m *MemoryStore) ListByOwnerFiltered(owner uuid.UUID, f OwnerListFilter, li
 	return matched, total, nil
 }
 
-// SetMembership 注入团队成员判定器（测试用）：user 是否属于 team（幂等）。
-func (m *MemoryStore) SetMembership(f func(userID, teamID uuid.UUID) bool) {
+// SetMembership 注入空间成员判定器（测试用）：user 是否属于 space（幂等）。
+func (m *MemoryStore) SetMembership(f func(userID, spaceID uuid.UUID) bool) {
 	if f != nil {
 		m.membership = f
 	}
 }
 
 // ListSharedWithUser 与 GormStore 语义一致：有效私有分享（不含自己创建的），
-// share_users 显式授权或（注入的成员判定命中）share_teams 团队成员，created_at 倒序。
+// share_users 显式授权或（注入的成员判定命中）share_spaces 空间成员，created_at 倒序。
 func (m *MemoryStore) ListSharedWithUser(user uuid.UUID, now time.Time, limit int) ([]Share, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -194,8 +194,8 @@ func (m *MemoryStore) ListSharedWithUser(user uuid.UUID, now time.Time, limit in
 			granted = true
 		}
 		if !granted && m.membership != nil {
-			for teamID := range m.shareTeams[v.ID] {
-				if m.membership(user, teamID) {
+			for spaceID := range m.shareSpaces[v.ID] {
+				if m.membership(user, spaceID) {
 					granted = true
 					break
 				}
@@ -228,6 +228,17 @@ func (m *MemoryStore) Revoke(id uuid.UUID, now time.Time) error {
 		v.RevokedAt = &now
 		m.items[id] = v
 	}
+	return nil
+}
+
+// Delete 物理删除分享行及全部关联（与 GormStore 的 FK 级联语义对齐）。
+func (m *MemoryStore) Delete(id uuid.UUID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.items, id)
+	delete(m.shareUsers, id)
+	delete(m.shareSpaces, id)
+	delete(m.shareFiles, id)
 	return nil
 }
 
@@ -289,14 +300,14 @@ func (m *MemoryStore) AddShareUsers(shareID uuid.UUID, userIDs []uuid.UUID, now 
 	return nil
 }
 
-func (m *MemoryStore) AddShareTeams(shareID uuid.UUID, teamIDs []uuid.UUID, now time.Time) error {
+func (m *MemoryStore) AddShareSpaces(shareID uuid.UUID, spaceIDs []uuid.UUID, now time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.shareTeams[shareID] == nil {
-		m.shareTeams[shareID] = make(map[uuid.UUID]time.Time)
+	if m.shareSpaces[shareID] == nil {
+		m.shareSpaces[shareID] = make(map[uuid.UUID]time.Time)
 	}
-	for _, id := range teamIDs {
-		m.shareTeams[shareID][id] = now
+	for _, id := range spaceIDs {
+		m.shareSpaces[shareID][id] = now
 	}
 	return nil
 }
@@ -311,11 +322,11 @@ func (m *MemoryStore) ListShareUserIDs(shareID uuid.UUID) ([]uuid.UUID, error) {
 	return out, nil
 }
 
-func (m *MemoryStore) ListShareTeamIDs(shareID uuid.UUID) ([]uuid.UUID, error) {
+func (m *MemoryStore) ListShareSpaceIDs(shareID uuid.UUID) ([]uuid.UUID, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	out := make([]uuid.UUID, 0, len(m.shareTeams[shareID]))
-	for id := range m.shareTeams[shareID] {
+	out := make([]uuid.UUID, 0, len(m.shareSpaces[shareID]))
+	for id := range m.shareSpaces[shareID] {
 		out = append(out, id)
 	}
 	return out, nil

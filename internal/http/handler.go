@@ -24,15 +24,16 @@ import (
 	"github.com/docflow/docflow/internal/onlyoffice"
 	"github.com/docflow/docflow/internal/realtime"
 	"github.com/docflow/docflow/internal/share"
+	"github.com/docflow/docflow/internal/space"
 	"github.com/docflow/docflow/internal/tagging"
 	"github.com/docflow/docflow/internal/tasks"
-	"github.com/docflow/docflow/internal/team"
 	"github.com/docflow/docflow/internal/upload"
 	"github.com/docflow/docflow/internal/webhook"
 	"github.com/docflow/docflow/internal/webpkg"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
 )
 
 // userDirectory 抽象用户目录与账号管理查询（生产实现为 *auth.UserStore），
@@ -61,6 +62,26 @@ type userDirectory interface {
 }
 
 var _ userDirectory = (*auth.UserStore)(nil)
+
+// emailChangeAccount 为换绑邮箱链路的最小账号读写源（生产实现
+// *auth.UserStore；独立窄接口避免扩张 userDirectory 造成测试替身连锁改动）。
+type emailChangeAccount interface {
+	GetByID(id uuid.UUID) (auth.User, error)
+	UpdateEmail(id uuid.UUID, email string) error
+	EmailExists(email string) (bool, error)
+}
+
+var _ emailChangeAccount = (*auth.UserStore)(nil)
+
+// SetEmailChange 注入换绑邮箱链路依赖（验证码存储 + 账号读写源；幂等）。
+func (h *Handler) SetEmailChange(codes auth.EmailChangeStore, account emailChangeAccount) {
+	if codes != nil {
+		h.emailChangeCodes = codes
+	}
+	if account != nil {
+		h.emailChangeAccount = account
+	}
+}
 
 // dummyPasswordHash 为包初始化时一次性生成的 bcrypt 哈希（与 HashPassword
 // 同 cost）。用户不存在/非 active 分支对它执行同样的 CompareHashAndPassword，
@@ -96,7 +117,7 @@ type Handler struct {
 	users     userDirectory
 	files     *files.Store
 	shares    *share.Service
-	teams     *team.Service
+	spaces    *space.Service
 	// groups 为管理端用户组服务（migration 035，SetGroups 注入）：组 CRUD
 	// 与成员管理（仅 admin 路由组）；未注入时组端点返回 503（生产恒注入）。
 	groups          *group.Service
@@ -111,6 +132,9 @@ type Handler struct {
 	stats      statsSource
 	auditQuery auditQuerySource
 	roles      auth.RoleLookup
+	// statsDB 为管理端空间列表的直查 DB（SetStatsSource 一并注入；仅 admin
+	// 路由组消费，缺省时 /admin/spaces 返回 503）。
+	statsDB *gorm.DB
 	// caddyTLS 为 HTTPS 运行时切换服务（SetCaddyTLS 注入）；nil 时
 	// GET /admin/tls 返回 managed=false，PUT 返回 503。
 	caddyTLS *caddytls.Service
@@ -163,8 +187,13 @@ type Handler struct {
 	notifications  *notify.Service
 	realtime       *realtime.Hub
 	allowedOrigins []string
-	environment    string
-	wsSecret       string
+	// emailChangeAccount 为换绑邮箱链路的账号读写源（SetEmailChange 注入，
+	// 生产为 *auth.UserStore）；emailChangeCodes 为验证码存储。任一未注入
+	// 时换绑邮箱端点返回 503（契约测试不注入）。
+	emailChangeAccount emailChangeAccount
+	emailChangeCodes   auth.EmailChangeStore
+	environment        string
+	wsSecret           string
 	// webhooks 为 Webhook 通知渠道服务（SetWebhooks 注入）：注册/列举/
 	// 启停/删除（本人维度）；未注入时 webhook 端点返回 503（生产恒注入）。
 	webhooks *webhook.Service
@@ -210,7 +239,7 @@ type Handler struct {
 	loginLockDuration time.Duration
 	backupDir         string
 	// mcpDeps 为 MCP 端点（POST /mcp）的服务依赖：NewHandler 以 files/
-	// upload/share/team/storage 装配，search 于 Register 时并入（SetSearch
+	// upload/share/space/storage 装配，search 于 Register 时并入（SetSearch
 	// 后注册）；测试可直接改写注入内存实现（模式同 resolver/unpacker）。
 	mcpDeps *mcp.Deps
 	// mcpServer 为 Register 时构建的 MCP 服务端实例（mcpPost 消费）。
@@ -223,8 +252,8 @@ type Handler struct {
 	openWith openWithStore
 }
 
-func NewHandler(authService *auth.Service, users *auth.UserStore, fileStore *files.Store, shares *share.Service, teams *team.Service, uploads *upload.Service, storage upload.Storage, cookieSecure bool, cookieDomain string, refreshTokenTTL time.Duration) *Handler {
-	h := &Handler{auth: authService, users: users, files: fileStore, shares: shares, teams: teams, uploads: uploads, storage: storage, cookieSecure: cookieSecure, cookieDomain: cookieDomain, refreshTokenTTL: refreshTokenTTL, audit: audit.NopRecorder{}, mailer: mail.NewNoopMailer(), idem: newIdemCache(idempotencyTTL), versionReader: fileStore, usage: fileStore, aiFiles: fileStore, resolver: fileStore, unpacker: fileStore, csrfStrict: true, loginMaxRetries: 5, loginLockDuration: 15 * time.Minute, mcpDeps: &mcp.Deps{Files: fileStore, Uploads: uploads, Storage: storage, Shares: shares, Teams: teams}}
+func NewHandler(authService *auth.Service, users *auth.UserStore, fileStore *files.Store, shares *share.Service, spaces *space.Service, uploads *upload.Service, storage upload.Storage, cookieSecure bool, cookieDomain string, refreshTokenTTL time.Duration) *Handler {
+	h := &Handler{auth: authService, users: users, files: fileStore, shares: shares, spaces: spaces, uploads: uploads, storage: storage, cookieSecure: cookieSecure, cookieDomain: cookieDomain, refreshTokenTTL: refreshTokenTTL, audit: audit.NopRecorder{}, mailer: mail.NewNoopMailer(), idem: newIdemCache(idempotencyTTL), versionReader: fileStore, usage: fileStore, aiFiles: fileStore, resolver: fileStore, unpacker: fileStore, csrfStrict: true, loginMaxRetries: 5, loginLockDuration: 15 * time.Minute, mcpDeps: &mcp.Deps{Files: fileStore, Uploads: uploads, Storage: storage, Shares: shares, Spaces: spaces}}
 	if fileStore != nil {
 		h.zipper = fileStore
 	}
@@ -408,6 +437,10 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	//（nickname/department/position/phone/bio/language/timezone）。
 	api.GET("/me", h.me)
 	api.PATCH("/me", h.updateMe)
+	// 换绑邮箱（账号安全，v2.4）：验证密码后向新邮箱投递 6 位验证码，
+	// 二次提交确认完成换绑（见 me_email.go）。
+	api.POST("/me/email/change-request", h.requestEmailChange)
+	api.POST("/me/email/change-confirm", h.confirmEmailChange)
 	// 默认打开方式偏好（按扩展名，user_open_with）：列表、upsert 与删除。
 	api.GET("/me/open-with", h.listOpenWith)
 	api.PUT("/me/open-with", h.updateOpenWith)
@@ -502,6 +535,8 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	api.GET("/shares/:id", h.getShare)
 	api.PATCH("/shares/:id", h.updateShare)
 	api.DELETE("/shares/:id", h.revokeShare)
+	// 清除已撤销分享的记录（物理删除；须撤销满 30 天，见 shares.go）。
+	api.DELETE("/shares/:id/purge", h.purgeShare)
 	// 私有分享访问入口（登录用户）：按显式授权访问分享文件。
 	api.GET("/shares/:id/files/:fid", h.shareFileInfo)
 	api.GET("/shares/:id/files/:fid/download", h.shareFileDownload)
@@ -510,27 +545,35 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	api.GET("/users/lookup", h.lookupUsers)
 	// 用户检索（成员/ACL 主体选择器）：任何登录用户可用。
 	api.GET("/users/search", h.searchUsers)
-	// 团队与团队空间。
-	api.POST("/teams", h.createTeam)
-	api.GET("/teams", h.listTeams)
-	api.PATCH("/teams/:id", h.updateTeam)
-	api.DELETE("/teams/:id", h.deleteTeam)
-	// 成员主动退出（非 owner；v1.7 团队页「离开」卡片操作）。
-	api.POST("/teams/:id/leave", h.leaveTeam)
-	// 所有权转让（仅 owner）：POST {user_id}（五级内置角色，见 teams.go）。
-	api.POST("/teams/:id/transfer-ownership", h.transferTeamOwnership)
-	api.POST("/teams/:id/members", h.addTeamMember)
-	api.GET("/teams/:id/members", h.listTeamMembers)
-	api.PATCH("/teams/:id/members/:uid", h.updateTeamMember)
-	api.DELETE("/teams/:id/members/:uid", h.removeTeamMember)
-	// 团队邮箱邀请（v1.7.1 成员管理完善；owner/admin 管理，token 一次性）。
-	api.POST("/teams/:id/invites", h.createTeamInvite)
-	api.GET("/teams/:id/invites", h.listTeamInvites)
-	api.DELETE("/teams/:id/invites/:iid", h.revokeTeamInvite)
-	// 接受邀请（登录用户凭 token 入队；独立前缀避免与 /teams/:id 路由树冲突）。
-	api.POST("/team-invites/join/:token", h.acceptTeamInvite)
-	api.GET("/teams/:id/files", h.listTeamFiles)
-	api.POST("/teams/:id/folders", h.createTeamFolder)
+	// 用户只读信息（成员列表行点击查看，v2.4）：任何登录用户可用；暴露面
+	// 与 /users/search 一致（自托管协作场景可接受，不含手机号等敏感档案）。
+	api.GET("/users/:id", h.getUser)
+	// 空间与空间文件（统一空间模型，migration 040）。
+	api.POST("/spaces", h.createSpace)
+	api.GET("/spaces", h.listSpaces)
+	api.PATCH("/spaces/:id", h.patchSpace)
+	api.DELETE("/spaces/:id", h.deleteSpace)
+	// 成员主动退出（非 owner 直接成员）。
+	api.POST("/spaces/:id/leave", h.leaveSpace)
+	// 所有权转让（仅 owner）：POST {user_id}（五级内置角色，见 spaces.go）。
+	api.POST("/spaces/:id/transfer-ownership", h.transferSpaceOwnership)
+	api.POST("/spaces/:id/members", h.addSpaceMember)
+	api.GET("/spaces/:id/members", h.listSpaceMembers)
+	api.PATCH("/spaces/:id/members/:uid", h.updateSpaceMember)
+	api.DELETE("/spaces/:id/members/:uid", h.removeSpaceMember)
+	// 空间用户组成员（space_group_members：加组/改组角色/移除组）。
+	api.GET("/spaces/:id/groups", h.listSpaceGroups)
+	api.POST("/spaces/:id/groups", h.addSpaceGroup)
+	api.PATCH("/spaces/:id/groups/:gid", h.updateSpaceGroup)
+	api.DELETE("/spaces/:id/groups/:gid", h.removeSpaceGroup)
+	// 空间邮箱邀请（owner/admin 管理，token 一次性）。
+	api.POST("/spaces/:id/invites", h.createSpaceInvite)
+	api.GET("/spaces/:id/invites", h.listSpaceInvites)
+	api.DELETE("/spaces/:id/invites/:iid", h.revokeSpaceInvite)
+	// 接受邀请（登录用户凭 token 入空间；独立前缀避免与 /spaces/:id 路由树冲突）。
+	api.POST("/space-invites/join/:token", h.acceptSpaceInvite)
+	api.GET("/spaces/:id/files", h.listSpaceFiles)
+	api.POST("/spaces/:id/folders", h.createSpaceFolder)
 	// ONLYOFFICE 集成：config 探测端点恒注册（认证组；禁用时 enabled=false
 	// 且不暴露 server_url）；启用（SetOnlyOffice 注入）时追加挂载 session
 	//（认证组）与 download/callback（公开组，绕过 Bearer 与认证接口限流，
@@ -570,6 +613,8 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	// env 回退）/ 写即时生效（邮件发送处每次读库）；密码只写不读。
 	admin.GET("/settings/smtp", h.getSMTPSettings)
 	admin.PUT("/settings/smtp", h.putSMTPSettings)
+	// 测试邮件：用当前生效配置向指定邮箱投递一封测试邮件（错误详情回传）。
+	admin.POST("/settings/smtp/test", h.testSMTPSettings)
 	// HTTPS 运行时切换（热下发 Caddy admin API）：GET 恒注册（未托管时
 	// managed=false 供页面降级展示）；PUT 未托管时 503；POST /tls/cert
 	// 上传自定义证书（custom 模式，multipart cert+key）。
@@ -594,12 +639,14 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	admin.PATCH("/users/:id", h.adminUpdateUser)
 	admin.DELETE("/users/:id", h.adminDeleteUser)
 	admin.POST("/users/:id/reset-password", h.adminResetUserPassword)
-	// 邀请管理（仅 admin）：创建（返回一次性注册链接）、列表、撤销。
+	// 邀请管理（仅 admin）：创建（返回一次性注册链接）、列表、撤销与重发
+	//（重发=撤销旧 token 并生成新链接）。
 	admin.POST("/invitations", h.createInvitation)
 	admin.GET("/invitations", h.listInvitations)
 	admin.DELETE("/invitations/:id", h.revokeInvitation)
+	admin.POST("/invitations/:id/resend", h.resendInvitation)
 	// 用户组管理（migration 035，仅 admin）：组 CRUD 与成员增删；删除组级联
-	// 清 group_members（组不删用户）。组为纯组织维度，不挂文件空间。
+	// 清 group_members（组不删用户）。
 	admin.GET("/groups", h.adminListGroups)
 	admin.POST("/groups", h.adminCreateGroup)
 	admin.PATCH("/groups/:id", h.adminUpdateGroup)
@@ -607,6 +654,12 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	admin.GET("/groups/:id/members", h.adminListGroupMembers)
 	admin.POST("/groups/:id/members", h.adminAddGroupMember)
 	admin.DELETE("/groups/:id/members/:uid", h.adminRemoveGroupMember)
+	// 空间管理（统一空间模型，仅 admin）：列表（含用量/成员数）、越权修改
+	//（name/desc/配额）、解散（软删）与已解散空间的彻底删除（物理清理）。
+	admin.GET("/spaces", h.adminListSpaces)
+	admin.PATCH("/spaces/:id", h.adminPatchSpace)
+	admin.DELETE("/spaces/:id", h.adminDeleteSpace)
+	admin.DELETE("/spaces/:id/purge", h.adminPurgeSpace)
 	// 公开分享接口：无认证、不设 cookie，单独按 IP 限流。
 	// 密码校验端点（verify）额外叠加独立按 IP+token 的更严限流（5/min），
 	// 防无认证暴力猜测分享密码。
@@ -624,7 +677,7 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	public.POST("/shares/:token/verify", shareVerifyLimiter(NewRateLimiter(shareVerifyRateLimitPerMin)), h.publicShareVerify)
 	// MCP（Model Context Protocol）：JSON-RPC 2.0 over HTTP，挂根级 /mcp
 	//（不经 /api/v1 的 CSRF；独立按 IP 轻限流）。依赖经 NewHandler 装配
-	//（files/upload/share/team/storage），search 经 SetSearch 注入。
+	//（files/upload/share/space/storage），search 经 SetSearch 注入。
 	h.registerMCP(r, jwtSecret)
 }
 
@@ -847,6 +900,29 @@ func (h *Handler) searchUsers(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"users": out})
 }
 
+// getUser GET /api/v1/users/:id：用户只读信息（成员列表行点击查看用户资料
+// 弹窗，v2.4）。任何登录用户可用（暴露面与 /users/search 同口径：不含
+// 手机号/状态/角色等管理字段）；不存在 404。
+func (h *Handler) getUser(c *gin.Context) {
+	id, ok := parseID(c, c.Param("id"))
+	if !ok {
+		return
+	}
+	u, err := h.users.GetByID(id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"id":         u.ID,
+		"username":   u.Username,
+		"email":      u.Email,
+		"nickname":   u.Nickname,
+		"department": u.Department,
+		"position":   u.Position,
+	})
+}
+
 func parseID(c *gin.Context, value string) (uuid.UUID, bool) {
 	id, err := uuid.Parse(value)
 	if err != nil {
@@ -862,9 +938,46 @@ func setETag(c *gin.Context, f files.File) {
 	c.Header("ETag", fmt.Sprintf("\"%s\"", f.UpdatedAt.UTC().Format(time.RFC3339Nano)))
 }
 
-// listFiles GET /api/v1/files：目录列举（缺省/parent_id）或跨目录检索。
+// resolveListSpace 解析 /files 与 /folders 的 space 查询参数：缺省为用户
+// 默认空间；显式 space 须为可见空间（读权限），否则 404。
+func (h *Handler) resolveListSpace(c *gin.Context, actor uuid.UUID) (uuid.UUID, bool) {
+	raw := c.Query("space")
+	if raw == "" {
+		sp, err := h.spaces.DefaultSpace(actor)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to resolve default space"})
+			return uuid.Nil, false
+		}
+		return sp.ID, true
+	}
+	spaceID, ok := parseID(c, raw)
+	if !ok {
+		return uuid.Nil, false
+	}
+	if !h.requireSpaceRead(c, spaceID, actor) {
+		return uuid.Nil, false
+	}
+	return spaceID, true
+}
+
+// defaultSpaceRootID 返回用户默认空间根目录 ID（上传/建目录/模板的缺省
+// parent；统一空间模型下取代个人 EnsureRoot 语义）。
+func (h *Handler) defaultSpaceRootID(user uuid.UUID) (uuid.UUID, error) {
+	sp, err := h.spaces.DefaultSpace(user)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	root, err := h.files.SpaceRoot(sp.ID)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return root.ID, nil
+}
+
+// listFiles GET /api/v1/files?space=：目录列举（统一空间模型；space 缺省=
+// 我的默认空间，parent_id 缺省=空间根目录）或跨目录检索。
 // 提供 tag_id 或 starred 过滤时切换为检索模式（忽略 parent_id）：
-// 覆盖个人 + 团队可读文件（owner/在册成员，见 files.SearchAccessible）。
+// 覆盖全部可见空间文件（owner/在册成员，见 files.SearchAccessible）。
 // sort=name|updated_at|size × order=asc|desc 对两种模式均生效。
 func (h *Handler) listFiles(c *gin.Context) {
 	owner := userID(c)
@@ -881,7 +994,7 @@ func (h *Handler) listFiles(c *gin.Context) {
 		return
 	}
 	// limit 1..1000（缺省 100）：允许显式放大（前端目录树/文件列表拉满
-	// 1000，避免多子项目录截断——与 /teams/:id/files 的 teamFolderLimit 同口径）。
+	// 1000，避免多子项目录截断——与 /spaces/:id/files 的 spaceFolderLimit 同口径）。
 	limit := 100
 	if raw := c.Query("limit"); raw != "" {
 		n, err := strconv.Atoi(raw)
@@ -902,11 +1015,15 @@ func (h *Handler) listFiles(c *gin.Context) {
 	} else if tagID != nil || starred != nil {
 		out, err = h.files.SearchAccessible(owner, files.SearchOptions{TagID: tagID, Starred: starred, SortOptions: sortOpt, Limit: limit})
 	} else {
+		spaceID, ok := h.resolveListSpace(c, owner)
+		if !ok {
+			return
+		}
 		var parent uuid.UUID
 		if parentText := c.Query("parent_id"); parentText == "" {
-			root, rerr := h.files.EnsureRoot(owner)
+			root, rerr := h.files.SpaceRoot(spaceID)
 			if rerr != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to ensure root folder"})
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to ensure space root"})
 				return
 			}
 			parent = root.ID
@@ -915,7 +1032,7 @@ func (h *Handler) listFiles(c *gin.Context) {
 		} else {
 			return
 		}
-		out, err = h.files.List(owner, &parent, limit, sortOpt)
+		out, err = h.files.ListSpace(spaceID, parent, limit, files.SpaceListFilter{SortOptions: sortOpt})
 	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to list files"})
@@ -964,11 +1081,15 @@ func (h *Handler) createFolder(c *gin.Context) {
 		return
 	}
 	owner := userID(c)
+	spaceID, ok := h.resolveListSpace(c, owner)
+	if !ok {
+		return
+	}
 	var parent uuid.UUID
 	if request.ParentID == "" {
-		root, err := h.files.EnsureRoot(owner)
+		root, err := h.files.SpaceRoot(spaceID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to ensure root folder"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to ensure space root"})
 			return
 		}
 		parent = root.ID
@@ -977,7 +1098,7 @@ func (h *Handler) createFolder(c *gin.Context) {
 	} else {
 		return
 	}
-	f, err := h.files.CreateFolder(owner, parent, request.Name)
+	f, err := h.files.CreateFolderIn(owner, parent, request.Name)
 	if h.fileError(c, err) {
 		return
 	}
@@ -1076,6 +1197,9 @@ func (h *Handler) fileError(c *gin.Context, err error) bool {
 		c.JSON(http.StatusForbidden, gin.H{"error": "root folder cannot be changed"})
 	case errors.Is(err, files.ErrNotFound):
 		c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
+	case errors.Is(err, files.ErrQuotaExceeded):
+		// 空间配额超限（统一空间模型）：413 + 机器可读 code。
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": err.Error(), "code": "SPACE_QUOTA_EXCEEDED"})
 	case errors.Is(err, files.ErrNoVersion):
 		c.JSON(http.StatusConflict, gin.H{"error": "file has no current version"})
 	default:

@@ -33,7 +33,7 @@ func readAvailable(d *Deps) bool { return d.Files != nil && d.Storage != nil }
 
 func sharesAvailable(d *Deps) bool { return d.Shares != nil }
 
-func teamsAvailable(d *Deps) bool { return d.Teams != nil }
+func spacesAvailable(d *Deps) bool { return d.Spaces != nil }
 
 func searchAvailable(d *Deps) bool { return d.Search != nil }
 
@@ -50,8 +50,7 @@ func allTools() []Tool {
 		}
 		return p
 	}
-	scopeProp := prop("空间：personal 个人空间（缺省）/ team 团队空间（需 team_id）", map[string]any{"enum": []string{"personal", "team"}, "default": "personal"})
-	teamIDProp := prop("团队 ID（scope=team 时必填）")
+	spaceIDProp := prop("空间 ID（UUID）；缺省为你的默认空间，df_list_spaces 可列出全部可见空间")
 	parentIDProp := prop("父目录 file_id；缺省为对应空间根目录")
 	fileIDProp := prop("文件或目录的 file_id（UUID）")
 	limitProp := func(max int) map[string]any {
@@ -63,10 +62,10 @@ func allTools() []Tool {
 	return []Tool{
 		{
 			Name:        "df_list_files",
-			Description: "列出目录内容（缺省根目录）：个人空间或团队空间，返回子项 id/name/type/parent_id 等。",
+			Description: "列出目录内容（缺省根目录）：指定空间（space_id 缺省为默认空间），返回子项 id/name/type/parent_id 等。",
 			Scope:       ScopeFilesRead,
 			InputSchema: map[string]any{"type": "object", "properties": map[string]any{
-				"scope": scopeProp, "team_id": teamIDProp, "parent_id": parentIDProp,
+				"space_id": spaceIDProp, "parent_id": parentIDProp,
 				"limit":  map[string]any{"type": "integer", "minimum": 1, "maximum": 200, "default": 50, "description": "返回条数上限"},
 				"offset": map[string]any{"type": "integer", "minimum": 0, "default": 0, "description": "分页偏移（服务端截断实现）"},
 			}},
@@ -83,22 +82,22 @@ func allTools() []Tool {
 		},
 		{
 			Name:        "df_create_folder",
-			Description: "创建子目录（个人空间或团队空间；团队目录继承团队作用域，写权限按团队角色/ACL 判定）。",
+			Description: "创建子目录（空间内；写权限按空间角色/ACL 判定）。",
 			Scope:       ScopeFilesWrite,
 			InputSchema: map[string]any{"type": "object", "properties": map[string]any{
 				"name": prop("目录名（NFC 归一，拒绝非法字符/保留名，≤255 字符）"), "parent_id": parentIDProp,
-				"scope": scopeProp, "team_id": teamIDProp,
+				"space_id": spaceIDProp,
 			}, "required": []string{"name"}},
 			Available: filesAvailable,
 			Handler:   toolCreateFolder,
 		},
 		{
 			Name:        "df_write_file",
-			Description: "新建文件并写入内容：走上传管线（office 格式校验、病毒扫描、存储配额、扩展名黑名单、MIME 按扩展名推断均生效）。同名冲突时换名重试。",
+			Description: "新建文件并写入内容：走上传管线（office 格式校验、病毒扫描、空间配额、扩展名黑名单、MIME 按扩展名推断均生效）。同名冲突时换名重试。",
 			Scope:       ScopeFilesWrite,
 			InputSchema: map[string]any{"type": "object", "properties": map[string]any{
 				"name": prop("文件名（含扩展名，MIME 与校验按扩展名处理）"), "parent_id": parentIDProp,
-				"scope": scopeProp, "team_id": teamIDProp,
+				"space_id":     spaceIDProp,
 				"content_text": contentTextProp, "content_base64": contentBase64Prop,
 			}, "required": []string{"name"}},
 			Available: writeAvailable,
@@ -174,10 +173,10 @@ func allTools() []Tool {
 		},
 		{
 			Name:        "df_list_trash",
-			Description: "列出回收站顶层条目（个人空间或指定团队空间）。",
+			Description: "列出回收站顶层条目（指定空间；space_id 缺省为默认空间）。",
 			Scope:       ScopeFilesRead,
 			InputSchema: map[string]any{"type": "object", "properties": map[string]any{
-				"scope": scopeProp, "team_id": teamIDProp, "limit": limitProp(200),
+				"space_id": spaceIDProp, "limit": limitProp(200),
 			}},
 			Available: filesAvailable,
 			Handler:   toolListTrash,
@@ -202,7 +201,7 @@ func allTools() []Tool {
 		},
 		{
 			Name:        "df_search_files",
-			Description: "全文检索文件（文件名 + 文本内容；覆盖个人与可读团队文件）。需部署启用搜索，未启用时调用返回明确错误。",
+			Description: "全文检索文件（文件名 + 文本内容；覆盖全部可见空间）。需部署启用搜索，未启用时调用返回明确错误。",
 			Scope:       ScopeFilesRead,
 			InputSchema: map[string]any{"type": "object", "properties": map[string]any{
 				"query": prop("检索关键词（名称子串匹配或内容分词命中）"), "limit": limitProp(100),
@@ -220,7 +219,7 @@ func allTools() []Tool {
 		},
 		{
 			Name:        "df_create_share",
-			Description: "为文件创建分享：public 返回一次性 token 与访问链接（可附密码）；private 授权给指定用户/团队（须再提供 user_ids/team_ids）。",
+			Description: "为文件创建分享：public 返回一次性 token 与访问链接（可附密码）；private 授权给指定用户/空间（须再提供 user_ids/space_ids）。",
 			Scope:       ScopeFilesWrite,
 			InputSchema: map[string]any{"type": "object", "properties": map[string]any{
 				"file_id":         fileIDProp,
@@ -230,7 +229,7 @@ func allTools() []Tool {
 				"password":        prop("公开分享访问密码（4-64 字符，仅 public 可用）"),
 				"max_downloads":   map[string]any{"type": "integer", "minimum": 0, "description": "下载次数上限（可选）"},
 				"user_ids":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "私有分享授权用户 ID 列表"},
-				"team_ids":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "私有分享授权团队 ID 列表"},
+				"space_ids":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "私有分享授权空间 ID 列表（空间全体成员可访问）"},
 			}, "required": []string{"file_id"}},
 			Available: sharesAvailable,
 			Handler:   toolCreateShare,
@@ -244,20 +243,20 @@ func allTools() []Tool {
 			Handler:     toolRevokeShare,
 		},
 		{
-			Name:        "df_list_teams",
-			Description: "列出当前用户所属团队（id/name/description/owner_id），供 team_id 定位团队空间。",
+			Name:        "df_list_spaces",
+			Description: "列出当前用户可见的空间（id/name/description/owner_id/is_default），供 space_id 定位目标空间。",
 			Scope:       ScopeFilesRead,
 			InputSchema: map[string]any{"type": "object", "properties": map[string]any{}},
-			Available:   teamsAvailable,
-			Handler:     toolListTeams,
+			Available:   spacesAvailable,
+			Handler:     toolListSpaces,
 		},
 		{
 			Name:        "df_resolve_path",
-			Description: "按路径定位文件/目录并返回 file_id（如 path=\"docs/报告.md\"；个人空间为个人根下相对路径，团队空间须 team_id）。",
+			Description: "按路径定位文件/目录并返回 file_id（如 path=\"docs/报告.md\"；空间内相对路径，space_id 缺省为默认空间）。",
 			Scope:       ScopeFilesRead,
 			InputSchema: map[string]any{"type": "object", "properties": map[string]any{
-				"scope": scopeProp, "team_id": teamIDProp,
-				"path": prop("以 / 分隔的相对路径（空串为根目录）"),
+				"space_id": spaceIDProp,
+				"path":     prop("以 / 分隔的相对路径（空串为根目录）"),
 			}, "required": []string{"path"}},
 			Available: filesAvailable,
 			Handler:   toolResolvePath,
@@ -305,72 +304,57 @@ func parseUUIDField(name, value string) (uuid.UUID, error) {
 	return id, nil
 }
 
-// requireTeamRead 校验用户对团队空间的读权限（CanRead：在册成员），
-// 语义同 http 层 requireTeamRead；未通过时按「不存在」处理不泄露存在性。
-func requireTeamRead(deps *Deps, user, teamID uuid.UUID) error {
-	if deps.Teams == nil {
+// requireSpaceRead 校验用户对空间的读权限（CanRead：在册成员），
+// 语义同 http 层 requireSpaceRead；未通过时按「不存在」处理不泄露存在性。
+func requireSpaceRead(deps *Deps, user, spaceID uuid.UUID) error {
+	if deps.Spaces == nil {
 		return errToolUnavailable
 	}
-	ok, err := deps.Teams.CanRead(user, teamID)
+	ok, err := deps.Spaces.CanRead(user, spaceID)
 	if err != nil {
 		return err
 	}
 	if !ok {
-		return fail("team not found or you are not a member")
+		return fail("space not found or you are not a member")
 	}
 	return nil
 }
 
-// normalizeScope 归一 scope 参数（缺省 personal）。
-func normalizeScope(scope string) (string, error) {
-	s := strings.ToLower(strings.TrimSpace(scope))
-	if s == "" {
-		return "personal", nil
+// resolveSpaceID 解析 space 参数：空串回退用户默认空间 ID。
+func resolveSpaceID(deps *Deps, user uuid.UUID, raw string) (uuid.UUID, error) {
+	if v := strings.TrimSpace(raw); v != "" {
+		return parseUUIDField("space_id", v)
 	}
-	if s != "personal" && s != "team" {
-		return "", badArgs("scope must be personal or team")
+	if deps.Spaces == nil {
+		return uuid.Nil, errToolUnavailable
 	}
-	return s, nil
+	sp, err := deps.Spaces.DefaultSpace(user)
+	if err != nil {
+		return uuid.Nil, fail("default space not found; pass space_id explicitly")
+	}
+	return sp.ID, nil
 }
 
-// resolveParent 解析父目录（读取或写入场景共用）：personal 缺省个人根目录
-// （EnsureRoot）；team 要求 team_id + 团队读权限，parent_id 缺省团队根目录。
+// resolveParent 解析父目录（读取或写入场景共用）：space_id 缺省为用户默认
+// 空间（经 Spaces 服务解析；要求空间读权限），parent_id 缺省为空间根目录。
 // 写权限由下游服务（CreateFolderIn / 上传管线 ValidateFolder）判定，不旁路。
-func resolveParent(deps *Deps, id Identity, scope, teamIDRaw, parentIDRaw string) (files.File, error) {
+func resolveParent(deps *Deps, id Identity, spaceIDRaw, parentIDRaw string) (files.File, error) {
 	user := id.UserID
-	switch scope {
-	case "personal":
-		if parentIDRaw == "" {
-			return deps.Files.EnsureRoot(user)
-		}
-		parentID, err := parseUUIDField("parent_id", parentIDRaw)
-		if err != nil {
-			return files.File{}, err
-		}
-		// 归属/存在性由后续写入或列举服务判定；此处仅定位。
-		if f, gerr := deps.Files.Get(user, parentID); gerr == nil && f.Type == "folder" {
-			return f, nil
-		}
-		return files.File{ID: parentID, Type: "folder"}, nil
-	case "team":
-		teamID, err := parseUUIDField("team_id", teamIDRaw)
-		if err != nil {
-			return files.File{}, err
-		}
-		if err := requireTeamRead(deps, user, teamID); err != nil {
-			return files.File{}, err
-		}
-		if parentIDRaw == "" {
-			return deps.Files.TeamRoot(teamID)
-		}
-		parentID, err := parseUUIDField("parent_id", parentIDRaw)
-		if err != nil {
-			return files.File{}, err
-		}
-		return deps.Files.GetTeamFolder(teamID, parentID)
-	default:
-		return files.File{}, badArgs("scope must be personal or team")
+	spaceID, err := resolveSpaceID(deps, user, spaceIDRaw)
+	if err != nil {
+		return files.File{}, err
 	}
+	if err := requireSpaceRead(deps, user, spaceID); err != nil {
+		return files.File{}, err
+	}
+	if parentIDRaw == "" {
+		return deps.Files.SpaceRoot(spaceID)
+	}
+	parentID, err := parseUUIDField("parent_id", parentIDRaw)
+	if err != nil {
+		return files.File{}, err
+	}
+	return deps.Files.GetSpaceFolder(spaceID, parentID)
 }
 
 // decodeContent 解码 content_text / content_base64 二选一字段。
@@ -396,7 +380,7 @@ func decodeContent(text, base64Content string) ([]byte, error) {
 func fileJSON(f files.File) map[string]any {
 	return map[string]any{
 		"id": f.ID, "name": f.Name, "parent_id": f.ParentID, "type": f.Type,
-		"is_root": f.IsRoot, "scope_type": f.ScopeType, "team_id": f.TeamID,
+		"is_root": f.IsRoot, "space_id": f.SpaceID,
 		"description": f.Description, "is_starred": f.IsStarred,
 		"created_at": f.CreatedAt, "updated_at": f.UpdatedAt,
 	}
@@ -429,17 +413,12 @@ func filesJSONList(out []files.File) []map[string]any {
 
 func toolListFiles(_ context.Context, deps *Deps, id Identity, args json.RawMessage) (any, error) {
 	var a struct {
-		Scope    string `json:"scope"`
-		TeamID   string `json:"team_id"`
+		SpaceID  string `json:"space_id"`
 		ParentID string `json:"parent_id"`
 		Limit    int    `json:"limit"`
 		Offset   int    `json:"offset"`
 	}
 	if err := decodeArgs(args, &a); err != nil {
-		return nil, err
-	}
-	scope, err := normalizeScope(a.Scope)
-	if err != nil {
 		return nil, err
 	}
 	limit, offset := a.Limit, a.Offset
@@ -453,42 +432,13 @@ func toolListFiles(_ context.Context, deps *Deps, id Identity, args json.RawMess
 		offset = 0
 	}
 	fetch := limit + offset
-	var out []files.File
-	var parentID uuid.UUID
-	switch scope {
-	case "personal":
-		var parent *uuid.UUID
-		if a.ParentID == "" {
-			root, rerr := deps.Files.EnsureRoot(id.UserID)
-			if rerr != nil {
-				return nil, rerr
-			}
-			parent = &root.ID
-		} else {
-			pid, perr := parseUUIDField("parent_id", a.ParentID)
-			if perr != nil {
-				return nil, perr
-			}
-			parent = &pid
-		}
-		parentID = *parent
-		var lerr error
-		out, lerr = deps.Files.List(id.UserID, parent, fetch, files.SortOptions{})
-		if lerr != nil {
-			return nil, lerr
-		}
-	case "team":
-		parent, err := resolveParent(deps, id, "team", a.TeamID, a.ParentID)
-		if err != nil {
-			return nil, err
-		}
-		parentID = parent.ID
-		teamID, _ := parseUUIDField("team_id", a.TeamID)
-		var lerr error
-		out, lerr = deps.Files.ListTeam(teamID, parent.ID, fetch, files.TeamListFilter{})
-		if lerr != nil {
-			return nil, lerr
-		}
+	parent, err := resolveParent(deps, id, a.SpaceID, a.ParentID)
+	if err != nil {
+		return nil, err
+	}
+	out, lerr := deps.Files.ListSpace(parent.SpaceID, parent.ID, fetch, files.SpaceListFilter{})
+	if lerr != nil {
+		return nil, lerr
 	}
 	if offset > 0 {
 		if offset < len(out) {
@@ -497,7 +447,7 @@ func toolListFiles(_ context.Context, deps *Deps, id Identity, args json.RawMess
 			out = nil
 		}
 	}
-	return map[string]any{"parent_id": parentID, "scope": scope, "files": filesJSONList(out), "count": len(out)}, nil
+	return map[string]any{"parent_id": parent.ID, "space_id": parent.SpaceID, "files": filesJSONList(out), "count": len(out)}, nil
 }
 
 func toolGetFile(_ context.Context, deps *Deps, id Identity, args json.RawMessage) (any, error) {
@@ -528,8 +478,7 @@ func toolCreateFolder(_ context.Context, deps *Deps, id Identity, args json.RawM
 	var a struct {
 		Name     string `json:"name"`
 		ParentID string `json:"parent_id"`
-		Scope    string `json:"scope"`
-		TeamID   string `json:"team_id"`
+		SpaceID  string `json:"space_id"`
 	}
 	if err := decodeArgs(args, &a); err != nil {
 		return nil, err
@@ -537,15 +486,11 @@ func toolCreateFolder(_ context.Context, deps *Deps, id Identity, args json.RawM
 	if strings.TrimSpace(a.Name) == "" {
 		return nil, badArgs("name is required")
 	}
-	scope, err := normalizeScope(a.Scope)
+	parent, err := resolveParent(deps, id, a.SpaceID, a.ParentID)
 	if err != nil {
 		return nil, err
 	}
-	parent, err := resolveParent(deps, id, scope, a.TeamID, a.ParentID)
-	if err != nil {
-		return nil, err
-	}
-	// CreateFolderIn 自带授权（个人 owner / 团队 CanWrite+ACL）并继承作用域。
+	// CreateFolderIn 自带授权（空间 CanWrite+ACL）并继承空间归属。
 	f, err := deps.Files.CreateFolderIn(id.UserID, parent.ID, a.Name)
 	if err != nil {
 		return nil, err
@@ -557,8 +502,7 @@ func toolWriteFile(_ context.Context, deps *Deps, id Identity, args json.RawMess
 	var a struct {
 		Name          string `json:"name"`
 		ParentID      string `json:"parent_id"`
-		Scope         string `json:"scope"`
-		TeamID        string `json:"team_id"`
+		SpaceID       string `json:"space_id"`
 		ContentText   string `json:"content_text"`
 		ContentBase64 string `json:"content_base64"`
 	}
@@ -572,15 +516,11 @@ func toolWriteFile(_ context.Context, deps *Deps, id Identity, args json.RawMess
 	if err != nil {
 		return nil, err
 	}
-	scope, err := normalizeScope(a.Scope)
+	parent, err := resolveParent(deps, id, a.SpaceID, a.ParentID)
 	if err != nil {
 		return nil, err
 	}
-	parent, err := resolveParent(deps, id, scope, a.TeamID, a.ParentID)
-	if err != nil {
-		return nil, err
-	}
-	// 走 UploadBytes 管线：office 校验/扫描/配额/黑名单/版本/作用域全部生效。
+	// 走 UploadBytes 管线：office 校验/扫描/配额/黑名单/版本/空间归属全部生效。
 	session, err := deps.Uploads.UploadBytes(id.UserID, parent.ID, a.Name, data)
 	if err != nil {
 		return nil, err
@@ -822,15 +762,10 @@ func toolRestoreFile(_ context.Context, deps *Deps, id Identity, args json.RawMe
 
 func toolListTrash(_ context.Context, deps *Deps, id Identity, args json.RawMessage) (any, error) {
 	var a struct {
-		Scope  string `json:"scope"`
-		TeamID string `json:"team_id"`
-		Limit  int    `json:"limit"`
+		SpaceID string `json:"space_id"`
+		Limit   int    `json:"limit"`
 	}
 	if err := decodeArgs(args, &a); err != nil {
-		return nil, err
-	}
-	scope, err := normalizeScope(a.Scope)
-	if err != nil {
 		return nil, err
 	}
 	limit := a.Limit
@@ -840,22 +775,18 @@ func toolListTrash(_ context.Context, deps *Deps, id Identity, args json.RawMess
 	if limit > 200 {
 		limit = 200
 	}
-	var teamID *uuid.UUID
-	if scope == "team" {
-		tid, terr := parseUUIDField("team_id", a.TeamID)
-		if terr != nil {
-			return nil, terr
-		}
-		if rerr := requireTeamRead(deps, id.UserID, tid); rerr != nil {
-			return nil, rerr
-		}
-		teamID = &tid
-	}
-	out, err := deps.Files.ListTrashScope(id.UserID, scope, teamID, limit)
+	spaceID, err := resolveSpaceID(deps, id.UserID, a.SpaceID)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"scope": scope, "files": filesJSONList(out), "count": len(out)}, nil
+	if rerr := requireSpaceRead(deps, id.UserID, spaceID); rerr != nil {
+		return nil, rerr
+	}
+	out, err := deps.Files.ListTrashSpace(id.UserID, spaceID, limit)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"space_id": spaceID, "files": filesJSONList(out), "count": len(out)}, nil
 }
 
 func toolListVersions(_ context.Context, deps *Deps, id Identity, args json.RawMessage) (any, error) {
@@ -976,7 +907,7 @@ func toolCreateShare(_ context.Context, deps *Deps, id Identity, args json.RawMe
 		Password      string   `json:"password"`
 		MaxDownloads  *int     `json:"max_downloads"`
 		UserIDs       []string `json:"user_ids"`
-		TeamIDs       []string `json:"team_ids"`
+		SpaceIDs      []string `json:"space_ids"`
 	}
 	if err := decodeArgs(args, &a); err != nil {
 		return nil, err
@@ -1020,11 +951,11 @@ func toolCreateShare(_ context.Context, deps *Deps, id Identity, args json.RawMe
 		if uerr != nil {
 			return nil, uerr
 		}
-		teamIDs, terr := parseIDs(a.TeamIDs, "team_ids")
-		if terr != nil {
-			return nil, terr
+		spaceIDs, serr := parseIDs(a.SpaceIDs, "space_ids")
+		if serr != nil {
+			return nil, serr
 		}
-		created, err := deps.Shares.CreatePrivateWithOptions(id.UserID, fileID, permission, expiresIn, a.MaxDownloads, userIDs, teamIDs, opts)
+		created, err := deps.Shares.CreatePrivateWithOptions(id.UserID, fileID, permission, expiresIn, a.MaxDownloads, userIDs, spaceIDs, opts)
 		if err != nil {
 			return nil, err
 		}
@@ -1036,8 +967,8 @@ func toolCreateShare(_ context.Context, deps *Deps, id Identity, args json.RawMe
 	if visibility != share.VisibilityPublic {
 		return nil, badArgs("visibility must be public or private")
 	}
-	if len(a.UserIDs) > 0 || len(a.TeamIDs) > 0 {
-		return nil, badArgs("user_ids/team_ids are only allowed for private shares")
+	if len(a.UserIDs) > 0 || len(a.SpaceIDs) > 0 {
+		return nil, badArgs("user_ids/space_ids are only allowed for private shares")
 	}
 	created, token, err := deps.Shares.CreatePublic(id.UserID, fileID, permission, expiresIn, a.MaxDownloads, opts)
 	if err != nil {
@@ -1069,44 +1000,35 @@ func toolRevokeShare(_ context.Context, deps *Deps, id Identity, args json.RawMe
 	return map[string]any{"share_id": revoked.ID, "file_id": revoked.FileID, "revoked": true}, nil
 }
 
-func toolListTeams(_ context.Context, deps *Deps, id Identity, _ json.RawMessage) (any, error) {
-	teams, err := deps.Teams.ListTeams(id.UserID)
+func toolListSpaces(_ context.Context, deps *Deps, id Identity, _ json.RawMessage) (any, error) {
+	spaces, err := deps.Spaces.ListSpaces(id.UserID)
 	if err != nil {
 		return nil, err
 	}
-	items := make([]map[string]any, 0, len(teams))
-	for _, t := range teams {
+	items := make([]map[string]any, 0, len(spaces))
+	for _, sp := range spaces {
 		items = append(items, map[string]any{
-			"id": t.ID, "name": t.Name, "description": t.Description,
-			"owner_id": t.OwnerID, "created_at": t.CreatedAt,
+			"id": sp.ID, "name": sp.Name, "description": sp.Description,
+			"owner_id": sp.OwnerID, "is_default": sp.IsDefault, "created_at": sp.CreatedAt,
 		})
 	}
-	return map[string]any{"teams": items, "count": len(items)}, nil
+	return map[string]any{"spaces": items, "count": len(items)}, nil
 }
 
 func toolResolvePath(_ context.Context, deps *Deps, id Identity, args json.RawMessage) (any, error) {
 	var a struct {
-		Scope  string `json:"scope"`
-		TeamID string `json:"team_id"`
-		Path   string `json:"path"`
+		SpaceID string `json:"space_id"`
+		Path    string `json:"path"`
 	}
 	if err := decodeArgs(args, &a); err != nil {
 		return nil, err
 	}
-	scope, err := normalizeScope(a.Scope)
+	spaceID, err := resolveSpaceID(deps, id.UserID, a.SpaceID)
 	if err != nil {
 		return nil, err
 	}
-	nsType, scopeID := files.NamespacePersonal, id.UserID
-	if scope == "team" {
-		scopeID, err = parseUUIDField("team_id", a.TeamID)
-		if err != nil {
-			return nil, err
-		}
-		nsType = files.NamespaceTeam
-	}
-	// 复用 resolve 链路（逐段解析 + authorizeFileAccess 团队 ACL/成员判定）。
-	f, chain, err := deps.Files.ResolveReadablePath(id.UserID, nsType, scopeID, a.Path)
+	// 复用 resolve 链路（逐段解析 + authorizeFileAccess 空间 ACL/成员判定）。
+	f, chain, err := deps.Files.ResolveReadablePath(id.UserID, files.NamespaceSpace, spaceID, a.Path)
 	if err != nil {
 		return nil, err
 	}
@@ -1116,7 +1038,7 @@ func toolResolvePath(_ context.Context, deps *Deps, id Identity, args json.RawMe
 	}
 	return map[string]any{
 		"file_id": f.ID, "name": f.Name, "type": f.Type,
-		"scope": scope, "canonical_path": strings.Join(names[1:], "/"),
+		"space_id": spaceID, "canonical_path": strings.Join(names[1:], "/"),
 	}, nil
 }
 
@@ -1157,7 +1079,7 @@ func errorMessage(tool string, err error) string {
 	case errors.Is(err, files.ErrConflict):
 		msg = "name conflict: an item with the same name already exists in the target folder"
 	case errors.Is(err, files.ErrForbidden):
-		msg = "forbidden: no permission for this operation (team role or folder ACL denied)"
+		msg = "forbidden: no permission for this operation (space role or folder ACL denied)"
 	case errors.Is(err, files.ErrNotFound):
 		msg = "not found: the file/folder/share does not exist, or you have no access to it"
 	case errors.Is(err, files.ErrRoot):

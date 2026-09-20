@@ -2,6 +2,7 @@ package http
 
 import (
 	"errors"
+	"log"
 	"net/http"
 
 	"github.com/docflow/docflow/internal/audit"
@@ -89,6 +90,16 @@ func (h *Handler) oidcCallback(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "token generation failed"})
 		return
+	}
+	// 统一空间模型：SSO 登录幂等补齐默认空间（自动开户或存量用户均可）。
+	if h.spaces != nil {
+		display := ""
+		if u, uerr := h.users.GetByID(uid); uerr == nil {
+			display = u.Username
+		}
+		if _, _, serr := h.spaces.EnsureDefaultSpace(uid, display); serr != nil {
+			log.Printf("[space] ensure default space for %s: %v", uid, serr)
+		}
 	}
 	refresh, err := h.auth.NewSessionWithInfo(uid, sessionInfoFromRequest(c))
 	if err != nil {

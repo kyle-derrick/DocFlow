@@ -99,22 +99,30 @@ func (s *GormStore) ListByOwnerFiltered(owner uuid.UUID, f OwnerListFilter, limi
 
 // ListSharedWithUser 单条 SQL 实时判定授权（与 CanAccess 判定一致）：
 // 有效私有分享（未撤销、未过期、未达下载上限，不含自己创建的），
-// 且 share_users 显式授权 user，或 user 属于 share_teams 任一授权团队
-// （EXISTS 子查询 JOIN team_members，成员变动立即生效）。
+// 且 share_users 显式授权 user，或 user 属于 share_spaces 任一授权空间
+// （EXISTS 子查询判定空间成员：直接成员或经用户组，成员变动立即生效）。
 func (s *GormStore) ListSharedWithUser(user uuid.UUID, now time.Time, limit int) ([]Share, error) {
 	var out []Share
 	err := s.db.
 		Where("visibility = ? AND owner_id <> ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?) AND (max_downloads IS NULL OR download_count < max_downloads)",
 			VisibilityPrivate, user, now).
 		Where("(EXISTS (SELECT 1 FROM share_users su WHERE su.share_id = shares.id AND su.user_id = ?) OR "+
-			"EXISTS (SELECT 1 FROM share_teams st JOIN team_members tm ON tm.team_id = st.team_id WHERE st.share_id = shares.id AND tm.user_id = ?))",
-			user, user).
+			"EXISTS (SELECT 1 FROM share_spaces ss WHERE ss.share_id = shares.id AND ("+
+			"EXISTS (SELECT 1 FROM space_members sm WHERE sm.space_id = ss.space_id AND sm.user_id = ?) OR "+
+			"EXISTS (SELECT 1 FROM space_group_members sgm JOIN group_members gm ON gm.group_id = sgm.group_id WHERE sgm.space_id = ss.space_id AND gm.user_id = ?))))",
+			user, user, user).
 		Order("created_at DESC, id").Limit(limit).Find(&out).Error
 	return out, err
 }
 
 func (s *GormStore) Revoke(id uuid.UUID, now time.Time) error {
 	return s.db.Model(&Share{}).Where("id = ? AND revoked_at IS NULL", id).Update("revoked_at", now).Error
+}
+
+// Delete 物理删除分享行（手动「清除记录」，服务层已校验撤销满 30 天）；
+// share_users/share_spaces/share_files 等关联经 FK ON DELETE CASCADE 清理。
+func (s *GormStore) Delete(id uuid.UUID) error {
+	return s.db.Delete(&Share{}, "id = ?", id).Error
 }
 
 // ConsumeDownload 用条件 UPDATE 原子递增 download_count，
@@ -164,18 +172,22 @@ func (s *GormStore) SetFilePublic(fileID uuid.UUID, value bool) error {
 	return s.db.Table("files").Where("id = ?", fileID).Update("is_public", value).Error
 }
 
-// ShareUser / ShareTeam 对应 share_users / share_teams 关联表（migrations/008_teams_shares.sql）。
+// ShareUser / ShareSpace 对应 share_users / share_spaces 关联表（migrations/040_unified_spaces.sql）。
 type ShareUser struct {
 	ShareID   uuid.UUID `gorm:"type:uuid;primaryKey"`
 	UserID    uuid.UUID `gorm:"type:uuid;primaryKey"`
 	CreatedAt time.Time
 }
 
-type ShareTeam struct {
+type ShareSpace struct {
 	ShareID   uuid.UUID `gorm:"type:uuid;primaryKey"`
-	TeamID    uuid.UUID `gorm:"type:uuid;primaryKey"`
+	SpaceID   uuid.UUID `gorm:"type:uuid;primaryKey"`
 	CreatedAt time.Time
 }
+
+// TableName 显式映射 share_spaces（gorm 默认复数化为 share_spaces，此处
+// 显式声明保持清晰）。
+func (ShareSpace) TableName() string { return "share_spaces" }
 
 // ShareFile 对应 share_files 连接表（migration 036）：多文件打包分享的
 // 可见条目（分享锚点目录其余子项不暴露）。
@@ -196,13 +208,13 @@ func (s *GormStore) AddShareUsers(shareID uuid.UUID, userIDs []uuid.UUID, now ti
 	return s.db.Create(&rows).Error
 }
 
-func (s *GormStore) AddShareTeams(shareID uuid.UUID, teamIDs []uuid.UUID, now time.Time) error {
-	if len(teamIDs) == 0 {
+func (s *GormStore) AddShareSpaces(shareID uuid.UUID, spaceIDs []uuid.UUID, now time.Time) error {
+	if len(spaceIDs) == 0 {
 		return nil
 	}
-	rows := make([]ShareTeam, 0, len(teamIDs))
-	for _, id := range teamIDs {
-		rows = append(rows, ShareTeam{ShareID: shareID, TeamID: id, CreatedAt: now})
+	rows := make([]ShareSpace, 0, len(spaceIDs))
+	for _, id := range spaceIDs {
+		rows = append(rows, ShareSpace{ShareID: shareID, SpaceID: id, CreatedAt: now})
 	}
 	return s.db.Create(&rows).Error
 }
@@ -217,12 +229,12 @@ func (s *GormStore) ListShareUserIDs(shareID uuid.UUID) ([]uuid.UUID, error) {
 	return out, err
 }
 
-func (s *GormStore) ListShareTeamIDs(shareID uuid.UUID) ([]uuid.UUID, error) {
-	var rows []ShareTeam
-	err := s.db.Where("share_id = ?", shareID).Order("team_id").Find(&rows).Error
+func (s *GormStore) ListShareSpaceIDs(shareID uuid.UUID) ([]uuid.UUID, error) {
+	var rows []ShareSpace
+	err := s.db.Where("share_id = ?", shareID).Order("space_id").Find(&rows).Error
 	out := make([]uuid.UUID, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, r.TeamID)
+		out = append(out, r.SpaceID)
 	}
 	return out, err
 }

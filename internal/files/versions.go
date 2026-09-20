@@ -220,40 +220,9 @@ func pruneVersionsLogic(r versionsRepo, fileID uuid.UUID, keep int, keepNewerTha
 	return pruned, nil
 }
 
-// authorizeFileWrite 判定 user 能否修改 file（追加版本/回滚）：
-// 个人文件仅 owner；团队文件先经路径级 ACL（write），未匹配走成员写权限
-// （owner/editor，viewer 403）。
-// 个人文件非 owner 统一 ErrNotFound（不泄露存在性），团队越权返回 ErrForbidden。
-func authorizeFileWrite(f File, user uuid.UUID, canWriteTeam TeamWriter, acl ACLResolver) error {
-	if f.OwnerID == user {
-		return nil
-	}
-	teamID := teamScope(f)
-	if teamID == nil {
-		return ErrNotFound
-	}
-	allowed, matched, aerr := resolveACL(acl, f.ID, *teamID, user, "write")
-	if aerr != nil {
-		return aerr
-	}
-	if matched {
-		if !allowed {
-			return ErrForbidden
-		}
-		return nil
-	}
-	if canWriteTeam == nil {
-		return ErrForbidden
-	}
-	ok, err := canWriteTeam(user, *teamID)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return ErrForbidden
-	}
-	return nil
-}
+// authorizeFileWrite 判定 user 能否修改 file（追加版本/回滚）：文件行
+// owner 短路；其余先经路径级 ACL（write），未匹配走空间成员写权限。
+// 实现见 service.go（统一空间模型）。
 
 // gormVersionsRepo 是 versionsRepo 的 GORM/PostgreSQL 实现，
 // 由 Store 在事务内构造。
@@ -412,12 +381,10 @@ func (s *Store) AddVersion(f File, storageKey, sha256 string, size int64, mimeTy
 	return version, newBlob, nil
 }
 
-// dispatchVersionAdded 版本写入完成的通知分发判定：仅团队文件
-// （scope_type=team 且有 team_id）且写入者非文件行 owner 时回调；
-// 个人文件或 owner 自身写入不通知（避免噪音）。接收者范围（团队全部成员、
-// owner 除外）由注入方解析。
+// dispatchVersionAdded 版本写入完成的通知分发判定：写入者非文件行 owner
+// 时回调（统一空间模型：所有文件都在空间内，通知空间成员由注入方处理）。
 func dispatchVersionAdded(cb VersionNotifyFunc, f File, actor uuid.UUID, version FileVersion) {
-	if cb == nil || teamScope(f) == nil || actor == f.OwnerID {
+	if cb == nil || actor == f.OwnerID {
 		return
 	}
 	cb(f, actor, version)
@@ -504,7 +471,7 @@ func (s *Store) DeleteVersion(user, fileID, versionID uuid.UUID) error {
 		}
 		return err
 	}
-	if err := authorizeFileWrite(f, user, s.teamWriter, s.acl); err != nil {
+	if err := authorizeFileWrite(f, user, s.spaceWriter, s.acl); err != nil {
 		return err
 	}
 	var version FileVersion
@@ -520,10 +487,10 @@ func (s *Store) DeleteVersion(user, fileID, versionID uuid.UUID) error {
 	return nil
 }
 
-// dispatchVersionDeleted 版本删除完成的通知分发判定：仅团队文件且删除者
-// 非文件行 owner 时回调（个人文件仅 owner 可删，owner 自删不通知避免噪音）。
+// dispatchVersionDeleted 版本删除完成的通知分发判定：删除者非文件行
+// owner 时回调（file.version.deleted 通知逻辑由 main 注入，nil 不通知）。
 func dispatchVersionDeleted(cb VersionNotifyFunc, f File, actor uuid.UUID, version FileVersion) {
-	if cb == nil || teamScope(f) == nil || actor == f.OwnerID {
+	if cb == nil || actor == f.OwnerID {
 		return
 	}
 	cb(f, actor, version)
@@ -537,7 +504,7 @@ func (s *Store) SetCurrentVersion(user, fileID, versionID uuid.UUID) (File, File
 		}
 		return File{}, FileVersion{}, err
 	}
-	if err := authorizeFileWrite(f, user, s.teamWriter, s.acl); err != nil {
+	if err := authorizeFileWrite(f, user, s.spaceWriter, s.acl); err != nil {
 		return File{}, FileVersion{}, err
 	}
 	var version FileVersion
@@ -588,7 +555,7 @@ func (s *Store) ValidateReplaceTarget(user, target uuid.UUID) (File, error) {
 	if f.Type != "file" {
 		return File{}, ErrInvalidTarget
 	}
-	if err := authorizeFileWrite(f, user, s.teamWriter, s.acl); err != nil {
+	if err := authorizeFileWrite(f, user, s.spaceWriter, s.acl); err != nil {
 		return File{}, err
 	}
 	return f, nil
@@ -606,7 +573,7 @@ func (s *Store) ReplaceFileVersion(user, fileID uuid.UUID, storageKey, sha256 st
 		}
 		return false, err
 	}
-	if err := authorizeFileWrite(f, user, s.teamWriter, s.acl); err != nil {
+	if err := authorizeFileWrite(f, user, s.spaceWriter, s.acl); err != nil {
 		return false, err
 	}
 	_, newBlob, err := s.AddVersion(f, storageKey, sha256, size, mimeType, user)

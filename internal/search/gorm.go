@@ -10,26 +10,25 @@ type GormRepo struct{ db *gorm.DB }
 
 func NewGormRepo(db *gorm.DB) *GormRepo { return &GormRepo{db: db} }
 
-// accessibleScopeSQL 返回「user 可读」过滤 SQL 片段与参数：个人文件 owner
-// 命中；团队文件要求在册成员（EXISTS team_members，成员变动实时生效）。
-// 与 files.readableScopeSQL 同一判定模式（scope_type 归一化为 team_id
-// 非空——索引仅团队作用域文件写入 team_id）。
+// accessibleScopeSQL 返回「user 可读」过滤 SQL 片段与参数（统一空间模型）：
+// owner 命中，或用户为文档所在空间的在册成员（直接成员或经用户组，EXISTS
+// 子查询实时判定）。与 files.readableScopeSQL 同一判定模式。
 func accessibleScopeSQL(alias string, user uuid.UUID) (string, []any) {
-	return "(" + alias + ".owner_id = ? OR (" + alias + ".team_id IS NOT NULL AND " +
-		"EXISTS (SELECT 1 FROM team_members tm WHERE tm.team_id = " + alias + ".team_id AND tm.user_id = ?)))", []any{user, user}
+	return "(" + alias + ".owner_id = ? OR EXISTS (SELECT 1 FROM space_members sm WHERE sm.space_id = " + alias + ".space_id AND sm.user_id = ?)" +
+		" OR EXISTS (SELECT 1 FROM space_group_members sgm JOIN group_members gm ON gm.group_id = sgm.group_id WHERE sgm.space_id = " + alias + ".space_id AND gm.user_id = ?))", []any{user, user, user}
 }
 
 // UpsertDoc upsert 索引文档：按 file_id 冲突更新全部字段（version_id/owner_id/
-// team_id/name/content/updated_at）。content 为空串落 NULL（tsv 退化为名称向量，
+// space_id/name/content/updated_at）。content 为空串落 NULL（tsv 退化为名称向量，
 // 由生成列自动维护）。PostgreSQL 14+ 对生成列的 INSERT 须显式列清单（不含 tsv），
 // 原生 SQL 直写。
 func (g *GormRepo) UpsertDoc(d Doc) error {
-	return g.db.Exec(`INSERT INTO file_search_docs (file_id, version_id, owner_id, team_id, name, content, updated_at)
+	return g.db.Exec(`INSERT INTO file_search_docs (file_id, version_id, owner_id, space_id, name, content, updated_at)
 VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), now())
 ON CONFLICT (file_id) DO UPDATE SET
-  version_id = EXCLUDED.version_id, owner_id = EXCLUDED.owner_id, team_id = EXCLUDED.team_id,
+  version_id = EXCLUDED.version_id, owner_id = EXCLUDED.owner_id, space_id = EXCLUDED.space_id,
   name = EXCLUDED.name, content = EXCLUDED.content, updated_at = now()`,
-		d.FileID, d.VersionID, d.OwnerID, d.TeamID, d.Name, d.Content).Error
+		d.FileID, d.VersionID, d.OwnerID, d.SpaceID, d.Name, d.Content).Error
 }
 
 // RemoveDoc 删除 fileID 的索引文档（幂等）。

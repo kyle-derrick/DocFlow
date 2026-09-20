@@ -75,6 +75,22 @@ body,
   margin: 0;
 }
 
+/* 全局滚动条稳定（v2.2：页面切换有无滚动条导致内容左右微跳的根治）：
+ * - html 常驻纵向滚动条（overflow-y: scroll）+ scrollbar-gutter: stable
+ *   预留滚动条槽位——短内容页与长内容页布局宽度一致，切换路由不再左右跳。
+ * - antd Modal 打开时的滚动锁定会按实测滚动条宽给 body 补 padding-right
+ *   （v6 无 scrollbar-gutter 感知）——槽位已由 gutter 恒定预留，再补即双
+ *   重补偿（弹窗打开内容左跳），故归零该补偿；页面滚动条空间不受影响。 */
+html {
+  overflow-y: scroll;
+  scrollbar-gutter: stable;
+}
+
+body {
+  /* 归零 antd 弹窗滚动锁定的 padding-right 补偿（见上方说明）。 */
+  padding-right: 0 !important;
+}
+
 body {
   /* 全站字体栈（与 main.tsx antd token fontFamily 同源；中文字形依次回退
      PingFang SC → 微软雅黑 → Noto Sans SC，杜绝 system-ui 混用不一致）。 */
@@ -100,6 +116,27 @@ body {
   max-width: 1560px;
   margin: 0 auto;
   padding: 16px 16px 24px;
+  /* 页面切换淡入（v2.4：路由切换重挂载 .content 触发，见 App.tsx key=pathname）。
+     180ms 克制淡入 + 4px 上浮，不做过场动画。 */
+  animation: content-fadein 0.18s ease;
+}
+
+@keyframes content-fadein {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* 尊重系统「减少动态效果」偏好：关闭页面淡入。 */
+@media (prefers-reduced-motion: reduce) {
+  .content {
+    animation: none;
+  }
 }
 
 /* 顶栏缩减（48→40px）：与工具栏 mini 尺寸体系一致；搜索框迷你化见
@@ -368,30 +405,59 @@ body {
   font-size: 12px;
 }
 
-/* 宽屏页（文件/团队/回收站等）吃满 1560px；普通窄页保持 960px 阅读宽度（居中）。 */
-.wide-page { max-width: none; }
-.page:not(.wide-page) { max-width: 960px; margin: 0 auto; }
-/* 侧栏+内容双栏布局（管理/设置页）：放宽到 1400px 且整体水平居中，
-   主体内容区（.section-content flex:1）随之占满可用宽度，不再靠左留白。 */
-.page.section-page, .page.admin-page { display: flex; align-items: flex-start; gap: 24px; max-width: 1400px; width: 100%; margin: 0 auto; }
+/* 宽屏页（文件/空间/回收站等）吃满 1560px；其余页面内容宽统一 1560px、
+   居中（v2.4：废除旧 960/1400px 多档宽度，全站 .content 一档口径；
+   文件页全出血保持 .content:has(> .files-page) 覆盖）。 */
+.page:not(.wide-page) { max-width: none; }
+/* 侧栏+内容双栏布局（管理/设置页）：与全站同宽（1560px），整体水平居中，
+   主体内容区（.section-content flex:1）随之占满可用宽度。 */
+.page.section-page, .page.admin-page { display: flex; align-items: flex-start; gap: 24px; max-width: none; width: 100%; margin: 0 auto; }
 .section-sidebar { flex: 0 0 190px; position: sticky; top: 16px; display: flex; flex-direction: column; gap: 4px; }
 .section-sidebar h3 { margin: 0 0 8px; }
 .section-sidebar a { padding: 8px 12px; border-radius: 6px; color: var(--muted); text-decoration: none; }
 .section-sidebar a.active, .section-sidebar a:hover { color: var(--text); background: var(--surface-2); }
 .section-content { min-width: 0; flex: 1; }
 /* 空间切换控件组（文件页全宽顶栏最左的内联组，经 toolbarPrefix 注入）：
-   仅横向排布其内部控件，右侧细分隔线与后续控件分区。 */
+   仅横向排布其内部控件，右侧细分隔线与后续控件分区（v2.4：竖分隔线规格
+   固定 border-right: 1px solid var(--border)，与回收站按钮左侧分区一致）。 */
 .space-switcher { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; padding-right: 8px; border-right: 1px solid var(--border); margin-right: 2px; }
-/* 团队管理弹窗：创建表单 + 团队列表（点击名称进入空间，owner 可改名/删除）。 */
-.space-manage-create { margin-bottom: 14px; }
-.space-manage-list { list-style: none; margin: 0; padding: 0; max-height: 46vh; overflow: auto; }
-.space-manage-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent); }
-.space-manage-row:last-child { border-bottom: none; }
-.space-manage-name { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 4px 6px; margin-left: -6px; border: 0; border-radius: 6px; background: none; color: var(--text); font: inherit; text-align: left; cursor: pointer; }
-.space-manage-name:hover { background: var(--surface-2); }
-.space-manage-name-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.space-manage-time { font-size: 11px; margin-left: auto; flex-shrink: 0; }
-.space-manage-actions { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
+/* 空间切换下拉（SpaceSwitcher）：选项内空间徽标 + 默认空间徽章。 */
+.space-option { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+.space-option-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 默认空间徽章紧凑化（v2.4）：不撑高下拉行/选择框。 */
+.space-option .badge-default, .team-card-head .badge-default { font-size: 10px; padding: 0 5px; line-height: 16px; }
+/* 空间徽标：名称首字符 + 名称 hash 固定配色（0..7 八色，暗色基底微透明白字）。 */
+.space-avatar { display: inline-flex; align-items: center; justify-content: center; border-radius: 8px; flex: 0 0 auto; font-weight: 700; color: #fff; user-select: none; }
+.space-avatar-0 { background: #4f6bed; }
+.space-avatar-1 { background: #0f9960; }
+.space-avatar-2 { background: #d97706; }
+.space-avatar-3 { background: #dc2626; }
+.space-avatar-4 { background: #7c3aed; }
+.space-avatar-5 { background: #0891b2; }
+.space-avatar-6 { background: #be185d; }
+.space-avatar-7 { background: #475569; }
+/* 默认空间徽章（注册自动创建，可改名不可删除）。 */
+.badge-default { border: 1px solid color-mix(in srgb, var(--primary) 45%, transparent); color: var(--primary); font-weight: 600; }
+/* 空间配额进度条（空间卡片）：75% 起告警、90% 起危险配色。 */
+.quota-bar { height: 6px; margin: 10px 0 4px; border-radius: 999px; background: color-mix(in srgb, var(--border) 55%, transparent); overflow: hidden; }
+.quota-fill { height: 100%; border-radius: 999px; background: var(--primary); transition: width .25s ease; }
+.quota-fill.quota-warn { background: #d97706; }
+.quota-fill.quota-danger { background: #dc2626; }
+/* 空间管理综合弹窗（SpaceManageModal，仿系统设置）：左竖向导航 + 右内容区。
+   弹窗本体 width min(880px,92vw)、body 70vh 由组件 styles 注入；此处只管
+   内部两栏布局与各自内滚。 */
+.space-manage-body { display: flex; height: 100%; min-height: 0; }
+.space-manage-nav { flex: 0 0 168px; min-height: 0; overflow: auto; padding: 10px 6px; border-right: 1px solid var(--border); }
+.space-manage-nav .ant-menu { border-inline-end: none !important; background: transparent; font-size: 13px; }
+.space-manage-nav .ant-menu-item { margin-inline: 0; border-radius: 6px; }
+.space-manage-ro { margin: 10px 6px 0; font-size: 12px; }
+/* 标题行（v2.4）：左标题 + 右「邀请记录」入口按钮。 */
+.space-manage-title-row { display: flex; align-items: center; gap: 8px; }
+.space-manage-title-row .space-manage-invites-btn { margin-left: auto; margin-right: 18px; flex-shrink: 0; }
+.space-manage-content { flex: 1; min-width: 0; min-height: 0; overflow: auto; padding: 12px 16px 16px; }
+/* 危险区转让所有权行：候选成员下拉 + 按钮。 */
+.space-manage-transfer { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+.space-manage-transfer .ant-select { min-width: 240px; flex: 1 1 220px; }
 .user-menu { position: relative; }
 .user-menu-trigger { display: inline-flex; align-items: center; gap: 8px; }
 /* 用户菜单下拉箭头：加大字号/着色，更醒目（展开时旋转 180°）。 */
@@ -411,6 +477,71 @@ body {
 .tls-cert-upload .field { flex: 1 1 260px; margin-bottom: 0; }
 .tls-cert-upload input[type='file'] { width: 100%; font-size: 12px; color: var(--muted); }
 @media (max-width: 700px) { .section-page, .admin-page { display: block; } .section-sidebar { position: static; flex-direction: row; overflow-x: auto; margin-bottom: 16px; } .section-sidebar h3 { display: none; } .section-sidebar a { white-space: nowrap; } .topbar { gap: 8px; } .nav { display: none; } .topbar-search { flex: 1; width: auto; } }
+
+/* ---------- 全局过渡（v2.4：150-200ms ease 统一口径） ----------
+   克制、统一：卡片与按钮 hover 的边框/背景过渡 ~180ms，列表行 hover 背景
+   过渡 ~150ms；弹窗动画 antd 自带；不做过场动画。
+   尊重 prefers-reduced-motion：全部归零。 */
+.file-card,
+.team-card,
+.team-card-manage,
+.stat-card,
+.member-panel,
+.panel,
+.folder-tree-nav,
+.dir-picker-tree,
+.share-tree-list,
+.file-table {
+  transition: border-color 0.18s ease, background-color 0.18s ease, box-shadow 0.18s ease;
+}
+
+/* 列表/条目行 hover 背景过渡（文件表、分享树、成员行、最近文件、通知与
+   搜索面板、目录树、面包屑等自定义行）。 */
+.file-table tbody tr,
+.share-tree-row,
+.member-row,
+.dash-recent-item,
+.notif-item,
+.search-item,
+.user-search-options button,
+.folder-tree-row,
+.crumb button,
+.name-btn,
+.rich-text-picker-item,
+.rich-text-embed-card,
+.chip,
+.theme-swatch {
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .file-card,
+  .team-card,
+  .team-card-manage,
+  .stat-card,
+  .member-panel,
+  .panel,
+  .folder-tree-nav,
+  .dir-picker-tree,
+  .share-tree-list,
+  .file-table,
+  .file-table tbody tr,
+  .share-tree-row,
+  .member-row,
+  .dash-recent-item,
+  .notif-item,
+  .search-item,
+  .user-search-options button,
+  .folder-tree-row,
+  .crumb button,
+  .name-btn,
+  .rich-text-picker-item,
+  .rich-text-embed-card,
+  .chip,
+  .theme-swatch {
+    transition: none;
+  }
+}
 
 /* ---------- 页面 ---------- */
 
@@ -1126,8 +1257,8 @@ svg.lucide {
 }
 
 .badge {
-  font-size: 12px;
-  padding: 2px 10px;
+  font-size: 11px;
+  padding: 1px 7px;
   border-radius: 999px;
   border: 1px solid var(--border);
   color: var(--muted);
@@ -1172,6 +1303,18 @@ svg.lucide {
   gap: 8px;
 }
 /* 行内 antd Input 撑满由适配层（.share-link .ant-input-affix-wrapper flex:1）承担。 */
+
+/* 链接再次查看弹窗（v2.4）：二维码展示区。 */
+.share-reveal-modal { display: flex; flex-direction: column; gap: 4px; }
+.share-reveal-qr {
+  display: flex;
+  justify-content: center;
+  padding: 12px;
+  margin-top: 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
 
 /* ---------- 预览 ---------- */
 
@@ -1228,7 +1371,7 @@ svg.lucide {
   margin-top: 12px;
 }
 
-/* ---------- 团队 ---------- */
+/* ---------- 空间 ---------- */
 
 .panel {
   background: var(--surface);
@@ -1305,7 +1448,7 @@ svg.lucide {
   font-size: 12px;
 }
 
-/* v1.7 团队管理卡片：主体（点击进入）+ 底部操作行（进入/成员管理/编辑/
+/* 空间管理卡片（v2.0）：主体（点击进入）+ 底部操作行（进入/成员管理/编辑/
    解散/离开）。 */
 .team-card-manage {
   display: flex;
@@ -1352,14 +1495,14 @@ svg.lucide {
   border-top: 1px solid var(--border);
 }
 
-/* ---------- 团队空间 ---------- */
+/* ---------- 空间视图 ---------- */
 
-/* ---------- 文件页三栏铺满视口（v1.5，个人空间与团队空间同一布局） ----------
+/* ---------- 文件页三栏铺满视口（v1.5，默认空间与空间视图同一布局） ----------
    .files-page（页面根）：锁定视口高度的 flex 列（.content 内边距清零见
    :has 覆盖）——上方瞬时 banners（出现时压缩工作区而非溢出视口），下方
    .files-shell（flex:1 min-h-0）= 全宽顶栏（.files-topbar 44px，工具行
    portal 目标）+ 三栏 grid（左目录树 240px / 中文件管理 1fr / 右侧栏
-   280px 仅团队空间）。三栏各自内部滚动（overflow），内容少也撑满不缩减
+   280px 仅空间视图）。三栏各自内部滚动（overflow），内容少也撑满不缩减
    （grid 行 minmax(0,1fr) + 树 max-height:100%）。 */
 
 /* 文件类全屏页面（v1.6 全出血）：去 1560px 限宽与两侧留白（顶栏工具行与
@@ -1402,7 +1545,9 @@ svg.lucide {
 }
 
 .files-tree-layout.has-aside {
-  grid-template-columns: 240px minmax(0, 1fr) 280px;
+  /* 右侧成员栏（统一空间模型 v2.1）：260px 可选栏，默认收起（两栏）——
+     FilesPage 工具栏「成员」按钮切换；<1280px 视口自动收起。 */
+  grid-template-columns: 240px minmax(0, 1fr) 260px;
 }
 
 .files-tree-main {
@@ -1416,7 +1561,8 @@ svg.lucide {
   min-width: 0;
 }
 
-/* 右侧栏（团队=成员面板）：铺满列高，标题固定、列表内部滚动。 */
+/* 右侧栏（文件页=成员栏，默认收起，经工具栏「成员」按钮展开）：铺满列高，
+   标题固定、列表内部滚动（.member-scroll）。 */
 .workspace-aside {
   min-height: 0;
   min-width: 0;
@@ -1427,6 +1573,15 @@ svg.lucide {
   flex: 1;
   min-height: 0;
 }
+
+/* 工具栏「成员」切换按钮：展开态着主题色（aria-pressed 反映）。 */
+.member-panel-toggle[aria-pressed='true'] {
+  color: var(--primary);
+  border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
+}
+
+/* 成员栏底部「空间管理」入口（owner/admin）。 */
+.member-panel .member-panel-manage { margin-top: 8px; flex: 0 0 auto; }
 
 /* 中区文件浏览本体：顶栏已上移（portal），仅剩 .files-body 滚动。 */
 .file-browser {
@@ -1464,16 +1619,9 @@ svg.lucide {
   }
 }
 
-.team-member-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 4px;
-}
-
-/* 成员面板（右侧栏 v1.5）：卡片铺满列高，标题固定（.member-scroll 内部
-   滚动）；默认仅 头像+姓名+角色徽章 紧凑列表（分页 >20 人）；
-   邀请/移除/改角色与自定义角色管理收进「管理成员」弹窗。 */
+/* 成员面板（右侧栏）：卡片铺满列高，标题固定（.member-scroll 内部
+   滚动）；默认仅 头像+姓名+角色徽章 紧凑列表（分页 >20 人，simple）；
+   邀请/移除/改角色收进「空间管理」综合弹窗。 */
 .member-panel {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -1511,6 +1659,7 @@ svg.lucide {
 
 .member-pager {
   margin-top: 8px;
+  flex: 0 0 auto;
   display: flex;
   justify-content: center;
 }
@@ -1550,6 +1699,22 @@ svg.lucide {
   gap: 8px;
   min-width: 0;
 }
+
+/* 成员行可点击（v2.4：点击查看用户只读信息弹窗）。 */
+.member-row-clickable { cursor: pointer; }
+.member-info-btn {
+  padding: 2px 4px;
+  margin-left: -4px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.member-info-btn:hover { background: var(--surface-2); }
+.member-row-clickable:hover { background: color-mix(in srgb, var(--border) 35%, transparent); }
 
 .member-id {
   font-family: var(--font-mono);
@@ -1668,7 +1833,7 @@ svg.lucide {
   font-weight: 600;
 }
 
-/* owner 危险区（解散团队）：红色描边卡片。 */
+/* owner 危险区（解散空间）：红色描边卡片。 */
 .member-danger-zone {
   margin-top: 14px;
   padding: 10px 12px;
@@ -1696,7 +1861,7 @@ svg.lucide {
   font-size: 12.5px;
 }
 
-/* 加入团队落地页操作按钮。 */
+/* 加入空间落地页操作按钮。 */
 .join-team-actions {
   margin-top: 8px;
   display: flex;
@@ -1704,7 +1869,7 @@ svg.lucide {
   align-items: center;
 }
 
-/* ---------- 团队空间：角色管理与成员改派 ---------- */
+/* ---------- 空间视图：角色管理与成员改派 ---------- */
 
 /* 行内 antd Select（成员改派）：小字号、限宽；内边距由 antd 控制。 */
 .member-role-select.ant-select {
@@ -1925,13 +2090,15 @@ svg.lucide {
   height: 100vh;
 }
 
+/* 目录分享：全幅铺满视口（紧凑顶条 + 可滚动主体）。v2.4 顶条与文件页
+   .files-toolbar 视觉对齐：透明底色、44px 行高、控件 antd small。 */
 .share-folder-bar {
   display: flex;
   align-items: center;
-  gap: 10px;
-  min-height: 40px;
-  padding: 4px 16px;
-  background: var(--surface);
+  gap: 6px;
+  height: 44px;
+  padding: 0 12px;
+  background: transparent;
   border-bottom: 1px solid var(--border);
   flex: 0 0 auto;
   font-size: 13px;
@@ -2226,7 +2393,7 @@ svg.lucide {
 
 /* ---------- v1.1 Webhook 通知渠道 ---------- */
 
-/* webhook 行的事件徽标组（上传完成/隔离/分享下载/团队更新）。 */
+/* webhook 行的事件徽标组（上传完成/隔离/分享下载/空间更新）。 */
 .event-badges {
   display: flex;
   flex-wrap: wrap;
@@ -2744,7 +2911,7 @@ div.mxTooltip {
 /* ---------- 文件管理左侧目录树（FolderTreeNav，替代 Wiki 视图） ---------- */
 
 /* 布局骨架（.files-tree-layout/.files-tree-main/.workspace-aside 三栏 grid）
-   已上移至「团队空间」节统一维护：个人空间与团队空间同一布局组件。 */
+   已上移至「空间视图」节统一维护：默认空间与空间视图同一布局组件。 */
 
 /* 目录树：240px 宽、grid 拉伸填满列高，超高时内部滚动；
    行 min-width:max-content 支持横向滚动查看长文件名。 */
@@ -3110,7 +3277,7 @@ kbd {
   height: 100%;
 }
 
-/* ---------- 路径级 ACL 管理对话框（团队空间） ---------- */
+/* ---------- 路径级 ACL 管理对话框（空间视图） ---------- */
 
 .acl-list {
   max-height: 46vh;
@@ -3251,6 +3418,8 @@ kbd {
   margin: 0 4px;
 }
 
+/* 目录分享树列表（v2.4 视觉对齐文件管理 .file-table）：surface 底 + 边框 +
+   行内边距/hover 底色与文件表一致，hover 过渡见全局过渡节。 */
 .share-tree-list {
   list-style: none;
   margin: 0;
@@ -3258,14 +3427,20 @@ kbd {
   border: 1px solid var(--border);
   border-radius: 8px;
   overflow: hidden;
+  background: var(--surface);
 }
 
 .share-tree-row {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 8px 14px;
-  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.share-tree-row:hover {
+  background: var(--surface-2);
 }
 
 .share-tree-row:last-child {
@@ -4127,7 +4302,7 @@ kbd {
   align-items: start;
 }
 
-/* ---------- 面包屑前置返回箭头（团队空间「← 返回团队列表」）。 */
+/* ---------- 面包屑前置返回箭头（空间视图「← 返回空间列表」）。 */
 .crumb-back {
   display: inline-flex;
   align-items: center;
@@ -4250,3 +4425,368 @@ kbd {
 
 /* 表单行（.team-create-row .field）内 antd Select 最小宽度（flex 收缩保底）。 */
 .team-create-row .field .ant-select { min-width: 160px; }
+
+/* ==================== v2.2 增补样式 ==================== */
+
+/* ---- 项1：TOTP 绑定二维码（白底黑码保证任意明暗下可扫）。 ---- */
+.totp-qr-wrap {
+  display: flex;
+  justify-content: center;
+  padding: 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  width: fit-content;
+  margin: 0 auto;
+}
+
+/* ---- 项4：管理后台批量操作/筛选工具行（复用成员弹窗的紧凑条样式）。 ---- */
+.admin-page .member-list-toolbar,
+.panel .member-list-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ---- 项10：右侧成员栏（默认展开；顶部空间管理按钮 + 用户组小节）。 ---- */
+.member-panel .member-panel-manage {
+  margin-bottom: 8px;
+  flex: 0 0 auto;
+}
+
+.member-panel .member-row .muted {
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+/* ---- 项13：页面标题行操作组（/spaces 新建空间按钮等）。 ---- */
+.page-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ---- 项16：个人信息弹窗。 ---- */
+.profile-info-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.profile-info-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.profile-info-head .avatar {
+  width: 44px;
+  height: 44px;
+  font-size: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--primary) 22%, var(--surface-2));
+  color: var(--text);
+  flex-shrink: 0;
+}
+
+.profile-info-name {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.profile-info-sub {
+  font-size: 12px;
+}
+
+.profile-info-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.profile-info-list > div {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+}
+
+.profile-info-list dt {
+  width: 64px;
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.profile-info-list dd {
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 用户下拉触发按钮：下拉箭头（ChevronDown）与文字间距。 */
+.user-menu-trigger .user-menu-caret {
+  margin-left: 2px;
+  opacity: 0.65;
+}
+
+/* ---- 项17：顶栏外观快捷入口（Popover 紧凑单列）。 ---- */
+.appearance-pop {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 236px;
+}
+
+.appearance-pop-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.appearance-pop-label {
+  font-size: 12px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.appearance-pop-swatches {
+  display: flex;
+  gap: 6px;
+}
+
+/* 色板复用 .theme-swatch 的圆点规格，但不带文字（紧凑版）。 */
+.appearance-pop-swatches .theme-swatch {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: 50%;
+  border: 2px solid transparent;
+}
+
+.appearance-pop-swatches .theme-swatch.active {
+  border-color: var(--text);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 40%, transparent);
+}
+
+.appearance-pop-foot {
+  font-size: 12px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+/* ---- 项9：空间管理弹窗·邀请 tab 双轨说明。 ---- */
+.member-invite-ways {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.member-invite-way {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.member-invite-way strong {
+  font-size: 12px;
+}
+
+@media (max-width: 720px) {
+  .member-invite-ways {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ---- 项1：空间管理弹窗·一行式添加表单（成员/邀请/用户组共享）。 ---- */
+/* .member-add-row：主输入（flex 撑满）+ 角色 Select + 提交按钮同行；
+   修复旧版 Select 无宽度导致输入框异常窄的问题。 */
+.member-add-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.member-add-row .ant-select,
+.member-add-row .ant-input {
+  flex: 1 1 200px;
+  min-width: 0;
+}
+
+.member-add-main {
+  flex: 1 1 200px;
+  min-width: 0;
+  width: auto;
+}
+
+.member-add-main.ant-select-multiple {
+  flex: 3 1 240px;
+}
+
+.member-add-role {
+  flex: 0 0 118px;
+  width: 118px;
+}
+
+.member-add-submit {
+  flex: 0 0 auto;
+}
+
+/* 多选标签横向滚动，避免选人多用户后把按钮挤换行。 */
+.member-add-row .ant-select-multiple .ant-select-selection-overflow {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+}
+
+/* ---- 项4：成员列表组来源徽标（「组」，只读组员标识）。 ---- */
+.badge-group-src {
+  font-size: 10px;
+  padding: 0 5px;
+  line-height: 16px;
+  color: var(--muted);
+  border-color: color-mix(in srgb, var(--border) 100%, transparent);
+  background: var(--surface-2);
+}
+
+/* ---- 项6：/spaces 卡片右上角操作区。 ---- */
+.team-card-manage {
+  position: relative;
+}
+
+/* v2.4：右上角「管理」SplitButton（主按钮 + 下拉危险项），对齐文件页
+   上传按钮组（antd Compact）。 */
+.team-card-actions-split {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* 卡片头部留出按钮组空间，避免长名称与按钮重叠。 */
+.team-card-manage .team-card-head {
+  padding-right: 96px;
+}
+
+/* ---- 项10：人员与组页面（左组树 + 右成员表）。 ---- */
+.people-groups-layout {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.people-group-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  position: sticky;
+  top: 8px;
+}
+
+.people-group-node {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--text);
+  min-width: 0;
+}
+
+.people-group-node:hover {
+  background: var(--surface-2);
+}
+
+.people-group-node.active {
+  background: color-mix(in srgb, var(--primary) 14%, transparent);
+  color: var(--primary-hover);
+}
+
+.people-group-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.people-group-side {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+
+.people-group-count {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.people-group-main {
+  min-width: 0;
+}
+
+@media (max-width: 860px) {
+  .people-groups-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .people-group-tree {
+    position: static;
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+}
+
+/* ---- 项8：设置页系统设置面板·键名等宽代码样式。 ---- */
+.setting-key-code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 4px;
+  word-break: break-all;
+}
+
+/* ---- 项7：个人资料弹窗·资料编辑区（原设置页「资料」tab 并入）。 ---- */
+.profile-edit-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.profile-edit-fields .field {
+  margin-bottom: 0;
+}

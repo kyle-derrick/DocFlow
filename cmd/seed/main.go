@@ -1,4 +1,5 @@
-// Command seed 创建开发/运维用的管理员账号。
+// Command seed 创建开发/运维用的管理员账号，并确保其默认空间（统一
+// 空间模型，migration 040）。
 // 邮箱与密码必须通过环境变量提供，不允许硬编码默认密码。
 // 邮箱统一小写归一后写入与匹配（重跑幂等）。
 //
@@ -19,6 +20,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/docflow/docflow/internal/auth"
+	"github.com/docflow/docflow/internal/space"
 )
 
 func main() {
@@ -62,7 +64,16 @@ func main() {
 	if err := seedAdmin(db, username, email, hash, role); err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("admin user %s (%s, role=%s) is ready\n", username, email, role)
+	// 统一空间模型：确保 admin 的默认空间「{username}的空间」与根目录。
+	var admin auth.User
+	if err := db.Where("email = ?", email).First(&admin).Error; err != nil {
+		log.Fatalf("seed: reload admin %s: %v", email, err)
+	}
+	spaceSvc := space.NewService(space.NewGormStore(db))
+	if _, _, err := spaceSvc.EnsureDefaultSpace(admin.ID, username); err != nil {
+		log.Fatalf("seed: ensure default space for %s: %v", username, err)
+	}
+	fmt.Printf("admin user %s (%s, role=%s) is ready with default space\n", username, email, role)
 }
 
 // seedAdmin upsert 管理员账号：

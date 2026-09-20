@@ -4,8 +4,8 @@
 //     钩子），Indexer 读当前版本 blob 内容（限 2MB、文本 mime/扩展名判定）
 //     后经 Repo.UpsertDoc 落 file_search_docs（超出上限或二进制仅名称）；
 //   - 查询：名称 ILIKE %q%（大小写不敏感、escape %_\）OR tsv @@
-//     plainto_tsquery('simple', q)，访问控制复用 files.SearchAccessible 的
-//     判定模式（个人 owner=me OR 团队 EXISTS team_members），软删文件排除；
+//     plainto_tsquery('simple', q)，访问控制复用统一空间模型的判定
+//     （owner=me OR 空间在册成员：直接成员/经用户组），软删文件排除；
 //   - 清理：files 行硬删除经外键 ON DELETE CASCADE 级联移除索引行，
 //     janitor 另有孤儿兜底清理（file_search_docs 无对应 files 行）。
 //
@@ -30,7 +30,7 @@ type Doc struct {
 	FileID    uuid.UUID
 	VersionID uuid.UUID
 	OwnerID   uuid.UUID
-	TeamID    *uuid.UUID
+	SpaceID   *uuid.UUID
 	Name      string
 	// Content 文本内容；"" 表示仅名称（二进制 / 超上限 / 非文本 mime）。
 	Content string
@@ -72,8 +72,8 @@ type Repo interface {
 	UpsertDoc(d Doc) error
 	// RemoveDoc 删除 fileID 的索引文档（幂等）。
 	RemoveDoc(fileID uuid.UUID) error
-	// QueryDocs 返回 user 可读且命中 q 的结果：访问控制（个人 owner /
-	// 团队在册成员实时判定）、软删排除、tag/starred 过滤、limit 截断、
+	// QueryDocs 返回 user 可读且命中 q 的结果：访问控制（owner /
+	// 空间在册成员实时判定）、软删排除、tag/starred 过滤、limit 截断、
 	// 名称命中优先其次 updated_at 倒序，均由实现保证。
 	QueryDocs(user uuid.UUID, opts QueryOptions) ([]Result, error)
 }
@@ -101,8 +101,8 @@ func (s *Store) Query(user uuid.UUID, opts QueryOptions) ([]Result, error) {
 }
 
 // IndexFile upsert 索引文档（Indexer 的落库入口；content 为空即仅名称）。
-func (s *Store) IndexFile(fileID, versionID, ownerID uuid.UUID, teamID *uuid.UUID, name, content string) error {
-	return s.repo.UpsertDoc(Doc{FileID: fileID, VersionID: versionID, OwnerID: ownerID, TeamID: teamID, Name: name, Content: content})
+func (s *Store) IndexFile(fileID, versionID, ownerID uuid.UUID, spaceID *uuid.UUID, name, content string) error {
+	return s.repo.UpsertDoc(Doc{FileID: fileID, VersionID: versionID, OwnerID: ownerID, SpaceID: spaceID, Name: name, Content: content})
 }
 
 // RemoveFile 删除索引文档（幂等；正常路径由外键级联承担，此为显式入口）。

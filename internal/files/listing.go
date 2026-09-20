@@ -50,16 +50,21 @@ type SearchOptions struct {
 	Limit int
 }
 
-// readableScopeSQL 返回「user 可读」过滤 SQL 片段与参数：
-// 个人文件 owner 命中；团队文件（scope_type='team'）要求在册成员
-// （EXISTS team_members，成员变动实时生效，与 share 包同模式）。
+// readableScopeSQL 返回「user 可读」过滤 SQL 片段与参数（统一空间模型）：
+// 文件行 owner 命中，或用户为文件所在空间的在册成员（直接成员或经
+// 用户组，EXISTS 子查询实时判定，成员变动即时生效）。
 func readableScopeSQL(user uuid.UUID) (string, []any) {
-	return "(owner_id = ? OR (scope_type = 'team' AND team_id IS NOT NULL AND " +
-		"EXISTS (SELECT 1 FROM team_members tm WHERE tm.team_id = files.team_id AND tm.user_id = ?)))", []any{user, user}
+	return `(owner_id = ? OR EXISTS (
+		SELECT 1 FROM space_members sm WHERE sm.space_id = files.space_id AND sm.user_id = ?
+	) OR EXISTS (
+		SELECT 1 FROM space_group_members sgm
+		JOIN group_members gm ON gm.group_id = sgm.group_id
+		WHERE sgm.space_id = files.space_id AND gm.user_id = ?
+	))`, []any{user, user, user}
 }
 
 // SearchAccessible 跨目录列出 user 可读且命中过滤条件的文件
-// （个人 + 团队，含目录本身；不含根目录与软删除项）。
+// （可见空间内，含目录本身；不含根目录与软删除项）。
 // tag_id 的归属校验由调用方（HTTP 层经 tagging 服务）完成。
 func (s *Store) SearchAccessible(user uuid.UUID, opts SearchOptions) ([]File, error) {
 	if opts.Limit <= 0 {

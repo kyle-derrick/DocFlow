@@ -5,11 +5,14 @@
 //   则整站 iframe（raw/share）+ 顶部「文件列表」切换；否则直接文件列表。
 //   目录可逐级进入（tree API），文件按类型内联预览（raw）或下载，html 用
 //   raw/share 新窗口打开；
+// - v2.4：目录/打包分享点击文件改为弹窗查看（PublicEntryViewer，与文件页
+//   查看弹窗同规格），补齐富文本(.dfrt/.dfdoc)/md/xmind/白板/mermaid/
+//   drawio 的只读渲染路径（内容经 /raw/share 白名单扩展获取）；
 // - 密码保护分享先解锁（HttpOnly 会话 cookie），水印开启时叠加全屏覆盖层。
-import { FormEvent, useCallback, useEffect, useRef, useState } from 'react'
+import { FormEvent, Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { FileQuestion, FileText, Folder, Lock } from 'lucide-react'
-import { Button, Input, Segmented } from 'antd'
+import { Button, Input, Modal as AntdModal, Segmented } from 'antd'
 import {
   ApiError,
   PASSWORD_REQUIRED_CODE,
@@ -21,13 +24,28 @@ import {
   fetchPublicShareOffice,
   fetchPublicWebpkgPreview,
   getPublicShare,
+  isDfdocFile,
+  isDrawioFile,
+  isDrawioXmlContent,
+  isExcalidrawFile,
+  isMermaidFile,
   isOfficeFile,
+  isXmindFile,
   previewKind,
   publicShareTree,
   verifyPublicShare,
 } from '../api'
 import { loadDocEditorScript } from './EditorPage'
+import { MarkdownViewer } from './TextEditorPage'
+import { parseScene } from './ExcalidrawPage'
+import DrawioViewer from '../components/DrawioViewer'
+import ExcalidrawViewer from '../components/ExcalidrawViewer'
+import MermaidDiagram from '../components/MermaidDiagram'
+import XMindViewer from '../components/XMindViewer'
 import { useColorMode } from '../theme'
+
+// 富文本编辑器（Tiptap 产物 1MB+）懒加载独立 chunk（与 DfdocEditorPage 同法）。
+const RichTextEditor = lazy(() => import('../components/richtext/RichTextEditor'))
 
 function formatSize(size: number): string {
   if (size < 1024) return `${size} B`
@@ -186,65 +204,178 @@ function PublicOfficeViewer({ token, name }: { token: string; name: string }) {
   )
 }
 
-/** 选中文件的行内预览：文本（fetch 后 <pre>）/ 图片 / PDF 用 raw URL 直渲。 */
-function ShareEntryPreview({ rawBase, entry }: { rawBase: string; entry: ShareTreeEntry }) {
+/** 经 raw/share 拉取文本内容（raw 端点白名单内扩展名；失败抛 Error）。 */
+async function fetchRawText(url: string): Promise<string> {
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(`内容加载失败（${res.status}）`)
+  return res.text()
+}
+
+/** 经 raw/share 拉取二进制内容（.xmind 等本地解析）。 */
+async function fetchRawBuffer(url: string): Promise<ArrayBuffer> {
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(`内容加载失败（${res.status}）`)
+  return res.arrayBuffer()
+}
+
+/** 弹窗内文本加载态/错误态（与独立查看页的 text-editor-state 同视觉）。 */
+function ViewerState({ text }: { text: string }) {
+  return <div className="text-editor-page viewer-only"><div className="text-editor-state">{text}</div></div>
+}
+
+/**
+ * 目录分享条目的弹窗查看内容（v2.4）：按扩展名分发只读渲染，与文件页
+ * FileViewerDispatch 同口径——富文本(.dfrt/.dfdoc)/Markdown/mermaid/
+ * xmind/白板(drawio/excalidraw)/图片/PDF/纯文本。内容经 raw/share 获取
+ * （后端白名单已扩展相应扩展名）；html 仍新窗口打开（点击处已分流）。
+ */
+function PublicEntryViewer({ rawBase, entry }: { rawBase: string; entry: ShareTreeEntry }) {
+  const dark = useColorMode() === 'dark'
+  const lower = entry.name.toLowerCase()
   const url = rawUrlOf(rawBase, entry.path, false)
   const kind = previewKind(entry.mime_type ?? '')
   const [text, setText] = useState<string | null>(null)
-  const [textError, setTextError] = useState('')
+  const [error, setError] = useState('')
+  const endsXml = lower.endsWith('.xml')
+
+  // 文本类内容统一拉取（md/mermaid/drawio/xml 嗅探/dfrt/excalidraw/txt 等）。
+  const needsText =
+    isDfdocFile(lower)
+    || lower.endsWith('.md') || lower.endsWith('.markdown')
+    || isMermaidFile(lower)
+    || isExcalidrawFile(lower)
+    || isDrawioFile(lower)
+    || endsXml
+    || kind === 'text'
 
   useEffect(() => {
-    if (kind !== 'text') return
-    let cancelled = false
+    if (!needsText) return
+    let alive = true
     setText(null)
-    setTextError('')
-    fetch(url)
-      .then((res) => {
-        if (!res.ok) throw new Error(`预览加载失败（${res.status}）`)
-        return res.text()
-      })
-      .then((t) => {
-        if (!cancelled) setText(t)
-      })
-      .catch(() => {
-        if (!cancelled) setTextError('预览内容加载失败')
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [url, kind])
+    setError('')
+    void fetchRawText(url)
+      .then((t) => { if (alive) setText(t) })
+      .catch(() => { if (alive) setError('内容加载失败') })
+    return () => { alive = false }
+  }, [url, needsText])
 
-  return (
-    <div className="share-tree-preview">
-      <div className="share-tree-preview-head">
-        <strong>{entry.name}</strong>
-        {entry.size !== undefined && <span className="muted">{formatSize(entry.size)}</span>}
-        <Button size="small" href={url} download={entry.name}>下载</Button>
+  // 富文本（Tiptap JSON）readonly 渲染（嵌入块内图片等认证资源不可用，正文正常）。
+  if (isDfdocFile(lower)) {
+    if (error) return <ViewerState text={error} />
+    if (text === null) return <ViewerState text="正在加载文档…" />
+    return (
+      <Suspense fallback={<ViewerState text="正在加载查看器…" />}>
+        <RichTextEditor initialJSON={text} readonly />
+      </Suspense>
+    )
+  }
+  if (lower.endsWith('.md') || lower.endsWith('.markdown')) {
+    if (error) return <ViewerState text={error} />
+    if (text === null) return <ViewerState text="正在加载文档…" />
+    return <div className="text-editor-page viewer-only"><MarkdownViewer source={text} /></div>
+  }
+  if (isMermaidFile(lower)) {
+    if (error) return <ViewerState text={error} />
+    if (text === null) return <ViewerState text="正在加载图表…" />
+    return <div className="text-editor-page viewer-only diagram-viewer-page"><MermaidDiagram source={text} dark={dark} /></div>
+  }
+  if (isExcalidrawFile(lower)) {
+    if (error) return <ViewerState text={error} />
+    if (text === null) return <ViewerState text="正在加载白板…" />
+    const scene = parseScene(text)
+    if (scene.elements.length === 0) return <ViewerState text="该白板为空或内容损坏" />
+    return (
+      <div className="text-editor-page viewer-only diagram-viewer-page">
+        <ExcalidrawViewer elements={scene.elements} appState={scene.appState} files={scene.files} title={entry.name} />
       </div>
-      {kind === 'image' ? (
-        <div className="preview-box">
-          <img className="preview-image" src={url} alt={entry.name} />
+    )
+  }
+  if (isDrawioFile(lower)) {
+    if (error) return <ViewerState text={error} />
+    if (text === null) return <ViewerState text="正在加载图表…" />
+    return (
+      <div className="text-editor-page viewer-only diagram-viewer-page">
+        <DrawioViewer baseURL="/drawio" xml={text || '<mxfile><diagram/></mxfile>'} title={entry.name} dark={dark} lang="zh" />
+      </div>
+    )
+  }
+  if (endsXml) {
+    if (text === null) return <ViewerState text="正在加载…" />
+    if (text !== null && isDrawioXmlContent(text)) {
+      return (
+        <div className="text-editor-page viewer-only diagram-viewer-page">
+          <DrawioViewer baseURL="/drawio" xml={text} title={entry.name} dark={dark} lang="zh" />
         </div>
-      ) : kind === 'pdf' ? (
-        <div className="preview-box">
-          <iframe className="preview-frame" src={url} title={entry.name} />
+      )
+    }
+    return <div className="text-editor-page viewer-only"><pre className="preview-text">{text}</pre></div>
+  }
+  if (isXmindFile(lower)) {
+    return (
+      <div className="text-editor-page viewer-only diagram-viewer-page">
+        <XMindViewer fileId="" title={entry.name} convertible={false} loadBuffer={() => fetchRawBuffer(url)} />
+      </div>
+    )
+  }
+  if (kind === 'image') {
+    return <div className="preview-box"><img className="preview-image" src={url} alt={entry.name} /></div>
+  }
+  if (kind === 'pdf') {
+    return <div className="preview-box"><iframe className="preview-frame" src={url} title={entry.name} /></div>
+  }
+  if (kind === 'text') {
+    if (error) return <ViewerState text={error} />
+    if (text === null) return <ViewerState text="正在加载内容…" />
+    return <div className="text-editor-page viewer-only"><pre className="preview-text">{text}</pre></div>
+  }
+  return (
+    <ViewerState text="该文件类型不支持在线预览，可下载后查看。" />
+  )
+}
+
+/**
+ * 目录分享条目查看弹窗（v2.4）：与文件页查看弹窗（FileBrowser Modal
+ * modal-viewer 规格）同视觉——min(1180px,94vw) 宽 + 定高 body 内滚；
+ * 内容渲染由 PublicEntryViewer 分发。下载按钮按分享权限展示。
+ */
+function ShareEntryModal({
+  rawBase,
+  entry,
+  permission,
+  onClose,
+}: {
+  rawBase: string
+  entry: ShareTreeEntry
+  permission: 'view' | 'download'
+  onClose: () => void
+}) {
+  const url = rawUrlOf(rawBase, entry.path, false)
+  return (
+    <AntdModal
+      open
+      centered
+      footer={null}
+      width="min(1180px, 94vw)"
+      title={<span className="share-entry-modal-title">查看「{entry.name}」</span>}
+      styles={{ body: { overflow: 'auto', height: 'min(76vh, 760px)', maxHeight: 'min(76vh, 760px)' } }}
+      classNames={{
+        header: 'docflow-modal-header',
+        title: 'docflow-modal-title',
+        body: 'docflow-modal-body',
+        close: 'docflow-modal-close',
+      }}
+      className="docflow-modal modal-viewer"
+      onCancel={onClose}
+    >
+      <div className="preview-embed">
+        <PublicEntryViewer rawBase={rawBase} entry={entry} />
+      </div>
+      {permission === 'download' && isRawServed(entry.name) && (
+        <div className="preview-foot">
+          <Button size="small" href={url} download={entry.name}>下载</Button>
         </div>
-      ) : kind === 'text' ? (
-        <div className="preview-box">
-          {textError ? (
-            <div className="error-text">{textError}</div>
-          ) : text === null ? (
-            <p className="hint">加载预览内容…</p>
-          ) : (
-            <pre className="preview-text">{text}</pre>
-          )}
-        </div>
-      ) : isRawServed(entry.name) ? (
-        <p className="hint">该类型不提供行内预览，可下载后查看。</p>
-      ) : (
-        <p className="hint">该文件类型不支持在线预览或下载。</p>
       )}
-    </div>
+    </AntdModal>
   )
 }
 
@@ -263,11 +394,12 @@ function FolderShareView({ token, info }: { token: string; info: PublicShareInfo
   // 根 index.html 探测：null = 探测中；true = 可整站渲染。
   const [siteReady, setSiteReady] = useState<boolean | null>(null)
   const [view, setView] = useState<'site' | 'files'>('site')
-  const [selected, setSelected] = useState<ShareTreeEntry | null>(null)
+  // 弹窗查看目标（v2.4：点击文件弹出与文件页一致的查看弹窗）。
+  const [viewing, setViewing] = useState<ShareTreeEntry | null>(null)
 
   const loadDir = useCallback(async (path: string) => {
     setError('')
-    setSelected(null)
+    setViewing(null)
     setEntries(null)
     try {
       const res = await publicShareTree(token, path)
@@ -313,7 +445,8 @@ function FolderShareView({ token, info }: { token: string; info: PublicShareInfo
       window.open(rawUrlOf(rawBase, entry.path, false), '_blank', 'noopener')
       return
     }
-    setSelected(entry)
+    // v2.4：其余类型弹窗查看（与文件页查看弹窗分发一致）。
+    setViewing(entry)
   }
 
   const dirSegments = dir.split('/').filter(Boolean)
@@ -427,8 +560,12 @@ function FolderShareView({ token, info }: { token: string; info: PublicShareInfo
                 })}
               </ul>
             )}
-            {selected && <ShareEntryPreview rawBase={rawBase} entry={selected} />}
           </div>
+        )}
+
+        {/* 弹窗查看（v2.4：点击文件 = 与文件页一致的查看弹窗）。 */}
+        {viewing && rawBase && (
+          <ShareEntryModal rawBase={rawBase} entry={viewing} permission={info.permission} onClose={() => setViewing(null)} />
         )}
       </div>
     </>

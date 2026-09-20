@@ -136,3 +136,61 @@ func (h *Handler) revokeInvitation(c *gin.Context) {
 	h.recordAudit(c, audit.Entry{UserID: &actor, Action: audit.ActionInviteRevoke, ResourceType: audit.ResourceInvitation, ResourceID: id.String()})
 	c.Status(http.StatusNoContent)
 }
+
+// resendInvitation POST /api/v1/admin/invitations/:id/resend：重发邀请——
+// 撤销旧记录（旧 token 立即失效）并以同邮箱/同角色生成新邀请（新的一次性
+// accept_url 仅本次响应可见），best-effort 补发邀请邮件。已接受的邀请不可
+// 重发（410）。响应结构同创建（201）。
+func (h *Handler) resendInvitation(c *gin.Context) {
+	if h.invites == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "invitation service is not configured"})
+		return
+	}
+	id, ok := parseID(c, c.Param("id"))
+	if !ok {
+		return
+	}
+	old, err := h.invites.Get(id)
+	if err != nil {
+		if errors.Is(err, invite.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "invitation not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to load invitation"})
+		}
+		return
+	}
+	if old.AcceptedAt != nil {
+		c.JSON(http.StatusGone, gin.H{"error": "invitation already accepted"})
+		return
+	}
+	actor := userID(c)
+	// 旧记录先删（token 立即失效），再按同邮箱/角色新建——顺序保证重发后
+	// 幂等探测（FindActiveByEmail）命中的是新记录。
+	if err := h.invites.Revoke(id); err != nil && !errors.Is(err, invite.ErrNotFound) {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to resend invitation"})
+		return
+	}
+	inv, token, err := h.invites.Create(actor, old.Email, old.Role)
+	if err != nil {
+		switch {
+		case errors.Is(err, invite.ErrInvalidEmail), errors.Is(err, invite.ErrInvalidRole):
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to resend invitation"})
+		}
+		return
+	}
+	out := invitationJSON(inv)
+	if token != "" {
+		out["accept_url"] = "/register/" + token
+		inviter := ""
+		if name, err := h.users.Username(actor); err == nil {
+			inviter = name
+		}
+		if err := h.mailer.SendInvitation(inv.Email, h.publicLink("/register/"+token), inviter); err != nil {
+			log.Printf("[mail] resend invitation to %s: %v", inv.Email, err)
+		}
+	}
+	h.recordAudit(c, audit.Entry{UserID: &actor, Action: audit.ActionInviteResend, ResourceType: audit.ResourceInvitation, ResourceID: inv.ID.String(), Metadata: `{"email":"` + sanitizeAuditToken(inv.Email) + `","role":"` + inv.Role + `","old_id":"` + id.String() + `"}`})
+	c.JSON(http.StatusCreated, out)
+}

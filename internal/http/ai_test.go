@@ -94,7 +94,7 @@ func newAISource(mime, name, status string, size int64) *fakeAIFiles {
 	owner := uuid.New()
 	return &fakeAIFiles{
 		owner:   owner,
-		file:    files.File{ID: uuid.New(), Name: name, OwnerID: owner, Type: "file", ScopeType: "personal"},
+		file:    files.File{ID: uuid.New(), Name: name, OwnerID: owner, Type: "file"},
 		version: files.FileVersion{ID: uuid.New()},
 		blob:    files.ObjectBlob{StorageKey: "objects/ai", Size: size, MimeType: mime, Status: status},
 	}

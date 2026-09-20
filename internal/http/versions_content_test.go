@@ -136,12 +136,12 @@ func TestFileVersionContentNotFound(t *testing.T) {
 func TestFileVersionContentForbidden(t *testing.T) {
 	owner := uuid.New()
 	fileID, versionID := uuid.New(), uuid.New()
-	// 团队非成员：ErrForbidden → 403。
+	// 空间非成员（无读权限）：ErrForbidden → 403。
 	reader := newFakeVersionReader()
 	reader.stub(owner, files.File{ID: fileID, OwnerID: owner}, files.FileVersion{ID: versionID, FileID: fileID}, files.ObjectBlob{Status: files.BlobStatusAvailable}, files.ErrForbidden)
 	w := callVersionContent(newVersionContentHandler(reader), owner, fileID.String(), versionID.String())
 	if w.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403 for team non-member", w.Code)
+		t.Fatalf("status = %d, want 403 for space non-member", w.Code)
 	}
 	// blob 非 available（如 quarantined）：403 且附 status。
 	reader2 := newFakeVersionReader()

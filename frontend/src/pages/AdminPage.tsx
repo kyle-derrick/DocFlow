@@ -1,32 +1,24 @@
-// 管理设置页（仅 admin 角色）：顶部五类计数概览 + 按前缀分组的设置卡片，
-// 行内编辑保存（bool 开关 / int 数字 / string 文本，按 value type 渲染）。
-// 另含邀请管理与用户管理卡片：邀请创建（一次性注册链接展示/复制）、列表
-// 状态与撤销；用户列表（q 前缀检索 + 分页）、禁用/启用（立即撤销其全部
-// 会话）、改配额、改角色与重置密码（C6；删除以软禁用替代，见 openapi 取舍）。
-// 非 admin（403）显示无权限页；保存成功后刷新列表并提示。
-import { FormEvent, useEffect, useMemo, useState } from 'react'
+// 管理页（仅 admin 角色，v2.3 重分配）：概览 / 人员与组（合并：左组树 +
+// 右成员表 + 批量跨组移动/移出组/改角色/禁用 + 组 CRUD + 邀请记录弹窗）/
+// 空间（含「已解散」筛选与彻底删除）/ 审计日志（含保留期设置）/ 威胁防护
+//（隔离区 + 扫描 + 凭据状态）/ 备份。TLS / 邮件配置 / 系统设置已迁至
+// 「设置」页（admin 可见）；邀请管理并入「人员与组」右上角弹窗。
+import { FormEvent, Key, useEffect, useMemo, useState } from 'react'
 import { NavLink, Navigate, useNavigate, useParams } from 'react-router-dom'
-import { App as AntdApp, Button, Card, Checkbox, Input, InputNumber, Radio, Select, Switch, Table } from 'antd'
+import { App as AntdApp, Button, Card, Checkbox, Input, InputNumber, Segmented, Select, Table, Tag } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import {
   AdminStats,
+  AdminSpaceItem,
   AdminUser,
   ApiError,
   AuditEntry,
   BackupStatus,
   BackupVerifyResult,
   Group,
-  GroupMember,
   Invitation,
   QuarantineAction,
   QuarantineItem,
-  SettingItem,
-  SettingType,
-  SettingValue,
-  SmtpSettingsView,
-  TlsCert,
-  TlsMode,
-  TlsStatus,
   UserSearchResult,
   adminAddGroupMember,
   adminCreateGroup,
@@ -36,19 +28,18 @@ import {
   adminGetBackupStatus,
   adminVerifyBackup,
   adminGetSettings,
-  adminGetSmtpSettings,
-  adminGetTls,
   adminListAuditLogs,
-  adminListGroupMembers,
   adminListGroups,
   adminListQuarantine,
-  adminPutTls,
-  adminPutSmtpSettings,
+  adminListSpaces,
+  adminPurgeSpace,
   adminQuarantineAction,
   adminRemoveGroupMember,
+  adminResendInvitation,
   adminRunBackup,
+  adminDeleteSpace,
   adminUpdateGroup,
-  adminUploadTlsCert,
+  adminUpdateSpace,
   adminGetStats,
   adminListInvitations,
   adminListUsers,
@@ -59,33 +50,8 @@ import {
   currentUserId,
   searchUsers,
 } from '../api'
-import { Modal, confirmDialog, formatTime } from '../components/FileBrowser'
+import { Modal, confirmDialog, formatQuota, formatTime, promptViaModal } from '../components/FileBrowser'
 import { MessageKey, t, useLocale } from '../i18n'
-
-/** 设置键前缀 → 分组标题（未知前缀回退原样）。 */
-const groupTitles: Record<string, string> = {
-  site: '站点',
-  upload: '上传',
-  share: '分享',
-  retention: '保留策略',
-  security: '安全与限流',
-  batch: '批量操作',
-  folder: '目录',
-  backup: '备份',
-}
-
-const typeText: Record<SettingType, string> = {
-  bool: '布尔',
-  int: '整数',
-  string: '文本',
-}
-
-/** 设置生效方式徽章文案（effect 字段）。 */
-const effectText: Record<string, string> = {
-  immediate: '立即生效',
-  new_session: '新会话生效',
-  restart: '需重启生效',
-}
 
 /** 凭据状态卡的语义键 → 环境变量名展示（值绝不回显，仅展示配置状态）。 */
 const secretLabels: Array<{ key: string; env: string; label: string }> = [
@@ -99,8 +65,8 @@ const secretLabels: Array<{ key: string; env: string; label: string }> = [
 const statCards: Array<{ key: keyof AdminStats; label: string; format?: (v: number) => string }> = [
   { key: 'users', label: '用户' },
   { key: 'files', label: '文件' },
-  { key: 'storage_bytes', label: '存储用量', format: formatBytes },
-  { key: 'teams', label: '团队' },
+  { key: 'storage_bytes', label: '存储用量', format: (v) => formatQuota(v, false) },
+  { key: 'spaces', label: '空间' },
   { key: 'groups', label: '用户组' },
   { key: 'shares', label: '分享' },
   { key: 'uploads', label: '上传会话' },
@@ -121,210 +87,25 @@ const invitationStatusText: Record<Invitation['status'], string> = {
   expired: '已过期',
 }
 
-/** TLS 模式选项（值与后端 caddytls.Mode 对齐）。 */
-const tlsModeOptions: Array<{ value: TlsMode; label: string; desc: string }> = [
-  { value: 'http', label: 'HTTP（明文）', desc: '仅限本地/内网验证；127.0.0.1 等无域名场景' },
-  { value: 'auto', label: 'HTTPS（自动证书）', desc: '公网域名 DNS 指向本机，自动签发受信证书（Let\u0027s Encrypt）' },
-  { value: 'internal', label: 'HTTPS（自签）', desc: '内网域名或 IP 可用，流量加密但浏览器会提示不受信' },
-  { value: 'custom', label: 'HTTPS（自定义证书）', desc: '已有企业/自购证书：上传 PEM 证书+私钥，受信且无需公网 DNS' },
-]
-
-/** 证书摘要展示（CN / SAN / 有效期；未上传时提示先上传）。 */
-function TlsCertInfo({ cert }: { cert: TlsCert | null | undefined }) {
-  if (!cert) {
-    return <div className="setting-desc muted">尚未上传证书——选择「自定义证书」模式前请先在下方上传 PEM 证书与私钥</div>
-  }
-  return (
-    <div className="setting-desc">
-      <div>CN <code className="setting-value-mono">{cert.cn || '（无 CN，以 SAN 为准）'}</code></div>
-      {cert.dns_names && cert.dns_names.length > 0 && (
-        <div className="muted">SAN：{cert.dns_names.join('、')}</div>
-      )}
-      <div className="muted">有效期：{cert.not_before} ~ {cert.not_after}</div>
-    </div>
-  )
-}
-
-/** HTTPS 运行时切换卡片：模式选择 + 域名，保存后经 Caddy admin API 热下发
- * （立即生效，无需重启容器；caddy 拒绝时原子回退）。未托管（managed=false）
- * 时降级为提示。切换到 HTTPS 后提示 COOKIE_SECURE 联动。custom 模式附
- * 证书上传（multipart cert/key，后端解析校验并落盘共享卷）与摘要展示。 */
-function TlsPanel({ onNotice }: { onNotice: (msg: string) => void }) {
-  const [status, setStatus] = useState<TlsStatus | null>(null)
-  const [mode, setMode] = useState<TlsMode>('http')
-  const [domain, setDomain] = useState('')
-  const [saving, setSaving] = useState(false)
-  const [rowError, setRowError] = useState('')
-  // 证书上传：文件选择 + 上传中标记。
-  const [certFile, setCertFile] = useState<File | null>(null)
-  const [keyFile, setKeyFile] = useState<File | null>(null)
-  const [uploading, setUploading] = useState(false)
-
-  useEffect(() => {
-    adminGetTls()
-      .then((st) => {
-        setStatus(st)
-        setMode(st.mode)
-        setDomain(st.domain)
-      })
-      .catch(() => setStatus(null))
-  }, [])
-
-  const uploadCert = async () => {
-    if (!certFile || !keyFile || uploading) return
-    setUploading(true)
-    setRowError('')
-    try {
-      const st = await adminUploadTlsCert(certFile, keyFile)
-      setStatus(st)
-      setCertFile(null)
-      setKeyFile(null)
-      onNotice(`证书已上传（CN：${st.cert?.cn ?? '未知'}，到期 ${st.cert?.not_after ?? '?'}）；如需启用请在上方选择「自定义证书」并保存`)
-    } catch (err) {
-      setRowError(err instanceof Error ? err.message : '证书上传失败')
-    } finally {
-      setUploading(false)
-    }
-  }
-
-  const submit = async (e: FormEvent) => {
-    e.preventDefault()
-    setRowError('')
-    setSaving(true)
-    try {
-      const st = await adminPutTls(mode, domain.trim())
-      setStatus(st)
-      const notice =
-        st.mode === 'http'
-          ? '已切换为 HTTP 明文模式'
-          : `HTTPS 已生效（${st.mode === 'auto' ? '自动证书' : st.mode === 'internal' ? '自签证书' : '自定义证书'}：${st.domain || '默认'}）`
-      onNotice(`${notice}。若 .env 的 COOKIE_SECURE 与当前模式不符，请调整后重启 backend。`)
-    } catch (err) {
-      setRowError(err instanceof Error ? err.message : '保存失败')
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  const current = tlsModeOptions.find((o) => o.value === mode)
-  return (
-    <div className="panel setting-group">
-      <h3>HTTPS / TLS</h3>
-      {status === null ? (
-        <div className="hint">TLS 状态加载失败</div>
-      ) : !status.managed ? (
-        <div className="setting-desc muted">
-          当前部署未接入运行时切换（CADDY_ADMIN_ADDR 未配置）。TLS 由部署配置决定：
-          .env 设置 APP_DOMAIN 为域名时入口自动启用 HTTPS（ACME 自动签发），
-          未设置时为 HTTP 明文（本地验证）。
-        </div>
-      ) : (
-        <form className="setting-edit" onSubmit={submit} style={{ flexDirection: 'column', alignItems: 'stretch', gap: 8 }}>
-          <div className="setting-row" style={{ width: '100%' }}>
-            <div className="setting-main">
-              <div className="setting-key">当前模式</div>
-              <div className="setting-desc muted">
-                {status.mode === 'http'
-                  ? 'HTTP 明文'
-                  : status.mode === 'auto'
-                    ? `HTTPS 自动证书${status.domain ? `（${status.domain}）` : ''}`
-                    : status.mode === 'internal'
-                      ? `HTTPS 自签${status.domain ? `（${status.domain}）` : ''}`
-                      : `HTTPS 自定义证书${status.domain ? `（${status.domain}）` : ''}`}
-              </div>
-            </div>
-          </div>
-          <Radio.Group
-            value={mode}
-            onChange={(e) => setMode(e.target.value as TlsMode)}
-            style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 6 }}
-          >
-            {tlsModeOptions.map((opt) => (
-              <Radio key={opt.value} value={opt.value}>
-                {opt.label}
-                <span className="muted" style={{ marginLeft: 6 }}>{opt.desc}</span>
-              </Radio>
-            ))}
-          </Radio.Group>
-          {mode !== 'http' && (
-            <label className="field">
-              <span>站点域名或 IP</span>
-              <Input
-                placeholder="如 docflow.example.com / 192.168.1.10"
-                value={domain}
-                onChange={(e) => setDomain(e.target.value)}
-              />
-            </label>
-          )}
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <Button type="primary" size="small" htmlType="submit" loading={saving}>
-              {saving ? '下发中…' : '保存并立即生效'}
-            </Button>
-            {rowError && <span className="badge failed">{rowError}</span>}
-          </div>
-          {current && mode !== 'http' && (
-            <div className="setting-desc muted">
-              {mode === 'auto'
-                ? '要求：域名公网 DNS 指向本机、80/443 端口可达（ACME 挑战与重定向）。'
-                : mode === 'internal'
-                  ? '自签证书：浏览器将提示不受信（可信任导入 Caddy 根证书消除）；切换后请用 https:// 访问。'
-                  : '使用已上传的自定义证书（下方上传区）；私钥仅存服务器（权限 600），不经数据库。'}
-            </div>
-          )}
-          {/* 自定义证书：仅 custom（自定义证书）模式显示上传区——auto/internal
-              无需用户证书；已上传过证书（status.cert 存在）时也显示摘要供查看。 */}
-          {(mode === 'custom' || status.cert) && (
-          <div className="tls-cert-box">
-            <div className="setting-key">自定义证书（custom 模式）</div>
-            <TlsCertInfo cert={status.cert} />
-            {mode === 'custom' && (
-            <div className="tls-cert-upload">
-              <label className="field">
-                <span>证书 PEM（.pem / .crt，可含中间证书链）</span>
-                <input
-                  type="file"
-                  accept=".pem,.crt,.cer,text/plain"
-                  onChange={(e) => setCertFile(e.target.files?.[0] ?? null)}
-                />
-              </label>
-              <label className="field">
-                <span>私钥 PEM（.key / .pem）</span>
-                <input
-                  type="file"
-                  accept=".key,.pem,text/plain"
-                  onChange={(e) => setKeyFile(e.target.files?.[0] ?? null)}
-                />
-              </label>
-              <Button
-                size="small"
-                disabled={!certFile || !keyFile || uploading}
-                loading={uploading}
-                onClick={() => void uploadCert()}
-              >
-                {uploading ? '上传校验中…' : '上传证书'}
-              </Button>
-              <span className="setting-desc muted" style={{ marginLeft: 8 }}>
-                服务端校验 PEM 可解析且私钥匹配后原子落盘（替换旧证书）
-              </span>
-            </div>
-            )}
-          </div>
-          )}
-        </form>
-      )}
-    </div>
-  )
-}
-
-/** 邀请管理卡片：创建（一次性注册链接展示/复制）、列表状态与撤销。 */
+/** 邀请管理卡片：创建（弹窗，一次性注册链接展示/复制）、列表（邮箱检索 +
+ * 状态筛选 + 多选批量撤销）与撤销。 */
 function InvitationsPanel({ onError, onNotice }: { onError: (msg: string) => void; onNotice: (msg: string) => void }) {
+  const { modal: antdModal } = AntdApp.useApp()
   const locale = useLocale()
   const msg = (key: MessageKey) => t(locale, key)
-  const [invitations, setInvitations] = useState<Invitation[]>([])
+  const [invitations, setInvitations] = useState<Invitation[] | null>(null)
   const [email, setEmail] = useState('')
   const [role, setRole] = useState<'user' | 'admin'>('user')
   const [busy, setBusy] = useState(false)
   const [revoking, setRevoking] = useState<string | null>(null)
+  /** 创建邀请弹窗开关（v2.2：平铺表单弹窗化）。 */
+  const [createOpen, setCreateOpen] = useState(false)
+  /** 列筛选：邮箱关键词 + 状态。 */
+  const [query, setQuery] = useState('')
+  const [statusFilter, setStatusFilter] = useState<Invitation['status'] | ''>('')
+  /** 批量撤销勾选（仅待接受可撤）。 */
+  const [selected, setSelected] = useState<Key[]>([])
+  const [batchBusy, setBatchBusy] = useState(false)
   /** 最近一次创建的一次性注册链接（明文仅创建响应返回一次，保存在内存）。 */
   const [oneTimeLink, setOneTimeLink] = useState('')
   const [copied, setCopied] = useState(false)
@@ -350,6 +131,7 @@ function InvitationsPanel({ onError, onNotice }: { onError: (msg: string) => voi
     try {
       const created = await adminCreateInvitation(email.trim(), role)
       setEmail('')
+      setCreateOpen(false)
       if (created.accept_url) {
         // 拼成可分享的完整链接（当前站点 + 前端路由）。
         const link = new URL(created.accept_url, window.location.origin).toString()
@@ -384,6 +166,7 @@ function InvitationsPanel({ onError, onNotice }: { onError: (msg: string) => voi
     try {
       await adminRevokeInvitation(id)
       onNotice('已撤销邀请')
+      setSelected((prev) => prev.filter((k) => k !== id))
       await load()
     } catch (err) {
       if (err instanceof ApiError && err.status === 404) await load()
@@ -393,9 +176,72 @@ function InvitationsPanel({ onError, onNotice }: { onError: (msg: string) => voi
     }
   }
 
+  /** 重发邀请（v2.3）：撤销旧 token 并生成新一次性链接（展示+复制），
+   * best-effort 补发邮件；已接受 410 / 不存在 404 由后端校验。 */
+  const resend = async (inv: Invitation) => {
+    if (revoking !== null || inv.status !== 'pending') return
+    setRevoking(inv.id)
+    onError('')
+    try {
+      const created = await adminResendInvitation(inv.id)
+      if (created.accept_url) {
+        const link = new URL(created.accept_url, window.location.origin).toString()
+        setOneTimeLink(link)
+        setCopied(false)
+        onNotice(`已重发给 ${created.email} 的新邀请链接（旧链接已失效），请立即复制发送`)
+      } else {
+        onError('重发未返回新链接，请重试')
+      }
+      setSelected((prev) => prev.filter((k) => k !== inv.id))
+      await load()
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 404) await load()
+      else onError(err instanceof Error ? err.message : '重发失败')
+    } finally {
+      setRevoking(null)
+    }
+  }
+
+  /** 批量撤销（逐项调用，部分成功语义）。 */
+  const batchRevoke = async () => {
+    const ids = selected.map(String).filter((id) => invitations?.find((i) => i.id === id)?.status === 'pending')
+    if (ids.length === 0) return
+    const ok = await confirmDialog(antdModal, {
+      title: '批量撤销邀请',
+      content: `确定撤销选中的 ${ids.length} 条待接受邀请？对应注册链接立即失效。`,
+      okText: '撤销',
+      danger: true,
+      cancelText: '取消',
+    })
+    if (!ok) return
+    setBatchBusy(true)
+    onError('')
+    try {
+      const results = await Promise.allSettled(ids.map((id) => adminRevokeInvitation(id)))
+      const failed = results.filter((r) => r.status === 'rejected').length
+      if (failed > 0) onError(`批量撤销：成功 ${ids.length - failed} 条，失败 ${failed} 条`)
+      else onNotice(`已撤销 ${ids.length} 条邀请`)
+      setSelected([])
+      await load()
+    } finally {
+      setBatchBusy(false)
+    }
+  }
+
+  // 列筛选（前端过滤：邮箱包含 + 状态相等）。
+  const needle = query.trim().toLowerCase()
+  const visible = (invitations ?? []).filter((inv) =>
+    (needle === '' || inv.email.toLowerCase().includes(needle))
+    && (statusFilter === '' || inv.status === statusFilter))
+  const pendingSelected = selected.filter((id) => invitations?.find((i) => i.id === id)?.status === 'pending').length
+
   return (
     <div className="panel setting-group">
       <h3>{msg('invitesTitle')}</h3>
+      <div className="setting-desc muted" style={{ marginBottom: 12 }}>
+        一次性注册邀请链接（7 天内有效、仅可用一次）：发送给未注册的同事完成注册，
+        角色决定其注册后的系统角色。已注册用户无需邀请——可在「用户组」或空间内直接添加。
+      </div>
       {oneTimeLink && (
         <div className="share-link" style={{ marginBottom: 12 }}>
           <Input readOnly value={oneTimeLink} onFocus={(e) => e.currentTarget.select()} />
@@ -405,37 +251,48 @@ function InvitationsPanel({ onError, onNotice }: { onError: (msg: string) => voi
         </div>
       )}
       {oneTimeLink && <div className="setting-desc muted" style={{ marginBottom: 12 }}>该注册链接仅显示这一次，请立即复制发送给被邀请人（7 天内有效，仅可使用一次）</div>}
-      <form className="team-create-row" onSubmit={(e) => void submit(e)}>
-        <label className="field">
-          <span>邮箱</span>
-          <Input
-            type="email"
-            required
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            placeholder="teammate@example.com"
-          />
-        </label>
-        <label className="field">
-          <span>角色</span>
-          <Select
-            value={role}
-            onChange={(v) => setRole(v === 'admin' ? 'admin' : 'user')}
-            options={[
-              { value: 'user', label: 'user' },
-              { value: 'admin', label: 'admin' },
-            ]}
-          />
-        </label>
-        <Button type="primary" htmlType="submit" disabled={busy}>
-          {busy ? '创建中…' : '创建邀请'}
+      {/* 工具行：新建入口 + 邮箱检索 + 状态筛选 + 批量撤销。 */}
+      <div className="member-list-toolbar" style={{ marginBottom: 12 }}>
+        <Button type="primary" onClick={() => { setCreateOpen(true); setEmail('') }}>
+          创建邀请
         </Button>
-      </form>
+        <Input
+          allowClear
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="按邮箱检索…"
+          style={{ width: 200 }}
+          aria-label="按邮箱检索"
+        />
+        <Select
+          allowClear
+          value={statusFilter || undefined}
+          onChange={(v) => setStatusFilter((v ?? '') as Invitation['status'] | '')}
+          placeholder="全部状态"
+          options={[
+            { value: 'pending', label: '待接受' },
+            { value: 'accepted', label: '已接受' },
+            { value: 'expired', label: '已过期' },
+          ]}
+          style={{ width: 120 }}
+        />
+        {selected.length > 0 && pendingSelected > 0 && (
+          <Button danger disabled={batchBusy || revoking !== null} loading={batchBusy} onClick={() => void batchRevoke()}>
+            批量撤销（{pendingSelected}）
+          </Button>
+        )}
+      </div>
       <Table<Invitation>
         rowKey="id"
-        dataSource={invitations}
+        loading={invitations === null}
+        dataSource={visible}
         pagination={false}
-        locale={{ emptyText: msg('noInvites') }}
+        locale={{ emptyText: query || statusFilter ? '没有匹配的邀请' : msg('noInvites') }}
+        rowSelection={{
+          selectedRowKeys: selected,
+          onChange: setSelected,
+          getCheckboxProps: (inv) => ({ disabled: inv.status !== 'pending' || batchBusy || revoking !== null }),
+        }}
         columns={[
           {
             title: '邮箱',
@@ -448,7 +305,15 @@ function InvitationsPanel({ onError, onNotice }: { onError: (msg: string) => voi
               </div>
             ),
           },
-          { title: '角色', dataIndex: 'role', key: 'role', width: 80 },
+          {
+            title: '角色',
+            dataIndex: 'role',
+            key: 'role',
+            width: 100,
+            render: (r: string) => (
+              <Tag color={r === 'admin' ? 'purple' : 'default'}>{r === 'admin' ? '管理员（admin）' : '普通用户（user）'}</Tag>
+            ),
+          },
           {
             title: '状态',
             key: 'status',
@@ -460,22 +325,61 @@ function InvitationsPanel({ onError, onNotice }: { onError: (msg: string) => voi
           {
             title: '操作',
             key: 'actions',
-            width: 90,
+            width: 150,
             render: (_, inv) =>
               inv.status === 'pending' ? (
-                <Button size="small" danger disabled={revoking !== null} loading={revoking === inv.id} onClick={() => void revoke(inv.id)}>
-                  撤销
-                </Button>
+                <>
+                  <Button size="small" disabled={revoking !== null || batchBusy} loading={revoking === inv.id} onClick={() => void resend(inv)}>
+                    重发
+                  </Button>
+                  {' '}
+                  <Button size="small" danger disabled={revoking !== null || batchBusy} onClick={() => void revoke(inv.id)}>
+                    撤销
+                  </Button>
+                </>
               ) : null,
           },
         ]}
       />
+      {/* 创建邀请弹窗（v2.2：平铺表单弹窗化）。 */}
+      {createOpen && (
+        <Modal title="创建注册邀请" onClose={() => { if (!busy) { setCreateOpen(false); setEmail('') } }}>
+          <form className="team-create-row" style={{ flexDirection: 'column', alignItems: 'stretch' }} onSubmit={(e) => void submit(e)}>
+            <label className="field">
+              <span>邮箱（发给未注册的同事）</span>
+              <Input
+                autoFocus
+                type="email"
+                required
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="teammate@example.com"
+              />
+            </label>
+            <label className="field">
+              <span>角色（注册成功后的系统角色）</span>
+              <Select
+                value={role}
+                onChange={(v) => setRole(v === 'admin' ? 'admin' : 'user')}
+                options={[
+                  { value: 'user', label: '普通用户（user）' },
+                  { value: 'admin', label: '管理员（admin）' },
+                ]}
+              />
+            </label>
+            <div className="setting-control" style={{ marginTop: 8, justifyContent: 'flex-end' }}>
+              <Button type="primary" htmlType="submit" disabled={busy || email.trim() === ''}>
+                {busy ? '创建中…' : '创建邀请'}
+              </Button>
+              <Button disabled={busy} onClick={() => { setCreateOpen(false); setEmail('') }}>
+                取消
+              </Button>
+            </div>
+          </form>
+        </Modal>
+      )}
     </div>
   )
-}
-
-function formatSettingValue(value: SettingValue): string {
-  return String(value)
 }
 
 /** 用户状态徽标（locked 为登录失败锁定期，到期自动解锁或管理员启用解锁）。 */
@@ -497,9 +401,14 @@ function quotaToGib(quota: number): string {
   return String(Math.round((quota / GIB) * 100) / 100)
 }
 
-/** 用户管理卡片（C6）：检索/分页列表 + 编辑弹窗（昵称/角色/状态/配额）+
- * 组归属管理 + 禁用/启用 + 重置密码。 */
-function UsersPanel({ onError, onNotice }: { onError: (msg: string) => void; onNotice: (msg: string) => void }) {
+/** 人员与组（v2.3 合并页 /admin/people，原「人员」+「用户组」两个独立面板
+ * 合并删除）：左侧组树（全部用户 + 各用户组，组节点内联改名/删除）+ 右侧
+ * 成员表（点组过滤成员；组视图附「加入成员」与行内「移出本组」）；
+ * 批量操作：跨组移动（多选用户 → 目标组多选，移动=移出其余组并加入目标）、
+ * 移出当前组、改角色/禁用/启用（原有）；组 CRUD 收顶部按钮；邀请记录经
+ * 右上「邀请记录」按钮弹窗（创建 / 重发 / 撤销），不再单独占管理导航位。 */
+function PeopleAndGroupsPanel({ onError, onNotice }: { onError: (msg: string) => void; onNotice: (msg: string) => void }) {
+  const { modal: antdModal } = AntdApp.useApp()
   const locale = useLocale()
   const msg = (key: MessageKey) => t(locale, key)
   const [users, setUsers] = useState<AdminUser[]>([])
@@ -508,14 +417,40 @@ function UsersPanel({ onError, onNotice }: { onError: (msg: string) => void; onN
   const [offset, setOffset] = useState(0)
   const [q, setQ] = useState('')
   const [query, setQuery] = useState('')
+  /** 列筛选（当前页客户端过滤）：状态 + 角色。 */
+  const [statusFilter, setStatusFilter] = useState<AdminUser['status'] | ''>('')
+  const [roleFilter, setRoleFilter] = useState<'user' | 'admin' | ''>('')
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
-  /** 弹窗状态：编辑用户 / 用户组归属 / 重置密码弹窗。 */
+  /** 左侧组树选中（'' = 全部用户；否则组 ID）。 */
+  const [selectedGroup, setSelectedGroup] = useState('')
+  /** 弹窗状态：编辑用户 / 重置密码 / 新建组 / 编辑组 / 邀请记录。 */
   const [editingUser, setEditingUser] = useState<AdminUser | null>(null)
-  const [groupsUser, setGroupsUser] = useState<AdminUser | null>(null)
   const [resetUser, setResetUser] = useState<AdminUser | null>(null)
   const [newPassword, setNewPassword] = useState('')
-  const pageLimit = 20
+  const [invitesOpen, setInvitesOpen] = useState(false)
+  /** 批量操作：勾选行 + 批量角色下拉 + 跨组移动目标（组多选）。 */
+  const [selected, setSelected] = useState<Key[]>([])
+  const [batchRole, setBatchRole] = useState<'user' | 'admin'>('user')
+  const [batchBusy, setBatchBusy] = useState(false)
+  const [moveTargets, setMoveTargets] = useState<string[]>([])
+  const [moveBusy, setMoveBusy] = useState(false)
+  /** 组视图「加入成员」单选（远程搜索结果）。 */
+  const [addGroupPick, setAddGroupPick] = useState<UserSearchResult | null>(null)
+  /** 新建用户组弹窗（v2.2 平铺表单弹窗化）：名/描述 + 初始成员多选远程搜索。 */
+  const [createOpen, setCreateOpen] = useState(false)
+  const [name, setName] = useState('')
+  const [desc, setDesc] = useState('')
+  const [memberIds, setMemberIds] = useState<string[]>([])
+  const [memberQuery, setMemberQuery] = useState('')
+  const [memberOptions, setMemberOptions] = useState<UserSearchResult[]>([])
+  const [memberSearching, setMemberSearching] = useState(false)
+  const memberNameRef = useMemo(() => new Map<string, string>(), [])
+  /** 编辑组弹窗（改名/描述）。 */
+  const [editing, setEditing] = useState<Group | null>(null)
+  const [editName, setEditName] = useState('')
+  const [editDesc, setEditDesc] = useState('')
+  const pageLimit = 50
   const selfId = currentUserId()
 
   const load = async (nextOffset = offset, search = query) => {
@@ -537,7 +472,7 @@ function UsersPanel({ onError, onNotice }: { onError: (msg: string) => void; onN
     try {
       setGroups(await adminListGroups())
     } catch {
-      // 组列表加载失败不阻塞用户列表（组操作入口仍可用，弹窗内重试）。
+      // 组列表加载失败不阻塞用户列表（组树仍可重试）。
       setGroups([])
     }
   }
@@ -547,6 +482,26 @@ function UsersPanel({ onError, onNotice }: { onError: (msg: string) => void; onN
     void loadGroups()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // 新建组初始成员远程搜索（防抖 300ms，≥2 字）。
+  useEffect(() => {
+    const queryText = memberQuery.trim()
+    if (queryText.length < 2) {
+      setMemberOptions([])
+      return
+    }
+    const timer = window.setTimeout(() => {
+      setMemberSearching(true)
+      void searchUsers(queryText)
+        .then((found) => {
+          setMemberOptions(found)
+          for (const u of found) memberNameRef.set(u.id, (u.nickname ?? u.profile?.nickname) || u.username)
+        })
+        .catch(() => setMemberOptions([]))
+        .finally(() => setMemberSearching(false))
+    }, 300)
+    return () => window.clearTimeout(timer)
+  }, [memberQuery, memberNameRef])
 
   const submitSearch = (e: FormEvent) => {
     e.preventDefault()
@@ -569,7 +524,220 @@ function UsersPanel({ onError, onNotice }: { onError: (msg: string) => void; onN
     }
   }
 
-  /** 弹窗操作完成后的统一刷新（用户列表聚合 group_names + 组成员计数）。 */
+  /** 批量操作（逐项调用现有端点，部分成功语义）：kind=role 改角色、
+   *  disable 禁用（并撤销其全部会话）、enable 启用（解除锁定）。 */
+  const runBatch = async (kind: 'role' | 'disable' | 'enable') => {
+    const rows = users.filter((u) => selected.includes(u.id))
+    const targets = kind === 'disable' ? rows.filter((u) => u.id !== selfId) : rows
+    if (targets.length === 0) return
+    const actionText = kind === 'role'
+      ? `将 ${targets.length} 名用户的角色改为「${batchRole === 'admin' ? '管理员' : '普通用户'}」`
+      : kind === 'disable'
+        ? `禁用 ${targets.length} 名用户（立即撤销其全部登录会话）`
+        : `启用 ${targets.length} 名用户（同时解除登录失败锁定）`
+    const ok = await confirmDialog(antdModal, {
+      title: kind === 'role' ? '批量改角色' : kind === 'disable' ? '批量禁用' : '批量启用',
+      content: `确定${actionText}？`,
+      okText: kind === 'role' ? '改角色' : kind === 'disable' ? '禁用' : '启用',
+      danger: kind === 'disable',
+      cancelText: '取消',
+    })
+    if (!ok) return
+    setBatchBusy(true)
+    onError('')
+    try {
+      const calls = targets.map((u) =>
+        kind === 'role'
+          ? adminUpdateUser(u.id, { role: batchRole })
+          : adminUpdateUser(u.id, { status: kind === 'disable' ? 'disabled' : 'active' }))
+      const results = await Promise.allSettled(calls)
+      const failed = results.filter((r) => r.status === 'rejected').length
+      if (failed > 0) onError(`批量操作：成功 ${targets.length - failed} 项，失败 ${failed} 项`)
+      else onNotice(`批量操作完成：成功 ${targets.length} 项`)
+      setSelected([])
+      await refreshAll()
+    } finally {
+      setBatchBusy(false)
+    }
+  }
+
+  /** 批量跨组移动（v2.3）：多选用户 → 目标组多选；移动语义 = 移出其余组
+   * 并加入全部目标组（逐项调用成员增删端点，部分成功汇总）。 */
+  const batchMove = async () => {
+    const rows = users.filter((u) => selected.includes(u.id))
+    if (rows.length === 0 || moveTargets.length === 0 || moveBusy) return
+    const targetNames = moveTargets.map((id) => groups.find((g) => g.id === id)?.name ?? id.slice(0, 8)).join('、')
+    const ok = await confirmDialog(antdModal, {
+      title: '跨组移动',
+      content: `将选中的 ${rows.length} 名用户移出其现有用户组并加入「${targetNames}」？`,
+      okText: '移动',
+      cancelText: '取消',
+    })
+    if (!ok) return
+    setMoveBusy(true)
+    onError('')
+    let done = 0
+    let failed = 0
+    try {
+      for (const u of rows) {
+        // 移出全部现有组 → 加入目标组。
+        const outCalls = (u.group_names ?? [])
+          .map((gname) => groups.find((g) => g.name === gname))
+          .filter((g): g is Group => Boolean(g) && !moveTargets.includes(g!.id))
+          .map((g) => adminRemoveGroupMember(g.id, u.id))
+        const inCalls = moveTargets.map((gid) => adminAddGroupMember(gid, u.id))
+        const results = await Promise.allSettled([...outCalls, ...inCalls])
+        if (results.some((r) => r.status === 'rejected')) failed++
+        else done++
+      }
+      if (failed > 0) onError(`跨组移动：成功 ${done} 人，失败 ${failed} 人`)
+      else onNotice(`已将 ${done} 名用户移动到目标组`)
+      setSelected([])
+      setMoveTargets([])
+      await refreshAll()
+    } finally {
+      setMoveBusy(false)
+    }
+  }
+
+  /** 批量移出当前组（组视图）：把选中用户移出正在查看的组。 */
+  const batchRemoveFromGroup = async () => {
+    const current = groups.find((g) => g.id === selectedGroup)
+    const rows = users.filter((u) => selected.includes(u.id) && (u.group_names ?? []).includes(current?.name ?? '\u0000'))
+    if (!current || rows.length === 0 || batchBusy) return
+    const ok = await confirmDialog(antdModal, {
+      title: '移出用户组',
+      content: `将选中的 ${rows.length} 名用户移出「${current.name}」？（其他组归属不受影响）`,
+      okText: '移出',
+      danger: true,
+      cancelText: '取消',
+    })
+    if (!ok) return
+    setBatchBusy(true)
+    onError('')
+    try {
+      const results = await Promise.allSettled(rows.map((u) => adminRemoveGroupMember(current.id, u.id)))
+      const failed = results.filter((r) => r.status === 'rejected').length
+      if (failed > 0) onError(`移出组：成功 ${rows.length - failed} 人，失败 ${failed} 人`)
+      else onNotice(`已将 ${rows.length} 名用户移出「${current.name}」`)
+      setSelected([])
+      await refreshAll()
+    } finally {
+      setBatchBusy(false)
+    }
+  }
+
+  /** 组视图行内移出单个用户。 */
+  const removeFromGroup = async (user: AdminUser) => {
+    const current = groups.find((g) => g.id === selectedGroup)
+    if (!current || busy) return
+    const ok = await confirmDialog(antdModal, {
+      title: '移出用户组',
+      content: `确定将 ${user.profile.nickname || user.username} 移出「${current.name}」？`,
+      okText: '移出',
+      danger: true,
+      cancelText: '取消',
+    })
+    if (!ok) return
+    setBusy(true)
+    try {
+      await adminRemoveGroupMember(current.id, user.id)
+      onNotice(`已移出「${current.name}」`)
+      await refreshAll()
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 404) await refreshAll()
+      else onError(err instanceof Error ? err.message : '移出组失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** 组视图「加入成员」：把远程搜索选中的用户加入当前组。 */
+  const addUserToGroup = async () => {
+    const current = groups.find((g) => g.id === selectedGroup)
+    if (!current || !addGroupPick || busy) return
+    setBusy(true)
+    try {
+      await adminAddGroupMember(current.id, addGroupPick.id)
+      onNotice(`已将 ${searchResultLabel(addGroupPick)} 加入「${current.name}」`)
+      setAddGroupPick(null)
+      await refreshAll()
+    } catch (err) {
+      onError(err instanceof Error ? err.message : '加入组失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** 新建用户组：创建后逐个加入勾选的初始成员（部分成功语义）。 */
+  const submitCreateGroup = async (e: FormEvent) => {
+    e.preventDefault()
+    if (busy || !name.trim()) return
+    setBusy(true)
+    try {
+      const created = await adminCreateGroup(name.trim(), desc.trim())
+      const failedNames: string[] = []
+      for (const uid of memberIds) {
+        try { await adminAddGroupMember(created.id, uid) } catch { failedNames.push(memberNameRef.get(uid) ?? uid.slice(0, 8)) }
+      }
+      if (failedNames.length > 0) onError(`用户组已创建，但 ${failedNames.length} 名初始成员加入失败：${failedNames.join('、')}`)
+      else onNotice(memberIds.length > 0 ? `用户组已创建并加入 ${memberIds.length} 名成员` : '用户组已创建')
+      setName('')
+      setDesc('')
+      setMemberIds([])
+      setMemberQuery('')
+      setMemberOptions([])
+      setCreateOpen(false)
+      await loadGroups()
+    } catch (err) {
+      onError(err instanceof Error ? err.message : '创建用户组失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** 编辑组保存（改名/描述）。 */
+  const saveGroupEdit = async (e: FormEvent) => {
+    e.preventDefault()
+    if (!editing || busy) return
+    setBusy(true)
+    try {
+      await adminUpdateGroup(editing.id, { name: editName.trim(), description: editDesc.trim() })
+      setEditing(null)
+      onNotice('用户组已更新')
+      await loadGroups()
+    } catch (err) {
+      onError(err instanceof Error ? err.message : '更新用户组失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** 删除组（级联清成员关系，不影响用户本身）。 */
+  const removeGroup = async (g: Group) => {
+    const ok = await confirmDialog(antdModal, {
+      title: '删除用户组',
+      content: `确定删除用户组「${g.name}」？其 ${g.member_count} 名成员的归属关系将被清除（用户本身不受影响）。`,
+      okText: '删除',
+      danger: true,
+      cancelText: '取消',
+    })
+    if (!ok) return
+    setBusy(true)
+    try {
+      await adminDeleteGroup(g.id)
+      onNotice(`已删除用户组「${g.name}」`)
+      if (selectedGroup === g.id) setSelectedGroup('')
+      await refreshAll()
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 404) await refreshAll()
+      else onError(err instanceof Error ? err.message : '删除用户组失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** 弹窗/批量操作完成后的统一刷新（用户列表聚合 group_names + 组成员计数）。 */
   const refreshAll = async () => {
     await Promise.all([load(), loadGroups()])
   }
@@ -593,160 +761,298 @@ function UsersPanel({ onError, onNotice }: { onError: (msg: string) => void; onN
   }
 
   const page = Math.floor(offset / pageLimit) + 1
+  const currentGroup = groups.find((g) => g.id === selectedGroup) ?? null
+  // 当前页客户端筛选（状态/角色 + 左侧组树选中组过滤）。
+  const visibleUsers = users.filter((u) =>
+    (statusFilter === '' || u.status === statusFilter)
+    && (roleFilter === '' || u.role === roleFilter)
+    && (!currentGroup || (u.group_names ?? []).includes(currentGroup.name)))
 
   return (
-    <div className="panel setting-group">
-      <h3>{msg('usersTitle')}</h3>
+    <div className="panel setting-group people-groups">
+      <h3>人员与组</h3>
       <div className="setting-desc muted" style={{ marginBottom: 12 }}>
-        检索（用户名/邮箱/昵称前缀）与分页浏览全部用户；「编辑」弹窗可改昵称/角色/状态/配额，
-        「组」管理其用户组归属。禁用账号立即撤销其全部登录会话，启用同时解除登录失败锁定；
+        左侧选择「全部用户」或某个用户组过滤右侧成员表；勾选多行可批量改角色/禁用/启用、
+        跨组移动（移出其余组并加入目标组）或移出当前组。组的新建/改名/删除收在顶部按钮；
+        邀请记录（创建/重发/撤销）经右上按钮弹窗。禁用账号立即撤销其全部登录会话；
         账号不支持删除——以禁用替代（保留其名下文件与审计记录）。
       </div>
-      <form className="team-create-row" style={{ marginBottom: 12 }} onSubmit={(e) => void submitSearch(e)}>
-        <label className="field">
-          <span>检索（用户名 / 邮箱 / 昵称前缀）</span>
-          <Input
-            allowClear
-            autoCapitalize="none"
-            spellCheck={false}
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder="如：alice、alice@ 或昵称前缀"
-          />
-        </label>
-        <Button type="primary" htmlType="submit">搜索</Button>
-        {query && (
-          <Button onClick={() => { setQ(''); setQuery(''); void load(0, '') }}>清除</Button>
+      {/* 顶部操作行：组 CRUD + 邀请记录 + 检索/筛选。 */}
+      <form className="member-list-toolbar" style={{ marginBottom: 12 }} onSubmit={(e) => void submitSearch(e)}>
+        <Button type="primary" onClick={() => { setCreateOpen(true); setName(''); setDesc(''); setMemberIds([]) }}>
+          新建用户组
+        </Button>
+        <Button onClick={() => setInvitesOpen(true)}>邀请记录</Button>
+        <Input
+          allowClear
+          autoCapitalize="none"
+          spellCheck={false}
+          style={{ width: 220 }}
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="检索：用户名 / 邮箱 / 昵称前缀"
+          aria-label="检索用户"
+        />
+        <Select
+          allowClear
+          value={statusFilter || undefined}
+          onChange={(v) => setStatusFilter((v ?? '') as AdminUser['status'] | '')}
+          placeholder="全部状态"
+          style={{ width: 120 }}
+          options={[
+            { value: 'active', label: '正常' },
+            { value: 'disabled', label: '已禁用' },
+            { value: 'locked', label: '已锁定' },
+          ]}
+        />
+        <Select
+          allowClear
+          value={roleFilter || undefined}
+          onChange={(v) => setRoleFilter((v ?? '') as 'user' | 'admin' | '')}
+          placeholder="全部角色"
+          style={{ width: 140 }}
+          options={[
+            { value: 'admin', label: '管理员（admin）' },
+            { value: 'user', label: '普通用户（user）' },
+          ]}
+        />
+        <Button htmlType="submit">搜索</Button>
+        {(query || statusFilter || roleFilter) && (
+          <Button onClick={() => { setQ(''); setQuery(''); setStatusFilter(''); setRoleFilter(''); void load(0, '') }}>清除</Button>
         )}
       </form>
-      <Table<AdminUser>
-        rowKey="id"
-        loading={loading}
-        dataSource={users}
-        scroll={{ x: 980 }}
-        locale={{ emptyText: msg('noUsers') }}
-        pagination={{
-          total,
-          current: page,
-          pageSize: pageLimit,
-          showSizeChanger: false,
-          showTotal: (t) => `共 ${t} 人`,
-          onChange: (p) => void load((p - 1) * pageLimit),
-        }}
-        columns={[
-          {
-            title: '用户',
-            key: 'user',
-            width: 240,
-            render: (_, user) => (
-              <div>
-                <div>
-                  {user.profile.nickname || user.username}
-                  {user.id === selfId && <span className="badge" style={{ marginLeft: 6 }}>本人</span>}
-                </div>
-                <div className="setting-desc muted" title={user.email}>{user.username} · {user.email}</div>
-                {(user.group_names?.length ?? 0) > 0 && (
-                  <div style={{ marginTop: 2 }}>
-                    {user.group_names!.map((name) => (
-                      <span key={name} className="badge" style={{ marginLeft: 4 }} title="所属用户组">{name}</span>
-                    ))}
+      <div className="people-groups-layout">
+        {/* 左侧组树：全部用户 + 各用户组（组节点内联改名/删除）。 */}
+        <aside className="people-group-tree">
+          <div
+            className={`people-group-node${selectedGroup === '' ? ' active' : ''}`}
+            onClick={() => { setSelectedGroup(''); setSelected([]) }}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => { if (e.key === 'Enter') { setSelectedGroup(''); setSelected([]) } }}
+          >
+            <span className="people-group-name">全部用户</span>
+            <span className="muted people-group-count">{total}</span>
+          </div>
+          {groups.map((g) => (
+            <div
+              key={g.id}
+              className={`people-group-node${selectedGroup === g.id ? ' active' : ''}`}
+              onClick={() => { setSelectedGroup(g.id); setSelected([]) }}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => { if (e.key === 'Enter') { setSelectedGroup(g.id); setSelected([]) } }}
+            >
+              <span className="people-group-name" title={g.description || g.name}>{g.name}</span>
+              <span className="people-group-side">
+                <span className="muted people-group-count">{g.member_count}</span>
+                <Button
+                  type="text"
+                  size="small"
+                  title="改名 / 描述"
+                  onClick={(e) => { e.stopPropagation(); setEditing(g); setEditName(g.name); setEditDesc(g.description) }}
+                >
+                  改
+                </Button>
+                <Button
+                  type="text"
+                  size="small"
+                  danger
+                  title="删除组（成员关系清除，用户不受影响）"
+                  onClick={(e) => { e.stopPropagation(); void removeGroup(g) }}
+                >
+                  删
+                </Button>
+              </span>
+            </div>
+          ))}
+          {groups.length === 0 && <p className="hint">尚未创建用户组</p>}
+        </aside>
+        {/* 右侧成员表（按组过滤）。 */}
+        <div className="people-group-main">
+          {/* 组视图：加入成员（远程搜索单选）。 */}
+          {currentGroup && (
+            <div className="team-create-row" style={{ marginBottom: 12, alignItems: 'flex-end' }}>
+              <UserPickerField onSelect={setAddGroupPick} />
+              <Button type="primary" disabled={busy || !addGroupPick} loading={busy} onClick={() => void addUserToGroup()}>
+                加入「{currentGroup.name}」
+              </Button>
+            </div>
+          )}
+          {/* 批量操作栏（勾选后出现）：改角色/禁用/启用 + 跨组移动 + 移出当前组。 */}
+          {selected.length > 0 && (
+            <div className="member-list-toolbar" style={{ marginBottom: 12 }}>
+              <span className="setting-meta muted">已选 {selected.length} 项</span>
+              <Select
+                value={batchRole}
+                onChange={(v) => setBatchRole(v === 'admin' ? 'admin' : 'user')}
+                options={[
+                  { value: 'user', label: '普通用户（user）' },
+                  { value: 'admin', label: '管理员（admin）' },
+                ]}
+                style={{ width: 170 }}
+              />
+              <Button disabled={batchBusy} loading={batchBusy} onClick={() => void runBatch('role')}>批量改角色</Button>
+              <Button danger disabled={batchBusy} loading={batchBusy} onClick={() => void runBatch('disable')}>批量禁用</Button>
+              <Button disabled={batchBusy} loading={batchBusy} onClick={() => void runBatch('enable')}>批量启用</Button>
+              <Select
+                mode="multiple"
+                allowClear
+                value={moveTargets}
+                onChange={setMoveTargets}
+                placeholder="移动到组（可多选）…"
+                style={{ minWidth: 220 }}
+                options={groups.map((g) => ({ value: g.id, label: g.name }))}
+              />
+              <Button disabled={moveBusy || moveTargets.length === 0} loading={moveBusy} onClick={() => void batchMove()}>
+                跨组移动
+              </Button>
+              {currentGroup && (
+                <Button danger disabled={batchBusy} onClick={() => void batchRemoveFromGroup()}>
+                  移出「{currentGroup.name}」
+                </Button>
+              )}
+            </div>
+          )}
+          <Table<AdminUser>
+            rowKey="id"
+            loading={loading}
+            dataSource={visibleUsers}
+            scroll={{ x: 980 }}
+            locale={{ emptyText: query || statusFilter || roleFilter || currentGroup ? '没有匹配的用户' : msg('noUsers') }}
+            rowSelection={{
+              selectedRowKeys: selected,
+              onChange: setSelected,
+              getCheckboxProps: () => ({ disabled: busy || batchBusy || moveBusy }),
+            }}
+            pagination={{
+              total,
+              current: page,
+              pageSize: pageLimit,
+              showSizeChanger: false,
+              showTotal: (t) => `共 ${t} 人`,
+              onChange: (p) => void load((p - 1) * pageLimit),
+            }}
+            columns={[
+              {
+                title: '用户',
+                key: 'user',
+                width: 240,
+                render: (_, user) => (
+                  <div>
+                    <div>
+                      {user.profile.nickname || user.username}
+                      {user.id === selfId && <span className="badge" style={{ marginLeft: 6 }}>本人</span>}
+                    </div>
+                    <div className="setting-desc muted" title={user.email}>{user.username} · {user.email}</div>
+                    {(user.group_names?.length ?? 0) > 0 && (
+                      <div style={{ marginTop: 2 }}>
+                        {user.group_names!.map((gname) => (
+                          <span key={gname} className="badge" style={{ marginLeft: 4 }} title="所属用户组">{gname}</span>
+                        ))}
+                      </div>
+                    )}
                   </div>
-                )}
-              </div>
-            ),
-          },
-          {
-            title: '状态',
-            key: 'status',
-            width: 90,
-            render: (_, user) => <span className={userStatusBadge[user.status]}>{userStatusText[user.status]}</span>,
-          },
-          {
-            title: '角色',
-            dataIndex: 'role',
-            key: 'role',
-            width: 80,
-            render: (role: string) => <span className={`badge ${role === 'admin' ? 'role-owner' : ''}`}>{role}</span>,
-          },
-          {
-            title: '存储用量',
-            key: 'storage',
-            width: 190,
-            render: (_, user) => {
-              const used = user.storage_used ?? 0
-              const quotaPercent = user.storage_quota > 0 ? Math.min(100, Math.round((used * 100) / user.storage_quota)) : 0
-              return (
-                <span className="muted">
-                  {formatBytes(used)} / {quotaToGib(user.storage_quota)} GiB（{quotaPercent}%）
-                  {user.locked_until && ` · 锁定至 ${formatTime(user.locked_until)}`}
-                </span>
-              )
-            },
-          },
-          {
-            title: '注册时间',
-            key: 'created_at',
-            width: 150,
-            render: (_, user) => <span className="muted">{formatTime(user.created_at)}</span>,
-          },
-          {
-            title: '操作',
-            key: 'actions',
-            width: 270,
-            fixed: 'right',
-            render: (_, user) => {
-              const isSelf = user.id === selfId
-              return (
-                <div className="table-actions">
-                  <Button
-                    size="small"
-                    disabled={busy}
-                    title="编辑昵称 / 角色 / 状态 / 配额"
-                    onClick={() => setEditingUser(user)}
-                  >
-                    编辑
-                  </Button>
-                  <Button
-                    size="small"
-                    disabled={busy}
-                    title="管理所属用户组（加入 / 移出）"
-                    onClick={() => setGroupsUser(user)}
-                  >
-                    组
-                  </Button>
-                  {user.status === 'active' ? (
-                    <Button
-                      size="small"
-                      danger
-                      disabled={busy || isSelf}
-                      title={isSelf ? '不可禁用自己的账号' : '禁用并撤销其全部会话'}
-                      onClick={() => void update(user.id, { status: 'disabled' }, `已禁用 ${user.username}（其全部会话已失效）`)}
-                    >
-                      禁用
-                    </Button>
-                  ) : (
-                    <Button
-                      size="small"
-                      disabled={busy}
-                      title="启用并解除登录失败锁定"
-                      onClick={() => void update(user.id, { status: 'active' }, `已启用 ${user.username}`)}
-                    >
-                      启用
-                    </Button>
-                  )}
-                  <Button
-                    size="small"
-                    disabled={busy}
-                    onClick={() => { setResetUser(user); setNewPassword('') }}
-                  >
-                    重置密码
-                  </Button>
-                </div>
-              )
-            },
-          },
-        ]}
-      />
+                ),
+              },
+              {
+                title: '状态',
+                key: 'status',
+                width: 90,
+                render: (_, user) => <span className={userStatusBadge[user.status]}>{userStatusText[user.status]}</span>,
+              },
+              {
+                title: '角色',
+                dataIndex: 'role',
+                key: 'role',
+                width: 110,
+                render: (role: string) => (
+                  <Tag color={role === 'admin' ? 'purple' : 'default'}>{role === 'admin' ? '管理员（admin）' : '普通用户（user）'}</Tag>
+                ),
+              },
+              {
+                title: '存储用量',
+                key: 'storage',
+                width: 190,
+                render: (_, user) => {
+                  const used = user.storage_used ?? 0
+                  const quotaPercent = user.storage_quota > 0 ? Math.min(100, Math.round((used * 100) / user.storage_quota)) : 0
+                  return (
+                    <span className="muted">
+                      {formatQuota(used, false)} / {formatQuota(user.storage_quota)}（{quotaPercent}%）
+                      {user.locked_until && ` · 锁定至 ${formatTime(user.locked_until)}`}
+                    </span>
+                  )
+                },
+              },
+              {
+                title: '注册时间',
+                key: 'created_at',
+                width: 150,
+                render: (_, user) => <span className="muted">{formatTime(user.created_at)}</span>,
+              },
+              {
+                title: '操作',
+                key: 'actions',
+                width: 270,
+                fixed: 'right',
+                render: (_, user) => {
+                  const isSelf = user.id === selfId
+                  return (
+                    <div className="table-actions">
+                      <Button
+                        size="small"
+                        disabled={busy}
+                        title="编辑昵称 / 角色 / 状态 / 配额"
+                        onClick={() => setEditingUser(user)}
+                      >
+                        编辑
+                      </Button>
+                      {currentGroup && (user.group_names ?? []).includes(currentGroup.name) && (
+                        <Button
+                          size="small"
+                          disabled={busy}
+                          title={`移出「${currentGroup.name}」`}
+                          onClick={() => void removeFromGroup(user)}
+                        >
+                          移出本组
+                        </Button>
+                      )}
+                      {user.status === 'active' ? (
+                        <Button
+                          size="small"
+                          danger
+                          disabled={busy || isSelf}
+                          title={isSelf ? '不可禁用自己的账号' : '禁用并撤销其全部会话'}
+                          onClick={() => void update(user.id, { status: 'disabled' }, `已禁用 ${user.username}（其全部会话已失效）`)}
+                        >
+                          禁用
+                        </Button>
+                      ) : (
+                        <Button
+                          size="small"
+                          disabled={busy}
+                          title="启用并解除登录失败锁定"
+                          onClick={() => void update(user.id, { status: 'active' }, `已启用 ${user.username}`)}
+                        >
+                          启用
+                        </Button>
+                      )}
+                      <Button
+                        size="small"
+                        disabled={busy}
+                        onClick={() => { setResetUser(user); setNewPassword('') }}
+                      >
+                        重置密码
+                      </Button>
+                    </div>
+                  )
+                },
+              },
+            ]}
+          />
+        </div>
+      </div>
       {resetUser && (
         <Modal title={`重置密码：${resetUser.profile.nickname || resetUser.username}`} onClose={() => { setResetUser(null); setNewPassword('') }}>
           <form className="setting-edit" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 12 }} onSubmit={(e) => void submitResetPassword(e, resetUser)}>
@@ -778,28 +1084,124 @@ function UsersPanel({ onError, onNotice }: { onError: (msg: string) => void; onN
           onChanged={refreshAll}
         />
       )}
-      {groupsUser && (
-        <UserGroupsModal
-          user={groupsUser}
-          groups={groups}
-          onClose={() => setGroupsUser(null)}
-          onError={onError}
-          onNotice={onNotice}
-          onChanged={refreshAll}
-        />
+      {/* 新建用户组弹窗：名称/描述 + 搜索勾选初始成员。 */}
+      {createOpen && (
+        <Modal title="新建用户组" onClose={() => { if (!busy) { setCreateOpen(false); setName(''); setDesc(''); setMemberIds([]) } }}>
+          <form className="team-create-row" style={{ flexDirection: 'column', alignItems: 'stretch' }} onSubmit={(e) => void submitCreateGroup(e)}>
+            <label className="field">
+              <span>组名（≤100 字符，全局唯一）</span>
+              <Input autoFocus maxLength={100} value={name} onChange={(e) => setName(e.target.value)} placeholder="如：研发部" />
+            </label>
+            <label className="field">
+              <span>描述（可选）</span>
+              <Input maxLength={200} value={desc} onChange={(e) => setDesc(e.target.value)} placeholder="组用途说明" />
+            </label>
+            <div className="field">
+              <span>初始成员（可选，搜索昵称/用户名/邮箱，至少 2 字）</span>
+              <Select
+                mode="multiple"
+                showSearch
+                allowClear
+                filterOption={false}
+                value={memberIds}
+                loading={memberSearching}
+                placeholder="输入昵称、用户名或邮箱检索并勾选"
+                notFoundContent={memberSearching ? '搜索中…' : null}
+                onSearch={setMemberQuery}
+                onChange={setMemberIds}
+                options={[
+                  ...memberOptions.map((u) => {
+                    const nickname = (u.nickname ?? u.profile?.nickname) || u.username
+                    return {
+                      value: u.id,
+                      label: (
+                        <span className="user-search-option">
+                          <strong>{nickname}</strong>
+                          <span className="muted">{u.username} · {u.email}</span>
+                        </span>
+                      ),
+                    }
+                  }),
+                  ...memberIds
+                    .filter((id) => !memberOptions.some((u) => u.id === id))
+                    .map((id) => ({ value: id, label: memberNameRef.get(id) ?? id })),
+                ]}
+              />
+            </div>
+            <div className="setting-control" style={{ marginTop: 8, justifyContent: 'flex-end' }}>
+              <Button type="primary" htmlType="submit" disabled={busy || !name.trim()} loading={busy}>
+                创建
+              </Button>
+              <Button disabled={busy} onClick={() => { setCreateOpen(false); setName(''); setDesc(''); setMemberIds([]) }}>
+                取消
+              </Button>
+            </div>
+          </form>
+        </Modal>
+      )}
+      {/* 编辑组弹窗（改名/描述）。 */}
+      {editing && (
+        <Modal title={`编辑用户组：${editing.name}`} onClose={() => setEditing(null)}>
+          <form className="team-create-row" style={{ flexDirection: 'column', alignItems: 'stretch' }} onSubmit={(e) => void saveGroupEdit(e)}>
+            <label className="field">
+              <span>组名</span>
+              <Input maxLength={100} required value={editName} onChange={(e) => setEditName(e.target.value)} />
+            </label>
+            <label className="field">
+              <span>描述</span>
+              <Input value={editDesc} onChange={(e) => setEditDesc(e.target.value)} placeholder="组用途说明（留空清除）" />
+            </label>
+            <div className="setting-control" style={{ marginTop: 8 }}>
+              <Button type="primary" htmlType="submit" disabled={busy || !editName.trim()} loading={busy}>保存</Button>
+              <Button disabled={busy} onClick={() => setEditing(null)}>取消</Button>
+            </div>
+          </form>
+        </Modal>
+      )}
+      {/* 邀请记录弹窗（v2.3 并入人员页，不再单独占管理导航位）。 */}
+      {invitesOpen && (
+        <Modal wide title="邀请记录" onClose={() => setInvitesOpen(false)}>
+          <InvitationsPanel onError={onError} onNotice={onNotice} />
+        </Modal>
       )}
     </div>
   )
 }
 
-function AuditPanel({ onError }: { onError: (msg: string) => void }) {
+function AuditPanel({
+  onError,
+  retentionDays,
+  onSaveRetention,
+}: {
+  onError: (msg: string) => void
+  /** audit.retention_days 当前值（null = 未加载）。 */
+  retentionDays: number | null
+  /** 保存保留期（0 = 永久）；成功后由宿主刷新设置。 */
+  onSaveRetention: (days: number) => Promise<void>
+}) {
   const [filters, setFilters] = useState<import('../api').AuditFilters>({})
   const [data, setData] = useState<import('../api').AuditListResult | null>(null)
+  const [loading, setLoading] = useState(false)
   const [history, setHistory] = useState<string[]>([])
   const [expanded, setExpanded] = useState<number[]>([])
+  // 保留期草稿（服务端 audit.retention_days；0 = 永久）。
+  const [retentionDraft, setRetentionDraft] = useState<number | null>(retentionDays)
+  const [retentionBusy, setRetentionBusy] = useState(false)
+  useEffect(() => { setRetentionDraft(retentionDays) }, [retentionDays])
+  const saveRetention = async () => {
+    if (retentionBusy || retentionDraft === null || retentionDraft < 0) return
+    setRetentionBusy(true)
+    try {
+      await onSaveRetention(retentionDraft)
+    } finally {
+      setRetentionBusy(false)
+    }
+  }
   const load = async (cursor = '', push = false) => {
+    setLoading(true)
     try { setData(await adminListAuditLogs(filters, cursor)); if (push) setHistory((h) => [...h, cursor]) }
     catch (e) { onError(e instanceof Error ? e.message : '审计日志加载失败') }
+    finally { setLoading(false) }
   }
   useEffect(() => { void load() }, [])
   const field = (key: keyof import('../api').AuditFilters, placeholder: string, type = 'text') => (
@@ -814,22 +1216,59 @@ function AuditPanel({ onError }: { onError: (msg: string) => void }) {
   const columns: ColumnsType<AuditEntry> = [
     { title: '用户', dataIndex: 'user_id', key: 'user_id', width: 150, render: (v: string) => v || '系统/匿名' },
     { title: 'IP', dataIndex: 'ip', key: 'ip', width: 130, render: (v: string) => v || '-' },
-    { title: '操作', dataIndex: 'action', key: 'action', width: 170 },
+    { title: '操作', dataIndex: 'action', key: 'action', width: 170, render: (v: string) => <span title={v}>{auditActionText(v)}</span> },
     { title: '资源', key: 'resource', render: (_, entry) => `${entry.resource_type} ${entry.resource_id}` },
     {
       title: '状态',
       dataIndex: 'status',
       key: 'status',
       width: 90,
-      render: (v: string) => <span className={`badge ${v === 'success' ? 'available' : 'failed'}`}>{v}</span>,
+      render: (v: string) => (
+        <span className={`badge ${v === 'success' ? 'available' : 'failed'}`} title={v}>
+          {v === 'success' ? '成功' : v === 'failure' ? '失败' : v}
+        </span>
+      ),
     },
     { title: '时间', key: 'created_at', width: 160, render: (_, entry) => <span className="muted">{formatTime(entry.created_at)}</span> },
   ]
   return (
     <div className="panel setting-group audit-panel">
       <h3>审计日志</h3>
+      {/* 保留期设置（audit.retention_days；0 = 永久，后台清理任务每日删过期）。 */}
+      <div className="setting-row">
+        <div className="setting-main">
+          <div className="setting-key">
+            审计日志保留期 <code className="setting-desc muted">audit.retention_days</code>
+          </div>
+          <div className="setting-desc muted">
+            后台定时清理任务删除超过保留期的审计记录；0 = 永久保留。修改即时生效。
+          </div>
+        </div>
+        <div className="setting-control">
+          <InputNumber
+            min={0}
+            max={3650}
+            step={1}
+            precision={0}
+            style={{ width: 110 }}
+            value={retentionDraft}
+            onChange={(v) => setRetentionDraft(v === null || v === undefined ? null : v)}
+            addonAfter="天"
+            aria-label="审计日志保留天数"
+          />
+          <Button
+            size="small"
+            type="primary"
+            loading={retentionBusy}
+            disabled={retentionBusy || retentionDraft === null || retentionDraft < 0 || retentionDraft === retentionDays}
+            onClick={() => void saveRetention()}
+          >
+            保存
+          </Button>
+        </div>
+      </div>
       <form className="audit-filters" onSubmit={(e) => { e.preventDefault(); setHistory([]); void load() }}>
-        {field('action', 'Action')}
+        {field('action', '操作（如 auth.login）')}
         {field('userId', '用户 UUID')}
         <Select
           allowClear
@@ -837,51 +1276,85 @@ function AuditPanel({ onError }: { onError: (msg: string) => void }) {
           value={filters.status || undefined}
           onChange={(v) => setFilters({ ...filters, status: v ?? '' })}
           options={[
-            { value: 'success', label: 'success' },
-            { value: 'failure', label: 'failure' },
+            { value: 'success', label: '成功（success）' },
+            { value: 'failure', label: '失败（failure）' },
           ]}
         />
         {field('resourceType', '资源类型')}
         {field('resourceId', '资源 ID')}
         {field('from', '开始时间', 'datetime-local')}
         {field('to', '结束时间', 'datetime-local')}
-        <Button type="primary" htmlType="submit">筛选</Button>
+        <Button type="primary" htmlType="submit" loading={loading}>筛选</Button>
         <Button onClick={() => void adminDownloadAuditCSV(filters)}>按当前筛选导出 CSV</Button>
       </form>
+      <Table<AuditEntry>
+        rowKey="id"
+        columns={columns}
+        dataSource={data?.items ?? []}
+        loading={loading && data === null}
+        pagination={false}
+        scroll={{ x: 900 }}
+        locale={{ emptyText: loading ? '加载中…' : '没有匹配的审计记录' }}
+        expandable={{
+          expandedRowKeys: expanded,
+          onExpand: (open, entry) => setExpanded(open ? [entry.id] : []),
+          expandedRowRender: (entry) => (
+            <div>
+              <strong>User-Agent</strong>
+              <pre className="audit-detail-pre">{entry.user_agent || '-'}</pre>
+              <strong>Metadata</strong>
+              <pre className="audit-detail-pre">{entry.metadata || '{}'}</pre>
+            </div>
+          ),
+        }}
+        onRow={(entry) => ({
+          onClick: () => setExpanded((keys) => (keys.includes(entry.id) ? keys.filter((k) => k !== entry.id) : [entry.id])),
+          style: { cursor: 'pointer' },
+        })}
+      />
       {data && (
         <>
           <div className="setting-meta muted">共 {data.total} 条</div>
-          <Table<AuditEntry>
-            rowKey="id"
-            columns={columns}
-            dataSource={data.items}
-            pagination={false}
-            scroll={{ x: 900 }}
-            expandable={{
-              expandedRowKeys: expanded,
-              onExpand: (open, entry) => setExpanded(open ? [entry.id] : []),
-              expandedRowRender: (entry) => (
-                <div>
-                  <strong>User-Agent</strong>
-                  <pre className="audit-detail-pre">{entry.user_agent || '-'}</pre>
-                  <strong>Metadata</strong>
-                  <pre className="audit-detail-pre">{entry.metadata || '{}'}</pre>
-                </div>
-              ),
-            }}
-            onRow={(entry) => ({
-              onClick: () => setExpanded((keys) => (keys.includes(entry.id) ? keys.filter((k) => k !== entry.id) : [entry.id])),
-              style: { cursor: 'pointer' },
-            })}
-          />
           <div className="pager">
-            <Button size="small" disabled={history.length === 0} onClick={() => { const next = history.slice(0, -1); setHistory(next); void load(next[next.length - 1] ?? '') }}>上一页</Button>
-            <Button size="small" disabled={!data.next_cursor} onClick={() => void load(data.next_cursor, true)}>下一页</Button>
+            <Button size="small" disabled={history.length === 0 || loading} onClick={() => { const next = history.slice(0, -1); setHistory(next); void load(next[next.length - 1] ?? '') }}>上一页</Button>
+            <Button size="small" disabled={!data.next_cursor || loading} onClick={() => void load(data.next_cursor, true)}>下一页</Button>
           </div>
         </>
       )}
     </div>
   )
+}
+
+/** 常见审计动作 → 中文标签（键名与后端 internal/audit 动作常量对齐；
+ * 未命中回退原 action 串，原值经 title 提示）。 */
+const AUDIT_ACTION_LABELS: Record<string, string> = {
+  login_success: '登录成功', login_failure: '登录失败',
+  upload_complete: '上传完成', purge: '彻底删除',
+  share_create: '创建分享', share_revoke: '撤销分享', public_download: '分享下载',
+  'version.create': '创建新版本', 'version.restore': '回滚版本', 'file.version.delete': '删除历史版本',
+  'file.copy': '复制文件', 'file.convert_markdown': '转换为 Markdown',
+  'settings.update': '系统设置变更',
+  'janitor.upload': '清理·上传残留', 'janitor.blob': '清理·孤立对象', 'janitor.trash': '清理·回收站过期',
+  'onlyoffice.save': 'Office 保存', 'onlyoffice.cleanup': 'Office 会话清理',
+  'invite.create': '创建邀请', 'invite.revoke': '撤销邀请', 'invite.accept': '接受邀请',
+  'auth.password_reset': '密码重置',
+  'token.create': '创建令牌', 'token.revoke': '撤销令牌',
+  'webhook.create': '创建 Webhook', 'webhook.delete': '删除 Webhook',
+  'totp.enable': '启用两步验证', 'totp.disable': '禁用两步验证',
+  'oidc.provision': 'SSO 开通账号',
+  'user.update': '更新用户', 'user.reset_password': '管理员重置密码',
+  'backup.verify': '校验备份',
+  'quarantine.rescan': '重扫隔离对象', 'quarantine.release': '解除隔离', 'quarantine.delete': '删除隔离对象',
+  'group.create': '创建用户组', 'group.update': '更新用户组', 'group.delete': '删除用户组',
+  'group.member.add': '组成员加入', 'group.member.remove': '组成员移出',
+  'space.delete': '解散空间', 'space.leave': '离开空间', 'space.owner_transfer': '转让空间所有权',
+  'space.admin_update': '管理员改空间', 'space.group.add': '空间加用户组', 'space.group.update': '空间改组角色', 'space.group.remove': '空间移除用户组',
+  'acl.update': '目录权限变更',
+  'tls.update': 'TLS 模式切换', 'tls.cert_upload': '上传自定义证书',
+}
+
+function auditActionText(action: string): string {
+  return AUDIT_ACTION_LABELS[action] ?? action
 }
 
 /** 字节数的人类可读表示（备份文件/总大小展示）。 */
@@ -1011,189 +1484,26 @@ function BackupPanel({ onError, onNotice }: { onError: (msg: string) => void; on
   )
 }
 
-/** 邮件（SMTP）卡片：可编辑表单。GET/PUT /admin/settings/smtp —— 后端已
- * 支持运行时修改（DB 覆盖 → env 回退合并，保存即时生效：邮件发送处每次
- * 读库）；pass 留空 = 保持现值（任何读路径不回显，仅报 configured），
- * env 基线（.env 部署值）作对照展示，PUBLIC_BASE_URL 仍为 env-only。 */
-function MailPanel({ onNotice, onError }: { onNotice: (m: string) => void; onError: (m: string) => void }) {
-  const [view, setView] = useState<SmtpSettingsView | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [saving, setSaving] = useState(false)
-  const [formError, setFormError] = useState('')
-  const [form, setForm] = useState<{ enabled: boolean; host: string; port: number | null; user: string; pass: string; from: string; tls_mode: string }>({
-    enabled: false, host: '', port: 587, user: '', pass: '', from: '', tls_mode: 'auto',
-  })
-
-  const load = async () => {
-    setLoading(true)
-    try {
-      const v = await adminGetSmtpSettings()
-      setView(v)
-      setForm({
-        enabled: v.enabled, host: v.host, port: v.port, user: v.user, pass: '',
-        from: v.from, tls_mode: v.tls_mode || 'auto',
-      })
-    } catch (err) {
-      onError(err instanceof Error ? err.message : 'SMTP 配置加载失败')
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  useEffect(() => {
-    void load()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  const handleSave = async (e: FormEvent) => {
-    e.preventDefault()
-    const host = form.host.trim()
-    const from = form.from.trim()
-    const port = form.port ?? 0
-    if (form.enabled && (!host || !from)) {
-      setFormError('启用 SMTP 时服务器地址与发件人必填')
-      return
-    }
-    if (port < 1 || port > 65535) {
-      setFormError('端口须为 1-65535')
-      return
-    }
-    setSaving(true)
-    setFormError('')
-    try {
-      const v = await adminPutSmtpSettings({
-        enabled: form.enabled, host, port, user: form.user.trim(), pass: form.pass, from, tls_mode: form.tls_mode,
-      })
-      setView(v)
-      setForm((prev) => ({ ...prev, pass: '' }))
-      onNotice('SMTP 配置已保存（即时生效）')
-    } catch (err) {
-      setFormError(err instanceof Error ? err.message : '保存失败')
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  if (loading) {
-    return (
-      <div className="panel setting-group">
-        <h3>邮件（SMTP）</h3>
-        <div className="empty">SMTP 配置加载中…</div>
-      </div>
-    )
-  }
-
-  return (
-    <div className="panel setting-group">
-      <h3>邮件（SMTP）</h3>
-      <div className="setting-desc muted" style={{ marginBottom: 12 }}>
-        邮件通道（邀请注册、密码重置、通知副本）在此保存即时生效：表单值即为
-        生效配置（输入框占位符提示 .env 基线值）；密码留空表示保持现值
-        （不回显）；未启用时使用日志通道（链接输出到 backend 日志，不发送邮件）。
-      </div>
-      {view && (
-        <form className="smtp-form" onSubmit={handleSave}>
-          <div className="setting-row" style={{ borderBottom: 0, paddingBottom: 0 }}>
-            <div className="setting-main">
-              <div className="setting-key">通道状态 <code className="setting-desc muted">smtp.enabled</code></div>
-              <div className="setting-desc muted">启用时经 SMTP 投递；未启用为 Noop 日志通道（env 基线：{view.env.enabled ? '启用' : '未启用'}）</div>
-            </div>
-            <div className="setting-control">
-              <span className="setting-bool">
-                <Switch size="small" checked={form.enabled} onChange={(v) => setForm((prev) => ({ ...prev, enabled: v }))} />
-                <span>{form.enabled ? '开启' : '关闭'}</span>
-              </span>
-            </div>
-          </div>
-          <div className="smtp-grid">
-            <label className="field">
-              <span>服务器地址（SMTP_HOST）</span>
-              <Input
-                value={form.host}
-                onChange={(e) => setForm((prev) => ({ ...prev, host: e.target.value }))}
-                placeholder={view.env.host || '如 smtp.example.com'}
-              />
-            </label>
-            <label className="field">
-              <span>端口（SMTP_PORT）</span>
-              <InputNumber
-                min={1}
-                max={65535}
-                value={form.port}
-                onChange={(v) => setForm((prev) => ({ ...prev, port: v }))}
-                placeholder={String(view.env.port || 587)}
-                style={{ width: '100%' }}
-              />
-            </label>
-            <label className="field">
-              <span>加密方式（smtp.tls_mode）</span>
-              <Select
-                value={form.tls_mode}
-                onChange={(v) => setForm((prev) => ({ ...prev, tls_mode: v }))}
-                options={[
-                  { value: 'auto', label: 'auto（STARTTLS 自动协商，默认）' },
-                  { value: 'ssl', label: 'ssl（隐式 TLS / SMTPS，465 常见）' },
-                  { value: 'none', label: 'none（不协商，仅内网中继）' },
-                ]}
-              />
-            </label>
-            <label className="field">
-              <span>发件人（SMTP_FROM，启用时必填）</span>
-              <Input
-                value={form.from}
-                onChange={(e) => setForm((prev) => ({ ...prev, from: e.target.value }))}
-                placeholder={view.env.from || '如 docflow@example.com'}
-              />
-            </label>
-            <label className="field">
-              <span>认证用户名（SMTP_USER，空 = 匿名投递）</span>
-              <Input
-                value={form.user}
-                onChange={(e) => setForm((prev) => ({ ...prev, user: e.target.value }))}
-                placeholder={view.env.user || '匿名投递'}
-              />
-            </label>
-            <label className="field">
-              <span>认证密码（SMTP_PASS，留空保持现值）</span>
-              <Input.Password
-                value={form.pass}
-                onChange={(e) => setForm((prev) => ({ ...prev, pass: e.target.value }))}
-                placeholder={view.password_configured ? '已配置（留空保持不变）' : '未配置'}
-                autoComplete="new-password"
-              />
-            </label>
-          </div>
-          {formError && <div className="error-text">{formError}</div>}
-          <div className="modal-actions" style={{ marginTop: 4 }}>
-            <Button disabled={saving} onClick={() => void load()}>重置</Button>
-            <Button type="primary" htmlType="submit" loading={saving}>
-              {saving ? '保存中…' : '保存（即时生效）'}
-            </Button>
-          </div>
-        </form>
-      )}
-      <div className="setting-row" style={{ marginTop: 12 }}>
-        <div className="setting-main">
-          <div className="setting-key">站点地址 <code className="setting-desc muted">PUBLIC_BASE_URL</code></div>
-          <div className="setting-desc muted">邮件内邀请/重置链接的前缀（env-only，不可在此修改）；为空时链接退化为相对路径（仅日志可见）</div>
-        </div>
-        <div className="setting-control">
-          {view?.public_base_url ? <span className="setting-value-mono">{view.public_base_url}</span> : <span className="badge">未设置</span>}
-        </div>
-      </div>
-    </div>
-  )
-}
-
-/** 凭据状态卡片（G6）：各密钥类 env 的已配置/未配置徽章（只读探针，不回显值）。 */
+/** 凭据状态卡片（G6）：各密钥类 env 的已配置/未配置徽章（只读探针，不回显值）。
+ * v2.2 自查结论：本卡为**环境态只读信息**——密钥值从不离开服务端（任何 API 都
+ * 不回显），故保持只读；每项补充「在哪改」的指引：SMTP 密码可在「邮件」面板
+ * 运行时修改，其余须改部署 .env 后重启 backend。 */
 function SecretsPanel({ secrets }: { secrets: Record<string, boolean> }) {
   if (!secrets || Object.keys(secrets).length === 0) return null
+  /** 各密钥的配置指引（值只读，但告诉管理员在哪改）。 */
+  const hints: Record<string, string> = {
+    jwt_secret: '修改：部署 .env 的 JWT_SECRET（重启 backend 生效；变更会使全部现有会话与 PAT 失效）',
+    smtp_password: '修改：可在「设置 → 邮件配置」运行时设置（保存即时生效），或 .env 的 SMTP_PASS',
+    s3_secret_key: '修改：部署 .env 的 S3_SECRET_KEY（STORAGE_DRIVER=s3 时必需；重启生效）',
+    onlyoffice_jwt_secret: '修改：部署 .env 的 ONLYOFFICE_JWT_SECRET（须与 DocumentServer 一致；重启生效）',
+  }
   return (
     <div className="panel setting-group">
       <h3>凭据状态</h3>
       <div className="setting-desc muted" style={{ marginBottom: 12 }}>
-        密钥类凭据一律走环境变量（不入 system_settings）；此处仅展示各环境变量
-        是否已配置（值不回显）。未配置的密钥在对应功能启用时将不可用。
+        密钥类凭据一律走环境变量（不入 system_settings），此处为**只读探针**：仅展示各环境变量
+        是否已配置，值绝不回显（服务端任何接口都不返回密钥明文）。未配置的密钥在对应功能
+        启用时将不可用。
       </div>
       {secretLabels.map(({ key, env, label }) => {
         const configured = Boolean(secrets[key])
@@ -1203,6 +1513,7 @@ function SecretsPanel({ secrets }: { secrets: Record<string, boolean> }) {
               <div className="setting-key">
                 {label} <code className="setting-desc muted">{env}</code>
               </div>
+              {hints[key] && <div className="setting-desc muted">{hints[key]}</div>}
             </div>
             <div className="setting-control">
               <span className={configured ? 'badge available' : 'badge failed'}>
@@ -1225,6 +1536,10 @@ function QuarantinePanel({ onError, onNotice }: { onError: (msg: string) => void
   const [items, setItems] = useState<QuarantineItem[] | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
   const [confirmRelease, setConfirmRelease] = useState(false)
+  /** v2.2：文件名/SHA 检索（前端过滤）+ 多选批量重扫/删除。 */
+  const [query, setQuery] = useState('')
+  const [selected, setSelected] = useState<Key[]>([])
+  const [batchBusy, setBatchBusy] = useState(false)
 
   const load = async () => {
     try {
@@ -1277,6 +1592,7 @@ function QuarantinePanel({ onError, onNotice }: { onError: (msg: string) => void
       } else {
         onNotice('已删除隔离对象（quarantine.delete 已审计）')
       }
+      setSelected((prev) => prev.filter((k) => k !== item.sha256))
       await load()
     } catch (err) {
       onError(err instanceof Error ? err.message : '操作失败')
@@ -1284,6 +1600,40 @@ function QuarantinePanel({ onError, onNotice }: { onError: (msg: string) => void
       setBusy(null)
     }
   }
+
+  /** 批量重扫/删除（逐项调用，部分成功语义；删除为不可逆，双重确认）。 */
+  const runBatch = async (action: 'rescan' | 'delete') => {
+    const shaList = selected.map(String)
+    if (shaList.length === 0 || batchBusy) return
+    const ok = await confirmDialog(modal, {
+      title: action === 'rescan' ? '批量重扫' : '批量删除隔离对象',
+      content: action === 'rescan'
+        ? `对选中的 ${shaList.length} 个对象重新执行安全扫描？通过者恢复可用。`
+        : `确认删除选中的 ${shaList.length} 个隔离对象？将解除全部版本引用并物理删除，不可恢复。`,
+      okText: action === 'rescan' ? '重扫' : '删除',
+      danger: action === 'delete',
+      cancelText: '取消',
+    })
+    if (!ok) return
+    setBatchBusy(true)
+    onError('')
+    try {
+      const results = await Promise.allSettled(shaList.map((sha) => adminQuarantineAction(sha, action, { confirm: true })))
+      const failed = results.filter((r) => r.status === 'rejected').length
+      if (failed > 0) onError(`批量${action === 'rescan' ? '重扫' : '删除'}：成功 ${shaList.length - failed} 项，失败 ${failed} 项`)
+      else onNotice(`批量${action === 'rescan' ? '重扫' : '删除'}完成：${shaList.length} 项`)
+      setSelected([])
+      await load()
+    } finally {
+      setBatchBusy(false)
+    }
+  }
+
+  const needle = query.trim().toLowerCase()
+  const visible = (items ?? []).filter((it) =>
+    needle === ''
+    || (it.file_name ?? '').toLowerCase().includes(needle)
+    || it.sha256.toLowerCase().includes(needle))
 
   return (
     <div className="panel setting-group">
@@ -1293,16 +1643,41 @@ function QuarantinePanel({ onError, onNotice }: { onError: (msg: string) => void
         扫描，通过恢复可用）、解除隔离（需勾选确认，误报场景）、删除（解除全部版本
         引用并物理删除，不可恢复）。全部操作均记录审计。
       </div>
+      <div className="member-list-toolbar" style={{ marginBottom: 12 }}>
+        <Input
+          allowClear
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="按文件名 / SHA-256 检索…"
+          style={{ width: 240 }}
+          aria-label="隔离区检索"
+        />
+        {selected.length > 0 && (
+          <>
+            <Button disabled={batchBusy || busy !== null} loading={batchBusy} onClick={() => void runBatch('rescan')}>
+              批量重扫（{selected.length}）
+            </Button>
+            <Button danger disabled={batchBusy || busy !== null} loading={batchBusy} onClick={() => void runBatch('delete')}>
+              批量删除（{selected.length}）
+            </Button>
+          </>
+        )}
+      </div>
       {items === null ? (
         <div className="empty">隔离区加载中…</div>
-      ) : items.length === 0 ? (
-        <div className="empty">当前没有隔离中的内容对象</div>
+      ) : visible.length === 0 ? (
+        <div className="empty">{needle ? '没有匹配的隔离对象' : '当前没有隔离中的内容对象'}</div>
       ) : (
         <Table<QuarantineItem>
           rowKey="sha256"
           pagination={false}
-          dataSource={items}
+          dataSource={visible}
           scroll={{ x: 900 }}
+          rowSelection={{
+            selectedRowKeys: selected,
+            onChange: setSelected,
+            getCheckboxProps: () => ({ disabled: batchBusy || busy !== null }),
+          }}
           columns={[
             {
               title: '文件 / SHA-256',
@@ -1427,283 +1802,6 @@ function UserPickerField({ onSelect }: { onSelect: (user: UserSearchResult) => v
   )
 }
 
-/** 组成员管理弹窗：搜索添加成员 + 成员列表移除（操作后刷新组列表计数）。 */
-function GroupMembersModal({
-  group,
-  onClose,
-  onError,
-  onNotice,
-  onChanged,
-}: {
-  group: Group
-  onClose: () => void
-  onError: (msg: string) => void
-  onNotice: (msg: string) => void
-  onChanged: () => Promise<void> | void
-}) {
-  const { modal } = AntdApp.useApp()
-  const [members, setMembers] = useState<GroupMember[] | null>(null)
-  const [picked, setPicked] = useState<UserSearchResult | null>(null)
-  const [busy, setBusy] = useState(false)
-
-  const load = async () => {
-    try {
-      setMembers(await adminListGroupMembers(group.id))
-    } catch (err) {
-      onError(err instanceof Error ? err.message : '组成员加载失败')
-    }
-  }
-
-  useEffect(() => {
-    void load()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [group.id])
-
-  const add = async () => {
-    if (!picked || busy) return
-    setBusy(true)
-    try {
-      await adminAddGroupMember(group.id, picked.id)
-      onNotice(`已将 ${searchResultLabel(picked)} 加入「${group.name}」`)
-      setPicked(null)
-      await load()
-      await onChanged()
-    } catch (err) {
-      onError(err instanceof Error ? err.message : '添加成员失败')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const remove = async (member: GroupMember) => {
-    if (busy) return
-    const ok = await confirmDialog(modal, {
-      title: '移除组成员',
-      content: `确定将 ${member.nickname || member.username || member.user_id.slice(0, 8)} 移出「${group.name}」？`,
-      okText: '移除',
-      danger: true,
-      cancelText: '取消',
-    })
-    if (!ok) return
-    setBusy(true)
-    try {
-      await adminRemoveGroupMember(group.id, member.user_id)
-      onNotice('已移除组成员')
-      await load()
-      await onChanged()
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 404) {
-        await load()
-        await onChanged()
-      } else {
-        onError(err instanceof Error ? err.message : '移除成员失败')
-      }
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  return (
-    <Modal title={`管理组成员：${group.name}`} onClose={onClose}>
-      <div className="team-create-row" style={{ marginBottom: 12, alignItems: 'flex-end' }}>
-        <UserPickerField onSelect={setPicked} />
-        <Button type="primary" disabled={busy || !picked} loading={busy} onClick={() => void add()}>
-          加入组
-        </Button>
-      </div>
-      {picked && <div className="setting-desc muted" style={{ marginBottom: 8 }}>已选择：{searchResultLabel(picked)}（{picked.username}）</div>}
-      {members === null ? (
-        <div className="hint">加载中…</div>
-      ) : members.length === 0 ? (
-        <div className="empty">该组暂无成员</div>
-      ) : (
-        <ul className="member-list">
-          {members.map((m) => (
-            <li key={m.user_id} className="member-row">
-              <div className="member-info">
-                <span className="member-id" title={m.user_id}>{m.nickname || m.username || m.user_id}</span>
-                {m.username && m.nickname && <span className="muted" style={{ marginLeft: 8 }}>{m.username}</span>}
-              </div>
-              <div className="member-side">
-                <span className="muted member-time" title={`加入于 ${formatTime(m.joined_at)}`}>{formatTime(m.joined_at)}</span>
-                <Button size="small" danger disabled={busy} onClick={() => void remove(m)}>移除</Button>
-              </div>
-            </li>
-          ))}
-        </ul>
-      )}
-    </Modal>
-  )
-}
-
-/** 用户组管理卡片：创建表单 + 组列表（antd Table：名称/描述/成员数/操作），
- * 成员管理与改名/描述编辑经弹窗完成；删除需确认（级联清成员关系）。 */
-function GroupsPanel({ onError, onNotice }: { onError: (msg: string) => void; onNotice: (msg: string) => void }) {
-  const { modal } = AntdApp.useApp()
-  const [groups, setGroups] = useState<Group[] | null>(null)
-  const [name, setName] = useState('')
-  const [desc, setDesc] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [membersGroup, setMembersGroup] = useState<Group | null>(null)
-  const [editing, setEditing] = useState<Group | null>(null)
-  const [editName, setEditName] = useState('')
-  const [editDesc, setEditDesc] = useState('')
-
-  const load = async () => {
-    try {
-      setGroups(await adminListGroups())
-      onError('')
-    } catch (err) {
-      onError(err instanceof Error ? err.message : '用户组加载失败')
-    }
-  }
-
-  useEffect(() => {
-    void load()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  const submit = async (e: FormEvent) => {
-    e.preventDefault()
-    if (busy || !name.trim()) return
-    setBusy(true)
-    try {
-      await adminCreateGroup(name.trim(), desc.trim())
-      setName('')
-      setDesc('')
-      onNotice('用户组已创建')
-      await load()
-    } catch (err) {
-      onError(err instanceof Error ? err.message : '创建用户组失败')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const saveEdit = async (e: FormEvent) => {
-    e.preventDefault()
-    if (!editing || busy) return
-    setBusy(true)
-    try {
-      await adminUpdateGroup(editing.id, { name: editName.trim(), description: editDesc.trim() })
-      setEditing(null)
-      onNotice('用户组已更新')
-      await load()
-    } catch (err) {
-      onError(err instanceof Error ? err.message : '更新用户组失败')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const remove = async (g: Group) => {
-    const ok = await confirmDialog(modal, {
-      title: '删除用户组',
-      content: `确定删除用户组「${g.name}」？其 ${g.member_count} 名成员的归属关系将被清除（用户本身不受影响）。`,
-      okText: '删除',
-      danger: true,
-      cancelText: '取消',
-    })
-    if (!ok) return
-    setBusy(true)
-    try {
-      await adminDeleteGroup(g.id)
-      onNotice(`已删除用户组「${g.name}」`)
-      await load()
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 404) await load()
-      else onError(err instanceof Error ? err.message : '删除用户组失败')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  return (
-    <div className="panel setting-group">
-      <h3>用户组</h3>
-      <div className="setting-desc muted" style={{ marginBottom: 12 }}>
-        用户组为组织维度的人员集合（仅 admin 管理）：用于给用户打组织标签，
-        不挂文件空间、不影响文件权限（协作空间请使用「团队」）。删除组会清除其成员归属，不会删除用户。
-      </div>
-      <form className="team-create-row" style={{ marginBottom: 12 }} onSubmit={(e) => void submit(e)}>
-        <label className="field">
-          <span>组名（≤100 字符，全局唯一）</span>
-          <Input maxLength={100} value={name} onChange={(e) => setName(e.target.value)} placeholder="如：研发部" />
-        </label>
-        <label className="field">
-          <span>描述（可选）</span>
-          <Input value={desc} onChange={(e) => setDesc(e.target.value)} placeholder="组用途说明" />
-        </label>
-        <Button type="primary" htmlType="submit" disabled={busy || !name.trim()} loading={busy}>
-          创建用户组
-        </Button>
-      </form>
-      {groups === null ? (
-        <div className="hint">加载中…</div>
-      ) : (
-        <Table<Group>
-          rowKey="id"
-          pagination={false}
-          dataSource={groups}
-          locale={{ emptyText: '尚未创建用户组' }}
-          scroll={{ x: 760 }}
-          columns={[
-            { title: '名称', dataIndex: 'name', key: 'name' },
-            { title: '描述', key: 'description', render: (_, g) => <span className="muted">{g.description || '—'}</span> },
-            { title: '成员数', dataIndex: 'member_count', key: 'member_count', width: 90 },
-            { title: '创建时间', key: 'created_at', width: 160, render: (_, g) => <span className="muted">{formatTime(g.created_at)}</span> },
-            {
-              title: '操作',
-              key: 'actions',
-              width: 200,
-              render: (_, g) => (
-                <div className="table-actions">
-                  <Button size="small" disabled={busy} onClick={() => setMembersGroup(g)}>成员</Button>
-                  <Button
-                    size="small"
-                    disabled={busy}
-                    onClick={() => { setEditing(g); setEditName(g.name); setEditDesc(g.description) }}
-                  >
-                    编辑
-                  </Button>
-                  <Button size="small" danger disabled={busy} onClick={() => void remove(g)}>删除</Button>
-                </div>
-              ),
-            },
-          ]}
-        />
-      )}
-      {membersGroup && (
-        <GroupMembersModal
-          group={membersGroup}
-          onClose={() => setMembersGroup(null)}
-          onError={onError}
-          onNotice={onNotice}
-          onChanged={load}
-        />
-      )}
-      {editing && (
-        <Modal title={`编辑用户组：${editing.name}`} onClose={() => setEditing(null)}>
-          <form className="team-create-row" style={{ flexDirection: 'column', alignItems: 'stretch' }} onSubmit={(e) => void saveEdit(e)}>
-            <label className="field">
-              <span>组名</span>
-              <Input maxLength={100} required value={editName} onChange={(e) => setEditName(e.target.value)} />
-            </label>
-            <label className="field">
-              <span>描述</span>
-              <Input value={editDesc} onChange={(e) => setEditDesc(e.target.value)} placeholder="组用途说明（留空清除）" />
-            </label>
-            <div className="setting-control" style={{ marginTop: 8 }}>
-              <Button type="primary" htmlType="submit" disabled={busy || !editName.trim()} loading={busy}>保存</Button>
-              <Button disabled={busy} onClick={() => setEditing(null)}>取消</Button>
-            </div>
-          </form>
-        </Modal>
-      )}
-    </div>
-  )
-}
-
 /** 用户编辑弹窗（people 区行操作）：昵称 / 角色 / 状态 / 配额一次提交。 */
 function UserEditModal({
   user,
@@ -1772,8 +1870,8 @@ function UserEditModal({
               disabled={user.id === selfId}
               onChange={(v) => setRole(v === 'admin' ? 'admin' : 'user')}
               options={[
-                { value: 'user', label: 'user' },
-                { value: 'admin', label: 'admin' },
+                { value: 'user', label: '普通用户（user）' },
+                { value: 'admin', label: '管理员（admin）' },
               ]}
             />
           </label>
@@ -1784,8 +1882,8 @@ function UserEditModal({
               disabled={user.id === selfId}
               onChange={(v) => setStatus(v === 'disabled' ? 'disabled' : 'active')}
               options={[
-                { value: 'active', label: 'active（正常）' },
-                { value: 'disabled', label: 'disabled（禁用）' },
+                { value: 'active', label: '正常（active）' },
+                { value: 'disabled', label: '已禁用（disabled）' },
               ]}
             />
           </label>
@@ -1810,102 +1908,6 @@ function UserEditModal({
           <Button disabled={busy} onClick={onClose}>取消</Button>
         </div>
       </form>
-    </Modal>
-  )
-}
-
-/** 用户组归属弹窗（people 区行操作「组」）：查看/移出所属组 + 加入新组。 */
-function UserGroupsModal({
-  user,
-  groups,
-  onClose,
-  onError,
-  onNotice,
-  onChanged,
-}: {
-  user: AdminUser
-  groups: Group[]
-  onClose: () => void
-  onError: (msg: string) => void
-  onNotice: (msg: string) => void
-  onChanged: () => Promise<void> | void
-}) {
-  const current = user.group_names ?? []
-  const [picked, setPicked] = useState('')
-  const [busy, setBusy] = useState(false)
-
-  const add = async () => {
-    if (!picked || busy) return
-    setBusy(true)
-    try {
-      await adminAddGroupMember(picked, user.id)
-      onNotice(`已将 ${user.username} 加入「${groups.find((g) => g.id === picked)?.name ?? picked}」`)
-      setPicked('')
-      await onChanged()
-    } catch (err) {
-      onError(err instanceof Error ? err.message : '加入组失败')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const remove = async (name: string) => {
-    const group = groups.find((g) => g.name === name)
-    if (!group || busy) return
-    setBusy(true)
-    try {
-      await adminRemoveGroupMember(group.id, user.id)
-      onNotice(`已将 ${user.username} 移出「${name}」`)
-      await onChanged()
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 404) await onChanged()
-      else onError(err instanceof Error ? err.message : '移出组失败')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  return (
-    <Modal title={`所属用户组：${user.profile.nickname || user.username}`} onClose={onClose}>
-      {current.length === 0 ? (
-        <div className="empty">该用户尚未加入任何用户组</div>
-      ) : (
-        <ul className="member-list" style={{ marginBottom: 12 }}>
-          {current.map((name) => {
-            const group = groups.find((g) => g.name === name)
-            return (
-              <li key={name} className="member-row">
-                <div className="member-info">
-                  <span className="member-id">{name}</span>
-                  {group && <span className="muted" style={{ marginLeft: 8 }}>{group.description || `${group.member_count} 名成员`}</span>}
-                </div>
-                <div className="member-side">
-                  <Button size="small" danger disabled={busy || !group} onClick={() => void remove(name)}>移出</Button>
-                </div>
-              </li>
-            )
-          })}
-        </ul>
-      )}
-      <div className="team-create-row" style={{ alignItems: 'flex-end' }}>
-        <label className="field">
-          <span>加入组</span>
-          <Select
-            value={picked || undefined}
-            onChange={(v) => setPicked(v ?? '')}
-            placeholder="选择用户组…"
-            allowClear
-            options={groups.filter((g) => !current.includes(g.name)).map((g) => ({
-              value: g.id,
-              label: `${g.name}（${g.member_count} 人）`,
-            }))}
-          />
-        </label>
-        <Button type="primary" disabled={busy || !picked} loading={busy} onClick={() => void add()}>
-          加入组
-        </Button>
-      </div>
-      {groups.length === 0 && <div className="setting-desc muted" style={{ marginTop: 8 }}>尚未创建任何用户组，可先在「用户组」页创建。</div>}
     </Modal>
   )
 }
@@ -1958,9 +1960,271 @@ function RecentAuditPanel({ onError }: { onError: (msg: string) => void }) {
   )
 }
 
+/** 空间管理卡片（v2.0 统一空间模型，v2.3 增「已解散」筛选与彻底删除）：
+ * 名称/所有者检索列表 + 越权编辑（名称/描述/配额，不受单空间配额上限
+ * 约束）+ 解散（软删，含多选批量）；「已解散」视图列出软删空间并可
+ * **彻底删除**（物理删文件/成员/分享，输入空间名二次确认）；默认空间
+ * 不可解散。 */
+function SpacesPanel({ onError, onNotice }: { onError: (msg: string) => void; onNotice: (msg: string) => void }) {
+  const { modal } = AntdApp.useApp()
+  const [spaces, setSpaces] = useState<AdminSpaceItem[] | null>(null)
+  const [q, setQ] = useState('')
+  const [busy, setBusy] = useState(false)
+  /** 视图切换：active = 正常空间（默认）；dissolved = 已解散（软删）。 */
+  const [view, setView] = useState<'active' | 'dissolved'>('active')
+  /** 批量解散勾选（默认空间行禁选；仅 active 视图）。 */
+  const [selectedSpaces, setSelectedSpaces] = useState<Key[]>([])
+  const [editing, setEditing] = useState<AdminSpaceItem | null>(null)
+  const [editName, setEditName] = useState('')
+  const [editDesc, setEditDesc] = useState('')
+  const [editQuota, setEditQuota] = useState('')
+
+  const load = async (query: string, dissolved = view === 'dissolved') => {
+    setBusy(true)
+    try {
+      setSpaces(await adminListSpaces(query.trim(), 100, dissolved))
+    } catch (err) {
+      onError(err instanceof Error ? err.message : '空间列表加载失败')
+      setSpaces([])
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  useEffect(() => {
+    void load('', view === 'dissolved')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view])
+
+  const submit = (e: FormEvent) => {
+    e.preventDefault()
+    void load(q)
+  }
+
+  const saveEdit = async (e: FormEvent) => {
+    e.preventDefault()
+    if (!editing || busy || !editName.trim()) return
+    const quotaGib = Number(editQuota)
+    if (!Number.isFinite(quotaGib) || quotaGib < 0) {
+      onError('配额须为 ≥0 的数字（GiB；0=不限）')
+      return
+    }
+    setBusy(true)
+    try {
+      await adminUpdateSpace(editing.id, {
+        name: editName.trim(),
+        description: editDesc.trim(),
+        quotaBytes: Math.round(quotaGib * GIB),
+      })
+      setEditing(null)
+      onNotice('空间已更新')
+      await load(q)
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 404) {
+        setEditing(null)
+        await load(q)
+      } else {
+        onError(err instanceof Error ? err.message : '更新空间失败')
+      }
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const dissolve = async (s: AdminSpaceItem) => {
+    const ok = await confirmDialog(modal, {
+      title: '解散空间',
+      content: `确定解散空间「${s.name}」？空间内全部文件将被删除，不可恢复。`,
+      okText: '解散',
+      danger: true,
+      cancelText: '取消',
+    })
+    if (!ok) return
+    setBusy(true)
+    try {
+      await adminDeleteSpace(s.id)
+      onNotice(`已解散空间「${s.name}」`)
+      setSelectedSpaces((prev) => prev.filter((k) => k !== s.id))
+      await load(q)
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 404) await load(q)
+      else onError(err instanceof Error ? err.message : '解散空间失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** 批量解散（v2.2：勾选 + 确认；默认空间自动跳过）。 */
+  const batchDissolve = async () => {
+    const targets = (spaces ?? []).filter((s) => selectedSpaces.includes(s.id) && !s.is_default)
+    if (targets.length === 0 || busy) return
+    const ok = await confirmDialog(modal, {
+      title: '批量解散空间',
+      content: `确定解散选中的 ${targets.length} 个空间？空间内全部文件将被删除，不可恢复。`,
+      okText: '解散',
+      danger: true,
+      cancelText: '取消',
+    })
+    if (!ok) return
+    setBusy(true)
+    onError('')
+    try {
+      const results = await Promise.allSettled(targets.map((s) => adminDeleteSpace(s.id)))
+      const failed = results.filter((r) => r.status === 'rejected').length
+      if (failed > 0) onError(`批量解散：成功 ${targets.length - failed} 个，失败 ${failed} 个`)
+      else onNotice(`已解散 ${targets.length} 个空间`)
+      setSelectedSpaces([])
+      await load(q)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** 彻底删除已解散空间（物理删文件/成员/分享）：输入空间名二次确认。 */
+  const purge = async (s: AdminSpaceItem) => {
+    const name = await promptViaModal(modal, {
+      title: `彻底删除空间：${s.name}`,
+      label: `此操作将物理删除空间内全部文件、成员与分享记录，不可恢复。请输入空间名「${s.name}」确认：`,
+      placeholder: s.name,
+      okText: '彻底删除',
+      cancelText: '取消',
+    })
+    if (name === null || name !== s.name) {
+      if (name !== null) onError('输入的空间名不匹配，已取消彻底删除')
+      return
+    }
+    setBusy(true)
+    try {
+      await adminPurgeSpace(s.id)
+      onNotice(`已彻底删除空间「${s.name}」`)
+      await load(q)
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 404) await load(q)
+      else onError(err instanceof Error ? err.message : '彻底删除空间失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="panel setting-group">
+      <h3>空间</h3>
+      <div className="setting-desc muted" style={{ marginBottom: 12 }}>
+        全站空间清单：admin 可越权修改名称/描述/配额并解散空间；默认空间为
+        注册自动创建，可改名不可解散。解散后进入「已解散」视图，可彻底删除（物理删除文件/成员/分享，不可恢复）。
+      </div>
+      <form className="team-create-row" style={{ marginBottom: 12 }} onSubmit={submit}>
+        <label className="field" style={{ flex: 1 }}>
+          <span>按空间名 / 所有者用户名检索</span>
+          <Input allowClear value={q} onChange={(e) => setQ(e.target.value)} placeholder="如：研发 或 admin" />
+        </label>
+        <Button type="primary" htmlType="submit" disabled={busy} loading={busy}>搜索</Button>
+        {view === 'active' && selectedSpaces.length > 0 && (
+          <Button danger disabled={busy} loading={busy} onClick={() => void batchDissolve()}>
+            批量解散（{selectedSpaces.filter((id) => spaces?.find((s) => s.id === id && !s.is_default)).length}）
+          </Button>
+        )}
+        <div style={{ display: 'flex', alignItems: 'flex-end' }}>
+          <Segmented
+            value={view}
+            onChange={(v) => { setSelectedSpaces([]); setView(v as 'active' | 'dissolved') }}
+            options={[
+              { label: '正常', value: 'active' },
+              { label: '已解散', value: 'dissolved' },
+            ]}
+          />
+        </div>
+      </form>
+      {spaces === null ? (
+        <div className="hint">加载中…</div>
+      ) : (
+        <Table<AdminSpaceItem>
+          rowKey="id"
+          pagination={false}
+          dataSource={spaces}
+          locale={{ emptyText: view === 'dissolved' ? '没有已解散的空间' : '没有匹配的空间' }}
+          scroll={{ x: 900 }}
+          rowSelection={view === 'active' ? {
+            selectedRowKeys: selectedSpaces,
+            onChange: setSelectedSpaces,
+            // 默认空间不可解散，禁选防误勾。
+            getCheckboxProps: (s) => ({ disabled: s.is_default || busy }),
+          } : undefined}
+          columns={[
+            {
+              title: '名称',
+              dataIndex: 'name',
+              key: 'name',
+              render: (_, s) => (
+                <span>
+                  {s.name}
+                  {s.is_default && <span className="badge" style={{ marginLeft: 8 }}>默认</span>}
+                  {view === 'dissolved' && <span className="badge failed" style={{ marginLeft: 8 }}>已解散</span>}
+                </span>
+              ),
+            },
+            { title: '所有者', key: 'owner', render: (_, s) => <span className="muted">{s.owner_username || s.owner_id.slice(0, 8)}</span> },
+            { title: '成员数', dataIndex: 'member_count', key: 'member_count', width: 90, render: (v: number | undefined) => v ?? '—' },
+            { title: '配额', key: 'quota', width: 110, render: (_, s) => <span className="muted">{formatQuota(s.quota_bytes)}</span> },
+            { title: '已用', key: 'used', width: 110, render: (_, s) => <span className="muted">{formatQuota(s.storage_used ?? 0, false)}</span> },
+            view === 'dissolved'
+              ? { title: '解散时间', key: 'deleted_at', width: 170, render: (_, s) => <span className="muted">{s.deleted_at ? formatTime(s.deleted_at) : '—'}</span> }
+              : { title: '创建时间', key: 'created_at', width: 170, render: (_, s) => <span className="muted">{formatTime(s.created_at)}</span> },
+            {
+              title: '操作',
+              key: 'actions',
+              width: 150,
+              render: (_, s) => (
+                <div className="table-actions">
+                  {view === 'active' ? (
+                    <>
+                      <Button
+                        size="small"
+                        disabled={busy}
+                        onClick={() => { setEditing(s); setEditName(s.name); setEditDesc(s.description); setEditQuota(quotaToGib(s.quota_bytes)) }}
+                      >
+                        编辑
+                      </Button>
+                      {!s.is_default && <Button size="small" danger disabled={busy} onClick={() => void dissolve(s)}>解散</Button>}
+                    </>
+                  ) : (
+                    <Button size="small" danger disabled={busy} onClick={() => void purge(s)}>彻底删除</Button>
+                  )}
+                </div>
+              ),
+            },
+          ]}
+        />
+      )}
+      {editing && (
+        <Modal title={`编辑空间：${editing.name}`} onClose={() => setEditing(null)}>
+          <form className="team-create-row" style={{ flexDirection: 'column', alignItems: 'stretch' }} onSubmit={saveEdit}>
+            <label className="field">
+              <span>名称</span>
+              <Input maxLength={100} required value={editName} onChange={(e) => setEditName(e.target.value)} />
+            </label>
+            <label className="field">
+              <span>描述（留空清除）</span>
+              <Input value={editDesc} onChange={(e) => setEditDesc(e.target.value)} />
+            </label>
+            <label className="field">
+              <span>配额（GiB；0 = 不限）</span>
+              <Input value={editQuota} onChange={(e) => setEditQuota(e.target.value)} placeholder="如：10 或 0" />
+            </label>
+            <div className="setting-control" style={{ marginTop: 8 }}>
+              <Button type="primary" htmlType="submit" disabled={busy || !editName.trim()} loading={busy}>保存</Button>
+              <Button disabled={busy} onClick={() => setEditing(null)}>取消</Button>
+            </div>
+          </form>
+        </Modal>
+      )}
+    </div>
+  )
+}
+
 const adminSections = [
-  ['overview', '概览'], ['people', '人员'], ['groups', '用户组'], ['audit', '审计日志'], ['security', '安全'],
-  ['tls', 'TLS'], ['mail', '邮件'], ['backup', '备份'], ['system', '系统设置'],
+  ['overview', '概览'], ['people', '人员与组'], ['spaces', '空间'], ['audit', '审计日志'], ['threat', '威胁防护'],
+  ['backup', '备份'],
 ] as const
 
 export default function AdminPage() {
@@ -1968,29 +2232,22 @@ export default function AdminPage() {
   const locale = useLocale()
   const msg = (key: MessageKey) => t(locale, key)
   const [stats, setStats] = useState<AdminStats | null>(null)
-  const [settings, setSettings] = useState<SettingItem[]>([])
   const [secrets, setSecrets] = useState<Record<string, boolean>>({})
+  /** audit.retention_days 当前值（null = 尚未加载；0 = 永久）。 */
+  const [auditRetentionDays, setAuditRetentionDays] = useState<number | null>(null)
   const [loading, setLoading] = useState(true)
   const [forbidden, setForbidden] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
-
-  // 行内编辑状态：当前编辑键 + 草稿（bool 直接存布尔，int/string 存字符串）。
-  const [editingKey, setEditingKey] = useState<string | null>(null)
-  const [draft, setDraft] = useState<string | boolean>('')
-  const [savingKey, setSavingKey] = useState<string | null>(null)
-  const [rowError, setRowError] = useState('')
-  // 系统设置页：搜索框过滤键 + 分组折叠状态（prefix → 折叠；过滤时自动展开）。
-  const [settingsQuery, setSettingsQuery] = useState('')
-  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
 
   const load = async () => {
     setLoading(true)
     setError('')
     try {
       const [result, st] = await Promise.all([adminGetSettings(), adminGetStats()])
-      setSettings(result.settings ?? [])
       setSecrets(result.secrets ?? {})
+      const retention = (result.settings ?? []).find((item) => item.key === 'audit.retention_days')
+      setAuditRetentionDays(retention ? Number(retention.value) : 0)
       setStats(st)
       setForbidden(false)
     } catch (err) {
@@ -2009,83 +2266,16 @@ export default function AdminPage() {
     void load()
   }, [])
 
-  /** 按键前缀分组（保持 Definitions 输出顺序），支持按 key/描述过滤（系统设置页搜索框）。 */
-  const settingGroups = useMemo(() => {
-    const needle = settingsQuery.trim().toLowerCase()
-    const map = new Map<string, SettingItem[]>()
-    for (const item of settings) {
-      if (needle !== '' && !item.key.toLowerCase().includes(needle) && !item.description.toLowerCase().includes(needle)) {
-        continue
-      }
-      const prefix = item.key.split('.')[0]
-      const list = map.get(prefix) ?? []
-      list.push(item)
-      map.set(prefix, list)
-    }
-    return Array.from(map.entries())
-  }, [settings, settingsQuery])
-
-  const startEdit = (item: SettingItem) => {
-    setEditingKey(item.key)
-    setDraft(item.type === 'bool' ? Boolean(item.value) : String(item.value))
-    setRowError('')
-    setNotice('')
-  }
-
-  /** bool 设置行直开直关（不进编辑态）：切换即保存并刷新列表（含生效方式徽章）。 */
-  const toggleBool = async (item: SettingItem) => {
-    if (savingKey !== null) return
-    setRowError('')
-    setSavingKey(item.key)
+  /** 保存审计保留期后刷新设置（拿回服务端归一化值）。 */
+  const saveAuditRetention = async (days: number) => {
+    const normalized = await adminPutSetting('audit.retention_days', days)
+    setNotice(`已保存审计日志保留期：${normalized === 0 ? '永久保留' : `${normalized} 天`}`)
     try {
-      const normalized = await adminPutSetting(item.key, !item.value)
-      setNotice(`已保存 ${item.key}（当前值：${normalized ? '开启' : '关闭'}）`)
       const refreshed = await adminGetSettings()
-      setSettings(refreshed.settings ?? [])
-      setSecrets(refreshed.secrets ?? {})
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 403) setRowError('无权限')
-      else setRowError(err instanceof Error ? err.message : '保存失败')
-    } finally {
-      setSavingKey(null)
-    }
-  }
-
-  const handleSave = async (e: FormEvent, item: SettingItem) => {
-    e.preventDefault()
-    if (editingKey !== item.key) return
-    setRowError('')
-    let value: SettingValue
-    if (item.type === 'bool') {
-      value = Boolean(draft)
-    } else if (item.type === 'int') {
-      const parsed = Number(draft)
-      if (draft === '' || !Number.isInteger(parsed)) {
-        setRowError('请输入整数')
-        return
-      }
-      value = parsed
-    } else {
-      value = String(draft).trim()
-    }
-    setSavingKey(item.key)
-    try {
-      const normalized = await adminPutSetting(item.key, value)
-      setEditingKey(null)
-      setNotice(`已保存 ${item.key}（当前值：${String(normalized)}）`)
-      // 保存成功后刷新设置列表（含 updated_at/updated_by 与服务端归一化结果）。
-      try {
-        const refreshed = await adminGetSettings()
-        setSettings(refreshed.settings ?? [])
-        setSecrets(refreshed.secrets ?? {})
-      } catch {
-        // 列表刷新失败不打断，保留本地已保存状态
-      }
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 403) setRowError('无权限')
-      else setRowError(err instanceof Error ? err.message : '保存失败')
-    } finally {
-      setSavingKey(null)
+      const retention = (refreshed.settings ?? []).find((item) => item.key === 'audit.retention_days')
+      setAuditRetentionDays(retention ? Number(retention.value) : 0)
+    } catch {
+      setAuditRetentionDays(Number(normalized))
     }
   }
 
@@ -2133,158 +2323,29 @@ export default function AdminPage() {
       )}
 
       {section === 'people' && !loading && !forbidden && (
-        <UsersPanel
-          onError={(msg) => { setError(msg); setNotice('') }}
-          onNotice={(msg) => { setNotice(msg); setError('') }}
+        <PeopleAndGroupsPanel
+          onError={(m) => { setError(m); setNotice('') }}
+          onNotice={(m) => { setNotice(m); setError('') }}
         />
       )}
 
-      {section === 'groups' && !loading && !forbidden && (
-        <GroupsPanel
-          onError={(msg) => { setError(msg); setNotice('') }}
-          onNotice={(msg) => { setNotice(msg); setError('') }}
+      {section === 'spaces' && !loading && !forbidden && (
+        <SpacesPanel
+          onError={(m) => { setError(m); setNotice('') }}
+          onNotice={(m) => { setNotice(m); setError('') }}
         />
       )}
 
-      {section === 'audit' && !loading && !forbidden && <AuditPanel onError={(msg) => { setError(msg); setNotice('') }} />}
-      {section === 'backup' && !loading && !forbidden && <BackupPanel onError={(msg) => { setError(msg); setNotice('') }} onNotice={(msg) => { setNotice(msg); setError('') }} />}
-      {section === 'security' && !loading && !forbidden && <QuarantinePanel onError={(msg) => { setError(msg); setNotice('') }} onNotice={(msg) => { setNotice(msg); setError('') }} />}
-      {section === 'security' && !loading && !forbidden && <SecretsPanel secrets={secrets} />}
-       {section === 'tls' && !loading && !forbidden && <TlsPanel onNotice={(msg) => { setNotice(msg); setError('') }} />}
-      {section === 'mail' && !loading && !forbidden && <MailPanel onNotice={setNotice} onError={setError} />}
-
-      {section === 'people' && !loading && !forbidden && (
-        <InvitationsPanel
-          onError={(msg) => { setError(msg); setNotice('') }}
-          onNotice={(msg) => { setNotice(msg); setError('') }}
+      {section === 'audit' && !loading && !forbidden && (
+        <AuditPanel
+          onError={(m) => { setError(m); setNotice('') }}
+          retentionDays={auditRetentionDays}
+          onSaveRetention={saveAuditRetention}
         />
       )}
-
-      {section === 'system' && !loading && (
-        <div className="panel setting-group" style={{ padding: '12px 16px' }}>
-          <form className="team-create-row" style={{ marginBottom: 0 }} onSubmit={(e) => e.preventDefault()}>
-            <label className="field" style={{ flex: 1 }}>
-              <span>过滤设置键（按 key 或描述匹配；过滤时分组自动展开）</span>
-              <Input
-                allowClear
-                autoCapitalize="none"
-                spellCheck={false}
-                value={settingsQuery}
-                onChange={(e) => setSettingsQuery(e.target.value)}
-                placeholder="如：upload、share.default 或“配额”"
-              />
-            </label>
-            {settingsQuery && (
-              <Button style={{ alignSelf: 'flex-end' }} onClick={() => setSettingsQuery('')}>清除</Button>
-            )}
-          </form>
-        </div>
-      )}
-
-      {section === 'system' && !loading && settingGroups.length === 0 && (
-        <div className="empty">没有匹配的设置项</div>
-      )}
-
-      {section === 'system' && !loading && settingGroups.map(([prefix, items]) => {
-        const searching = settingsQuery.trim() !== ''
-        const isCollapsed = !searching && collapsed[prefix]
-        return (
-        <div key={prefix} className="panel setting-group">
-          <h3 style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <Button
-              type="text"
-              size="small"
-              title={isCollapsed ? '展开分组' : '折叠分组'}
-              onClick={() => setCollapsed((prev) => ({ ...prev, [prefix]: !isCollapsed }))}
-            >
-              {isCollapsed ? '▸' : '▾'}
-            </Button>
-            {groupTitles[prefix] ?? prefix}
-            <span className="setting-meta muted">（{items.length} 项）</span>
-          </h3>
-          {!isCollapsed && items.map((item) => {
-            const editing = editingKey === item.key
-            return (
-              <div key={item.key} className="setting-row">
-                <div className="setting-main">
-                  <div className="setting-key">
-                    {item.key}
-                    {item.effect && (
-                      <span className="badge" style={{ marginLeft: 8 }} title="变更生效方式">
-                        {effectText[item.effect] ?? item.effect}
-                      </span>
-                    )}
-                  </div>
-                  <div className="setting-desc muted">{item.description}</div>
-                  <div className="setting-meta muted">
-                    类型 {typeText[item.type]} · 默认值 {formatSettingValue(item.default)}
-                    {item.updated_at && ` · 更新于 ${formatTime(item.updated_at)}`}
-                  </div>
-                </div>
-                <div className="setting-control">
-                  {editing ? (
-                    <form className="setting-edit" onSubmit={(e) => void handleSave(e, item)}>
-                      {item.type === 'bool' ? (
-                        <span className="setting-bool">
-                          <Switch size="small" checked={Boolean(draft)} onChange={(v) => setDraft(v)} />
-                          <span>{draft ? '开启' : '关闭'}</span>
-                        </span>
-                      ) : item.type === 'int' ? (
-                        <InputNumber
-                          step={1}
-                          autoFocus
-                          value={draft === '' ? null : Number(draft)}
-                          onChange={(v) => setDraft(v === null || v === undefined ? '' : String(v))}
-                        />
-                      ) : (
-                        <Input
-                          autoFocus
-                          style={{ width: 220 }}
-                          value={String(draft)}
-                          onChange={(e) => setDraft(e.target.value)}
-                        />
-                      )}
-                      <Button
-                        type="primary"
-                        size="small"
-                        htmlType="submit"
-                        disabled={savingKey !== null || (item.type === 'string' && String(draft).trim() === '')}
-                        loading={savingKey === item.key}
-                      >
-                        保存
-                      </Button>
-                      <Button
-                        size="small"
-                        disabled={savingKey !== null}
-                        onClick={() => { setEditingKey(null); setRowError('') }}
-                      >
-                        取消
-                      </Button>
-                    </form>
-                  ) : item.type === 'bool' ? (
-                    <span className="setting-bool" title="bool 行直开直关：切换后立即保存">
-                      <Switch
-                        size="small"
-                        checked={Boolean(item.value)}
-                        loading={savingKey === item.key}
-                        onChange={() => void toggleBool(item)}
-                      />
-                      <span>{savingKey === item.key ? '保存中…' : item.value ? '开启' : '关闭'}</span>
-                    </span>
-                  ) : (
-                    <>
-                      <span className="setting-value-mono">{formatSettingValue(item.value)}</span>
-                      <Button size="small" onClick={() => startEdit(item)}>编辑</Button>
-                    </>
-                  )}
-                </div>
-                {editing && rowError && <div className="error-text setting-row-error">{rowError}</div>}
-              </div>
-            )
-          })}
-        </div>
-        )
-      })}
+      {section === 'backup' && !loading && !forbidden && <BackupPanel onError={(m) => { setError(m); setNotice('') }} onNotice={(m) => { setNotice(m); setError('') }} />}
+      {section === 'threat' && !loading && !forbidden && <QuarantinePanel onError={(m) => { setError(m); setNotice('') }} onNotice={(m) => { setNotice(m); setError('') }} />}
+      {section === 'threat' && !loading && !forbidden && <SecretsPanel secrets={secrets} />}
       </div>
     </div>
   )

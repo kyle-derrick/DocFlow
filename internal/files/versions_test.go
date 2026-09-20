@@ -149,7 +149,7 @@ func (m *memVersionsRepo) MarkBlobDeletingIfZero(id uuid.UUID) (bool, error) {
 func (m *memVersionsRepo) seedFile(owner uuid.UUID, sha string) (File, FileVersion, ObjectBlob) {
 	blob := ObjectBlob{ID: uuid.New(), SHA256: sha, StorageKey: "objects/" + sha, Size: 3, MimeType: "text/plain", RefCount: 1, Status: BlobStatusAvailable}
 	m.blobs[blob.ID] = blob
-	f := File{ID: uuid.New(), Name: "doc.txt", OwnerID: owner, Type: "file", ScopeType: "personal"}
+	f := File{ID: uuid.New(), Name: "doc.txt", OwnerID: owner, Type: "file"}
 	m.files[f.ID] = f
 	v := FileVersion{ID: uuid.New(), FileID: f.ID, Version: 1, ObjectBlobID: blob.ID, ContentSHA256: sha, Size: 3, UserID: owner}
 	m.versions[v.ID] = v
@@ -227,7 +227,7 @@ func TestAddVersionReusesAvailableBlobAndIncrementsRef(t *testing.T) {
 	}
 
 	// 跨文件复用：另一文件上传相同内容。
-	f2 := File{ID: uuid.New(), Name: "copy.txt", OwnerID: owner, Type: "file", ScopeType: "personal"}
+	f2 := File{ID: uuid.New(), Name: "copy.txt", OwnerID: owner, Type: "file"}
 	repo.files[f2.ID] = f2
 	v3, newBlob, err := addVersionLogic(repo, f2.ID, "objects/ignored2", shaA, 3, "text/plain", owner)
 	if err != nil {
@@ -305,7 +305,7 @@ func TestAddVersionVersionNumbersIncrementAcrossAdds(t *testing.T) {
 func TestAddVersionRejectsFolderAndDeletedFile(t *testing.T) {
 	repo := newMemVersionsRepo()
 	owner := uuid.New()
-	folder := File{ID: uuid.New(), Name: "dir", OwnerID: owner, Type: "folder", ScopeType: "personal"}
+	folder := File{ID: uuid.New(), Name: "dir", OwnerID: owner, Type: "folder"}
 	repo.files[folder.ID] = folder
 	if _, _, err := addVersionLogic(repo, folder.ID, "k", shaB, 1, "text/plain", owner); err != ErrNotFound {
 		t.Fatalf("folder target: err = %v, want ErrNotFound", err)
@@ -426,7 +426,7 @@ func TestSetCurrentVersionLogicRejectsForeignVersion(t *testing.T) {
 	repo := newMemVersionsRepo()
 	owner := uuid.New()
 	f1, v1, _ := repo.seedFile(owner, shaA)
-	f2 := File{ID: uuid.New(), Name: "other.txt", OwnerID: owner, Type: "file", ScopeType: "personal"}
+	f2 := File{ID: uuid.New(), Name: "other.txt", OwnerID: owner, Type: "file"}
 	repo.files[f2.ID] = f2
 
 	if _, err := setCurrentVersionLogic(repo, f2.ID, v1.ID); err != ErrNotFileVersion {
@@ -444,21 +444,21 @@ func TestSetCurrentVersionLogicRejectsForeignVersion(t *testing.T) {
 }
 
 // TestAuthorizeFileWriteMatrix 覆盖版本写入（追加/回滚）授权矩阵：
-// 个人文件仅 owner；团队文件 owner/editor 可写，viewer 与非成员 403；
-// 未注入 TeamWriter 时团队文件一律拒绝。
+// 文件行 owner 短路；空间文件要求写权限（owner/admin/member_share/member），
+// viewer 与非成员 403；未注入 SpaceWriter 时非 owner 文件一律拒绝。
 func TestAuthorizeFileWriteMatrix(t *testing.T) {
 	creator, other := uuid.New(), uuid.New()
-	teamA := uuid.New()
+	spaceA := uuid.New()
 
-	personalFile := File{ID: uuid.New(), Name: "own.txt", OwnerID: creator, Type: "file", ScopeType: "personal"}
-	teamFile := File{ID: uuid.New(), Name: "team.txt", OwnerID: creator, Type: "file", ScopeType: "team", TeamID: &teamA}
+	ownFile := File{ID: uuid.New(), Name: "own.txt", OwnerID: creator, SpaceID: spaceA, Type: "file"}
+	spaceFile := File{ID: uuid.New(), Name: "space.txt", OwnerID: creator, SpaceID: spaceA, Type: "file"}
 
-	editor := uuid.New() // teamA editor
-	viewer := uuid.New() // teamA viewer（只读成员）
+	editor := uuid.New() // spaceA 可写成员
+	viewer := uuid.New() // spaceA 只读成员
 
-	writer := fakeTeamWriter(map[uuid.UUID][]uuid.UUID{
-		creator: {teamA},
-		editor:  {teamA},
+	writer := fakeSpaceWriter(map[uuid.UUID][]uuid.UUID{
+		creator: {spaceA},
+		editor:  {spaceA},
 		// viewer/other 无写权限。
 	})
 
@@ -466,16 +466,16 @@ func TestAuthorizeFileWriteMatrix(t *testing.T) {
 		name    string
 		user    uuid.UUID
 		file    File
-		writer  TeamWriter
+		writer  SpaceWriter
 		wantErr error
 	}{
-		{"personal file by owner", creator, personalFile, writer, nil},
-		{"personal file by other user", other, personalFile, writer, ErrNotFound},
-		{"team file by creator (owner)", creator, teamFile, writer, nil},
-		{"team file by editor", editor, teamFile, writer, nil},
-		{"team file by viewer", viewer, teamFile, writer, ErrForbidden},
-		{"team file by non-member", other, teamFile, writer, ErrForbidden},
-		{"team file without writer injected", editor, teamFile, nil, ErrForbidden},
+		{"own file by owner", creator, ownFile, writer, nil},
+		{"own file by other user (no writer)", other, ownFile, writer, ErrForbidden},
+		{"space file by creator (owner)", creator, spaceFile, writer, nil},
+		{"space file by editor", editor, spaceFile, writer, nil},
+		{"space file by viewer", viewer, spaceFile, writer, ErrForbidden},
+		{"space file by non-member", other, spaceFile, writer, ErrForbidden},
+		{"space file without writer injected", editor, spaceFile, nil, ErrForbidden},
 	}
 	for _, tc := range tests {
 		if err := authorizeFileWrite(tc.file, tc.user, tc.writer, nil); !errors.Is(err, tc.wantErr) {

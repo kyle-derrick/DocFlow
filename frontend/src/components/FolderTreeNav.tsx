@@ -5,7 +5,7 @@
 //   点击目录节点切换 FileBrowser 当前目录；文件/目录节点右键菜单与
 //   文件列表行菜单统一（查看（方式名）/ 编辑（方式名）/ 打开方式 > 分组，
 //   复用 .ctx-menu 视觉，见 FileBrowser itemMenuItems 同构结构）。
-// - FileBrowserWithTree：FilesPage / TeamSpacePage 布局层包装器——在
+// - FileBrowserWithTree：FilesPage 布局层包装器——在
 //   FileBrowser 外面包左侧树栏（240px，可折叠），不修改 FileBrowser 内部
 //   实现：FileBrowser 未暴露受控当前目录 prop，故用「key 重挂载回到根 +
 //   逐段点击其自身渲染的目录行/卡片按钮」最小侵入方式驱动面包屑导航；
@@ -15,7 +15,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { ChevronDown, ChevronRight, FileText, Folder, Home } from 'lucide-react'
-import { Button, Menu } from 'antd'
+import { Menu } from 'antd'
 import type { MenuProps } from 'antd'
 import { FileItem, FileQueryOptions, OpenWithPrefs, drawioStatus, encodePathSegments, listOpenWith, onlyOfficeStatus } from '../api'
 import {
@@ -37,7 +37,7 @@ import { useLocale } from '../i18n'
 const ROOT_KEY = '__root__'
 
 /**
- * 目录树子级列举的 limit 上限（与后端 /files、/teams/:id/files 的 limit
+ * 目录树子级列举的 limit 上限（与后端 /files、/spaces/:id/files 的 limit
  * 上限一致）。列表条数达到该值说明可能被截断——registerListing 据此
  * 不把目录误判为「确认空」。
  */
@@ -131,8 +131,6 @@ export default function FolderTreeNav({
   openPrefs,
   ooEnabled,
   drawioEnabled,
-  collapsed,
-  onToggleCollapse,
   errorText,
 }: {
   rootLabel: string
@@ -158,8 +156,6 @@ export default function FolderTreeNav({
   /** OnlyOffice / draw.io 集成可用性（方式门槛过滤，与文件列表菜单一致）。 */
   ooEnabled: boolean
   drawioEnabled: boolean
-  collapsed: boolean
-  onToggleCollapse: () => void
   errorText: string
 }) {
   const locale = useLocale()
@@ -356,37 +352,12 @@ export default function FolderTreeNav({
     )
   }
 
-  if (collapsed) {
-    return (
-      <aside className="folder-tree-nav collapsed">
-        <Button
-          type="text"
-          size="small"
-          className="folder-tree-collapse-btn"
-          title={zh ? '展开目录树' : 'Expand folder tree'}
-          aria-label={zh ? '展开目录树' : 'Expand folder tree'}
-          onClick={onToggleCollapse}
-        >
-          »
-        </Button>
-      </aside>
-    )
-  }
-
+  // v2.2：去掉折叠按钮——左栏始终显示（原折叠功能有状态串扰问题，且 240px
+  // 常驻栏对导航价值大于偶尔让出的宽度）。
   return (
     <aside className="folder-tree-nav">
       <div className="folder-tree-head">
         <span>{zh ? '目录' : 'Folders'}</span>
-        <Button
-          type="text"
-          size="small"
-          className="folder-tree-collapse-btn"
-          title={zh ? '收起目录树' : 'Collapse folder tree'}
-          aria-label={zh ? '收起目录树' : 'Collapse folder tree'}
-          onClick={onToggleCollapse}
-        >
-          «
-        </Button>
       </div>
       {errorText && <div className="folder-tree-error">{errorText}</div>}
       {renderRow(ROOT_KEY, 0)}
@@ -419,7 +390,7 @@ export default function FolderTreeNav({
  * - 顶栏宿主（.files-topbar）：FileBrowser 的工具行经 toolbarHost portal
  *   渲染为横跨全宽的 44px 顶条（空间切换/搜索/标签/新建/上传/回收站）；
  * - 下方三栏 grid：目录树(240px) + 文件管理(1fr) + 右侧栏(280px，aside
- *   槽——团队空间成员面板；个人空间不传即无第三栏)；各栏内部各自滚动；
+ *   槽——空间视图成员面板；默认空间不传即无第三栏)；各栏内部各自滚动；
  * - listChildren 缺省复用 listItems（树内过滤 folder）；
  * - 树节点登记：包装 listItems 感知每次非检索目录列表（含 FileBrowser
  *   自身导航与 reload），子目录即时入树——用户在 FileBrowser 内移动时
@@ -430,7 +401,7 @@ export default function FolderTreeNav({
 export function FileBrowserWithTree({ listChildren, aside, ...browserProps }: FileBrowserProps & {
   /** 目录树取子目录的数据源；缺省复用 listItems（目录 + 文件全量）。 */
   listChildren?: (parentId: string | null) => Promise<FileItem[]>
-  /** 右侧栏内容（团队空间成员面板）；提供时启用三栏布局。 */
+  /** 右侧栏内容（空间视图成员面板）；提供时启用三栏布局。 */
   aside?: ReactNode
 }) {
   const rootLabel = browserProps.rootLabel
@@ -443,7 +414,6 @@ export function FileBrowserWithTree({ listChildren, aside, ...browserProps }: Fi
   const [loadingKeys, setLoadingKeys] = useState<Set<string>>(new Set())
   const [treeError, setTreeError] = useState('')
   const [currentKey, setCurrentKey] = useState<string>(ROOT_KEY)
-  const [collapsed, setCollapsed] = useState(false)
   // FileBrowser 重挂载 key（树点击导航时 +1，回到根后逐段点击进入）。
   const [navKey, setNavKey] = useState(0)
   const hostRef = useRef<HTMLDivElement | null>(null)
@@ -615,8 +585,10 @@ export function FileBrowserWithTree({ listChildren, aside, ...browserProps }: Fi
   )
 
   /** 树节点点击（目录名单击 = 进入）：重挂载回根 + 逐段点击进入（根节点
-   *  直接回根）。已在目标目录且中间列表不在检索模式时短路（避免无谓
-   *  重挂载闪烁）。 */
+   * 直接回根）。已在目标目录且中间列表不在检索模式时短路（避免无谓
+   * 重挂载闪烁）。导航时**清空 fileOpenSignal**——上次「查看文件」的信号
+   * 若残留，重挂载后 FileBrowser 的 mount effect 会按旧信号重新弹查看窗
+   * （v2.2 修复：点目录复开上一次弹窗）。 */
   const selectFromTree = (key: string) => {
     if (key === currentKey && !lastSearchRef.current) return
     const path: string[] = []
@@ -633,6 +605,7 @@ export function FileBrowserWithTree({ listChildren, aside, ...browserProps }: Fi
     pendingRef.current = key === ROOT_KEY ? [] : path
     setCurrentKey(key)
     setNavKey((n) => n + 1)
+    setFileOpenSignal(undefined)
     // 展开目标**祖先**（不含目标自身——进入不改变展开态，收缩只经 caret
     // 箭头；用户点击时目标行必然可见，无需代为展开）。
     let cur: string | undefined = key
@@ -781,8 +754,6 @@ export function FileBrowserWithTree({ listChildren, aside, ...browserProps }: Fi
           openPrefs={openPrefs}
           ooEnabled={ooEnabled}
           drawioEnabled={drawioEnabled}
-          collapsed={collapsed}
-          onToggleCollapse={() => setCollapsed((v) => !v)}
           errorText={treeError}
         />
         <div className="files-tree-main" ref={hostRef}>

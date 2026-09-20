@@ -56,6 +56,10 @@ jobs:
 
       - name: Build
         run: npm run build
+        env:
+          # tsc 类型检查 + vite 打包（antd6/monaco 等类型树）内存峰值高，
+          # CI 默认 2GB/4GB 堆会 OOM（exit 134），本地构建同样需要 ≥4GB。
+          NODE_OPTIONS: --max-old-space-size=6144
 
   # E2E（Playwright）：依赖 backend/frontend 两个 job 通过后再跑。
   # PostgreSQL 用 GitHub Actions service container（postgres:16-alpine，
@@ -115,4 +119,6 @@ jobs:
           # 种子管理员密码须满足强度（≥12 且含大小写+数字；setup-backend
           # 以环境变量为准幂等 upsert）。
           E2E_SEED_PASSWORD: E2eAdminPassw0rd
+          # E2E webServer 若触发前端构建同样需要更大 Node 堆。
+          NODE_OPTIONS: --max-old-space-size=6144
         run: npm run e2e

@@ -1,6 +1,6 @@
 // 通用文件浏览组件：从 FilesPage 提炼的目录列表 / 面包屑 / 上传 / 下载 /
 // 预览（含 office 文档的 ONLYOFFICE「编辑」入口）/ 新建文件夹逻辑，
-// 个人空间与团队空间共用。
+// 默认空间与非默认空间共用。
 // 通过注入 listItems / createFolderFn / uploadFn / downloadFn / previewFn
 // 适配不同后端端点；写操作 403 时统一提示「无写权限」。
 // v1.0 追加：多选 + 批量移动/删除（部分成功语义）、行内星标切换、
@@ -43,8 +43,9 @@ import {
   FileQueryOptions,
   FileWithVersion,
   OpenWithPrefs,
+  SHARE_WATERMARK_DEFAULT,
+  Space,
   Tag,
-  Team,
   UploadPhase,
   addFileTag,
   batchMoveFiles,
@@ -68,9 +69,9 @@ import {
   listFileTags,
   listFiles,
   listOpenWith,
+  listSpaceFiles,
+  listSpaces,
   listTags,
-  listTeamFiles,
-  listTeams,
   onlyOfficeStatus,
   removeFileTag,
   encodePathSegments,
@@ -106,7 +107,7 @@ import { FileViewerDispatch } from '../pages/ViewerPage'
 /** 文件浏览视图模式（设计 6.3.7）：list = 现有表格，grid = 卡片网格。 */
 export type ViewMode = 'list' | 'grid'
 
-/** 视图偏好持久化 key（个人空间与团队空间共用，见设计 6.3.7）。 */
+/** 视图偏好持久化 key（默认空间与空间视图共用，见设计 6.3.7）。 */
 const VIEW_MODE_KEY = 'docflow.viewMode'
 
 function loadViewMode(): ViewMode {
@@ -132,6 +133,55 @@ function formatSize(bytes: number): string {
 
 export function formatTime(iso: string): string {
   return new Date(iso).toLocaleString('zh-CN', { hour12: false })
+}
+
+/**
+ * 配额/用量字节数的统一格式化（全站配额展示口径）：
+ * B → KiB → MiB → GiB → TiB 自适应，精确到 1 位小数。
+ * zeroAsUnlimited=true（默认）时 0 显示「不限」（配额语义）；用量等场景
+ * 传 false 以显示 0 字节。
+ */
+export function formatQuota(n: number, zeroAsUnlimited = true): string {
+  if (!Number.isFinite(n) || n < 0) n = 0
+  if (n === 0) return zeroAsUnlimited ? '不限' : '0 B'
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB']
+  let v = n
+  let i = 0
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024
+    i++
+  }
+  return i === 0 ? `${n} B` : `${v.toFixed(1)} ${units[i]}`
+}
+
+/**
+ * 弹窗层残留清扫（v2.3 页面偶现卡死修复）：Modal/confirm 在关闭动画被
+ * 组件卸载打断时，antd（rc-dialog）的遮罩容器可能残留在 body 且
+ * pointer-events 未释放，或 body 的滚动锁（overflow:hidden）未解除，
+ * 表现为「页面可滚动但不可点击/右键」。这里在每次弹窗关闭/卸载后延迟
+ * 复核：无任何可见弹窗时清掉 body 滚动锁残留，并移除不含可见内容的
+ * .ant-modal-root 容器（Popconfirm/Popover 的空根节点一并清）。
+ */
+export function sweepModalLayer(): void {
+  window.setTimeout(() => {
+    const body = document.body
+    // 仍存在可见弹层时不动（多弹窗叠加/动画进行中）。
+    const hasVisibleLayer = document.querySelector(
+      '.ant-modal-wrap:not([style*="display: none"]) .ant-modal, .ant-drawer-open, .ant-image-preview-open',
+    )
+    if (!hasVisibleLayer && body.style.overflow === 'hidden') {
+      body.style.removeProperty('overflow')
+      body.style.removeProperty('padding-right')
+    }
+    document.querySelectorAll<HTMLElement>('body > .ant-modal-root, body > .ant-modal-container').forEach((root) => {
+      // antd5 根为 .ant-modal-root（wrap 为直接子级）；antd6 根为
+      // .ant-modal-container（层级多一层，wrap 可能在任意深度）。
+      const wrap = root.querySelector<HTMLElement>('.ant-modal-wrap')
+      // 可见 = wrap 未隐藏且仍有弹窗内容；纯遮罩残留（无 wrap 内容）一并移除。
+      const visible = wrap != null && wrap.style.display !== 'none' && wrap.childElementCount > 0
+      if (!visible) root.remove()
+    })
+  }, 60)
 }
 
 /**
@@ -182,6 +232,14 @@ export function Modal({
   children: ReactNode
 }) {
   const viewer = className?.split(/\s+/).includes('modal-viewer') ?? false
+  const handleClose = () => {
+    onClose()
+    sweepModalLayer()
+  }
+  // 卸载清扫：宿主普遍以条件渲染（{open && <Modal/>}）关闭弹窗，antd 的
+  // 关闭动画被卸载打断时遮罩/滚动锁可能残留（页面可滚动不可点击），统一
+  // 在卸载后延迟复核清理（见 sweepModalLayer）。
+  useEffect(() => sweepModalLayer, [])
   return (
     <AntdModal
       open
@@ -201,7 +259,7 @@ export function Modal({
         body: 'docflow-modal-body',
         close: 'docflow-modal-close',
       }}
-      onCancel={onClose}
+      onCancel={handleClose}
       title={
         headExtra ? (
           <div className="docflow-modal-title-row">
@@ -222,20 +280,52 @@ export function Modal({
 /** antd modal API 类型（App.useApp().modal）。 */
 export type AntdModalApi = ReturnType<typeof AntdApp.useApp>['modal']
 
-/** modal.confirm 的 Promise 封装：确认 resolve(true)、取消 resolve(false)。 */
+/**
+ * 文件查看弹窗（v2.4 从文件页查看弹窗抽出的最小复用单元）：Modal 薄封装
+ * 的查看器规格（modal-viewer：min(1180px,94vw) 宽 + 定高 body）+
+ * FileViewerDispatch 统一分发——与文件页行点击查看完全一致。供概览「最近
+ * 文件」等页外入口弹窗查看（不新开窗口）。file 仅需 id/name。
+ */
+export function FileViewModal({ file, onClose }: { file: { id: string; name: string }; onClose: () => void }) {
+  return (
+    <Modal wide className="modal-viewer" title={`查看「${file.name}」`} onClose={onClose}>
+      <div className="preview-embed">
+        <FileViewerDispatch
+          fileId={file.id}
+          name={file.name}
+          resolveRawUrl={async () => {
+            try {
+              const r = await resolveFileById(file.id, { mode: 'view' })
+              return r.raw_url
+            } catch {
+              return null
+            }
+          }}
+        />
+      </div>
+    </Modal>
+  )
+}
+
+/** modal.confirm 的 Promise 封装：确认 resolve(true)、取消 resolve(false)；
+ *  结束后清扫弹窗层残留（遮罩/滚动锁，见 sweepModalLayer）。 */
 export function confirmDialog(
   modal: AntdModalApi,
   opts: { title: string; content?: ReactNode; okText: string; danger?: boolean; cancelText: string },
 ): Promise<boolean> {
   return new Promise((resolve) => {
+    const settle = (ok: boolean) => {
+      resolve(ok)
+      sweepModalLayer()
+    }
     modal.confirm({
       title: opts.title,
       content: opts.content,
       okText: opts.okText,
       okButtonProps: { danger: opts.danger },
       cancelText: opts.cancelText,
-      onOk: () => resolve(true),
-      onCancel: () => resolve(false),
+      onOk: () => settle(true),
+      onCancel: () => settle(false),
     })
   })
 }
@@ -332,9 +422,9 @@ interface UploadRow {
 }
 
 interface Crumb {
-  /** 列表查询用的目录 ID；null 表示根（个人根 / 团队根，按注入的 listItems 语义）。 */
+  /** 列表查询用的目录 ID；null 表示根（按注入的 listItems 语义，默认根 / 空间根）。 */
   id: string | null
-  /** 真实目录 ID（上传/建目录用）；团队根由列表响应回填，个人根为 null。 */
+  /** 真实目录 ID（上传/建目录用）；空间根由列表响应回填，默认根为 null。 */
   folderId: string | null
   name: string
 }
@@ -346,7 +436,7 @@ export interface DirListing {
 }
 
 /**
- * 面包屑 → 命名空间内相对路径段（去掉首段根标签；个人空间与团队空间
+ * 面包屑 → 命名空间内相对路径段（去掉首段根标签；默认空间与空间视图
  * 通用，供「作为网页打开」等需要按路径 resolve 的场景拼路径复用）。
  */
 export function pathSegmentsOf(crumbs: Array<{ id: string | null; name: string }>): string[] {
@@ -384,7 +474,7 @@ function sortItems(items: FileItem[]): FileItem[] {
   return [...items].sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === 'folder' ? -1 : 1))
 }
 
-/** 写操作错误文案：403 统一为「无写权限」（团队 viewer、只读目录等）。 */
+/** 写操作错误文案：403 统一为「无写权限」（guest、只读目录等）。 */
 function writeErrorText(err: unknown, fallback: string): string {
   if (err instanceof ApiError && err.status === 403) return '无写权限'
   return err instanceof Error ? err.message : fallback
@@ -415,11 +505,11 @@ export interface FileBrowserProps {
   /** 文件元数据来源（GET /files/{id}）；提供时网格视图卡片惰性补齐文件大小。 */
   fileMetaFn?: (fileId: string) => Promise<FileWithVersion | null>
   /**
-   * 当前空间命名空间（供目录「作为网页打开」按路径 resolve）：个人空间
-   * personal + 自己 user UUID；团队空间 team + 团队 ID。检索模式（跨目录）
+   * 当前空间命名空间（供目录「作为网页打开」按路径 resolve）：默认空间
+   * 不传（后端缺省）；非默认空间 space + 空间 ID。检索模式（跨目录）
    * 下面包屑不代表条目位置，菜单项自动隐藏。
    */
-  ns?: { type: 'personal' | 'team'; scope: string }
+  ns?: { type: 'space'; scope: string }
   /**
    * 外部「打开文件」受控信号（左侧目录树文件节点点击触发）：seq 变化时
    * 在当前列表按 fileId 定位并打开查看弹窗；不在当前目录时经
@@ -447,16 +537,16 @@ export interface FileBrowserProps {
    * 状态完全隔离（见 DirPickerModal）。
    */
   pickerListItems?: (parentId: string | null, opts?: FileQueryOptions) => Promise<DirListing>
-  /** 面包屑前缀槽（团队空间「← 返回团队列表」入口，不占独立行）。 */
+  /** 面包屑前缀槽（空间视图「← 返回空间列表」入口，不占独立行）。 */
   crumbPrefix?: ReactNode
   /**
    * 条目级「分享」入口（右键菜单）：注入时显示（复用宿主页分享对话框）；
-   * 缺省不显示（团队空间暂无分享 UI）。
+   * 缺省不显示（宿主页未注入分享入口时）。
    */
   shareFn?: (item: FileItem) => void
   /**
    * 条目级「重命名」入口（右键菜单）：注入时用宿主页实现；缺省回退本组件
-   * 内置的通用重命名（renameFile + prompt 弹窗，个人/团队端点通用）。
+   * 内置的通用重命名（renameFile + prompt 弹窗，端点通用）。
    */
   renameFn?: (item: FileItem) => void
   /**
@@ -464,6 +554,16 @@ export interface FileBrowserProps {
    * 横幅）；缺省回退本组件内置的通用删除确认（deleteFile，回收站可恢复）。
    */
   deleteFn?: (item: FileItem) => void
+  /**
+   * 隐藏工具栏行尾的「回收站」按钮（v2.2：文件页把回收站移到工具行左端
+   * 空间切换旁，经 trashSignal 受控触发本组件的回收站弹窗）。
+   */
+  hideToolbarTrash?: boolean
+  /**
+   * 外部「打开回收站」受控信号（数值变化时打开回收站弹窗；0/不变不触发）：
+   * 配合 hideToolbarTrash，由宿主在工具行任意位置自绘回收站入口。
+   */
+  trashSignal?: number
 }
 
 export default function FileBrowser({
@@ -487,6 +587,8 @@ export default function FileBrowser({
   shareFn,
   renameFn,
   deleteFn,
+  hideToolbarTrash,
+  trashSignal,
 }: FileBrowserProps) {
   const locale = useLocale()
   const msg = (key: MessageKey) => t(locale, key)
@@ -513,7 +615,7 @@ export default function FileBrowser({
   const [batchBusy, setBatchBusy] = useState(false)
 
   // 视图模式（设计 6.3.7）：list / grid，偏好持久化到 localStorage，
-  // 个人空间与团队空间共用同一偏好（状态在两视图间共享，选择互通）。
+  // 默认空间与空间视图共用同一偏好（状态在两视图间共享，选择互通）。
   const [viewMode, setViewMode] = useState<ViewMode>(loadViewMode)
 
   // 网格卡片的「⋯」操作菜单：当前展开的条目 ID（null = 关闭）。
@@ -612,6 +714,8 @@ export default function FileBrowser({
   const [batchShareMax, setBatchShareMax] = useState('')
   const [batchSharePassword, setBatchSharePassword] = useState('')
   const [batchShareWatermark, setBatchShareWatermark] = useState(true)
+  const [batchShareWatermarkText, setBatchShareWatermarkText] = useState('')
+  const [batchShareTitle, setBatchShareTitle] = useState('')
   const [shareLinks, setShareLinks] = useState<Array<{ name: string; url: string }>>([])
   const [shareListOpen, setShareListOpen] = useState(false)
   const [copiedShareIdx, setCopiedShareIdx] = useState(-1)
@@ -773,7 +877,7 @@ export default function FileBrowser({
       // 其余排序键与最近访问视图（last_access_at 倒序）直接采用服务端顺序。
       setItems(sortKey === 'name' && !opts.recent ? sortItems(list) : list)
       if (folderId) {
-        // 团队根目录：列表响应回填真实目录 ID，供上传/建目录使用。
+        // 空间根目录：列表响应回填真实目录 ID，供上传/建目录使用。
         setCrumbs((prev) => prev.map((c, i) => (i === prev.length - 1 ? { ...c, folderId } : c)))
       }
     } catch (err) {
@@ -863,16 +967,16 @@ export default function FileBrowser({
   // ---- 移动 / 复制（DirPickerModal 目标目录选择器） ----
 
   /** 打开目录选择器：单条移动（item 非空）或批量移动（item=null，作用于选中集）。
-   * 每次打开都刷新团队列表（挂载后新建的团队立即可选为跨空间目标）。 */
-  const refreshPickerTeams = () => {
-    void listTeams()
-      .then(setPickerTeams)
+   * 每次打开都刷新空间列表（挂载后新建的空间立即可选为跨空间目标）。 */
+  const refreshPickerSpaces = () => {
+    void listSpaces()
+      .then(setPickerAllSpaces)
       .catch(() => {})
   }
 
   const openMovePicker = (item: FileItem | null) => {
     setPickerError('')
-    refreshPickerTeams()
+    refreshPickerSpaces()
     setDirPicker({ mode: 'move', item })
   }
 
@@ -881,7 +985,7 @@ export default function FileBrowser({
   const openCopyPicker = (item: FileItem | null) => {
     if (!copyFn) return
     setPickerError('')
-    refreshPickerTeams()
+    refreshPickerSpaces()
     setDirPicker({ mode: 'copy', item })
   }
 
@@ -896,19 +1000,20 @@ export default function FileBrowser({
     [pickerListItems, listItems],
   )
 
-  // ---- 复制/移动目标空间（v1.6 跨空间）：当前空间 + 个人空间 + 我的团队 ----
-  // 后端 batch/move 与 copy 均按目标目录继承作用域（个人↔团队）并做写权限
-  // 校验，target_parent_id 指向其他空间目录即可跨 root。团队列表惰性加载；
+  // ---- 复制/移动目标空间（v1.6 跨空间，v2.0 统一空间模型）：当前空间 +
+  // 我的其余空间（默认空间「我的文件」+ 其他空间） ----
+  // 后端 batch/move 与 copy 均按目标目录继承空间作用域并做写权限
+  // 校验，target_parent_id 指向其他空间目录即可跨 root。空间列表惰性加载；
   // 仅有当前一个空间时不显示空间切换（回退单空间模式）。
-  const [pickerTeams, setPickerTeams] = useState<Team[]>([])
+  const [pickerAllSpaces, setPickerAllSpaces] = useState<Space[]>([])
   useEffect(() => {
     let alive = true
-    void listTeams()
-      .then((ts) => {
-        if (alive) setPickerTeams(ts)
+    void listSpaces()
+      .then((list) => {
+        if (alive) setPickerAllSpaces(list)
       })
       .catch(() => {
-        /* 团队列表不可用：仅当前空间（跨空间入口隐藏） */
+        /* 空间列表不可用：仅当前空间（跨空间入口隐藏） */
       })
     return () => {
       alive = false
@@ -917,11 +1022,10 @@ export default function FileBrowser({
 
   const pickerSpaces = useMemo<PickerSpace[]>(() => {
     const zh = locale === 'zh-CN'
-    const currentNsPersonal = !ns || ns.type === 'personal'
-    // 当前空间为团队时，current 根经 listTeamFiles 响应 parent_id 解析
-    //（空团队根也能拿到 UUID；个人根留 ''，batch/move 缺省即个人根）。
-    const currentResolveRoot = !currentNsPersonal && ns
-      ? async () => (await listTeamFiles(ns.scope, null)).parent_id ?? ''
+    // 当前空间为非默认空间时，current 根经 listSpaceFiles 响应 parent_id
+    // 解析（空空间根也能拿到 UUID；默认空间根留 ''，batch/move 缺省即默认根）。
+    const currentResolveRoot = ns
+      ? async () => (await listSpaceFiles(ns.scope, null)).parent_id ?? ''
       : undefined
     const out: PickerSpace[] = [{
       key: 'current',
@@ -929,25 +1033,29 @@ export default function FileBrowser({
       listChildren: (pid) => listChildrenForPicker(pid),
       resolveRootId: currentResolveRoot,
     }]
-    if (!currentNsPersonal) {
-      out.push({
-        key: 'personal',
-        label: zh ? '我的文件（个人空间）' : 'My files (personal)',
-        listChildren: async (pid) => listFiles(pid),
-      })
-    }
-    for (const t of pickerTeams) {
-      if (ns?.type === 'team' && ns.scope === t.id) continue
-      out.push({
-        key: `team:${t.id}`,
-        label: `${t.name}（${zh ? '团队' : 'team'}）`,
-        listChildren: async (pid) => (await listTeamFiles(t.id, pid)).files ?? [],
-        // 空团队根也须能定位根 UUID（batch/move 的 '' 缺省=个人根，会静默移错空间）。
-        resolveRootId: async () => (await listTeamFiles(t.id, null)).parent_id ?? '',
-      })
+    for (const s of pickerAllSpaces) {
+      // 当前空间（未传 ns=默认空间；传 ns=ns.scope）已固定在首位，跳过。
+      const isCurrent = ns ? s.id === ns.scope : s.is_default
+      if (isCurrent) continue
+      if (s.is_default) {
+        out.push({
+          key: `space:${s.id}`,
+          label: zh ? '我的文件' : 'My files',
+          listChildren: async (pid) => listFiles(pid),
+        })
+      } else {
+        out.push({
+          key: `space:${s.id}`,
+          label: s.name,
+          listChildren: async (pid) => (await listSpaceFiles(s.id, pid)).files ?? [],
+          // 空空间根也须能定位根 UUID（batch/move 的 '' 缺省=默认空间根，
+          // 会静默移错空间）。
+          resolveRootId: async () => (await listSpaceFiles(s.id, null)).parent_id ?? '',
+        })
+      }
     }
     return out
-  }, [locale, ns, rootLabel, pickerTeams, listChildrenForPicker])
+  }, [locale, ns, rootLabel, pickerAllSpaces, listChildrenForPicker])
 
   /** 选择器确认：移动走 batch/move（单条/批量同端点，部分成功语义）；复制走
    * copyFn（单条直调；批量逐项循环收集部分失败——目录子树复制由后端
@@ -1044,6 +1152,20 @@ export default function FileBrowser({
   // 链接展示全部选中项，可逐项预览/下载或整包 zip）；单项选中 → 回退普通
   // 公开分享。选项（权限/有效期/次数/密码/水印）与单项分享创建对齐。
 
+  /** 打包分享标题智能默认：首个非「根目录」条目名 + 「等 N 项」；全部命中
+   * 兜底占位（后端再回退「打包分享（N 项）」）。单项分享不设标题。 */
+  const suggestShareTitle = (ids: string[]): string => {
+    const zh = locale === 'zh-CN'
+    const names = ids
+      .map((id) => items.find((it) => it.id === id)?.name)
+      .filter((n): n is string => Boolean(n) && n !== '根目录' && n !== 'root')
+    if (names.length === 0) return ''
+    const head = names[0].length > 24 ? `${names[0].slice(0, 24)}…` : names[0]
+    return ids.length > 1
+      ? (zh ? `${head} 等 ${ids.length} 项` : `${head} + ${ids.length - 1} more`)
+      : head
+  }
+
   const openBatchShareDialog = () => {
     if (selectedIds.length === 0) {
       setBatchError(msg('batchShareEmpty'))
@@ -1054,6 +1176,8 @@ export default function FileBrowser({
     setBatchShareMax('')
     setBatchSharePassword('')
     setBatchShareWatermark(true)
+    setBatchShareWatermarkText(SHARE_WATERMARK_DEFAULT)
+    setBatchShareTitle(selectedIds.length > 1 ? suggestShareTitle(selectedIds) : '')
     setBatchShareError('')
     setBatchShareOpen(true)
   }
@@ -1076,13 +1200,14 @@ export default function FileBrowser({
         maxDownloads: batchShareMax.trim() === '' ? undefined : Number(batchShareMax),
         password: pwd || undefined,
         watermarkEnabled: batchShareWatermark,
+        watermarkText: batchShareWatermark ? (batchShareWatermarkText.trim() || undefined) : undefined,
       }
       const created = ids.length === 1
         ? await createShare({ fileId: ids[0], visibility: 'public', ...opts })
-        : await createShareBundle({ fileIds: ids, ...opts })
+        : await createShareBundle({ fileIds: ids, title: batchShareTitle.trim() || undefined, ...opts })
       const name = ids.length === 1
         ? (items.find((it) => it.id === ids[0])?.name ?? '分享')
-        : `打包分享（${ids.length} 项）`
+        : (batchShareTitle.trim() || `打包分享（${ids.length} 项）`)
       if (created.token) {
         setShareLinks([{ name, url: `${window.location.origin}/s/${created.token}` }])
         setCopiedShareIdx(-1)
@@ -1291,7 +1416,7 @@ export default function FileBrowser({
 
   // ---- 目录「作为网页打开」（resolve 目录下 index.html → raw_url / 新窗口） ----
 
-  /** 目录在命名空间内的路径段（面包屑拼当前目录路径，含团队空间）；检索模式返回 null。 */
+  /** 目录在命名空间内的路径段（面包屑拼当前目录路径，含空间视图）；检索模式返回 null。 */
   const folderSegmentsOf = (item: FileItem): string[] | null => {
     if (!ns || searchMode) return null
     return [...pathSegmentsOf(crumbs), item.name]
@@ -1393,7 +1518,15 @@ export default function FileBrowser({
   // 外部「打开文件」受控信号（左侧目录树文件节点点击）：当前列表命中直接
   // 弹窗；未命中（不在当前目录）经 fileMetaFn/getFileMeta 拉取元数据后弹窗，
   // pathSegments 一并记录供弹窗内 by-path 路由使用。
+  // v2.3 信号改为「变化驱动 + 首次挂载跳过」：FileBrowserWithTree 树导航会
+  // 以 key 重挂载本组件，挂载期不按旧信号重放（否则点目录复开上次的查看
+  // 弹窗——串扰 bug 根因之一），同一实例上的后续信号变化正常触发。
+  const fileOpenSignalMountedRef = useRef(false)
   useEffect(() => {
+    if (!fileOpenSignalMountedRef.current) {
+      fileOpenSignalMountedRef.current = true
+      return
+    }
     if (!fileOpenSignal || fileOpenSignal.seq <= 0) return
     const { fileId, pathSegments } = fileOpenSignal
     const found = items.find((it) => it.id === fileId && it.type === 'file')
@@ -1416,6 +1549,21 @@ export default function FileBrowser({
       })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fileOpenSignal])
+
+  // 外部「打开回收站」受控信号（数值变化时打开回收站弹窗；0 不触发）。
+  // 依据：与 fileOpenSignal 同模式——树导航以 key 重挂载本组件，挂载期跳过
+  // 旧信号（v2.3 修复：打开回收站→关闭→点目录树导航，重挂载后回收站弹窗
+  // 「复开」的串扰 bug）；同一实例上的后续信号变化正常触发。
+  const trashSignalMountedRef = useRef(false)
+  useEffect(() => {
+    if (!trashSignalMountedRef.current) {
+      trashSignalMountedRef.current = true
+      return
+    }
+    if (!trashSignal || trashSignal <= 0) return
+    setTrashOpen(true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [trashSignal])
 
   // ---- 受控上传队列（v1.6 取消）：文件选择 / 拖拽两条队列逐文件串行，
   //      每文件一条任务行；取消 = 排队中直接标记跳过 / 进行中 abort 传输。 ----
@@ -1933,7 +2081,7 @@ export default function FileBrowser({
   }
 
   // ---- 条目重命名 / 删除（内置默认实现；宿主页可经 renameFn/deleteFn 覆盖，
-  //      如个人空间的删除撤销横幅）。个人/团队端点通用。 ----
+  //      如默认空间的删除撤销横幅）。端点通用。 ----
 
   const builtinRename = async (item: FileItem) => {
     const name = await promptViaModal(antdModal, {
@@ -2366,14 +2514,17 @@ export default function FileBrowser({
           </Button>
         </Badge>
       )}
-      {/* 回收站入口（v1.5 弹窗化：原 /trash 整页路由已删除）。 */}
-      <Button
-        size="small"
-        title={msg('trash')}
-        onClick={() => setTrashOpen(true)}
-      >
-        <Trash2 size={13} strokeWidth={2} aria-hidden="true" /> {msg('trash')}
-      </Button>
+      {/* 回收站入口（v1.5 弹窗化：原 /trash 整页路由已删除；hideToolbarTrash
+          时由宿主在工具行左端自绘入口、经 trashSignal 受控打开）。 */}
+      {!hideToolbarTrash && (
+        <Button
+          size="small"
+          title={msg('trash')}
+          onClick={() => setTrashOpen(true)}
+        >
+          <Trash2 size={13} strokeWidth={2} aria-hidden="true" /> {msg('trash')}
+        </Button>
+      )}
     </div>
   )
 
@@ -2800,6 +2951,18 @@ export default function FileBrowser({
                   : `Bundle ${selectedIds.length} items into one directory-style share link.`)
                 : (locale === 'zh-CN' ? '为所选内容创建公开分享链接。' : 'Create a public share link for the selection.')}
             </p>
+            {selectedIds.length > 1 && (
+              <label className="field">
+                <span>{locale === 'zh-CN' ? '分享标题' : 'Share title'}</span>
+                <Input
+                  allowClear
+                  maxLength={100}
+                  value={batchShareTitle}
+                  onChange={(e) => setBatchShareTitle(e.target.value)}
+                  placeholder={locale === 'zh-CN' ? '打包分享的展示标题（默认按所选内容智能命名）' : 'Display title of the bundle'}
+                />
+              </label>
+            )}
             <label className="field">
               <span>{locale === 'zh-CN' ? '权限' : 'Permission'}</span>
               <Select
@@ -2854,6 +3017,18 @@ export default function FileBrowser({
                 />
                 <span>{locale === 'zh-CN' ? '公开访问页叠加斜排水印' : 'Overlay watermark on public pages'}</span>
               </label>
+              {batchShareWatermark && (
+                <Input
+                  allowClear
+                  style={{ marginTop: 8 }}
+                  maxLength={256}
+                  value={batchShareWatermarkText}
+                  onChange={(e) => setBatchShareWatermarkText(e.target.value)}
+                  placeholder={locale === 'zh-CN'
+                    ? '水印内容（占位符：{user} 访问者 / {date} 日期 / {name} 文件名）'
+                    : 'Watermark text ({user}/{date}/{name})'}
+                />
+              )}
             </div>
             {batchShareError && <div className="error-text">{batchShareError}</div>}
             <div className="modal-actions">

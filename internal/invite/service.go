@@ -130,6 +130,11 @@ func (s *Service) List(limit int) ([]Invitation, error) {
 	return s.repo.List(limit)
 }
 
+// Get 返回邀请记录（admin 重发前读取邮箱/角色用）；不存在返回 ErrNotFound。
+func (s *Service) Get(id uuid.UUID) (Invitation, error) {
+	return s.repo.Get(id)
+}
+
 // Revoke 删除邀请（token 立即不可解析）；不存在返回 ErrNotFound。
 func (s *Service) Revoke(id uuid.UUID) error {
 	return s.repo.Delete(id)

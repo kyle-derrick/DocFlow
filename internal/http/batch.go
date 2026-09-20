@@ -198,12 +198,12 @@ func (h *Handler) batchMove(c *gin.Context) {
 	owner := userID(c)
 	var target uuid.UUID
 	if strings.TrimSpace(req.TargetParentID) == "" {
-		root, err := h.files.EnsureRoot(owner)
+		rootID, err := h.defaultSpaceRootID(owner)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to ensure root folder"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to ensure default space root"})
 			return
 		}
-		target = root.ID
+		target = rootID
 	} else if target, ok = parseID(c, req.TargetParentID); !ok {
 		return
 	}

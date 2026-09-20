@@ -228,7 +228,7 @@ func (m *memTrashRepo) DeleteBlobRechecked(id uuid.UUID, deleteObject func(strin
 
 // addFile 添加文件行；deleted 表示软删除时间（nil 为未删除）。
 func (m *memTrashRepo) addFile(owner uuid.UUID, parent *uuid.UUID, name, kind string, isRoot bool, deleted *time.Time) File {
-	f := File{ID: uuid.New(), Name: name, ParentID: parent, OwnerID: owner, Type: kind, IsRoot: isRoot, ScopeType: "personal", DeletedAt: deleted}
+	f := File{ID: uuid.New(), Name: name, ParentID: parent, OwnerID: owner, Type: kind, IsRoot: isRoot, DeletedAt: deleted}
 	m.files[f.ID] = f
 	return f
 }
@@ -248,7 +248,7 @@ func (m *memTrashRepo) addVersion(fileID, blobID uuid.UUID, set bool) FileVersio
 func ptrID(id uuid.UUID) *uuid.UUID { return &id }
 
 // allowAll 直通授权回调：逻辑层单测只关注恢复/删除语义（授权由 Store 层
-// authorizeFileWrite/authorizeTeamDelete 回调注入，另见 folder_access_test）。
+// authorizeFileWrite/authorizeSpaceDelete 回调注入，另见 folder_access_test）。
 func allowAll(File) error { return nil }
 
 // ---- restoreLogic ----

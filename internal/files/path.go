@@ -9,16 +9,14 @@ import (
 	"gorm.io/gorm"
 )
 
-// 命名空间类型（resolve / raw 路径型访问）。
-const (
-	NamespacePersonal = "personal"
-	NamespaceTeam     = "team"
-)
+// 命名空间类型（resolve / raw 路径型访问，统一空间模型）：scope 为空间
+// UUID，用户须为空间在册成员。
+const NamespaceSpace = "space"
 
 // MaxPathSegments 路径解析的段数上限（与默认目录深度 32 对齐，含环防御语义）。
 const MaxPathSegments = 32
 
-// ErrInvalidNamespace 表示 nsType 不是 personal|team。
+// ErrInvalidNamespace 表示 nsType 不是 space。
 var ErrInvalidNamespace = errors.New("invalid namespace")
 
 // encodedSeparators 为路由层解码一次后仍出现的百分号编码分隔符序列：
@@ -117,37 +115,30 @@ func resolvePathLogic(findChild func(parent uuid.UUID, lowerName string) (File, 
 // pathEnv 抽象命名空间路径解析所需的数据访问与权限判定（Store 为生产实现，
 // 闭包字段便于内存单测注入）。
 type pathEnv struct {
-	findChild    func(parent uuid.UUID, lowerName string) (File, error)
-	personalRoot func(actor uuid.UUID) (File, error)
-	teamRoot     func(teamID uuid.UUID) (File, error)
-	teamReader   TeamReader
-	teamWriter   TeamWriter
-	acl          ACLResolver
+	findChild   func(parent uuid.UUID, lowerName string) (File, error)
+	spaceRoot   func(spaceID uuid.UUID) (File, error)
+	spaceReader SpaceReader
+	spaceWriter SpaceWriter
+	acl         ACLResolver
 }
 
-// resolveNamespaceRoot 解析 actor 可访问的命名空间根目录（纯逻辑）：
-// personal 要求 scopeID==actor（个人根目录，EnsureRoot 语义，缺省自动创建）；
-// team 要求 actor 为该团队成员（teamReader/CanRead 判定，未接线一律拒绝
+// resolveNamespaceRoot 解析 actor 可访问的空间根目录（纯逻辑）：要求
+// actor 为该空间在册成员（spaceReader/CanRead 判定，未接线一律拒绝
 // fail closed，非成员按 ErrNotFound 不泄露存在性），根目录须存在且未删除。
 func resolveNamespaceRoot(env pathEnv, actor uuid.UUID, nsType string, scopeID uuid.UUID) (File, error) {
 	switch nsType {
-	case NamespacePersonal:
-		if scopeID != actor {
-			return File{}, ErrNotFound
-		}
-		return env.personalRoot(actor)
-	case NamespaceTeam:
-		if env.teamReader == nil {
+	case NamespaceSpace:
+		if env.spaceReader == nil {
 			return File{}, ErrForbidden
 		}
-		ok, merr := env.teamReader(actor, scopeID)
+		ok, merr := env.spaceReader(actor, scopeID)
 		if merr != nil {
 			return File{}, merr
 		}
 		if !ok {
 			return File{}, ErrNotFound
 		}
-		return env.teamRoot(scopeID)
+		return env.spaceRoot(scopeID)
 	default:
 		return File{}, ErrInvalidNamespace
 	}
@@ -170,10 +161,10 @@ func resolveNamespacePath(env pathEnv, actor uuid.UUID, nsType string, scopeID u
 		return File{}, nil, rerr
 	}
 	if write {
-		if err := authorizeFileWrite(f, actor, env.teamWriter, env.acl); err != nil {
+		if err := authorizeFileWrite(f, actor, env.spaceWriter, env.acl); err != nil {
 			return File{}, nil, err
 		}
-	} else if err := authorizeFileAccess(f, actor, env.teamReader, env.acl); err != nil {
+	} else if err := authorizeFileAccess(f, actor, env.spaceReader, env.acl); err != nil {
 		return File{}, nil, err
 	}
 	return f, chain, nil
@@ -182,33 +173,31 @@ func resolveNamespacePath(env pathEnv, actor uuid.UUID, nsType string, scopeID u
 // pathEnvOf 构造 Store 的生产 pathEnv。
 func (s *Store) pathEnvOf() pathEnv {
 	return pathEnv{
-		findChild:    s.findChildByLowerName,
-		personalRoot: s.EnsureRoot,
-		teamRoot:     s.TeamRoot,
-		teamReader:   s.teamReader,
-		teamWriter:   s.teamWriter,
-		acl:          s.acl,
+		findChild:   s.findChildByLowerName,
+		spaceRoot:   s.SpaceRoot,
+		spaceReader: s.spaceReader,
+		spaceWriter: s.spaceWriter,
+		acl:         s.acl,
 	}
 }
 
-// ResolveNamespaceRoot 返回 actor 可访问的命名空间根目录（见
-// resolveNamespaceRoot）：personal 要求 scopeID==actor（个人根目录，
-// 缺省自动创建，与 EnsureRoot 一致且仅匹配 team_id IS NULL 的个人根）；
-// team 要求 actor 为成员（teamReader/CanRead），根目录须存在且未删除。
+// ResolveNamespaceRoot 返回 actor 可访问的空间根目录（见 resolveNamespaceRoot）：
+// nsType 恒为 space，scope 为空间 UUID；actor 须为在册成员。
 func (s *Store) ResolveNamespaceRoot(actor uuid.UUID, nsType string, scopeID uuid.UUID) (File, error) {
 	return resolveNamespaceRoot(s.pathEnvOf(), actor, nsType, scopeID)
 }
 
-// ResolveReadablePath 解析命名空间内相对路径并做读授权（authorizeFileAccess
-// 复用：个人仅 owner、团队任意在册成员/ACL）。path 为 "/" 分隔的相对路径，
-// 空路径即根目录。返回命中文件与路径链（chain[0]=根目录，canonical path 取
-// 链上各段实际存储名称）。
+// ResolveReadablePath 解析空间内相对路径并做读授权（authorizeFileAccess
+// 复用：文件行 owner、空间在册成员/ACL）。path 为 "/" 分隔的相对路径，
+// 空路径即根目录。返回命中文件与路径链（chain[0]=根目录，canonical path
+// 取链上各段实际存储名称）。
 func (s *Store) ResolveReadablePath(actor uuid.UUID, nsType string, scopeID uuid.UUID, path string) (File, []File, error) {
 	return resolveNamespacePath(s.pathEnvOf(), actor, nsType, scopeID, path, false)
 }
 
 // ResolveWritablePath 同 ResolveReadablePath，但按写权限判定
-// （authorizeFileWrite：个人仅 owner、团队 owner/editor/ACL write，viewer 403）。
+// （authorizeFileWrite：文件行 owner、空间成员 owner/admin/member_share/
+// member/ACL write，guest 403）。
 func (s *Store) ResolveWritablePath(actor uuid.UUID, nsType string, scopeID uuid.UUID, path string) (File, []File, error) {
 	return resolveNamespacePath(s.pathEnvOf(), actor, nsType, scopeID, path, true)
 }

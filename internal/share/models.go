@@ -16,7 +16,7 @@ const (
 
 // 分享可见性：public 为公开 token 链接（现有行为不变）；
 // private 为私有分享，不生成公开 token，仅登录用户按显式授权
-// （share_users 指定用户 / share_teams 团队成员）访问。
+// （share_users 指定用户 / share_spaces 空间在册成员）访问。
 const (
 	VisibilityPublic  = "public"
 	VisibilityPrivate = "private"
@@ -29,18 +29,21 @@ const (
 )
 
 // DefaultWatermarkTemplate 为水印默认模板（settings share.watermark_text
-// 未设置时的回退值）；公开访问无登录身份，{email}/{ip} 占位符渲染为
+// 未设置时的回退值）；公开访问无登录身份，{user}/{email}/{ip} 占位符渲染为
 // 脱敏 IP 前缀（见 RenderWatermark）。
-const DefaultWatermarkTemplate = "{date} {name}"
+const DefaultWatermarkTemplate = "{user} {date} {name}"
 
 // MaxWatermarkTextLen 为自定义水印模板长度上限（rune 数）。
 const MaxWatermarkTextLen = 256
 
-// Share 对应 shares 表（migrations/006/008/022）。
-// TokenHash 为明文 token 的 SHA-256 hex；明文 token 不落库，仅在创建响应中返回一次。
-// 私有分享 TokenHash 为空串（列可空），不做 token 解析。
+// Share 对应 shares 表（migrations/006/008/022/041）。
+// TokenHash 为明文 token 的 SHA-256 hex；Token 为明文留存（migration 041，
+// 供「我的分享」再次查看链接；旧行为创建的行为空串）。私有分享 TokenHash
+// 为空串（列可空），不做 token 解析。
 // PasswordHash 为 SHA-256(password || id) hex（022），空串表示未设密码；
-// WatermarkEnabled/WatermarkText 为水印开关与自定义模板（NULL=渲染时用默认模板）。
+// PasswordPlain 为访问密码明文留存（041，供分享者再次查看复制；访问校验
+// 仍以 PasswordHash 为准）；WatermarkEnabled/WatermarkText 为水印开关与
+// 自定义模板（NULL=渲染时用默认模板）；Title 为打包分享自定义标题（041）。
 type Share struct {
 	ID               uuid.UUID  `gorm:"type:uuid;primaryKey" json:"id"`
 	OwnerID          uuid.UUID  `gorm:"type:uuid;not null;index" json:"-"`
@@ -59,6 +62,10 @@ type Share struct {
 	// IsBundle 多文件打包分享（migration 036）：FileID 为打包条目的公共父
 	// 目录（锚点），可见条目由 share_files 限定（锚点其余子项不暴露）。
 	IsBundle bool `gorm:"column:is_bundle;not null;default:false" json:"is_bundle"`
+	// Token / PasswordPlain / Title 见结构体注释（migration 041）。
+	Token         string `gorm:"type:text;not null;default:''" json:"-"`
+	PasswordPlain string `gorm:"type:text;not null;default:''" json:"-"`
+	Title         string `gorm:"type:text;not null;default:''" json:"title"`
 }
 
 // HasPassword 表示公开分享是否受密码保护（仅公开分享可设密码）。

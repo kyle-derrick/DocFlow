@@ -26,10 +26,10 @@ var ErrUnsupportedFilter = fmt.Errorf("meili driver does not support tag/starred
 var _ Repo = (*MeiliRepo)(nil)
 
 // MeiliRepo 是 Repo 的 Meilisearch 实现（SEARCH_DRIVER=meili，v2 可选项）：
-//   - 文档字段 {file_id, version_id, owner_id, team_id, name, content}，
-//     team_id 为空（个人文件）时 JSON null——Meili 忽略，team 过滤不命中；
-//   - 访问过滤 owner_id = user OR team_id IN（用户团队列表，teamsOf 注入，
-//     由 main 接 team.Store.ListForUser 提供——不扩 Repo.QueryDocs 签名，
+//   - 文档字段 {file_id, version_id, owner_id, space_id, name, content}，
+//     space_id 为空时 JSON null——Meili 忽略，space 过滤不命中；
+//   - 访问过滤 owner_id = user OR space_id IN（用户空间列表，spacesOf 注入，
+//     由 main 接 space.Store.ListForUser 提供——不扩 Repo.QueryDocs 签名，
 //     pg/memory 实现与既有调用方零改动）；
 //   - tag/starred 过滤不支持（ErrUnsupportedFilter）；
 //   - Result：name 取索引值（rename 后需等待索引重建，与 pg 的实时 JOIN
@@ -40,18 +40,18 @@ type MeiliRepo struct {
 	base   string
 	apiKey string
 	client *http.Client
-	// teamsOf 返回用户所在团队列表（访问过滤数据源，main 注入）。
-	teamsOf func(user uuid.UUID) ([]uuid.UUID, error)
+	// spacesOf 返回用户所在空间列表（访问过滤数据源，main 注入）。
+	spacesOf func(user uuid.UUID) ([]uuid.UUID, error)
 }
 
 // NewMeiliRepo 构造 Meilisearch Repo；baseURL 形如 http://meilisearch:7700
-// （不含尾斜杠），apiKey 可空（未设 MASTER_KEY 的实例）；teamsOf 不可为 nil。
-func NewMeiliRepo(baseURL, apiKey string, teamsOf func(user uuid.UUID) ([]uuid.UUID, error)) *MeiliRepo {
+// （不含尾斜杠），apiKey 可空（未设 MASTER_KEY 的实例）；spacesOf 不可为 nil。
+func NewMeiliRepo(baseURL, apiKey string, spacesOf func(user uuid.UUID) ([]uuid.UUID, error)) *MeiliRepo {
 	return &MeiliRepo{
-		base:    strings.TrimSuffix(baseURL, "/"),
-		apiKey:  apiKey,
-		client:  &http.Client{Timeout: meiliTimeout},
-		teamsOf: teamsOf,
+		base:     strings.TrimSuffix(baseURL, "/"),
+		apiKey:   apiKey,
+		client:   &http.Client{Timeout: meiliTimeout},
+		spacesOf: spacesOf,
 	}
 }
 
@@ -112,7 +112,7 @@ func (m *MeiliRepo) EnsureIndex(ctx context.Context) error {
 	// 由启动顺序保证（EnsureIndex 先于任何 UpsertDoc）。注意 v1.8 的
 	// settings 子路由仅支持 PUT（PATCH 为更高版本行为，返回 405）。
 	_, err = m.do(ctx, http.MethodPut, "/indexes/"+MeiliIndexUID+"/settings/filterable-attributes",
-		[]string{"owner_id", "team_id"})
+		[]string{"owner_id", "space_id"})
 	return err
 }
 
@@ -121,7 +121,7 @@ type meiliDoc struct {
 	FileID    string  `json:"file_id"`
 	VersionID string  `json:"version_id"`
 	OwnerID   string  `json:"owner_id"`
-	TeamID    *string `json:"team_id"`
+	SpaceID   *string `json:"space_id"`
 	Name      string  `json:"name"`
 	Content   string  `json:"content"`
 }
@@ -132,9 +132,9 @@ func (m *MeiliRepo) UpsertDoc(d Doc) error {
 		FileID: d.FileID.String(), VersionID: d.VersionID.String(),
 		OwnerID: d.OwnerID.String(), Name: d.Name, Content: d.Content,
 	}
-	if d.TeamID != nil {
-		id := d.TeamID.String()
-		doc.TeamID = &id
+	if d.SpaceID != nil {
+		id := d.SpaceID.String()
+		doc.SpaceID = &id
 	}
 	_, err := m.do(context.Background(), http.MethodPost, "/indexes/"+MeiliIndexUID+"/documents?primaryKey=file_id", []meiliDoc{doc})
 	return err
@@ -171,23 +171,23 @@ type meiliSearchResponse struct {
 }
 
 // QueryDocs 检索 user 可读且命中 q 的文件：访问过滤 owner_id = user OR
-// team_id IN 用户团队列表；limit 截断；tag/starred 过滤不支持
+// space_id IN 用户空间列表；limit 截断；tag/starred 过滤不支持
 // （ErrUnsupportedFilter）。
 func (m *MeiliRepo) QueryDocs(user uuid.UUID, opts QueryOptions) ([]Result, error) {
 	if opts.TagID != nil || opts.Starred != nil {
 		return nil, ErrUnsupportedFilter
 	}
-	teams, err := m.teamsOf(user)
+	spaces, err := m.spacesOf(user)
 	if err != nil {
 		return nil, err
 	}
 	filter := "owner_id = " + quote(user.String())
-	if len(teams) > 0 {
-		ids := make([]string, 0, len(teams))
-		for _, id := range teams {
+	if len(spaces) > 0 {
+		ids := make([]string, 0, len(spaces))
+		for _, id := range spaces {
 			ids = append(ids, quote(id.String()))
 		}
-		filter += " OR team_id IN [" + strings.Join(ids, ", ") + "]"
+		filter += " OR space_id IN [" + strings.Join(ids, ", ") + "]"
 	}
 	body, err := m.do(context.Background(), http.MethodPost, "/indexes/"+MeiliIndexUID+"/search", meiliSearchRequest{
 		Q: opts.Q, Limit: opts.Limit, Filter: filter,

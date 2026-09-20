@@ -103,12 +103,12 @@ export async function authFetch(path: string, init: RequestInit = {}): Promise<R
   return res
 }
 
-/** UUID 校验（user_id / 团队目录等路径与表单输入共用）。 */
+/** UUID 校验（user_id / 空间目录等路径与表单输入共用）。 */
 export const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
 
 /**
  * 解码 access token 的 sub（当前用户 UUID）。
- * 仅用于 UI 展示判断（如团队 owner 标识），权限校验始终由后端强制。
+ * 仅用于 UI 展示判断（如空间 owner 标识），权限校验始终由后端强制。
  */
 export function currentUserId(): string | null {
   if (!accessToken) return null
@@ -215,13 +215,15 @@ export async function removeFileTag(fileId: string, tagId: string): Promise<void
   await api(`/api/v1/files/${fileId}/tags/${tagId}`, { method: 'DELETE' })
 }
 
-/** 切换收藏（读权限即可；团队文件为行级共享星标）。 */
+/** 切换收藏（读权限即可；空间文件为行级共享星标）。 */
 export async function setFileStarred(fileId: string, starred: boolean): Promise<FileItem> {
   return api<FileItem>(`/api/v1/files/${fileId}/starred`, jsonInit('PATCH', { starred }))
 }
 
-/** 列表查询选项：标签/收藏过滤（进入跨目录检索模式）、最近访问与排序。 */
+/** 列表查询选项：空间选择、标签/收藏过滤（进入跨目录检索模式）、最近访问与排序。 */
 export interface FileQueryOptions {
+  /** 空间 ID；缺省为用户默认空间。 */
+  spaceId?: string | null
   tagId?: string | null
   starred?: boolean
   /** true 时走 ?recent=true：最近访问文件（last_access_at 倒序，服务端忽略其余过滤与 parent_id）。 */
@@ -235,11 +237,12 @@ export interface FileQueryOptions {
 
 function buildFileQuery(parentId: string | null, opts?: FileQueryOptions): string {
   const params = new URLSearchParams()
+  if (opts?.spaceId) params.set('space', opts.spaceId)
   if (opts?.recent) {
     // 最近访问模式优先级最高（服务端语义），忽略 parent_id 与标签/收藏过滤。
     params.set('recent', 'true')
   } else if (opts?.tagId || opts?.starred !== undefined) {
-    // 检索模式：忽略 parent_id（服务端语义），跨个人+团队可读文件。
+    // 检索模式：忽略 parent_id（服务端语义），跨我可读文件。
     if (opts?.tagId) params.set('tag_id', opts.tagId)
     if (opts?.starred !== undefined) params.set('starred', String(opts.starred))
   } else if (parentId) {
@@ -524,8 +527,8 @@ export async function getTotpStatus(): Promise<TotpStatus> {
 }
 
 /**
- * 开始设置：生成新 secret（作废未完成的旧 setup）。客户端不渲染二维码，
- * 以文本展示 secret/otpauth URL 供认证器手动录入或导入。
+ * 开始设置：生成新 secret（作废未完成的旧 setup）。前端以 otpauth URL
+ * 渲染绑定二维码，并展示 secret 文本供认证器手动录入或导入。
  */
 export async function beginTotpSetup(): Promise<TotpSetup> {
   return api<TotpSetup>('/api/v1/auth/totp/setup', jsonInit('POST', {}))
@@ -734,7 +737,7 @@ export interface SearchResultItem {
 }
 
 /**
- * 全文检索当前用户可读文件（个人 owner + 团队在册成员；软删排除）。
+ * 全文检索当前用户可读文件（默认空间 owner + 其他空间在册成员/组；软删排除）。
  * 名称子串（大小写不敏感，中文友好）或内容词命中（内容索引仅文本类
  * 且 ≤2MB；二进制仅名称匹配）。索引在上传完成后异步构建，最新内容
  * 可能有短暂延迟。
@@ -778,10 +781,11 @@ export async function deleteFile(id: string): Promise<void> {
   await api(`/api/v1/files/${id}`, { method: 'DELETE' })
 }
 
-export async function listTrash(scope: 'personal' | 'team' = 'personal', teamId = ''): Promise<FileItem[]> {
-  const params = new URLSearchParams({ scope })
-  if (scope === 'team') params.set('team_id', teamId)
-  const data = await api<{ files: FileItem[] }>(`/api/v1/trash?${params.toString()}`)
+/** 回收站列表（spaceId 为空 = 默认空间；软删文件含目录整树可见）。 */
+export async function listTrash(spaceId = ''): Promise<FileItem[]> {
+  const params = new URLSearchParams()
+  if (spaceId) params.set('space', spaceId)
+  const data = await api<{ files: FileItem[] }>(`/api/v1/trash${params.size ? `?${params.toString()}` : ''}`)
   return data.files ?? []
 }
 
@@ -842,7 +846,7 @@ export async function fetchFileArrayBuffer(fileId: string): Promise<ArrayBuffer>
 }
 
 /** 目录打包下载（GET /files/:id/download.zip，流式 zip）：子树预遍历限 2000
- * 条目 / 2GB（超限 413 → ApiError）；权限同文件读取（个人 owner、团队成员/ACL）。 */
+ * 条目 / 2GB（超限 413 → ApiError）；权限同文件读取（默认空间 owner、空间成员/ACL）。 */
 export async function downloadFolderZip(id: string, name: string): Promise<void> {
   const blob = await fetchBlob(`/api/v1/files/${id}/download.zip`, '目录打包下载失败')
   saveBlob(blob, `${name}.zip`)
@@ -1026,8 +1030,8 @@ export async function publicShareTree(token: string, path = ''): Promise<PublicS
 
 // ---------- 路径解析与受控原始内容（resolve / raw） ----------
 
-/** 命名空间类型：personal（scope=自己 user UUID）或 team（scope=团队 UUID）。 */
-export type ResolveNamespaceType = 'personal' | 'team'
+/** 命名空间类型：space（scope=空间 UUID；统一空间模型唯一命名空间）。 */
+export type ResolveNamespaceType = 'space'
 
 /** GET /resolve 响应：文件元数据 + view/edit 前端路由 + 10 分钟 raw 授权 URL。 */
 export interface ResolveResult {
@@ -1086,29 +1090,21 @@ async function rebuildFilePath(fileId: string): Promise<string> {
   return segments.join('/')
 }
 
-/** 先按个人空间（JWT sub）、再遍历我的团队探测路径；命中判定以返回
+/** 先按默认空间、再遍历我的其他空间探测路径；命中判定以返回
  * file_id 与目标一致为准（resolveFileById 与 resolveNamespaceOf 共用）。 */
 async function probeNamespace(
   path: string,
   fileId: string,
   opts: ResolveOptions,
 ): Promise<{ ns: { type: ResolveNamespaceType; scope: string }; result: ResolveResult } | null> {
-  const me = currentUserId()
-  if (me) {
+  const spaces = await listSpaces()
+  const ordered = [...spaces.filter((s) => s.is_default), ...spaces.filter((s) => !s.is_default)]
+  for (const space of ordered) {
     try {
-      const r = await resolvePath('personal', me, path, opts)
-      if (r.file_id === fileId) return { ns: { type: 'personal', scope: me }, result: r }
+      const r = await resolvePath('space', space.id, path, opts)
+      if (r.file_id === fileId) return { ns: { type: 'space', scope: space.id }, result: r }
     } catch {
-      /* 个人空间未命中：继续团队探测 */
-    }
-  }
-  const teams = await listTeams()
-  for (const team of teams) {
-    try {
-      const r = await resolvePath('team', team.id, path, opts)
-      if (r.file_id === fileId) return { ns: { type: 'team', scope: team.id }, result: r }
-    } catch {
-      /* 尝试下一个团队 */
+      /* 尝试下一个空间 */
     }
   }
   return null
@@ -1126,29 +1122,29 @@ export async function resolveFileById(fileId: string, opts: ResolveOptions = {})
 }
 
 /**
- * 判定文件/目录所在命名空间（个人空间或某团队空间）：路径重建 + 空间探测
- * 均为尽力而为（仅登录用户自己的可读文件）；失败返回 null，由调用方自行
- * 兜底（通常按个人空间处理）。供富文本图片上传等需按空间分发端点的场景。
+ * 判定文件/目录所在空间（命名空间）：路径重建 + 空间探测均为尽力而为
+ * （仅登录用户自己的可读文件）；失败返回 null，由调用方自行兜底（通常按
+ * 默认空间处理）。供富文本图片上传等需按空间分发端点的场景。
  */
 export async function resolveNamespaceOf(
   fileId: string,
 ): Promise<{ type: ResolveNamespaceType; scope: string } | null> {
   try {
     const node = await getFileMeta(fileId)
-    // 根目录（个人根 / 团队根）无法按子路径 resolve 命中自身：改为遍历我的
-    // 团队比对根目录 ID；无命中即为个人根。
+    // 根目录无法按子路径 resolve 命中自身：遍历我的空间比对根目录 ID；
+    // 无命中即为默认空间根。
     if (node.is_root) {
-      const teams = await listTeams()
-      for (const team of teams) {
+      const spaces = await listSpaces()
+      for (const space of spaces) {
         try {
-          const listing = await listTeamFiles(team.id, null)
-          if (listing.parent_id === fileId) return { type: 'team', scope: team.id }
+          const listing = await listSpaceFiles(space.id, null)
+          if (listing.parent_id === fileId) return { type: 'space', scope: space.id }
         } catch {
-          /* 尝试下一个团队 */
+          /* 尝试下一个空间 */
         }
       }
       const me = currentUserId()
-      return me ? { type: 'personal', scope: me } : null
+      return me ? { type: 'space', scope: me } : null
     }
     const path = await rebuildFilePath(fileId)
     return (await probeNamespace(path, fileId, {}))?.ns ?? null
@@ -1202,6 +1198,11 @@ export async function convertMarkdown(fileId: string): Promise<ConvertMarkdownRe
 
 // ---------- 分享 ----------
 
+/** 水印默认模板（与后端 share.DefaultWatermarkTemplate 一致）：访问者 日期 文件名。
+ * 占位符：{user}=访问者（匿名时为脱敏 IP 前缀）、{date}=YYYY-MM-DD、{name}=文件名，
+ * 兼容 {email}/{ip}（脱敏 IP 前缀）。分享弹窗的水印输入框以此为默认值。 */
+export const SHARE_WATERMARK_DEFAULT = '{user} {date} {name}'
+
 export interface CreateShareOptions {
   fileId: string
   permission: 'view' | 'download'
@@ -1212,22 +1213,21 @@ export interface CreateShareOptions {
   maxDownloads?: number
   /** 私有分享：显式授权的用户列表（public 时必须为空）。 */
   userIds?: string[]
-  /** 私有分享：授权的团队列表（public 时必须为空）。 */
-  teamIds?: string[]
+  /** 私有分享：授权的空间列表（public 时必须为空）。 */
+  spaceIds?: string[]
   /** 公开分享访问密码（4-64 字符；明文仅本次请求，服务端存加盐哈希）。 */
   password?: string
   /** 水印开关；缺省用系统设置 share.default_watermark。 */
   watermarkEnabled?: boolean
   /** 自定义水印模板；缺省用系统设置 share.watermark_text。 */
   watermarkText?: string
+  /** 打包分享自定义标题（≤200 字符；缺省回退「打包分享（N 项）」）。 */
+  title?: string
 }
-
 /**
- * 分享明文 token 的前端内存态：契约约定列表与私有分享响应不回传明文
- * token（仅公开分享创建时返回一次），故创建时暂存于内存 Map，供「我的
- * 分享」页展示复制链接；刷新页面后丢失（等价于“创建时已展示”）。
- * 可见性/文件名已由列表响应后端字段提供（ShareItem.visibility/file_name），
- * 不再依赖内存态。
+ * 分享明文 token 的前端内存态：公开分享创建时返回一次，暂存内存 Map 供
+ * 「我的分享」页本会话快速打开/复制链接；v2.4 起后端留存 token，刷新后仍
+ * 可经 GET /shares/{id} 再次查看（本内存态仅为免二次请求的快路径）。
  */
 export interface ShareMeta {
   token?: string
@@ -1249,7 +1249,7 @@ export async function createShare(opts: CreateShareOptions): Promise<CreatedShar
   if (opts.maxDownloads && opts.maxDownloads > 0) body.max_downloads = opts.maxDownloads
   if (opts.visibility === 'private') {
     if (opts.userIds?.length) body.user_ids = opts.userIds
-    if (opts.teamIds?.length) body.team_ids = opts.teamIds
+    if (opts.spaceIds?.length) body.space_ids = opts.spaceIds
   } else if (opts.password) {
     body.password = opts.password
   }
@@ -1260,7 +1260,8 @@ export async function createShare(opts: CreateShareOptions): Promise<CreatedShar
   return created
 }
 
-/** 多文件打包分享（file_ids ≥ 2）：一个目录式公开链接承载全部选中项。 */
+/** 多文件打包分享（file_ids ≥ 2）：一个目录式公开链接承载全部选中项；
+ * title 为分享标题（缺省后端回退「打包分享（N 项）」，前端提供智能默认）。 */
 export async function createShareBundle(opts: {
   fileIds: string[]
   permission: 'view' | 'download'
@@ -1269,6 +1270,7 @@ export async function createShareBundle(opts: {
   password?: string
   watermarkEnabled?: boolean
   watermarkText?: string
+  title?: string
 }): Promise<CreatedShare> {
   const body: Record<string, unknown> = {
     file_ids: opts.fileIds,
@@ -1280,6 +1282,7 @@ export async function createShareBundle(opts: {
   if (opts.password) body.password = opts.password
   if (opts.watermarkEnabled !== undefined) body.watermark_enabled = opts.watermarkEnabled
   if (opts.watermarkText) body.watermark_text = opts.watermarkText
+  if (opts.title) body.title = opts.title
   const created = await api<CreatedShare>('/api/v1/shares', jsonInit('POST', body))
   rememberShareMeta(created.id, { token: created.token ?? undefined })
   return created
@@ -1316,10 +1319,18 @@ export async function listShares(opts: ShareListOptions = {}): Promise<ShareList
   return { shares: data.shares ?? [], total: data.total ?? 0, page: data.page ?? 1, page_size: data.page_size ?? 20 }
 }
 
-/** 删除分享（撤销即删除，幂等，仅创建者；链接立即失效）。 */
+/** 删除分享（撤销，幂等，仅创建者；链接立即失效，记录保留）。 */
 export async function revokeShare(id: string): Promise<void> {
   await api(`/api/v1/shares/${id}`, { method: 'DELETE' })
 }
+
+/** 清除已撤销分享的记录（物理删除；须撤销满 30 天，否则后端 409）。 */
+export async function purgeShare(id: string): Promise<void> {
+  await api(`/api/v1/shares/${id}/purge`, { method: 'DELETE' })
+}
+
+/** 分享撤销记录满 30 天后可手动清除（后端保留期口径，前端按钮可用性判断用）。 */
+export const SHARE_PURGE_RETENTION_MS = 30 * 24 * 3600 * 1000
 
 // ---------- 分享详情与访问统计 ----------
 
@@ -1338,9 +1349,13 @@ export interface ShareStats {
   recent: ShareAccessRecord[]
 }
 
-/** GET /shares/{id} 响应：分享详情 + 访问统计（仅创建者）。 */
+/** GET /shares/{id} 响应：分享详情 + 访问统计（仅创建者）。
+ * v2.4 起公开分享附 token / password（创建时留存，供再次查看复制；旧分享为空串）。 */
 export interface ShareDetail extends ShareItem {
   stats: ShareStats
+  token?: string
+  password?: string
+  title?: string
 }
 
 /** 分享详情与访问统计（仅创建者）。 */
@@ -1353,108 +1368,168 @@ export async function getFileMeta(id: string): Promise<FileWithVersion> {
   return api<FileWithVersion>(`/api/v1/files/${id}`)
 }
 
-// ---------- 团队 ----------
+// ---------- 空间（统一空间模型） ----------
 
-export interface Team {
+export interface Space {
   id: string
   name: string
   description: string
+  /** 空间存储配额（字节；0=不限）。 */
+  quota_bytes: number
   owner_id: string
+  /** 默认空间（注册自动创建，可改名不可删除）。 */
+  is_default?: boolean
   created_at: string
-  /** 我在该团队的角色（五级内置；GET /teams 附带，单团队响应可能缺省）。 */
-  my_role?: TeamRole
-  /** 团队成员数（GET /teams 附带）。 */
+  /** 我在该空间的角色（直接成员 ∪ 用户组取最高；GET /spaces 附带）。 */
+  my_role?: SpaceRole
+  /** 直接成员数（GET /spaces 附带）。 */
   member_count?: number
-  /** 团队空间存储用量（字节，GET /teams 附带）。 */
+  /** 空间存储用量（字节，软删计入；GET /spaces 附带）。 */
   storage_used?: number
 }
-export async function updateTeam(id: string, name: string, description: string): Promise<Team> {
-  return api<Team>(`/api/v1/teams/${id}`, jsonInit('PATCH', { name, description }))
-}
-export async function deleteTeam(id: string): Promise<void> { await api(`/api/v1/teams/${id}`, { method: 'DELETE' }) }
 
-export interface CreatedTeam extends Team {
+/** 更新空间（名称/描述/配额；owner/admin；非系统 admin 配额受 space.max_quota 限制）。 */
+export async function updateSpace(id: string, name: string, description: string): Promise<Space> {
+  return api<Space>(`/api/v1/spaces/${id}`, jsonInit('PATCH', { name, description }))
+}
+
+/** 更新空间配额（0=不限）。 */
+export async function updateSpaceQuota(id: string, quotaBytes: number): Promise<Space> {
+  return api<Space>(`/api/v1/spaces/${id}`, jsonInit('PATCH', { quota_bytes: quotaBytes }))
+}
+
+/** 解散空间（仅 owner；默认空间 400）。 */
+export async function deleteSpace(id: string): Promise<void> { await api(`/api/v1/spaces/${id}`, { method: 'DELETE' }) }
+
+export interface CreatedSpace extends Space {
   root_folder_id: string
 }
 
-export type TeamRole = 'owner' | 'admin' | 'member_share' | 'member' | 'guest'
+export type SpaceRole = 'owner' | 'admin' | 'member_share' | 'member' | 'guest'
 
 /** 可经成员管理授予的内置角色（owner 经「转让所有权」产生，不可直接指派）。 */
-export type AssignableTeamRole = Exclude<TeamRole, 'owner'>
+export type AssignableSpaceRole = Exclude<SpaceRole, 'owner'>
 
 /** 全部可授予角色（角色下拉固定顺序，权限从高到低）。 */
-export const ASSIGNABLE_TEAM_ROLES: readonly AssignableTeamRole[] = ['admin', 'member_share', 'member', 'guest']
+export const ASSIGNABLE_SPACE_ROLES: readonly AssignableSpaceRole[] = ['admin', 'member_share', 'member', 'guest']
 
-export interface TeamMember {
+export interface SpaceMember {
   user_id: string
-  /** 五级内置角色（owner/admin/member_share/member/guest，migration 037）。 */
-  role: TeamRole
+  /** 五级内置角色（owner/admin/member_share/member/guest）。 */
+  role: SpaceRole
   /** 成员用户名 / 昵称 / 邮箱（成员列表接口 JOIN users 补齐；展示用，可能缺省）。 */
   username?: string
   nickname?: string
   email?: string
   created_at: string
-  /** 加入时间（= team_members.created_at，v1.7.1 显式字段；旧后端回退 created_at）。 */
+  /** 加入时间（= space_members.created_at；旧后端回退 created_at）。 */
   joined_at?: string
-  team_id?: string
 }
 
-/** 创建团队：创建者自动成为 owner 成员并生成团队根目录。 */
-export async function createTeam(name: string, description: string): Promise<CreatedTeam> {
-  return api<CreatedTeam>('/api/v1/teams', jsonInit('POST', { name, description }))
+/** 经用户组加入空间的用户条目（GET /spaces/:id/members 的 group_users）：
+ * 组来源（group_id/group_name/group_role）+ 用户展示信息。 */
+export interface SpaceGroupUser {
+  user_id: string
+  group_id: string
+  group_name: string
+  group_role: AssignableSpaceRole
+  username?: string
+  nickname?: string
+  email?: string
 }
 
-/** 我所在（成员或 owner）的团队列表（v1.7 起含 my_role/member_count/storage_used）。 */
-export async function listTeams(): Promise<Team[]> {
-  const data = await api<{ teams: Team[] }>('/api/v1/teams')
-  return data.teams ?? []
+/** 成员列表响应：直接成员 + 组内用户（合并展示/转让候选用）。 */
+export interface SpaceMembersResult {
+  members: SpaceMember[]
+  group_users: SpaceGroupUser[]
 }
 
-export async function listTeamMembers(teamId: string): Promise<TeamMember[]> {
-  const data = await api<{ members: TeamMember[] }>(`/api/v1/teams/${teamId}/members`)
-  return data.members ?? []
+/** 创建空间：创建者自动成为 owner 成员并生成空间根目录；新空间配额 = space.default_quota。 */
+export async function createSpace(name: string, description: string): Promise<CreatedSpace> {
+  return api<CreatedSpace>('/api/v1/spaces', jsonInit('POST', { name, description }))
+}
+
+/** 我可见的空间列表（直接成员或经用户组；含 my_role/member_count/storage_used）。 */
+export async function listSpaces(): Promise<Space[]> {
+  const data = await api<{ spaces: Space[] }>('/api/v1/spaces')
+  return data.spaces ?? []
+}
+
+export async function listSpaceMembers(spaceId: string): Promise<SpaceMembersResult> {
+  const data = await api<SpaceMembersResult>(`/api/v1/spaces/${spaceId}/members`)
+  return { members: data.members ?? [], group_users: data.group_users ?? [] }
 }
 
 /** 添加成员（owner/admin；admin 角色仅 owner 可授予）。 */
-export async function addTeamMember(
-  teamId: string,
+export async function addSpaceMember(
+  spaceId: string,
   userId: string,
-  role: AssignableTeamRole,
-): Promise<TeamMember> {
-  return api<TeamMember>(`/api/v1/teams/${teamId}/members`, jsonInit('POST', { user_id: userId, role }))
+  role: AssignableSpaceRole,
+): Promise<SpaceMember> {
+  return api<SpaceMember>(`/api/v1/spaces/${spaceId}/members`, jsonInit('POST', { user_id: userId, role }))
 }
 
 /** 修改成员角色（owner/admin；owner 成员不可改，admin 角色仅 owner 可授）。 */
-export async function updateTeamMemberRole(
-  teamId: string,
+export async function updateSpaceMemberRole(
+  spaceId: string,
   userId: string,
-  role: AssignableTeamRole,
-): Promise<TeamMember> {
-  return api<TeamMember>(`/api/v1/teams/${teamId}/members/${userId}`, jsonInit('PATCH', { role }))
+  role: AssignableSpaceRole,
+): Promise<SpaceMember> {
+  return api<SpaceMember>(`/api/v1/spaces/${spaceId}/members/${userId}`, jsonInit('PATCH', { role }))
 }
 
 /** 移除成员（owner/admin；owner 成员不可移除）。 */
-export async function removeTeamMember(teamId: string, userId: string): Promise<void> {
-  await api(`/api/v1/teams/${teamId}/members/${userId}`, { method: 'DELETE' })
+export async function removeSpaceMember(spaceId: string, userId: string): Promise<void> {
+  await api(`/api/v1/spaces/${spaceId}/members/${userId}`, { method: 'DELETE' })
 }
 
-/** 成员主动退出团队（非 owner；POST /teams/:id/leave，v1.7）。 */
-export async function leaveTeam(teamId: string): Promise<void> {
-  await api(`/api/v1/teams/${teamId}/leave`, jsonInit('POST', {}))
+/** 成员主动退出空间（非 owner；POST /spaces/:id/leave）。 */
+export async function leaveSpace(spaceId: string): Promise<void> {
+  await api(`/api/v1/spaces/${spaceId}/leave`, jsonInit('POST', {}))
 }
 
-/** 转让团队所有权（仅 owner；新 owner 须为既有成员，原 owner 降为 admin）。 */
-export async function transferTeamOwnership(teamId: string, newOwnerId: string): Promise<Team> {
-  return api<Team>(`/api/v1/teams/${teamId}/transfer-ownership`, jsonInit('POST', { user_id: newOwnerId }))
+/** 转让空间所有权（仅 owner；新 owner 须为既有直接成员，原 owner 降为 admin）。 */
+export async function transferSpaceOwnership(spaceId: string, newOwnerId: string): Promise<Space> {
+  return api<Space>(`/api/v1/spaces/${spaceId}/transfer-ownership`, jsonInit('POST', { user_id: newOwnerId }))
 }
 
-// ---- 团队邮箱邀请（v1.7.1 成员管理完善） ----
+// ---- 空间的用户组授权（直接成员与用户组并存，权限取最高） ----
 
-/** 团队邀请条目（GET /teams/:id/invites；status 为后端派生 pending/accepted/expired）。 */
-export interface TeamInvite {
+export interface SpaceGroup {
+  group_id: string
+  role: AssignableSpaceRole
+  group_name?: string
+  member_count?: number
+  created_at: string
+}
+
+export async function listSpaceGroups(spaceId: string): Promise<SpaceGroup[]> {
+  const data = await api<{ groups: SpaceGroup[] }>(`/api/v1/spaces/${spaceId}/groups`)
+  return data.groups ?? []
+}
+
+/** 把用户组加入空间（owner/admin；admin 角色仅 owner 可授予）。 */
+export async function addSpaceGroup(spaceId: string, groupId: string, role: AssignableSpaceRole): Promise<SpaceGroup> {
+  return api<SpaceGroup>(`/api/v1/spaces/${spaceId}/groups`, jsonInit('POST', { group_id: groupId, role }))
+}
+
+/** 修改用户组角色（owner/admin；admin 角色仅 owner 可授）。 */
+export async function updateSpaceGroupRole(spaceId: string, groupId: string, role: AssignableSpaceRole): Promise<SpaceGroup> {
+  return api<SpaceGroup>(`/api/v1/spaces/${spaceId}/groups/${groupId}`, jsonInit('PATCH', { role }))
+}
+
+/** 移除空间的用户组授权（owner/admin）。 */
+export async function removeSpaceGroup(spaceId: string, groupId: string): Promise<void> {
+  await api(`/api/v1/spaces/${spaceId}/groups/${groupId}`, { method: 'DELETE' })
+}
+
+// ---- 空间邮箱邀请 ----
+
+/** 空间邀请条目（GET /spaces/:id/invites；status 为后端派生 pending/accepted/expired）。 */
+export interface SpaceInvite {
   id: string
   email: string
-  role: AssignableTeamRole
+  role: AssignableSpaceRole
   invited_by?: string | null
   status: 'pending' | 'accepted' | 'expired'
   expires_at: string
@@ -1463,50 +1538,50 @@ export interface TeamInvite {
 }
 
 /** 创建邀请响应：新建（201）附 join_url（明文 token 仅本次可见一次）；幂等命中既有邀请（200）无链接。 */
-export interface CreatedTeamInvite extends TeamInvite {
+export interface CreatedSpaceInvite extends SpaceInvite {
   join_url?: string
 }
 
 /** 创建邮箱邀请（owner/admin；admin 角色仅 owner 可授予）。 */
-export async function createTeamInvite(teamId: string, email: string, role: AssignableTeamRole): Promise<CreatedTeamInvite> {
-  return api<CreatedTeamInvite>(`/api/v1/teams/${teamId}/invites`, jsonInit('POST', { email, role }))
+export async function createSpaceInvite(spaceId: string, email: string, role: AssignableSpaceRole): Promise<CreatedSpaceInvite> {
+  return api<CreatedSpaceInvite>(`/api/v1/spaces/${spaceId}/invites`, jsonInit('POST', { email, role }))
 }
 
-/** 团队邀请列表（owner/admin；含已接受/已过期）。 */
-export async function listTeamInvites(teamId: string): Promise<TeamInvite[]> {
-  const data = await api<{ invites: TeamInvite[] }>(`/api/v1/teams/${teamId}/invites`)
+/** 空间邀请列表（owner/admin；含已接受/已过期）。 */
+export async function listSpaceInvites(spaceId: string): Promise<SpaceInvite[]> {
+  const data = await api<{ invites: SpaceInvite[] }>(`/api/v1/spaces/${spaceId}/invites`)
   return data.invites ?? []
 }
 
 /** 撤销邀请（删行，token 立即失效；owner/admin）。 */
-export async function revokeTeamInvite(teamId: string, inviteId: string): Promise<void> {
-  await api(`/api/v1/teams/${teamId}/invites/${inviteId}`, { method: 'DELETE' })
+export async function revokeSpaceInvite(spaceId: string, inviteId: string): Promise<void> {
+  await api(`/api/v1/spaces/${spaceId}/invites/${inviteId}`, { method: 'DELETE' })
 }
 
-/** 接受邀请响应：团队信息 + already_member（已在团队时邀请仍被消费）。 */
-export interface AcceptedTeamInvite {
-  team: Team
+/** 接受邀请响应：空间信息 + already_member（已在空间时邀请仍被消费）。 */
+export interface AcceptedSpaceInvite {
+  space: Space
   already_member: boolean
-  role: AssignableTeamRole
+  role: AssignableSpaceRole
 }
 
-/** 凭一次性 token 接受团队邀请（登录用户；邮箱须与邀请邮箱一致）。 */
-export async function acceptTeamInvite(token: string): Promise<AcceptedTeamInvite> {
-  return api<AcceptedTeamInvite>(`/api/v1/team-invites/join/${encodeURIComponent(token)}`, jsonInit('POST', {}))
+/** 凭一次性 token 接受空间邀请（登录用户；邮箱须与邀请邮箱一致）。 */
+export async function acceptSpaceInvite(token: string): Promise<AcceptedSpaceInvite> {
+  return api<AcceptedSpaceInvite>(`/api/v1/space-invites/join/${encodeURIComponent(token)}`, jsonInit('POST', {}))
 }
 
-export interface TeamFileListing {
+export interface SpaceFileListing {
   files: FileItem[]
-  /** 当前列出的目录 ID；parent_id 缺省查询时即团队根目录 ID。 */
+  /** 当前列出的目录 ID；parent_id 缺省查询时即空间根目录 ID。 */
   parent_id: string
 }
 
-/** 团队空间文件列表（parentId 为 null 表示团队根目录；tag/starred/排序同 /files 语义，目录范围内过滤）。 */
-export async function listTeamFiles(
-  teamId: string,
+/** 空间文件列表（parentId 为 null 表示空间根目录；tag/starred/排序同 /files 语义，目录范围内过滤）。 */
+export async function listSpaceFiles(
+  spaceId: string,
   parentId: string | null,
   opts?: FileQueryOptions,
-): Promise<TeamFileListing> {
+): Promise<SpaceFileListing> {
   const params = new URLSearchParams()
   if (parentId) params.set('parent_id', parentId)
   if (opts?.tagId) params.set('tag_id', opts.tagId)
@@ -1515,12 +1590,12 @@ export async function listTeamFiles(
   if (opts?.order) params.set('order', opts.order)
   if (opts?.limit && opts.limit > 0) params.set('limit', String(opts.limit))
   const query = params.toString()
-  return api<TeamFileListing>(`/api/v1/teams/${teamId}/files${query ? `?${query}` : ''}`)
+  return api<SpaceFileListing>(`/api/v1/spaces/${spaceId}/files${query ? `?${query}` : ''}`)
 }
 
-/** 在团队根目录（parentId 为 null）或指定团队目录下创建目录（editor 及以上角色）。 */
-export async function createTeamFolder(teamId: string, name: string, parentId: string | null): Promise<FileItem> {
-  return api<FileItem>(`/api/v1/teams/${teamId}/folders`, jsonInit('POST', { name, parent_id: parentId ?? '' }))
+/** 在空间根目录（parentId 为 null）或指定空间目录下创建目录（可写成员：owner/admin/member_share/member）。 */
+export async function createSpaceFolder(spaceId: string, name: string, parentId: string | null): Promise<FileItem> {
+  return api<FileItem>(`/api/v1/spaces/${spaceId}/folders`, jsonInit('POST', { name, parent_id: parentId ?? '' }))
 }
 
 // ---------- 上传 ----------
@@ -1648,20 +1723,20 @@ export async function uploadFileVersion(
 
 // ---------- 文件版本 ----------
 
-/** 版本列表（按版本号倒序；读权限同文件元数据：个人 owner、团队任意在册成员）。 */
+/** 版本列表（按版本号倒序；读权限同文件元数据：默认空间 owner、空间任意在册成员/组）。 */
 export async function listFileVersions(fileId: string): Promise<FileVersionDetail[]> {
   const data = await api<{ versions: FileVersionDetail[] }>(`/api/v1/files/${fileId}/versions`)
   return data.versions ?? []
 }
 
-/** 回滚当前版本指针到既有版本（个人 owner、团队 editor+；版本内容不可变）。 */
+/** 回滚当前版本指针到既有版本（默认空间 owner、空间 member_share+；版本内容不可变）。 */
 export async function restoreVersion(fileId: string, versionId: string): Promise<FileWithVersion> {
   return api<FileWithVersion>(`/api/v1/files/${fileId}/versions/${versionId}/restore`, { method: 'POST' })
 }
 
 /**
  * 认证读取指定版本原始内容为文本（版本对比用）：读权限同版本列表
- * （个人 owner、团队任意在册成员）；blob 非 available 时 403。
+ * （默认空间 owner、空间任意在册成员/组）；blob 非 available 时 403。
  */
 export async function fetchVersionText(fileId: string, versionId: string): Promise<string> {
   const res = await authFetch(`/api/v1/files/${fileId}/versions/${versionId}/content`)
@@ -1827,10 +1902,10 @@ export function isDrawioXmlContent(text: string): boolean {
   return /^\s*(<\?xml[^>]*\?>\s*)?<(mxfile|mxGraphModel)[\s>]/i.test(text)
 }
 
-// ---------- 路径级 ACL（团队空间文件夹） ----------
+// ---------- 路径级 ACL（空间文件夹） ----------
 
-/** ACL 主体类型：用户 / 团队 / 团队自定义角色。 */
-export type ACLSubjectType = 'user' | 'team' | 'role'
+/** ACL 主体类型：用户 / 空间。 */
+export type ACLSubjectType = 'user' | 'space'
 
 /** 路径级 ACL 权限动作（read/write/delete/share，不含 admin）。 */
 export type ACLAction = 'read' | 'write' | 'delete' | 'share'
@@ -1846,7 +1921,7 @@ export interface FolderACLEntry {
   permissions: ACLAction[]
 }
 
-/** 查询文件夹路径级 ACL（仅团队 owner；无条目时为空数组）。 */
+/** 查询文件夹路径级 ACL（仅空间 owner；无条目时为空数组）。 */
 export async function getFolderACL(folderId: string): Promise<FolderACLEntry[]> {
   const data = await api<{ entries?: FolderACLEntry[] } | FolderACLEntry[]>(
     `/api/v1/folders/${folderId}/acl`,
@@ -1854,7 +1929,7 @@ export async function getFolderACL(folderId: string): Promise<FolderACLEntry[]> 
   return Array.isArray(data) ? data : (data.entries ?? [])
 }
 
-/** 整体覆盖保存文件夹路径级 ACL（仅团队 owner；空数组即清空全部条目）。 */
+/** 整体覆盖保存文件夹路径级 ACL（仅空间 owner；空数组即清空全部条目）。 */
 export async function putFolderACL(folderId: string, entries: FolderACLEntry[]): Promise<void> {
   await api(`/api/v1/folders/${folderId}/acl`, jsonInit('PUT', { entries }))
 }
@@ -1911,8 +1986,8 @@ export interface AdminStats {
   shares: number
   /** api_tokens 表行数（v1.1 起返回）。 */
   tokens: number
-  /** 未软删团队数（概览页展示）。 */
-  teams?: number
+  /** 未软删空间数（概览页展示）。 */
+  spaces?: number
   /** 用户组数（migration 035）。 */
   groups?: number
   /** 对象存储用量（object_blobs.size 合计，字节）。 */
@@ -1934,6 +2009,55 @@ export async function adminPutSetting(key: string, value: SettingValue): Promise
 
 export async function adminGetStats(): Promise<AdminStats> {
   return api<AdminStats>('/api/v1/admin/stats')
+}
+
+// ---------- admin 空间管理（GET /admin/spaces、PATCH/DELETE /admin/spaces/:id） ----------
+
+/** admin 空间列表条目：空间基础字段 + owner 用户名 + 成员数 + 存储用量。 */
+export interface AdminSpaceItem {
+  id: string
+  name: string
+  description: string
+  quota_bytes: number
+  owner_id: string
+  owner_username?: string
+  is_default?: boolean
+  member_count?: number
+  storage_used?: number
+  created_at: string
+  /** 解散时间（dissolved=1 筛选时非空）。 */
+  deleted_at?: string
+}
+
+/** 空间管理列表（q 为空间名/owner 用户名子串；dissolved=true 列出已解散
+ * 的软删空间，供「彻底删除」处置；含成员数与用量）。 */
+export async function adminListSpaces(q = '', limit = 100, dissolved = false): Promise<AdminSpaceItem[]> {
+  const params = new URLSearchParams()
+  if (q) params.set('q', q)
+  if (limit) params.set('limit', String(limit))
+  if (dissolved) params.set('dissolved', '1')
+  const query = params.toString()
+  const data = await api<{ spaces: AdminSpaceItem[] }>(`/api/v1/admin/spaces${query ? `?${query}` : ''}`)
+  return data.spaces ?? []
+}
+
+/** admin 越权修改空间（名称/描述/配额；不受 space.max_quota 限制）。 */
+export async function adminUpdateSpace(id: string, opts: { name?: string; description?: string; quotaBytes?: number }): Promise<void> {
+  const body: Record<string, unknown> = {}
+  if (opts.name !== undefined) body.name = opts.name
+  if (opts.description !== undefined) body.description = opts.description
+  if (opts.quotaBytes !== undefined) body.quota_bytes = opts.quotaBytes
+  await api(`/api/v1/admin/spaces/${id}`, jsonInit('PATCH', body))
+}
+
+/** admin 越权解散空间（软删；默认空间 400）。 */
+export async function adminDeleteSpace(id: string): Promise<void> {
+  await api(`/api/v1/admin/spaces/${id}`, { method: 'DELETE' })
+}
+
+/** admin 彻底删除已解散空间（物理删文件/成员/分享；未解散 409）。 */
+export async function adminPurgeSpace(id: string): Promise<void> {
+  await api(`/api/v1/admin/spaces/${id}/purge`, { method: 'DELETE' })
 }
 
 // ---------- SMTP 运行时配置（GET/PUT /admin/settings/smtp） ----------
@@ -1977,6 +2101,12 @@ export async function adminGetSmtpSettings(): Promise<SmtpSettingsView> {
 
 export async function adminPutSmtpSettings(input: SmtpSettingsInput): Promise<SmtpSettingsView> {
   return api<SmtpSettingsView>('/api/v1/admin/settings/smtp', jsonInit('PUT', input))
+}
+
+/** POST /admin/settings/smtp/test {to}：用当前生效配置投递一封测试邮件。
+ * 失败时服务端返回错误详情（ApiError.message），成功返回 message 提示。 */
+export async function adminTestSmtp(to: string): Promise<{ ok: boolean; message: string }> {
+  return api<{ ok: boolean; message: string }>('/api/v1/admin/settings/smtp/test', jsonInit('POST', { to }))
 }
 
 // ---------- HTTPS 运行时切换（仅 admin；经 Caddy admin API 热下发） ----------
@@ -2161,25 +2291,24 @@ export async function adminRunBackup(): Promise<void> {
 
 // ---------- 仪表盘（v1.1） ----------
 
-/** 仪表盘最近文件条目（个人空间 updated_at 倒序前 5）。 */
+/** 仪表盘最近文件条目（默认空间 updated_at 倒序前 5）。 */
 export interface DashboardRecentFile {
   id: string
   name: string
   parent_id: string | null
   current_version_id: string
-  scope_type: 'personal' | 'team'
-  team_id: string | null
+  space_id: string
   updated_at: string
 }
 
 /** GET /dashboard 响应：个人统计 + admin 全局统计（仅 admin 角色）。 */
 export interface DashboardData {
-  /** 我的文件数（个人空间未软删文件，不含目录）。 */
+  /** 我的文件数（默认空间未软删文件，不含目录）。 */
   files: number
   /** 存储占用（当前版本大小之和，字节）。 */
   storage_bytes: number
-  /** 我可访问团队空间的文件数。 */
-  team_files: number
+  /** 我可访问其他空间的文件数。 */
+  space_files: number
   /** 有效分享数（公开+私有：未撤销未过期）。 */
   shares: number
   /** 近 7 天上传会话数。 */
@@ -2229,6 +2358,12 @@ export async function adminListInvitations(): Promise<Invitation[]> {
 /** 撤销邀请（删行，token 立即失效；不存在 404）。 */
 export async function adminRevokeInvitation(id: string): Promise<void> {
   await api(`/api/v1/admin/invitations/${id}`, { method: 'DELETE' })
+}
+
+/** 重发邀请：撤销旧记录并按同邮箱/同角色生成新邀请，返回新的一次性
+ * accept_url（仅本次可见）；已接受 410、不存在 404。 */
+export async function adminResendInvitation(id: string): Promise<CreatedInvitation> {
+  return api<CreatedInvitation>(`/api/v1/admin/invitations/${id}/resend`, jsonInit('POST', {}))
 }
 
 /**
@@ -2298,6 +2433,36 @@ export async function searchUsers(q: string): Promise<UserSearchResult[]> {
     `/api/v1/users/search?q=${encodeURIComponent(q)}`,
   )
   return data.users ?? data.results ?? []
+}
+
+/** GET /users/:id：用户只读资料（成员列表行点击查看，v2.4）。 */
+export interface UserInfoResult {
+  id: string
+  username: string
+  email: string
+  nickname?: string | null
+  department?: string | null
+  position?: string | null
+}
+
+/** 用户只读信息（任何登录用户可用；暴露面与搜索一致，不含手机号/状态/角色）。 */
+export async function getUserInfo(id: string): Promise<UserInfoResult> {
+  return api<UserInfoResult>(`/api/v1/users/${id}`)
+}
+
+// ---------- 换绑邮箱（账号安全，v2.4） ----------
+
+/** 换绑邮箱 · 第一段：验证密码后向新邮箱投递 6 位验证码（10 分钟有效）。 */
+export async function requestEmailChange(password: string, newEmail: string): Promise<void> {
+  await api<{ status: string }>(
+    '/api/v1/me/email/change-request',
+    jsonInit('POST', { password, new_email: newEmail }),
+  )
+}
+
+/** 换绑邮箱 · 第二段：提交验证码完成换绑，返回新邮箱。 */
+export async function confirmEmailChange(code: string): Promise<{ email: string }> {
+  return api<{ email: string }>('/api/v1/me/email/change-confirm', jsonInit('POST', { code }))
 }
 
 /** PATCH /me 可更新字段（undefined 表示不更新；空串清空文本字段）。 */

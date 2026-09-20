@@ -325,6 +325,27 @@ func (s *UserStore) UpdatePasswordHash(id uuid.UUID, passwordHash string) error 
 	return s.db.Model(&User{}).Where("id = ?", id).Updates(map[string]any{"password_hash": passwordHash, "updated_at": time.Now().UTC()}).Error
 }
 
+// UpdateEmail 换绑邮箱（账号安全，v2.4）：写入前须自行完成归一/唯一性
+// 校验；并发撞唯一约束返回 ErrUserExists。
+func (s *UserStore) UpdateEmail(id uuid.UUID, email string) error {
+	err := s.db.Model(&User{}).Where("id = ?", id).Updates(map[string]any{"email": NormalizeEmail(email), "updated_at": time.Now().UTC()}).Error
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
+			return ErrUserExists
+		}
+	}
+	return err
+}
+
+// EmailExists 判断邮箱是否已被任一用户占用（任意状态均占用唯一约束）；
+// 换绑邮箱请求阶段使用。
+func (s *UserStore) EmailExists(email string) (bool, error) {
+	var count int64
+	err := s.db.Model(&User{}).Where("email = ?", NormalizeEmail(email)).Count(&count).Error
+	return count > 0, err
+}
+
 // pgUniqueViolation 为 PostgreSQL 唯一约束冲突错误码（23505）。
 const pgUniqueViolation = "23505"
 

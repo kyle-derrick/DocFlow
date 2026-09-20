@@ -13,7 +13,7 @@ import (
 	"github.com/docflow/docflow/internal/acl"
 	"github.com/docflow/docflow/internal/auth"
 	"github.com/docflow/docflow/internal/files"
-	"github.com/docflow/docflow/internal/team"
+	"github.com/docflow/docflow/internal/space"
 )
 
 // aclRoleLookup 是 auth.RoleLookup 的内存实现（admin 判定用）。
@@ -26,17 +26,17 @@ func (l aclRoleLookup) Role(id uuid.UUID) (string, error) {
 	return auth.RoleUser, nil
 }
 
-// aclTestEnv 构造挂内存 ACL/团队服务的路由（模式同 teams_test.go）；
-// 返回路由、ACL 服务、底层内存 repo（构造目录数据用）与团队服务。
-func aclTestEnv(t *testing.T, actor uuid.UUID) (*gin.Engine, *acl.Service, *acl.MemoryRepo, *team.Service, *fakeUserDirectory) {
+// aclTestEnv 构造挂内存 ACL/空间服务的路由（模式同 spaces_test.go）；
+// 返回路由、ACL 服务、底层内存 repo（构造目录数据用）与空间服务。
+func aclTestEnv(t *testing.T, actor uuid.UUID) (*gin.Engine, *acl.Service, *acl.MemoryRepo, *space.Service, *fakeUserDirectory) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
-	teamSvc := team.NewService(team.NewMemoryStore())
+	spaceSvc := space.NewService(space.NewMemoryStore())
 	repo := acl.NewMemoryRepo()
 	svc := acl.NewService(repo)
 	users := &fakeUserDirectory{names: map[uuid.UUID]string{}}
 	h := NewHandler(nil, nil, nil, nil, nil, nil, nil, false, "", time.Hour)
-	h.teams = teamSvc
+	h.spaces = spaceSvc
 	h.acl = svc
 	h.users = users
 	router := gin.New()
@@ -48,7 +48,7 @@ func aclTestEnv(t *testing.T, actor uuid.UUID) (*gin.Engine, *acl.Service, *acl.
 	}
 	router.GET("/api/v1/folders/:id/acl", withUser(h.getFolderACL))
 	router.PUT("/api/v1/folders/:id/acl", withUser(h.replaceFolderACL))
-	return router, svc, repo, teamSvc, users
+	return router, svc, repo, spaceSvc, users
 }
 
 func callACL(router *gin.Engine, method, path, body string) *httptest.ResponseRecorder {
@@ -60,22 +60,22 @@ func callACL(router *gin.Engine, method, path, body string) *httptest.ResponseRe
 }
 
 // TestFolderACLEndpoints 覆盖 GET/PUT /folders/:id/acl 的权限与校验：
-// owner 200（含 subject 名称解析）、成员 403、个人空间 400、条目校验 400、
-// 整体替换生效（含清空）、目录不存在 404、未配置 503。
+// owner 200（含 subject 名称解析）、成员 403、非空间作用域目录 400、
+// 条目校验 400、整体替换生效（含清空）、目录不存在 404、未配置 503。
 func TestFolderACLEndpoints(t *testing.T) {
 	owner, member := uuid.New(), uuid.New()
-	router, _, repo, teamSvc, users := aclTestEnv(t, owner)
+	router, _, repo, spaceSvc, users := aclTestEnv(t, owner)
 	users.names[member] = "张三"
 
-	tm, root, err := teamSvc.CreateTeam(owner, "研发团队", "")
+	sp, root, err := spaceSvc.CreateSpace(owner, "研发空间", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// ACL repo 独立于团队 store：登记团队根目录（团队作用域目录）。
+	// ACL repo 独立于空间 store：登记空间根目录（空间作用域目录）。
 	repo.PutFolder(root)
-	// 个人空间目录（400 用例）。
-	personal := files.File{ID: uuid.New(), Name: "personal", OwnerID: owner, Type: "folder", ScopeType: "personal"}
-	repo.PutFolder(personal)
+	// 非空间作用域目录（SpaceID 零值，400 用例）。
+	plain := files.File{ID: uuid.New(), Name: "plain", OwnerID: owner, Type: "folder"}
+	repo.PutFolder(plain)
 
 	// owner 查看：空条目。
 	w := callACL(router, http.MethodGet, "/api/v1/folders/"+root.ID.String()+"/acl", "")
@@ -86,17 +86,17 @@ func TestFolderACLEndpoints(t *testing.T) {
 		t.Fatalf("empty entries body: %s", w.Body.String())
 	}
 
-	// 整体替换：team deny write/delete + user allow read；返回解析后的
-	// subject_name（团队成员用户名 / 团队名）。
+	// 整体替换：space deny write/delete + user allow read；返回解析后的
+	// subject_name（空间成员用户名 / 空间名）。
 	body := `{"entries":[
-		{"subject_type":"team","subject_id":"` + tm.ID.String() + `","effect":"deny","permissions":["write","delete"]},
+		{"subject_type":"space","subject_id":"` + sp.ID.String() + `","effect":"deny","permissions":["write","delete"]},
 		{"subject_type":"user","subject_id":"` + member.String() + `","effect":"allow","permissions":["read"]}
 	]}`
 	w = callACL(router, http.MethodPut, "/api/v1/folders/"+root.ID.String()+"/acl", body)
 	if w.Code != http.StatusOK {
 		t.Fatalf("owner put: status = %d (body %s)", w.Code, w.Body.String())
 	}
-	for _, want := range []string{`"subject_name":"张三"`, `"subject_name":"研发团队"`, `"effect":"deny"`, `"effect":"allow"`, `"permissions":["write","delete"]`} {
+	for _, want := range []string{`"subject_name":"张三"`, `"subject_name":"研发空间"`, `"effect":"deny"`, `"effect":"allow"`, `"permissions":["write","delete"]`} {
 		if !strings.Contains(w.Body.String(), want) {
 			t.Fatalf("put body missing %s: %s", want, w.Body.String())
 		}
@@ -112,13 +112,13 @@ func TestFolderACLEndpoints(t *testing.T) {
 		t.Fatalf("clear: status = %d body %s", w.Code, w.Body.String())
 	}
 
-	// 校验：个人空间 400；非法权限词 400；重复主体 400；非 UUID subject 400；
+	// 校验：非空间作用域 400；非法权限词 400；重复主体 400；非 UUID subject 400；
 	// 不存在的目录 404。
-	if w := callACL(router, http.MethodGet, "/api/v1/folders/"+personal.ID.String()+"/acl", ""); w.Code != http.StatusBadRequest {
-		t.Fatalf("personal get: status = %d, want 400", w.Code)
+	if w := callACL(router, http.MethodGet, "/api/v1/folders/"+plain.ID.String()+"/acl", ""); w.Code != http.StatusBadRequest {
+		t.Fatalf("plain get: status = %d, want 400", w.Code)
 	}
 	if w := callACL(router, http.MethodPut, "/api/v1/folders/"+root.ID.String()+"/acl",
-		`{"entries":[{"subject_type":"team","subject_id":"`+tm.ID.String()+`","effect":"allow","permissions":["admin"]}]}`); w.Code != http.StatusBadRequest {
+		`{"entries":[{"subject_type":"space","subject_id":"`+sp.ID.String()+`","effect":"allow","permissions":["admin"]}]}`); w.Code != http.StatusBadRequest {
 		t.Fatalf("invalid permission: status = %d, want 400", w.Code)
 	}
 	dup := `{"entries":[
@@ -137,8 +137,8 @@ func TestFolderACLEndpoints(t *testing.T) {
 	}
 
 	// 成员（非 owner、无 roles 源）：GET/PUT 均 403。
-	memberRouter, _, memberRepo, memberTeamSvc, _ := aclTestEnv(t, member)
-	_, memberRoot, err := memberTeamSvc.CreateTeam(owner, "运营团队", "")
+	memberRouter, _, memberRepo, memberSpaceSvc, _ := aclTestEnv(t, member)
+	_, memberRoot, err := memberSpaceSvc.CreateSpace(owner, "运营空间", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,11 +163,11 @@ func TestFolderACLEndpoints(t *testing.T) {
 	}
 }
 
-// TestFolderACLAdminAllowed 系统 admin（h.roles 注入）即使非团队成员也可管理。
+// TestFolderACLAdminAllowed 系统 admin（h.roles 注入）即使非空间成员也可管理。
 func TestFolderACLAdminAllowed(t *testing.T) {
 	owner, admin := uuid.New(), uuid.New()
-	_, _, repo, teamSvc, _ := aclTestEnv(t, owner)
-	_, root, err := teamSvc.CreateTeam(owner, "运营团队", "")
+	_, _, repo, spaceSvc, _ := aclTestEnv(t, owner)
+	_, root, err := spaceSvc.CreateSpace(owner, "运营空间", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +175,7 @@ func TestFolderACLAdminAllowed(t *testing.T) {
 
 	gin.SetMode(gin.TestMode)
 	handler := NewHandler(nil, nil, nil, nil, nil, nil, nil, false, "", time.Hour)
-	handler.teams = teamSvc
+	handler.spaces = spaceSvc
 	handler.acl = acl.NewService(repo)
 	handler.roles = aclRoleLookup{admins: map[uuid.UUID]bool{admin: true}}
 	r := gin.New()

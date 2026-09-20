@@ -21,10 +21,9 @@ type File struct {
 	Name             string     `gorm:"size:255;not null"`
 	ParentID         *uuid.UUID `gorm:"type:uuid"`
 	OwnerID          uuid.UUID  `gorm:"type:uuid;not null"`
-	TeamID           *uuid.UUID `gorm:"type:uuid"`
+	SpaceID          uuid.UUID  `gorm:"type:uuid;not null"`
 	Type             string     `gorm:"size:16;not null"`
 	IsRoot           bool       `gorm:"not null"`
-	ScopeType        string     `gorm:"size:16;not null"`
 	TreePath         string     `gorm:"type:ltree"`
 	CurrentVersionID *uuid.UUID `gorm:"type:uuid"`
 	Description      string

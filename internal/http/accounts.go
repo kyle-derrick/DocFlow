@@ -25,6 +25,8 @@ type registerRequest struct {
 
 // register POST /api/v1/auth/register {token,username,password}：邀请接受。
 // 注册成功即视为登录：签发 access token 并创建新 refresh 会话（同 login 响应）。
+// 统一空间模型：注册成功后自动创建默认空间「{username}的空间」（幂等；
+// 创建失败仅记日志不阻断登录——下次登录相关入口可经 EnsureDefaultSpace 补齐）。
 func (h *Handler) register(c *gin.Context) {
 	if h.invites == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "invitation service is not configured"})
@@ -50,6 +52,11 @@ func (h *Handler) register(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to complete registration"})
 		}
 		return
+	}
+	if h.spaces != nil {
+		if _, _, serr := h.spaces.EnsureDefaultSpace(user.ID, user.Username); serr != nil {
+			log.Printf("[space] ensure default space for %s: %v", user.ID, serr)
+		}
 	}
 	access, err := h.auth.AccessToken(user.ID)
 	if err != nil {

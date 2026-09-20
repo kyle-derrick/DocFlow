@@ -9,7 +9,6 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/text/unicode/norm"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 var (
@@ -23,7 +22,7 @@ var (
 	ErrFolderCopy = errors.New("folders cannot be copied")
 	// ErrCopyLimit 单次目录复制的子树条目数超限。
 	ErrCopyLimit = errors.New("folder exceeds copy limit")
-	// ErrForbidden 表示用户对团队目录无写权限（如 viewer 或非成员）。
+	// ErrForbidden 表示用户对空间目录无写权限（如 guest 或非成员）。
 	ErrForbidden = errors.New("no permission to write this folder")
 	// ErrFolderDepth 目录嵌套深度超过上限（folder.max_depth，默认 32）。
 	ErrFolderDepth = errors.New("folder depth limit exceeded")
@@ -50,32 +49,32 @@ func NormalizeName(name string) (string, error) {
 	return name, nil
 }
 
-// TeamWriter 判定用户能否写入团队空间（owner/editor/含 write 权限的自定义角色），
-// 由 team 包注入实现；未来可替换为 Casbin 等策略引擎。nil 表示团队权限源未配置
-// （拒绝团队目录写入）。
-type TeamWriter func(userID, teamID uuid.UUID) (bool, error)
+// SpaceWriter 判定用户能否写入空间（角色矩阵含 write：owner/admin/
+// member_share/member），由 space 包注入实现；nil 表示空间权限源未配置
+// （拒绝空间目录写入）。
+type SpaceWriter func(userID, spaceID uuid.UUID) (bool, error)
 
-// TeamReader 判定用户是否可读取团队空间（成员 + read 权限），由 team 包注入实现。
-// nil 表示成员判定源未配置（拒绝团队文件读取，安全默认）。
-type TeamReader func(userID, teamID uuid.UUID) (bool, error)
+// SpaceReader 判定用户是否可读取空间（任意在册成员），由 space 包注入实现。
+// nil 表示成员判定源未配置（拒绝空间文件读取，安全默认）。
+type SpaceReader func(userID, spaceID uuid.UUID) (bool, error)
 
-// TeamDeleter 判定用户能否删除团队文件（CanDelete：系统仅 owner、自定义角色
-// 按 delete 勾选且未被 deny），由 team 包注入实现；nil 表示未配置（拒绝，安全默认）。
-type TeamDeleter func(userID, teamID uuid.UUID) (bool, error)
+// SpaceDeleter 判定用户能否删除空间文件（角色矩阵含 delete），由 space
+// 包注入实现；nil 表示未配置（拒绝，安全默认）。
+type SpaceDeleter func(userID, spaceID uuid.UUID) (bool, error)
 
-// ACLResolver 判定用户对团队作用域文件/目录的单个动作权限（设计 6.5.3/6.5.4
-// 路径级 ACL，acl 包注入实现）：沿 parent 链求值 folder_acl 条目，返回
-// (allowed, matched)。matched=false 表示链上无适用条目（回退团队角色判定）；
+// ACLResolver 判定用户对空间作用域文件/目录的单个动作权限（路径级 ACL，
+// acl 包注入实现）：沿 parent 链求值 folder_acl 条目，返回
+// (allowed, matched)。matched=false 表示链上无适用条目（回退空间角色判定）；
 // nil 表示未接线（无 ACL 行为不变）。perm 取 read/write/delete/share。
-type ACLResolver func(fileOrFolderID, teamID, userID uuid.UUID, perm string) (allowed, matched bool, err error)
+type ACLResolver func(fileOrFolderID, spaceID, userID uuid.UUID, perm string) (allowed, matched bool, err error)
 
-// resolveACL 团队作用域资源的 ACL 求值入口：未接线直接未匹配；匹配则由
-// 调用方按结果放行/拒绝（不再走团队角色判定）。
-func resolveACL(acl ACLResolver, id, teamID, user uuid.UUID, perm string) (bool, bool, error) {
+// resolveACL 空间作用域资源的 ACL 求值入口：未接线直接未匹配；匹配则由
+// 调用方按结果放行/拒绝（不再走空间角色判定）。
+func resolveACL(acl ACLResolver, id, spaceID, user uuid.UUID, perm string) (bool, bool, error) {
 	if acl == nil {
 		return false, false, nil
 	}
-	return acl(id, teamID, user, perm)
+	return acl(id, spaceID, user, perm)
 }
 
 // defaultMaxFolderDepth 目录默认最大深度（根为 1；可经
@@ -83,14 +82,15 @@ func resolveACL(acl ACLResolver, id, teamID, user uuid.UUID, perm string) (bool,
 const defaultMaxFolderDepth = 32
 
 type Store struct {
-	db          *gorm.DB
-	teamWriter  TeamWriter
-	teamReader  TeamReader
-	teamDeleter TeamDeleter
-	// acl 团队作用域资源的路径级 ACL 求值器（acl 包注入；nil 未接线）。
-	acl         ACLResolver
-	maxVersions int
-	// maxVersionsFn 为版本保留数的运行时提供器（settings 热读取）；nil 时用 maxVersions。
+	db           *gorm.DB
+	spaceWriter  SpaceWriter
+	spaceReader  SpaceReader
+	spaceDeleter SpaceDeleter
+	// acl 空间作用域资源的路径级 ACL 求值器（acl 包注入；nil 未接线）。
+	acl ACLResolver
+	// maxVersions 为版本保留数的静态值；maxVersionsFn 为运行时提供器
+	//（settings 热读取）；nil 时用 maxVersions。
+	maxVersions   int
 	maxVersionsFn func() int
 	// retentionDaysFn 为版本保留时间窗（天）的运行时提供器（settings
 	// 热读取，upload.version_retention_days）；nil 或 0 = 不启用时间窗。
@@ -103,47 +103,47 @@ type Store struct {
 	// Purge 事务提交后 best-effort 调用。nil 表示未接线（不清理）。
 	webpkgCleaner func(prefix string) error
 	// versionNotify 版本落库完成回调（AddVersion 事务提交后调用）：
-	// main 注入团队 file.updated 通知逻辑；nil 表示未接线。回调不改变
+	// main 注入空间 file.updated 通知逻辑；nil 表示未接线。回调不改变
 	// 版本写入结果（错误由注入方自理）。
 	versionNotify VersionNotifyFunc
 	// versionDeletedNotify 历史版本删除完成回调（DeleteVersion 事务提交后
-	// 调用）：main 注入团队 file.version.deleted 通知逻辑；nil 表示未接线。
+	// 调用）：main 注入空间 file.version.deleted 通知逻辑；nil 表示未接线。
 	versionDeletedNotify VersionNotifyFunc
 }
 
 // VersionNotifyFunc 版本写入完成回调：f 为目标文件行、actor 为写入者、
-// version 为新落库的版本（事务已提交）。main 接线：团队文件且 actor≠owner
-// 时通知团队其他成员 file.updated。
+// version 为新落库的版本（事务已提交）。main 接线：空间文件且 actor≠owner
+// 时通知空间其他成员 file.updated。
 type VersionNotifyFunc func(f File, actor uuid.UUID, version FileVersion)
 
 func NewStore(db *gorm.DB) *Store {
 	return &Store{db: db, maxVersions: defaultMaxVersions, maxFolderDepth: defaultMaxFolderDepth}
 }
 
-// SetTeamWriter 注入团队写权限判定器（幂等）。
-func (s *Store) SetTeamWriter(w TeamWriter) {
+// SetSpaceWriter 注入空间写权限判定器（幂等）。
+func (s *Store) SetSpaceWriter(w SpaceWriter) {
 	if w != nil {
-		s.teamWriter = w
+		s.spaceWriter = w
 	}
 }
 
-// SetTeamReader 注入团队成员读判定器（幂等）。
-func (s *Store) SetTeamReader(r TeamReader) {
+// SetSpaceReader 注入空间成员读判定器（幂等）。
+func (s *Store) SetSpaceReader(r SpaceReader) {
 	if r != nil {
-		s.teamReader = r
+		s.spaceReader = r
 	}
 }
 
-// SetTeamDeleter 注入团队删除权限判定器（幂等）。
-func (s *Store) SetTeamDeleter(d TeamDeleter) {
+// SetSpaceDeleter 注入空间删除权限判定器（幂等）。
+func (s *Store) SetSpaceDeleter(d SpaceDeleter) {
 	if d != nil {
-		s.teamDeleter = d
+		s.spaceDeleter = d
 	}
 }
 
-// SetACLResolver 注入路径级 ACL 求值器（幂等；设计 6.5.3/6.5.4 最小落地）：
-// 团队作用域文件/目录的 read/write/delete 判定先走 ACL，链上无适用条目
-// （matched=false）回退既有团队角色判定；未注入时行为完全不变。
+// SetACLResolver 注入路径级 ACL 求值器（幂等）：空间作用域文件/目录的
+// read/write/delete 判定先走 ACL，链上无适用条目（matched=false）回退
+// 既有空间角色判定；未注入时行为完全不变。
 func (s *Store) SetACLResolver(a ACLResolver) {
 	if a != nil {
 		s.acl = a
@@ -160,7 +160,7 @@ func (s *Store) SetWebpkgCleaner(fn func(prefix string) error) {
 }
 
 // SetNotifyDispatcher 注入版本写入完成回调（幂等）：AddVersion 事务提交后
-// 调用（团队 file.updated 通知的接线点）；回调自行决定同步/异步执行策略。
+// 调用（空间 file.updated 通知的接线点）；回调自行决定同步/异步执行策略。
 func (s *Store) SetNotifyDispatcher(fn VersionNotifyFunc) {
 	if fn != nil {
 		s.versionNotify = fn
@@ -168,7 +168,7 @@ func (s *Store) SetNotifyDispatcher(fn VersionNotifyFunc) {
 }
 
 // SetVersionDeletedDispatcher 注入历史版本删除完成回调（幂等）：DeleteVersion
-// 事务提交后调用（团队 file.version.deleted 通知文件 owner 的接线点）；
+// 事务提交后调用（空间 file.version.deleted 通知文件 owner 的接线点）；
 // 回调自行决定同步/异步执行策略，不改变删除结果。
 func (s *Store) SetVersionDeletedDispatcher(fn VersionNotifyFunc) {
 	if fn != nil {
@@ -255,7 +255,7 @@ func validateMoveDepth(targetDepth, subtreeHeight, maxDepth int) error {
 	return nil
 }
 
-// getFolder 返回未删除的目录（不限 owner，供团队/个人作用域分支判定）。
+// getFolder 返回未删除的目录（不限 owner；统一空间模型下授权按空间角色判定）。
 func (s *Store) getFolder(id uuid.UUID) (File, error) {
 	var f File
 	if err := s.db.Where("id = ? AND type = 'folder' AND deleted_at IS NULL", id).First(&f).Error; err != nil {
@@ -272,75 +272,56 @@ type folderAccessor interface {
 	getFolder(id uuid.UUID) (File, error)
 }
 
-// teamScope 返回目录的团队作用域；非团队目录返回 nil。
-func teamScope(f File) *uuid.UUID {
-	if f.ScopeType == "team" && f.TeamID != nil {
-		return f.TeamID
-	}
-	return nil
-}
-
-// authorizeParentFolder 判定 user 能否在 parent 下创建内容：
-// 个人目录要求 owner；团队目录先经路径级 ACL（write，链含 parent 自身，
-// matched 则用其结果），未匹配走成员写权限（owner/editor，viewer 403）。
-func authorizeParentFolder(repo folderAccessor, user, parent uuid.UUID, canWriteTeam TeamWriter, acl ACLResolver) (File, error) {
+// authorizeParentFolder 判定 user 能否在 parent 下创建内容（统一空间模型）：
+// 目录恒属某空间——先经路径级 ACL（write，链含 parent 自身，matched 则用
+// 其结果），未匹配走空间成员写权限（owner/admin/member_share/member，
+// guest 403）。
+func authorizeParentFolder(repo folderAccessor, user, parent uuid.UUID, canWriteSpace SpaceWriter, acl ACLResolver) (File, error) {
 	p, err := repo.getFolder(parent)
 	if err != nil {
 		return File{}, err
 	}
-	if teamID := teamScope(p); teamID != nil {
-		allowed, matched, aerr := resolveACL(acl, p.ID, *teamID, user, "write")
-		if aerr != nil {
-			return File{}, aerr
-		}
-		if matched {
-			if !allowed {
-				return File{}, ErrForbidden
-			}
-			return p, nil
-		}
-		if canWriteTeam == nil {
-			return File{}, ErrForbidden
-		}
-		ok, werr := canWriteTeam(user, *teamID)
-		if werr != nil {
-			return File{}, werr
-		}
-		if !ok {
+	allowed, matched, aerr := resolveACL(acl, p.ID, p.SpaceID, user, "write")
+	if aerr != nil {
+		return File{}, aerr
+	}
+	if matched {
+		if !allowed {
 			return File{}, ErrForbidden
 		}
 		return p, nil
 	}
-	if p.OwnerID != user {
-		return File{}, ErrNotFound
+	if canWriteSpace == nil {
+		return File{}, ErrForbidden
+	}
+	ok, werr := canWriteSpace(user, p.SpaceID)
+	if werr != nil {
+		return File{}, werr
+	}
+	if !ok {
+		return File{}, ErrForbidden
 	}
 	return p, nil
 }
 
-// ValidateFolder 校验 user 可在 parent 下上传/创建内容。
-// 个人目录 owner 可写；团队目录先经路径级 ACL（write）再按成员
-// editor/owner 判定，viewer 与非成员 403。
+// ValidateFolder 校验 user 可在 parent 下上传/创建内容（空间成员写权限，
+// 先经路径级 ACL write 判定，guest 与非成员 403）。
 func (s *Store) ValidateFolder(user, parent uuid.UUID) error {
-	_, err := authorizeParentFolder(s, user, parent, s.teamWriter, s.acl)
+	_, err := authorizeParentFolder(s, user, parent, s.spaceWriter, s.acl)
 	return err
 }
 
-// authorizeFileAccess 判定 user 能否读取 file（元数据/当前版本/下载/预览共用入口）：
-// 个人文件仅 owner；团队文件（scope_type='team'）先经路径级 ACL（read，
-// 链自父目录向上），matched 则用其结果（拒绝同非成员按 ErrNotFound 处理，
-// 不泄露存在性），未匹配经注入的 CanRead 判定（系统角色任意在册成员可读；
-// 自定义角色按 read 勾选且未被 deny）。
-// 未注入判定器时团队文件一律拒绝（ErrForbidden，与写路径一致的安全默认）。
-// 非授权访问统一返回 ErrNotFound，不泄露资源存在性；owner 判定短路，行为与旧版一致。
-func authorizeFileAccess(f File, user uuid.UUID, isMember TeamReader, acl ACLResolver) error {
+// authorizeFileAccess 判定 user 能否读取 file（元数据/当前版本/下载/预览
+// 共用入口）：文件行 owner 短路（上传者恒可读，与既有行为一致）；其余先经
+// 路径级 ACL（read，链自父目录向上），matched 则用其结果（拒绝同非成员按
+// ErrNotFound 处理，不泄露存在性），未匹配经注入的 CanRead 判定（空间
+// 任意在册成员可读）。未注入判定器时一律拒绝（ErrForbidden，安全默认）。
+// 非授权访问统一返回 ErrNotFound，不泄露资源存在性。
+func authorizeFileAccess(f File, user uuid.UUID, isMember SpaceReader, acl ACLResolver) error {
 	if f.OwnerID == user {
 		return nil
 	}
-	teamID := teamScope(f)
-	if teamID == nil {
-		return ErrNotFound
-	}
-	allowed, matched, aerr := resolveACL(acl, f.ID, *teamID, user, "read")
+	allowed, matched, aerr := resolveACL(acl, f.ID, f.SpaceID, user, "read")
 	if aerr != nil {
 		return aerr
 	}
@@ -353,7 +334,7 @@ func authorizeFileAccess(f File, user uuid.UUID, isMember TeamReader, acl ACLRes
 	if isMember == nil {
 		return ErrForbidden
 	}
-	ok, err := isMember(user, *teamID)
+	ok, err := isMember(user, f.SpaceID)
 	if err != nil {
 		return err
 	}
@@ -364,7 +345,7 @@ func authorizeFileAccess(f File, user uuid.UUID, isMember TeamReader, acl ACLRes
 }
 
 // Get 返回 user 可访问的未删除单个文件（authorizeFileAccess 统一判定）：
-// 个人文件 owner 可读；团队文件任意在册成员可读（下载/预览/元数据同规则）。
+// 空间内任意在册成员可读（下载/预览/元数据同规则）。
 func (s *Store) Get(user, id uuid.UUID) (File, error) {
 	var f File
 	if err := s.db.Where("id = ? AND deleted_at IS NULL", id).First(&f).Error; err != nil {
@@ -373,7 +354,7 @@ func (s *Store) Get(user, id uuid.UUID) (File, error) {
 		}
 		return File{}, err
 	}
-	if err := authorizeFileAccess(f, user, s.teamReader, s.acl); err != nil {
+	if err := authorizeFileAccess(f, user, s.spaceReader, s.acl); err != nil {
 		return File{}, err
 	}
 	now := time.Now().UTC()
@@ -424,7 +405,7 @@ func (s *Store) CurrentVersion(owner, fileID uuid.UUID) (FileVersion, ObjectBlob
 }
 
 // IncrementDownloadCount 原子递增下载计数；user 须对文件有读权限
-// （owner 或团队在册成员，经 authorizeFileAccess 判定），且文件未删除时生效。
+// （owner 或空间在册成员，经 authorizeFileAccess 判定），且文件未删除时生效。
 func (s *Store) IncrementDownloadCount(user, fileID uuid.UUID) error {
 	if _, err := s.Get(user, fileID); err != nil {
 		return err
@@ -442,7 +423,7 @@ func (s *Store) IncrementDownloadCount(user, fileID uuid.UUID) error {
 }
 
 // IncrementViewCount 原子递增预览计数；user 须对文件有读权限
-// （owner 或团队在册成员，经 authorizeFileAccess 判定），且文件未删除时生效。
+// （owner 或空间在册成员，经 authorizeFileAccess 判定），且文件未删除时生效。
 func (s *Store) IncrementViewCount(user, fileID uuid.UUID) error {
 	if _, err := s.Get(user, fileID); err != nil {
 		return err
@@ -458,79 +439,16 @@ func (s *Store) IncrementViewCount(user, fileID uuid.UUID) error {
 	}
 	return nil
 }
-func (s *Store) EnsureRoot(owner uuid.UUID) (File, error) {
-	var root File
-	err := s.db.Transaction(func(tx *gorm.DB) error {
-		// 个人根目录限定 team_id IS NULL（idx_files_owner_root，migration 032）：
-		// 同一 owner 可能同时名下团队根目录（team_id 非空），不加条件会命中
-		// 团队根导致个人空间数据错乱。
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("owner_id = ? AND is_root = true AND team_id IS NULL", owner).First(&root).Error; err == nil {
-			return nil
-		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return err
-		}
-		root = File{ID: uuid.New(), Name: "根目录", OwnerID: owner, Type: "folder", IsRoot: true, ScopeType: "personal"}
-		if err := tx.Create(&root).Error; err != nil {
-			if strings.Contains(strings.ToLower(err.Error()), "unique") {
-				return tx.Where("owner_id = ? AND is_root = true AND team_id IS NULL", owner).First(&root).Error
-			}
-			return err
-		}
-		return nil
-	})
-	return root, err
-}
-func (s *Store) List(owner uuid.UUID, parent *uuid.UUID, limit int, sort SortOptions) ([]File, error) {
-	if sort.Sort == "" {
-		sort.Sort = "name"
-	}
-	clause, ok := SortClause(sort.Sort, sort.Order)
-	if !ok {
-		clause = "lower(name) ASC, id ASC"
-	}
-	var out []File
-	q := s.db.Where("owner_id = ? AND deleted_at IS NULL", owner)
-	if parent == nil {
-		q = q.Where("is_root = true")
-	} else {
-		q = q.Where("parent_id = ? AND is_root = false", *parent)
-	}
-	err := q.Order(clause).Limit(limit).Find(&out).Error
-	return out, err
-}
-func (s *Store) CreateFolder(owner, parent uuid.UUID, name string) (File, error) {
-	n, err := NormalizeName(name)
-	if err != nil {
-		return File{}, err
-	}
-	var parentFile File
-	if err := s.db.Where("id = ? AND owner_id = ? AND type = 'folder' AND deleted_at IS NULL", parent, owner).First(&parentFile).Error; err != nil {
-		return File{}, ErrNotFound
-	}
-	if depth, derr := s.folderDepthOf(parent); derr == nil {
-		if verr := validateCreateDepth(depth, s.effectiveMaxFolderDepth()); verr != nil {
-			return File{}, verr
-		}
-	} else if !errors.Is(derr, ErrNotFound) {
-		return File{}, derr
-	}
-	f := File{ID: uuid.New(), Name: n, ParentID: &parent, OwnerID: owner, Type: "folder", ScopeType: "personal"}
-	err = s.db.Create(&f).Error
-	if err != nil && strings.Contains(strings.ToLower(err.Error()), "unique") {
-		return File{}, ErrConflict
-	}
-	return f, err
-}
 
-// CreateFolderIn 在 parent 下创建子目录并继承其作用域：
-// 个人目录要求 owner；团队目录要求成员写权限（owner/editor，viewer 403）。
+// CreateFolderIn 在 parent 下创建子目录并继承其空间归属：
+// 空间成员写权限（owner/admin/member_share/member，guest 403）。
 // 深度校验（folder.max_depth）：parent 深度 + 1 不得超过上限。
 func (s *Store) CreateFolderIn(user, parent uuid.UUID, name string) (File, error) {
 	n, err := NormalizeName(name)
 	if err != nil {
 		return File{}, err
 	}
-	p, err := authorizeParentFolder(s, user, parent, s.teamWriter, s.acl)
+	p, err := authorizeParentFolder(s, user, parent, s.spaceWriter, s.acl)
 	if err != nil {
 		return File{}, err
 	}
@@ -541,10 +459,7 @@ func (s *Store) CreateFolderIn(user, parent uuid.UUID, name string) (File, error
 	} else if !errors.Is(derr, ErrNotFound) {
 		return File{}, derr
 	}
-	f := File{ID: uuid.New(), Name: n, ParentID: &parent, OwnerID: user, Type: "folder", ScopeType: "personal"}
-	if id := teamScope(p); id != nil {
-		f.ScopeType, f.TeamID = "team", id
-	}
+	f := File{ID: uuid.New(), Name: n, ParentID: &parent, OwnerID: user, SpaceID: p.SpaceID, Type: "folder"}
 	err = s.db.Create(&f).Error
 	if err != nil && strings.Contains(strings.ToLower(err.Error()), "unique") {
 		return File{}, ErrConflict
@@ -552,10 +467,10 @@ func (s *Store) CreateFolderIn(user, parent uuid.UUID, name string) (File, error
 	return f, err
 }
 
-// TeamRoot 返回团队根目录（scope_type='team'、is_root=true）；不存在或已删除返回 ErrNotFound。
-func (s *Store) TeamRoot(teamID uuid.UUID) (File, error) {
+// SpaceRoot 返回空间根目录（space_id、is_root=true）；不存在或已删除返回 ErrNotFound。
+func (s *Store) SpaceRoot(spaceID uuid.UUID) (File, error) {
 	var f File
-	if err := s.db.Where("team_id = ? AND is_root = true AND deleted_at IS NULL", teamID).First(&f).Error; err != nil {
+	if err := s.db.Where("space_id = ? AND is_root = true AND deleted_at IS NULL", spaceID).First(&f).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return File{}, ErrNotFound
 		}
@@ -564,10 +479,10 @@ func (s *Store) TeamRoot(teamID uuid.UUID) (File, error) {
 	return f, nil
 }
 
-// GetTeamFolder 返回团队名下未删除的目录（含根目录）；读权限由调用方校验成员身份。
-func (s *Store) GetTeamFolder(teamID, id uuid.UUID) (File, error) {
+// GetSpaceFolder 返回空间名下未删除的目录（含根目录）；读权限由调用方校验成员身份。
+func (s *Store) GetSpaceFolder(spaceID, id uuid.UUID) (File, error) {
 	var f File
-	if err := s.db.Where("id = ? AND team_id = ? AND type = 'folder' AND deleted_at IS NULL", id, teamID).First(&f).Error; err != nil {
+	if err := s.db.Where("id = ? AND space_id = ? AND type = 'folder' AND deleted_at IS NULL", id, spaceID).First(&f).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return File{}, ErrNotFound
 		}
@@ -576,16 +491,16 @@ func (s *Store) GetTeamFolder(teamID, id uuid.UUID) (File, error) {
 	return f, nil
 }
 
-// TeamListFilter 团队目录列举过滤：tag（可选）/收藏（可选）+ 排序。
-type TeamListFilter struct {
+// SpaceListFilter 空间目录列举过滤：tag（可选）/收藏（可选）+ 排序。
+type SpaceListFilter struct {
 	TagID   *uuid.UUID
 	Starred *bool
 	SortOptions
 }
 
-// ListTeam 列出团队目录内容（根目录或子目录）；成员读权限由调用方（HTTP 层）校验。
+// ListSpace 列出空间目录内容（根目录或子目录）；成员读权限由调用方（HTTP 层）校验。
 // tag_id/starred 过滤在目录范围内生效（EXISTS file_tags / is_starred）。
-func (s *Store) ListTeam(teamID, parent uuid.UUID, limit int, f TeamListFilter) ([]File, error) {
+func (s *Store) ListSpace(spaceID, parent uuid.UUID, limit int, f SpaceListFilter) ([]File, error) {
 	if f.Sort == "" {
 		f.Sort = "name"
 	}
@@ -593,7 +508,7 @@ func (s *Store) ListTeam(teamID, parent uuid.UUID, limit int, f TeamListFilter) 
 	if !ok {
 		clause = "lower(name) ASC, id ASC"
 	}
-	q := s.db.Where("team_id = ? AND parent_id = ? AND is_root = false AND deleted_at IS NULL", teamID, parent)
+	q := s.db.Where("space_id = ? AND parent_id = ? AND is_root = false AND deleted_at IS NULL", spaceID, parent)
 	if f.TagID != nil {
 		q = q.Where("EXISTS (SELECT 1 FROM file_tags ft WHERE ft.file_id = files.id AND ft.tag_id = ?)", *f.TagID)
 	}
@@ -605,20 +520,14 @@ func (s *Store) ListTeam(teamID, parent uuid.UUID, limit int, f TeamListFilter) 
 	return out, err
 }
 
-// authorizeTeamDelete 判定 user 能否删除 file（软删除/彻底删除共用）：
-// 个人文件仅 owner（非 owner 统一 ErrNotFound，不泄露存在性）；
-// 团队文件先经路径级 ACL（delete），未匹配走 CanDelete（系统仅 owner；
-// 自定义角色按 delete 勾选且未被 deny）——文件行 owner（上传者）不短路：
-// delete 是独立于 write 的权限（设计 6.5.2）。
-func authorizeTeamDelete(f File, user uuid.UUID, canDeleteTeam TeamDeleter, acl ACLResolver) error {
-	teamID := teamScope(f)
-	if teamID == nil {
-		if f.OwnerID != user {
-			return ErrNotFound
-		}
+// authorizeSpaceDelete 判定 user 能否删除 file（软删除/彻底删除共用）：
+// 文件行 owner（上传者）短路；其余先经路径级 ACL（delete），未匹配走
+// CanDelete（角色矩阵含 delete）——delete 是独立于 write 的权限。
+func authorizeSpaceDelete(f File, user uuid.UUID, canDeleteSpace SpaceDeleter, acl ACLResolver) error {
+	if f.OwnerID == user {
 		return nil
 	}
-	allowed, matched, aerr := resolveACL(acl, f.ID, *teamID, user, "delete")
+	allowed, matched, aerr := resolveACL(acl, f.ID, f.SpaceID, user, "delete")
 	if aerr != nil {
 		return aerr
 	}
@@ -628,10 +537,39 @@ func authorizeTeamDelete(f File, user uuid.UUID, canDeleteTeam TeamDeleter, acl 
 		}
 		return nil
 	}
-	if canDeleteTeam == nil {
+	if canDeleteSpace == nil {
 		return ErrForbidden
 	}
-	ok, err := canDeleteTeam(user, *teamID)
+	ok, err := canDeleteSpace(user, f.SpaceID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrForbidden
+	}
+	return nil
+}
+
+// authorizeFileWrite 判定 user 能否写入 file（重命名/追加版本/恢复共用）：
+// 文件行 owner 短路；其余先经路径级 ACL（write），未匹配走空间成员写权限。
+func authorizeFileWrite(f File, user uuid.UUID, canWriteSpace SpaceWriter, acl ACLResolver) error {
+	if f.OwnerID == user {
+		return nil
+	}
+	allowed, matched, aerr := resolveACL(acl, f.ID, f.SpaceID, user, "write")
+	if aerr != nil {
+		return aerr
+	}
+	if matched {
+		if !allowed {
+			return ErrForbidden
+		}
+		return nil
+	}
+	if canWriteSpace == nil {
+		return ErrForbidden
+	}
+	ok, err := canWriteSpace(user, f.SpaceID)
 	if err != nil {
 		return err
 	}
@@ -642,8 +580,7 @@ func authorizeTeamDelete(f File, user uuid.UUID, canDeleteTeam TeamDeleter, acl 
 }
 
 // Rename 重命名文件或目录（根目录不可改名）。
-// 个人文件仅 owner；团队文件走 CanWrite（authorizeFileWrite：文件行 owner 短路，
-// 其余成员 owner/editor/含 write 权限的自定义角色可改）。
+// 空间文件走 authorizeFileWrite（文件行 owner 短路，其余成员按角色/ACL）。
 func (s *Store) Rename(user, id uuid.UUID, name string) (File, error) {
 	n, err := NormalizeName(name)
 	if err != nil {
@@ -659,7 +596,7 @@ func (s *Store) Rename(user, id uuid.UUID, name string) (File, error) {
 	if f.IsRoot {
 		return File{}, ErrRoot
 	}
-	if err := authorizeFileWrite(f, user, s.teamWriter, s.acl); err != nil {
+	if err := authorizeFileWrite(f, user, s.spaceWriter, s.acl); err != nil {
 		return File{}, err
 	}
 	result := s.db.Model(&f).Updates(map[string]any{"name": n})
@@ -741,19 +678,14 @@ func (s *Store) CreateUploadedFile(owner, parent uuid.UUID, name, storageKey str
 	if err != nil {
 		return uuid.Nil, false, err
 	}
-	p, err := authorizeParentFolder(s, owner, parent, s.teamWriter, s.acl)
+	p, err := authorizeParentFolder(s, owner, parent, s.spaceWriter, s.acl)
 	if err != nil {
 		return uuid.Nil, false, err
-	}
-	// 团队目录下创建的文件继承团队作用域；个人目录保持 personal。
-	scopeType, teamID := "personal", (*uuid.UUID)(nil)
-	if id := teamScope(p); id != nil {
-		scopeType, teamID = "team", id
 	}
 	var created uuid.UUID
 	var newBlob bool
 	err = s.db.Transaction(func(tx *gorm.DB) error {
-		f := File{ID: uuid.New(), Name: n, ParentID: &parent, OwnerID: owner, TeamID: teamID, Type: "file", ScopeType: scopeType}
+		f := File{ID: uuid.New(), Name: n, ParentID: &parent, OwnerID: owner, SpaceID: p.SpaceID, Type: "file"}
 		if err := tx.Create(&f).Error; err != nil {
 			if strings.Contains(strings.ToLower(err.Error()), "unique") {
 				return ErrConflict
@@ -786,8 +718,12 @@ func (s *Store) Copy(user, id, parent uuid.UUID, name string) (File, error) {
 	if source.Type == "folder" {
 		return s.CopyFolder(user, id, parent, name)
 	}
-	parentFile, err := authorizeParentFolder(s, user, parent, s.teamWriter, s.acl)
+	parentFile, err := authorizeParentFolder(s, user, parent, s.spaceWriter, s.acl)
 	if err != nil {
+		return File{}, err
+	}
+	// 跨空间复制校验目标空间配额（超限 413 语义）。
+	if err := s.checkSpaceQuota(parentFile.SpaceID, s.fileSize(source.ID)); err != nil {
 		return File{}, err
 	}
 	if name == "" {
@@ -810,7 +746,7 @@ func (s *Store) Copy(user, id, parent uuid.UUID, name string) (File, error) {
 		if err := tx.Where("id = ?", version.ObjectBlobID).First(&blob).Error; err != nil {
 			return err
 		}
-		copied = File{ID: uuid.New(), Name: n, ParentID: &parent, OwnerID: user, Type: "file", ScopeType: parentFile.ScopeType, TeamID: parentFile.TeamID}
+		copied = File{ID: uuid.New(), Name: n, ParentID: &parent, OwnerID: user, SpaceID: parentFile.SpaceID, Type: "file"}
 		if err := tx.Create(&copied).Error; err != nil {
 			if strings.Contains(strings.ToLower(err.Error()), "unique") {
 				return ErrConflict
@@ -834,11 +770,11 @@ func (s *Store) Copy(user, id, parent uuid.UUID, name string) (File, error) {
 const copyFolderMaxEntries = 2000
 
 // CopyFolder 把 source 目录子树整体复制到 parent 下（name 缺省「<原名> copy」）。
-// 授权同 Copy：源读权限（Get，团队文件为成员读）+ 目标目录写权限
-// （authorizeParentFolder）——跨作用域复制（个人↔团队）时子树继承目标
-// 作用域（与移动的继承语义一致）。文件经 blob ref_count 复用当前版本；
-// 无当前版本的文件跳过。单事务递归；条目数超限（ErrCopyLimit）或目标
-// 深度超限（ErrFolderDepth）时整体回滚；同名冲突返回 ErrConflict。
+// 授权同 Copy：源读权限（Get）+ 目标目录写权限（authorizeParentFolder）——
+// 跨空间复制时子树继承目标空间（与移动的继承语义一致）。文件经 blob
+// ref_count 复用当前版本；无当前版本的文件跳过。单事务递归；条目数超限
+// （ErrCopyLimit）或目标深度超限（ErrFolderDepth）时整体回滚；同名冲突
+// 返回 ErrConflict。
 func (s *Store) CopyFolder(user, id, parent uuid.UUID, name string) (File, error) {
 	source, err := s.Get(user, id)
 	if err != nil {
@@ -847,7 +783,7 @@ func (s *Store) CopyFolder(user, id, parent uuid.UUID, name string) (File, error
 	if source.Type != "folder" || source.IsRoot {
 		return File{}, ErrFolderCopy
 	}
-	parentFile, err := authorizeParentFolder(s, user, parent, s.teamWriter, s.acl)
+	parentFile, err := authorizeParentFolder(s, user, parent, s.spaceWriter, s.acl)
 	if err != nil {
 		return File{}, err
 	}
@@ -857,6 +793,16 @@ func (s *Store) CopyFolder(user, id, parent uuid.UUID, name string) (File, error
 	n, err := NormalizeName(name)
 	if err != nil {
 		return File{}, err
+	}
+	// 跨空间复制校验目标空间配额：源子树全部文件当前版本字节合计。
+	if parentFile.SpaceID != source.SpaceID {
+		if bytes, serr := s.subtreeBytes(source.ID); serr == nil {
+			if err := s.checkSpaceQuota(parentFile.SpaceID, bytes); err != nil {
+				return File{}, err
+			}
+		} else if !errors.Is(serr, ErrNotFound) {
+			return File{}, serr
+		}
 	}
 	targetDepth, derr := s.folderDepthOf(parent)
 	if derr != nil {
@@ -873,7 +819,7 @@ func (s *Store) CopyFolder(user, id, parent uuid.UUID, name string) (File, error
 	count := 0
 	err = s.db.Transaction(func(tx *gorm.DB) error {
 		var cerr error
-		copied, cerr = copyFolderTree(tx, source, parent, n, parentFile.ScopeType, parentFile.TeamID, user, &count)
+		copied, cerr = copyFolderTree(tx, source, parent, n, parentFile.SpaceID, user, &count)
 		return cerr
 	})
 	if err != nil {
@@ -882,15 +828,15 @@ func (s *Store) CopyFolder(user, id, parent uuid.UUID, name string) (File, error
 	return copied, nil
 }
 
-// copyFolderTree 事务内递归复制目录子树：目录行逐层新建（继承目标作用域），
+// copyFolderTree 事务内递归复制目录子树：目录行逐层新建（继承目标空间），
 // 文件行复制当前版本（blob ref_count+1，与单文件 Copy 同语义）；
 // 子项按 lower(name) 排序复制（结果顺序稳定）；软删子项排除。
-func copyFolderTree(tx *gorm.DB, src File, parentID uuid.UUID, name, scopeType string, teamID *uuid.UUID, user uuid.UUID, count *int) (File, error) {
+func copyFolderTree(tx *gorm.DB, src File, parentID uuid.UUID, name string, spaceID uuid.UUID, user uuid.UUID, count *int) (File, error) {
 	*count++
 	if *count > copyFolderMaxEntries {
 		return File{}, ErrCopyLimit
 	}
-	dest := File{ID: uuid.New(), Name: name, ParentID: &parentID, OwnerID: user, Type: "folder", ScopeType: scopeType, TeamID: teamID, Description: src.Description}
+	dest := File{ID: uuid.New(), Name: name, ParentID: &parentID, OwnerID: user, SpaceID: spaceID, Type: "folder", Description: src.Description}
 	if err := tx.Create(&dest).Error; err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
 			return File{}, ErrConflict
@@ -903,7 +849,7 @@ func copyFolderTree(tx *gorm.DB, src File, parentID uuid.UUID, name, scopeType s
 	}
 	for _, ch := range children {
 		if ch.Type == "folder" {
-			if _, err := copyFolderTree(tx, ch, dest.ID, ch.Name, scopeType, teamID, user, count); err != nil {
+			if _, err := copyFolderTree(tx, ch, dest.ID, ch.Name, spaceID, user, count); err != nil {
 				return File{}, err
 			}
 			continue
@@ -911,7 +857,7 @@ func copyFolderTree(tx *gorm.DB, src File, parentID uuid.UUID, name, scopeType s
 		if ch.CurrentVersionID == nil {
 			continue
 		}
-		if _, err := copyFileRow(tx, ch, dest.ID, scopeType, teamID, user); err != nil {
+		if _, err := copyFileRow(tx, ch, dest.ID, spaceID, user); err != nil {
 			return File{}, err
 		}
 	}
@@ -920,7 +866,7 @@ func copyFolderTree(tx *gorm.DB, src File, parentID uuid.UUID, name, scopeType s
 
 // copyFileRow 复制单个文件行（当前版本 + blob 引用计数），与 Store.Copy
 // 的事务体一致；供目录递归复制复用。
-func copyFileRow(tx *gorm.DB, src File, parentID uuid.UUID, scopeType string, teamID *uuid.UUID, user uuid.UUID) (File, error) {
+func copyFileRow(tx *gorm.DB, src File, parentID uuid.UUID, spaceID uuid.UUID, user uuid.UUID) (File, error) {
 	var version FileVersion
 	if err := tx.Where("id = ?", *src.CurrentVersionID).First(&version).Error; err != nil {
 		return File{}, err
@@ -929,7 +875,7 @@ func copyFileRow(tx *gorm.DB, src File, parentID uuid.UUID, scopeType string, te
 	if err := tx.Where("id = ?", version.ObjectBlobID).First(&blob).Error; err != nil {
 		return File{}, err
 	}
-	copied := File{ID: uuid.New(), Name: src.Name, ParentID: &parentID, OwnerID: user, Type: "file", ScopeType: scopeType, TeamID: teamID}
+	copied := File{ID: uuid.New(), Name: src.Name, ParentID: &parentID, OwnerID: user, SpaceID: spaceID, Type: "file"}
 	if err := tx.Create(&copied).Error; err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
 			return File{}, ErrConflict
@@ -952,15 +898,16 @@ func (s *Store) Recent(owner uuid.UUID, limit int) ([]File, error) {
 		limit = 50
 	}
 	var out []File
+	cond, args := readableScopeSQL(owner)
 	err := s.db.
-		Where("owner_id = ? AND deleted_at IS NULL AND last_access_at IS NOT NULL AND current_version_id IS NOT NULL", owner).
+		Where("deleted_at IS NULL AND last_access_at IS NOT NULL AND current_version_id IS NOT NULL AND "+cond, args...).
 		Where("EXISTS (SELECT 1 FROM file_versions fv JOIN object_blobs ob ON ob.id = fv.object_blob_id WHERE fv.id = files.current_version_id AND fv.file_id = files.id AND ob.status = ?)", BlobStatusAvailable).
 		Order("last_access_at DESC, id DESC").Limit(limit).Find(&out).Error
 	return out, err
 }
 
 // Delete 软删除文件（移入回收站；根目录不可删）。
-// 个人文件仅 owner；团队文件走 CanDelete（authorizeTeamDelete，含自定义角色）。
+// 文件行 owner 短路；其余走空间 CanDelete（authorizeSpaceDelete）。
 func (s *Store) Delete(user, id uuid.UUID) error {
 	var f File
 	if err := s.db.Where("id = ? AND deleted_at IS NULL", id).First(&f).Error; err != nil {
@@ -972,7 +919,7 @@ func (s *Store) Delete(user, id uuid.UUID) error {
 	if f.IsRoot {
 		return ErrRoot
 	}
-	if err := authorizeTeamDelete(f, user, s.teamDeleter, s.acl); err != nil {
+	if err := authorizeSpaceDelete(f, user, s.spaceDeleter, s.acl); err != nil {
 		return err
 	}
 	return s.db.Model(&f).Update("deleted_at", gorm.Expr("CURRENT_TIMESTAMP")).Error

@@ -1,8 +1,8 @@
-// 默认打开方式分发（个人 / 团队文件列表共用）：
+// 默认打开方式分发（文件列表页共用）：
 // - 按扩展名给出内置默认 {view, edit} 双方式（查看/编辑各自独立）；
 // - 用户偏好（/me/open-with，按 ext，复合编码 v:<view>[+e:<edit>]）仅覆盖
-//   显式设置的字段，且取值必须对该扩展合法（office 扩展强制 office 等
-//   sanitize 规则保留，杜绝把 docx 二进制送进文本编辑器）；
+//   显式设置的字段；v2.2 起设置页下拉放开为全枚举（用户自选，任何扩展名
+//   可选任何方式），生效合并按枚举白名单校验（历史脏数据回落内置）；
 // - 方式 → 前端路由（新窗口）：/view|edit/by-path 按扩展名自动分发，
 //   用户偏好与「打开方式」子菜单选择经 ?open=<method> 显式覆盖（见
 //   ViewerPage / ByPathPage 的 open 参数分发）。
@@ -247,16 +247,18 @@ export const BUILTIN_OPENWITH_EXTS = [
 ] as const
 
 /**
- * 生效打开方式：内置默认之上合并用户偏好（只覆盖显式设置的字段）；
- * 偏好值必须对该扩展合法（如 .docx 不能设成 text），非法值回落内置
- * ——历史脏数据（OFFICE_EXTS 曾误含 txt 等）在此被清洗。
+ * 生效打开方式：内置默认之上合并用户偏好（只覆盖显式设置的字段）。
+ * v2.2：设置页「打开方式」下拉已放开为全枚举（用户自选，与后端白名单一致
+ * ——任何扩展名可选任何方式），此处同步放开按枚举白名单校验（不再按扩展
+ * 名合法性过滤），仅历史脏数据（枚举外值）回落内置；?open= 显式覆盖与
+ * 右键「打开方式」菜单仍可随时临时切换。
  */
 export function effectiveOpenWith(ext: string, prefs: OpenWithPrefs): OpenWithPair {
   const builtin = builtinOpenWith(ext)
   const pref = prefs[ext]
   if (!pref) return builtin
-  const view = pref.view && viewOptionsFor(ext).includes(pref.view) ? pref.view : builtin.view
-  const edit = pref.edit && editOptionsFor(ext).includes(pref.edit) ? pref.edit : builtin.edit
+  const view = pref.view && ALL_VIEW_METHODS.includes(pref.view) ? pref.view : builtin.view
+  const edit = pref.edit && (ALL_EDIT_METHODS.includes(pref.edit) || pref.edit === 'none') ? pref.edit : builtin.edit
   return { view, edit }
 }
 

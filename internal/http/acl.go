@@ -12,14 +12,14 @@ import (
 	"github.com/docflow/docflow/internal/audit"
 	"github.com/docflow/docflow/internal/auth"
 	"github.com/docflow/docflow/internal/files"
-	"github.com/docflow/docflow/internal/team"
+	"github.com/docflow/docflow/internal/space"
 )
 
 // aclService 抽象路径级 ACL 管理能力（SetACL 注入；生产实现 *acl.Service，
 // 契约测试注入内存实现）。未注入时端点返回 503。
 type aclService interface {
 	// List 返回目录行与当前条目；目录不存在 acl.ErrNotFound、
-	// 非团队作用域 acl.ErrNotTeamFolder。
+	// 非空间作用域 acl.ErrNotSpaceFolder。
 	List(folderID uuid.UUID) (files.File, []acl.Entry, error)
 	// Replace 整体替换条目（校验 + 事务内删旧插新），返回目录行。
 	Replace(folderID uuid.UUID, entries []acl.EntryInput, actor uuid.UUID) (files.File, error)
@@ -32,17 +32,17 @@ func (h *Handler) SetACL(svc aclService) {
 	}
 }
 
-// canManageFolderACL 判定 actor 能否管理目录的 ACL：文件夹所在团队的
-// owner/admin（团队级管理权限，五级内置角色）或系统 admin（其余成员 403）。
-// 团队不存在按 false 处理（调用方前置校验）。
-func (h *Handler) canManageFolderACL(actor, teamID uuid.UUID) bool {
-	if h.teams == nil {
+// canManageFolderACL 判定 actor 能否管理目录的 ACL：文件夹所在空间的
+// owner/admin（空间级管理权限，五级内置角色）或系统 admin（其余成员 403）。
+// 空间不存在按 false 处理（调用方前置校验）。
+func (h *Handler) canManageFolderACL(actor, spaceID uuid.UUID) bool {
+	if h.spaces == nil {
 		return false
 	}
-	if _, err := h.teams.Get(teamID); err != nil {
+	if _, err := h.spaces.Get(spaceID); err != nil {
 		return false
 	}
-	if ok, err := h.teams.CanAdmin(actor, teamID); err == nil && ok {
+	if ok, err := h.spaces.CanAdmin(actor, spaceID); err == nil && ok {
 		return true
 	}
 	if h.roles != nil {
@@ -53,8 +53,8 @@ func (h *Handler) canManageFolderACL(actor, teamID uuid.UUID) bool {
 	return false
 }
 
-// aclError 统一映射 ACL 服务错误：不存在 404（不泄露存在性）、个人空间
-// 目录 400、条目非法/重复 400。
+// aclError 统一映射 ACL 服务错误：不存在 404（不泄露存在性）、非空间
+// 作用域目录 400、条目非法/重复 400。
 func aclError(c *gin.Context, err error) bool {
 	if err == nil {
 		return false
@@ -62,8 +62,8 @@ func aclError(c *gin.Context, err error) bool {
 	switch {
 	case errors.Is(err, acl.ErrNotFound):
 		c.JSON(http.StatusNotFound, gin.H{"error": "folder not found"})
-	case errors.Is(err, acl.ErrNotTeamFolder):
-		c.JSON(http.StatusBadRequest, gin.H{"error": "acl is only available for team folders", "code": "NOT_TEAM_FOLDER"})
+	case errors.Is(err, acl.ErrNotSpaceFolder):
+		c.JSON(http.StatusBadRequest, gin.H{"error": "acl is only available for space folders", "code": "NOT_SPACE_FOLDER"})
 	case errors.Is(err, acl.ErrInvalidEntry), errors.Is(err, acl.ErrDuplicateEntry):
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 	default:
@@ -73,19 +73,19 @@ func aclError(c *gin.Context, err error) bool {
 }
 
 // aclEntryView 序列化条目（附 subject 名称解析，供前端展示）。
-func (h *Handler) aclEntryView(e acl.Entry, folderTeam team.Team) gin.H {
+func (h *Handler) aclEntryView(e acl.Entry, folderSpace space.Space) gin.H {
 	name := ""
 	switch {
 	case e.SubjectType == acl.SubjectUser && h.users != nil:
 		if n, err := h.users.Username(e.SubjectID); err == nil {
 			name = n
 		}
-	case e.SubjectType == acl.SubjectTeam:
-		if e.SubjectID == folderTeam.ID {
-			name = folderTeam.Name
-		} else if h.teams != nil {
-			if t, err := h.teams.Get(e.SubjectID); err == nil {
-				name = t.Name
+	case e.SubjectType == acl.SubjectSpace:
+		if e.SubjectID == folderSpace.ID {
+			name = folderSpace.Name
+		} else if h.spaces != nil {
+			if sp, err := h.spaces.Get(e.SubjectID); err == nil {
+				name = sp.Name
 			}
 		}
 	}
@@ -96,8 +96,8 @@ func (h *Handler) aclEntryView(e acl.Entry, folderTeam team.Team) gin.H {
 }
 
 // getFolderACL GET /api/v1/folders/:id/acl：返回目录的路径级 ACL 条目
-// （含 subject 名称解析）。仅文件夹所在团队 owner 或系统 admin 可读；
-// 个人空间目录 400；非授权 403。
+// （含 subject 名称解析）。仅文件夹所在空间 owner/admin 或系统 admin 可读；
+// 非授权 403。
 func (h *Handler) getFolderACL(c *gin.Context) {
 	if h.acl == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "acl service unavailable"})
@@ -111,18 +111,18 @@ func (h *Handler) getFolderACL(c *gin.Context) {
 	if aclError(c, err) {
 		return
 	}
-	t, err := h.teams.Get(*f.TeamID)
-	if teamError(c, err) {
+	sp, err := h.spaces.Get(f.SpaceID)
+	if spaceError(c, err) {
 		return
 	}
 	actor := userID(c)
-	if !h.canManageFolderACL(actor, t.ID) {
+	if !h.canManageFolderACL(actor, sp.ID) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "not allowed to manage this folder acl"})
 		return
 	}
 	items := make([]gin.H, 0, len(entries))
 	for _, e := range entries {
-		items = append(items, h.aclEntryView(e, t))
+		items = append(items, h.aclEntryView(e, sp))
 	}
 	c.JSON(http.StatusOK, gin.H{"folder_id": f.ID, "entries": items})
 }
@@ -139,7 +139,7 @@ type aclPutRequest struct {
 }
 
 // replaceFolderACL PUT /api/v1/folders/:id/acl：整体替换目录条目数组
-// （空数组即清空）。仅文件夹所在团队 owner 或系统 admin；个人空间目录 400。
+// （空数组即清空）。仅文件夹所在空间 owner/admin 或系统 admin。
 // 审计 acl.update。
 func (h *Handler) replaceFolderACL(c *gin.Context) {
 	if h.acl == nil {
@@ -155,17 +155,17 @@ func (h *Handler) replaceFolderACL(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
 	}
-	// 先读目录校验团队作用域与管理权（Replace 内部会再校验一遍作用域）。
+	// 先读目录校验空间作用域与管理权（Replace 内部会再校验一遍作用域）。
 	f, _, err := h.acl.List(id)
 	if aclError(c, err) {
 		return
 	}
-	t, err := h.teams.Get(*f.TeamID)
-	if teamError(c, err) {
+	sp, err := h.spaces.Get(f.SpaceID)
+	if spaceError(c, err) {
 		return
 	}
 	actor := userID(c)
-	if !h.canManageFolderACL(actor, t.ID) {
+	if !h.canManageFolderACL(actor, sp.ID) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "not allowed to manage this folder acl"})
 		return
 	}
@@ -192,7 +192,7 @@ func (h *Handler) replaceFolderACL(c *gin.Context) {
 	}
 	items := make([]gin.H, 0, len(entries))
 	for _, e := range entries {
-		items = append(items, h.aclEntryView(e, t))
+		items = append(items, h.aclEntryView(e, sp))
 	}
 	c.JSON(http.StatusOK, gin.H{"folder_id": id, "entries": items})
 }
