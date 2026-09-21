@@ -266,3 +266,35 @@ export function effectiveOpenWith(ext: string, prefs: OpenWithPrefs): OpenWithPa
 export function effectiveOpenWithFor(name: string, prefs: OpenWithPrefs): OpenWithPair {
   return effectiveOpenWith(extOf(name), prefs)
 }
+
+/**
+ * 文件名 → 独立编辑器/查看器路由基址（uuid 直链，不携带 by-path 上下文；
+ * 富文本右键「编辑」、文件卡片弹窗「新窗口编辑」等引用场景使用——引用
+ * 节点只有 fileId，无目录面包屑）。调用方自行拼接 `/{fileId}`。
+ * - kind='view' 恒返回 '/view'（ViewerPage 按扩展名自动分发各查看器）；
+ * - kind='edit' 按内置默认编辑方式分发：richtext → /dfdoc、drawio → /drawio、
+ *   excalidraw → /excalidraw、office → /edit、md → /markdown、其余文本 →
+ *   /text 或 /code；不支持编辑的类型回退 '/view'。
+ */
+export function editorRouteFor(name: string, kind: 'view' | 'edit'): string {
+  if (kind === 'view') return '/view'
+  const builtin = builtinOpenWith(extOf(name))
+  switch (builtin.edit) {
+    case 'richtext':
+      return '/dfdoc'
+    case 'drawio':
+      return '/drawio'
+    case 'excalidraw':
+      return '/excalidraw'
+    case 'office':
+      return '/edit'
+    case 'text': {
+      const t = textEditorKindFor(name)
+      if (t === 'markdown') return '/markdown'
+      if (t === 'html' || t === 'css' || t === 'javascript') return '/code'
+      return '/text'
+    }
+    default:
+      return '/view'
+  }
+}

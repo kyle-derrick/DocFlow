@@ -19,8 +19,10 @@ import {
   createSpaceFolder,
   currentUserId,
   deleteFile,
+  fetchFileText,
   getFolderACL,
   getFileMeta,
+  isDfdocFile,
   listFiles,
   listSpaceFiles,
   listSpaces,
@@ -46,6 +48,32 @@ const PERM_LABEL_KEYS: Record<string, MessageKey> = {
   delete: 'permDelete',
   share: 'permShare',
   admin: 'permAdmin',
+}
+
+/**
+ * 扫描 .dfrt/.dfdoc（Tiptap JSON）内容收集引用的 file-id 集合：
+ * docflowEmbed / docflowImage / docflowFileCard 三类引用节点的 attrs.fileId
+ *（创建分享时经 ref_ids 并入 share grants，公开页按文件名解析引用资源）。
+ * 解析失败/无引用返回空数组。
+ */
+function collectDfrtRefIds(text: string): string[] {
+  try {
+    const doc = JSON.parse(text) as Record<string, unknown> | null
+    const ids = new Set<string>()
+    const walk = (node: unknown): void => {
+      if (!node || typeof node !== 'object') return
+      const n = node as { type?: unknown; attrs?: { fileId?: unknown }; content?: unknown[] }
+      if (n.type === 'docflowEmbed' || n.type === 'docflowImage' || n.type === 'docflowFileCard') {
+        const id = n.attrs?.fileId
+        if (typeof id === 'string' && id) ids.add(id)
+      }
+      if (Array.isArray(n.content)) n.content.forEach(walk)
+    }
+    walk(doc)
+    return Array.from(ids)
+  } catch {
+    return []
+  }
 }
 
 /** 路径级 ACL 权限动作清单（不含 admin，与后端 folder ACL 契约一致）。 */
@@ -283,6 +311,9 @@ export default function FilesPage() {
   const [shareBusy, setShareBusy] = useState(false)
   const [shareError, setShareError] = useState('')
   const [copied, setCopied] = useState(false)
+  // v2.7 引用资源：.dfrt/.dfdoc 分享时扫描出的引用 file-id 列表（随创建
+  // 请求并入 share grants；弹窗展示「将包含 N 个引用资源」提示）。
+  const [shareRefs, setShareRefs] = useState<string[]>([])
 
   // 授权用户远程搜索（私有分享）：防抖 + 最少 2 字。
   useEffect(() => {
@@ -375,6 +406,14 @@ export default function FilesPage() {
     setShareResult(null)
     setShareError('')
     setCopied(false)
+    // v2.7 引用资源：.dfrt/.dfdoc 扫描文档 JSON 收集引用 file-id（弹窗提示
+    // 将包含的资源数，创建时并入 share grants）。
+    setShareRefs([])
+    if (item.type === 'file' && isDfdocFile(item.name)) {
+      void fetchFileText(item.id)
+        .then((text) => setShareRefs(collectDfrtRefIds(text)))
+        .catch(() => setShareRefs([]))
+    }
   }
 
   const toggleShareSpace = (spaceId: string) => {
@@ -400,6 +439,7 @@ export default function FilesPage() {
         password: shareVisibility === 'public' ? sharePassword.trim() : undefined,
         watermarkEnabled: shareWatermark,
         watermarkText: shareWatermarkText.trim() || undefined,
+        refIds: shareRefs.length > 0 ? shareRefs : undefined,
       })
       setShareResult(created)
     } catch (err) {
@@ -604,6 +644,11 @@ export default function FilesPage() {
               {shareTarget.type === 'folder' && (
                 <p className="hint share-vis-hint">
                   目录分享：访问者可浏览整个子树，在线预览或下载其中的文件（链接 /s/&lt;token&gt;）。
+                </p>
+              )}
+              {shareRefs.length > 0 && (
+                <p className="hint share-vis-hint">
+                  将包含 {shareRefs.length} 个引用资源（文档内嵌的图片/图表/文件），访问者可直接查看。
                 </p>
               )}
 

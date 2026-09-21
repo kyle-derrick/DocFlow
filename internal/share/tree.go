@@ -15,11 +15,13 @@ var ErrTreeUnavailable = errors.New("share tree is not available")
 
 // TreeSource 抽象目录分享树所需的子树解析与清单（生产实现 *files.Store）：
 // ResolveSubpath/ListFolderChildren 不做用户鉴权（匿名访问的授权由分享
-// 有效性 + 子树约束保证），CurrentVersion 以分享 owner 身份读取。
+// 有效性 + 子树约束保证），CurrentVersion 以分享 owner 身份读取；
+// CurrentBlobs 为批量口径（目录清单 size/mime 聚合，消除逐文件 N+1）。
 type TreeSource interface {
 	ResolveSubpath(base files.File, path string) (files.File, []files.File, error)
 	ListFolderChildren(folderID uuid.UUID, limit int) ([]files.File, error)
 	CurrentVersion(owner, fileID uuid.UUID) (files.FileVersion, files.ObjectBlob, error)
+	CurrentBlobs(ids []uuid.UUID) map[uuid.UUID]files.ObjectBlob
 }
 
 var _ TreeSource = (*files.Store)(nil)
@@ -94,6 +96,12 @@ func (s *Service) ResolveTree(token, path string) (TreeResult, error) {
 			errors.Is(err, files.ErrFolderDepth),
 			// 子树内不存在/断链/穿越段：统一 share.ErrNotFound，不泄露细节。
 			errors.Is(err, files.ErrNotFound):
+			// 富文本引用资源兜底（refs，见 AttachReferenceFiles）：单文件分享的
+			// 引用不在分享根子树内（如 assets/ 目录与文档同级），按路径末段
+			// 文件名在 share_files 条目中匹配。仅文件条目可命中。
+			if rf, rerr := s.resolveRefByName(sh.Share, path); rerr == nil {
+				return rf, nil
+			}
 			return TreeResult{}, ErrNotFound
 		}
 		return TreeResult{}, err
@@ -116,12 +124,11 @@ func (s *Service) resolveBundleTree(sh Share, path string) (TreeResult, error) {
 	}
 	if path == "" {
 		out := TreeResult{Share: sh, Folder: true, Path: "", Entries: make([]TreeEntry, 0, len(items))}
+		blobs := s.tree.CurrentBlobs(bundleFileIDs(items))
 		for _, it := range items {
 			entry := TreeEntry{Name: it.Name, Type: it.Type, Path: it.Name}
-			if it.Type == "file" {
-				if _, blob, cerr := s.tree.CurrentVersion(sh.OwnerID, it.ID); cerr == nil {
-					entry.Size, entry.MimeType = blob.Size, blob.MimeType
-				}
+			if b, ok := blobs[it.ID]; ok {
+				entry.Size, entry.MimeType = b.Size, b.MimeType
 			}
 			out.Entries = append(out.Entries, entry)
 		}
@@ -162,6 +169,37 @@ func (s *Service) resolveBundleTree(sh Share, path string) (TreeResult, error) {
 	return TreeResult{}, ErrNotFound
 }
 
+// resolveRefByName 引用资源兜底解析：path 末段文件名与 share_files 条目
+//（refs；打包分享条目为锚点子树解析所覆盖，不会走到这里）按名匹配，命中
+// 返回该文件条目（Path 保持请求的相对路径，前端 raw URL 拼接不受影响）。
+// 多条目同名取首个；目录条目与已删除/不可读条目跳过（BundleItems 已过滤）。
+func (s *Service) resolveRefByName(sh Share, path string) (TreeResult, error) {
+	if s.tree == nil {
+		return TreeResult{}, ErrTreeUnavailable
+	}
+	segments := strings.Split(path, "/")
+	base := segments[len(segments)-1]
+	if base == "" {
+		return TreeResult{}, ErrNotFound
+	}
+	items, err := s.BundleItems(sh)
+	if err != nil {
+		return TreeResult{}, err
+	}
+	for _, it := range items {
+		if it.Type != "file" || it.Name != base {
+			continue
+		}
+		blob := s.availableBlob(sh.OwnerID, it.ID)
+		if blob == nil {
+			continue
+		}
+		f := it
+		return TreeResult{Share: sh, Path: path, File: &f, Blob: blob}, nil
+	}
+	return TreeResult{}, ErrNotFound
+}
+
 // folderResult 构造目录命中结果（baseRel 为目录相对分享根的路径，子项
 // Path 以其为前缀）。
 func (s *Service) folderResult(sh Share, folder files.File, baseRel string) (TreeResult, error) {
@@ -169,20 +207,43 @@ func (s *Service) folderResult(sh Share, folder files.File, baseRel string) (Tre
 	if err != nil {
 		return TreeResult{}, err
 	}
+	// 子文件 size/mime 批量取当前版本 blob（单条 JOIN，原逐文件
+	// CurrentVersion 为 N+1：每文件 Get+version+blob 3 次查询）。
+	blobs := s.tree.CurrentBlobs(childFileIDs(entries))
 	out := TreeResult{Share: sh, Folder: true, Path: baseRel, Entries: make([]TreeEntry, 0, len(entries)), File: &folder}
 	for _, child := range entries {
 		entry := TreeEntry{Name: child.Name, Type: child.Type, Path: child.Name}
 		if baseRel != "" {
 			entry.Path = baseRel + "/" + child.Name
 		}
-		if child.Type == "file" {
-			if _, blob, cerr := s.tree.CurrentVersion(sh.OwnerID, child.ID); cerr == nil {
-				entry.Size, entry.MimeType = blob.Size, blob.MimeType
-			}
+		if b, ok := blobs[child.ID]; ok {
+			entry.Size, entry.MimeType = b.Size, b.MimeType
 		}
 		out.Entries = append(out.Entries, entry)
 	}
 	return out, nil
+}
+
+// childFileIDs 提取目录清单中的文件条目 ID（folder 类型不查版本）。
+func childFileIDs(entries []files.File) []uuid.UUID {
+	ids := make([]uuid.UUID, 0, len(entries))
+	for _, e := range entries {
+		if e.Type == "file" {
+			ids = append(ids, e.ID)
+		}
+	}
+	return ids
+}
+
+// bundleFileIDs 提取打包分享条目中的文件 ID。
+func bundleFileIDs(items []files.File) []uuid.UUID {
+	ids := make([]uuid.UUID, 0, len(items))
+	for _, it := range items {
+		if it.Type == "file" {
+			ids = append(ids, it.ID)
+		}
+	}
+	return ids
 }
 
 // relativePath 由解析链（chain[0]=分享根）构造相对路径。

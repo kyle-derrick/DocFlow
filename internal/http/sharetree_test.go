@@ -124,6 +124,16 @@ func (f *fakeShareFiles) ListFolderChildren(folderID uuid.UUID, limit int) ([]fi
 	return out, nil
 }
 
+func (f *fakeShareFiles) CurrentBlobs(ids []uuid.UUID) map[uuid.UUID]files.ObjectBlob {
+	out := make(map[uuid.UUID]files.ObjectBlob, len(ids))
+	for _, id := range ids {
+		if _, ok := f.versions[id]; ok {
+			out[id] = f.blobs[id]
+		}
+	}
+	return out
+}
+
 type shareTreeEnv struct {
 	h        *Handler
 	router   *gin.Engine

@@ -42,8 +42,14 @@ import (
 )
 
 const (
-	// DefaultTokenTTL 编辑配置 token 与下载 token 的默认有效期。
+	// DefaultTokenTTL 编辑配置 token 的默认有效期（编辑器初始化即消费）。
 	DefaultTokenTTL = 5 * time.Minute
+	// DefaultDownloadTokenTTL 回源下载 token 的默认有效期（24h）。
+	// 版本内容不可变且 token 绑定 file_id+version_id，长 TTL 安全；DS 在
+	// 保存回调后与 websocket 重连时会重新拉取 document.url，5 分钟过期的
+	// 下载 token 会使长编辑会话（尤其 PDF，每次保存/重连都重取源文件）
+	// 中途 401 → 编辑器报「文件版本已更改」并反复重载（死循环根因）。
+	DefaultDownloadTokenTTL = 24 * time.Hour
 	// DefaultDownloadMaxBytes 回调保存单文件的默认大小上限（接线时可覆盖）。
 	DefaultDownloadMaxBytes = 1 << 30
 	// downloadAudience 下载 token 的用途声明，防止与编辑配置等其他 token 混用。
@@ -212,6 +218,24 @@ func fileExt(name string) string {
 	return ""
 }
 
+// documentFileMeta 归一化 document.fileType 与 document.title（对齐
+// OnlyOffice 官方规则：fileType = 纯小写扩展名，title 须携带与之一致的
+// 后缀，否则 DocumentServer 控制台报警「fileType 与 title 不匹配」）：
+//   - 无扩展名：fileType 回退 txt、title 追加 .txt（空 fileType 同样触发
+//     DS 告警；该类文件本就只能以文本口径查看）；
+//   - 大小写后缀（如 X.PDF）：fileType 归一为 pdf，title 后缀同步改写为
+//     小写，保持两者一致（download URL 仍用原始 f.Name，路径校验不受影响）。
+func documentFileMeta(name string) (title, fileType string) {
+	ext := fileExt(name)
+	if ext == "" {
+		return name + ".txt", "txt"
+	}
+	if i := strings.LastIndexByte(name, '.'); name[i+1:] != ext {
+		return name[:i+1] + ext, ext
+	}
+	return name, ext
+}
+
 // documentType 按扩展名映射 ONLYOFFICE 文档类型（默认 word，含 PDF 查看）。
 func documentType(name string) string {
 	switch fileExt(name) {
@@ -290,11 +314,12 @@ func (s *Service) NewSessionConfig(user, fileID uuid.UUID, opts SessionOptions) 
 	if err != nil {
 		return nil, err
 	}
+	title, ftype := documentFileMeta(f.Name)
 	base := s.cfg.DownloadBase
 	document := map[string]any{
-		"fileType": fileExt(f.Name),
+		"fileType": ftype,
 		"key":      documentKey(fileID, version.ID),
-		"title":    f.Name,
+		"title":    title,
 		"url": fmt.Sprintf("%s/api/v1/onlyoffice/download/%s/%s?v=%s&token=%s",
 			base, fileID, url.PathEscape(f.Name), version.ID, url.QueryEscape(token)),
 		"permissions": map[string]any{"edit": canEdit, "print": true, "download": true},
@@ -338,11 +363,12 @@ func (s *Service) NewShareViewConfig(f files.File, version files.FileVersion, op
 	if err != nil {
 		return nil, err
 	}
+	title, ftype := documentFileMeta(f.Name)
 	base := s.cfg.DownloadBase
 	document := map[string]any{
-		"fileType": fileExt(f.Name),
+		"fileType": ftype,
 		"key":      documentKey(f.ID, version.ID),
-		"title":    f.Name,
+		"title":    title,
 		"url": fmt.Sprintf("%s/api/v1/onlyoffice/download/%s/%s?v=%s&token=%s",
 			base, f.ID, url.PathEscape(f.Name), version.ID, url.QueryEscape(token)),
 		"permissions": map[string]any{"edit": false, "print": opts.AllowDownload, "download": opts.AllowDownload},
@@ -418,8 +444,9 @@ func (s *Service) signConfig(config map[string]any) (string, error) {
 	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(s.cfg.JWTSecret))
 }
 
-// signDownloadToken 签发短期下载 token：sub=file_id、v=version_id、
-// aud=onlyoffice-download、exp=now+TTL。
+// signDownloadToken 签发下载 token：sub=file_id、v=version_id、
+// aud=onlyoffice-download、exp=now+DownloadTokenTTL（版本内容不可变，
+// 长有效期支撑 DS 会话中途重取，见 DefaultDownloadTokenTTL 注释）。
 func (s *Service) signDownloadToken(fileID, versionID uuid.UUID) (string, error) {
 	now := s.now()
 	claims := jwt.MapClaims{
@@ -427,7 +454,7 @@ func (s *Service) signDownloadToken(fileID, versionID uuid.UUID) (string, error)
 		"v":   versionID.String(),
 		"aud": downloadAudience,
 		"iat": now.Unix(),
-		"exp": now.Add(s.cfg.TokenTTL).Unix(),
+		"exp": now.Add(DefaultDownloadTokenTTL).Unix(),
 	}
 	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(s.cfg.JWTSecret))
 }

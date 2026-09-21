@@ -404,6 +404,71 @@ func (s *Store) CurrentVersion(owner, fileID uuid.UUID) (FileVersion, ObjectBlob
 	return version, blob, nil
 }
 
+// GetFileNamesForOwner 批量返回一组文件名（文件 ID → name）：分享列表等
+// 展示场景聚合用。仅 SELECT id+name：不触发 Get 的 authorizeFileAccess 与
+// last_access_at 更新副作用（列表展示不应污染「最近访问」），owner 过滤
+// 与 Get 的行归属语义一致；软删除与不存在的 id 不出现在返回 map。
+func (s *Store) GetFileNamesForOwner(owner uuid.UUID, ids []uuid.UUID) map[uuid.UUID]string {
+	out := make(map[uuid.UUID]string, len(ids))
+	if len(ids) == 0 {
+		return out
+	}
+	var rows []struct {
+		ID   uuid.UUID
+		Name string
+	}
+	if err := s.db.Model(&File{}).
+		Select("id, name").
+		Where("id IN ? AND owner_id = ? AND deleted_at IS NULL", ids, owner).
+		Scan(&rows).Error; err != nil {
+		return out
+	}
+	for _, r := range rows {
+		out[r.ID] = r.Name
+	}
+	return out
+}
+
+// CurrentBlobs 批量返回一组文件当前版本的 ObjectBlob（文件 ID → blob）：
+// 目录分享树清单等 size/mime 聚合场景使用，单条 JOIN 查询避免逐文件
+// 3 次查询的 N+1（200 条目录 = 600 次查询 → 1 次）。
+// 结果仅含「文件存在、未软删、有当前版本、blob 存在」的项；缺失的 id
+// 不出现在返回 map（调用方按缺省 0/空处理，与单条 CurrentVersion 失败
+// 静默的口径一致）。不做行级鉴权——调用方（分享树）以分享有效性保证
+// 授权，与 CurrentVersion 经 s.Get 的 owner 过滤等价场景。
+func (s *Store) CurrentBlobs(ids []uuid.UUID) map[uuid.UUID]ObjectBlob {
+	out := make(map[uuid.UUID]ObjectBlob, len(ids))
+	if len(ids) == 0 {
+		return out
+	}
+	var rows []struct {
+		FileID     uuid.UUID
+		ID         uuid.UUID
+		SHA256     string
+		StorageKey string
+		Size       int64
+		MimeType   string
+		Status     string
+	}
+	err := s.db.Raw(`
+		SELECT f.id AS file_id, ob.id, ob.sha256, ob.storage_key,
+		       ob.size, ob.mime_type, ob.status
+		FROM files f
+		JOIN file_versions fv ON fv.id = f.current_version_id
+		JOIN object_blobs ob ON ob.id = fv.object_blob_id
+		WHERE f.id IN ? AND f.deleted_at IS NULL`, ids).Scan(&rows).Error
+	if err != nil {
+		return out
+	}
+	for _, r := range rows {
+		out[r.FileID] = ObjectBlob{
+			ID: r.ID, SHA256: r.SHA256, StorageKey: r.StorageKey,
+			Size: r.Size, MimeType: r.MimeType, Status: r.Status,
+		}
+	}
+	return out
+}
+
 // IncrementDownloadCount 原子递增下载计数；user 须对文件有读权限
 // （owner 或空间在册成员，经 authorizeFileAccess 判定），且文件未删除时生效。
 func (s *Store) IncrementDownloadCount(user, fileID uuid.UUID) error {

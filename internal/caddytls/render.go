@@ -104,13 +104,22 @@ func Render(mode Mode, domain string) string {
 
 	handle_path /drawio/* {
 		root * /srv/drawio
+		header Cache-Control "public, max-age=86400"
 		try_files {path} /index.html
 		file_server
 	}
 
+	# /assets/* 为带内容哈希的前端产物，永久缓存；其余 SPA 路径（html/
+	# sw.js/manifest）发版即变，no-cache 每次验证。
+	handle /assets/* {
+		root * /srv/frontend
+		header Cache-Control "public, max-age=31536000, immutable"
+		file_server
+	}
 	handle {
 		root * /srv/frontend
 		try_files {path} /index.html
+		header Cache-Control "no-cache"
 		file_server
 	}
 

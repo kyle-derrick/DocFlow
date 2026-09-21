@@ -1,14 +1,15 @@
-import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { isValidElement } from 'react'
-import { Button, Segmented } from 'antd'
+import { App as AntdApp, Button, Segmented } from 'antd'
 import ReactMarkdown from 'react-markdown'
 import type { Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { useParams, useSearchParams } from 'react-router-dom'
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { fetchFileText, getFileMeta, uploadFileVersion } from '../api'
 import MarkmapDiagram from '../components/MarkmapDiagram'
 import MermaidDiagram from '../components/MermaidDiagram'
+import { closeEditorWithFallback, safeReturnTo } from '../editorNavigation'
 import { MessageKey, t, useLocale } from '../i18n'
 import { useColorMode } from '../theme'
 
@@ -107,6 +108,9 @@ type MdViewMode = 'edit' | 'split' | 'preview'
 
 const MD_VIEW_KEY = 'docflow.mdViewMode'
 
+/** md 分栏比例（百分比，编辑侧宽度；localStorage 记住，默认 50）。 */
+const MD_SPLIT_KEY = 'docflow.mdSplitRatio'
+
 function loadMdViewMode(): MdViewMode {
   const v = window.localStorage.getItem(MD_VIEW_KEY)
   return v === 'edit' || v === 'split' || v === 'preview' ? v : 'split'
@@ -118,6 +122,11 @@ function saveMdViewMode(mode: MdViewMode): void {
   } catch {
     /* ignore */
   }
+}
+
+function loadSplitRatio(): number {
+  const v = Number(window.localStorage.getItem(MD_SPLIT_KEY))
+  return Number.isFinite(v) && v >= 20 && v <= 80 ? v : 50
 }
 
 /** 源码只读查看（txt/css/js 等纯文本类）：等宽 <pre> 直接渲染（自动换行、
@@ -142,6 +151,9 @@ export default function TextEditorPage({
   // by-path 路由经 prop 传入 resolve 得到的 file_id；缺省回退路由参数。
   const fileId = fileIdProp ?? routeFileId
   const [searchParams] = useSearchParams()
+  const navigate = useNavigate()
+  const returnTo = safeReturnTo(searchParams.get('returnTo'))
+  const { modal: antdModal } = AntdApp.useApp()
   const viewMode = mode === 'view' || searchParams.get('mode') === 'view'
   const requestedKind = searchParams.get('kind')
   const editorKind: EditorKind = requestedKind === 'html' || requestedKind === 'css' || requestedKind === 'javascript'
@@ -157,13 +169,53 @@ export default function TextEditorPage({
   const [preview, setPreview] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  const [dirty, setDirty] = useState(false)
   const dirtyRef = useRef(false)
   // markdown 视图模式（编辑/分栏/预览，默认分栏，localStorage 记住）。
   const [mdView, setMdView] = useState<MdViewMode>(loadMdViewMode)
+  // md 分栏比例（编辑侧宽度百分比，拖拽分隔条调整，localStorage 记住）。
+  const [splitRatio, setSplitRatio] = useState(loadSplitRatio)
   // 分栏同步滚动：Monaco 实例与预览容器百分比互推（lock 防回环）。
-  const monacoRef = useRef<{ getScrollTop(): number; setScrollTop(v: number): void; getScrollHeight(): number; getHeight(): number } | null>(null)
+  // 注意：IStandaloneCodeEditor 无 getHeight()（曾按此调用在分栏滚动时抛
+  // TypeError: k.getHeight is not a function），视口高度经 getLayoutInfo().height。
+  const monacoRef = useRef<{ getScrollTop(): number; setScrollTop(v: number): void; getScrollHeight(): number; getLayoutInfo(): { height: number } } | null>(null)
   const previewScrollRef = useRef<HTMLDivElement | null>(null)
   const syncLockRef = useRef(false)
+  // 分栏拖拽：containerRef 记录分栏容器（比例按容器宽度换算）。
+  const splitHostRef = useRef<HTMLDivElement | null>(null)
+
+  const markDirty = () => {
+    dirtyRef.current = true
+    setDirty(true)
+    setNotice('')
+  }
+
+  // 分栏拖拽：mousedown 分隔条 → mousemove 按容器宽度换算比例（20-80%）→
+  // mouseup 持久化 localStorage（监听器命令式挂载，拖拽期间持续有效）。
+  const startSplitDrag = (e: React.MouseEvent) => {
+    if (mdView !== 'split') return
+    e.preventDefault()
+    const host = splitHostRef.current
+    if (!host) return
+    let latest = splitRatio
+    const onMove = (ev: MouseEvent) => {
+      const rect = host.getBoundingClientRect()
+      const ratio = Math.round(((ev.clientX - rect.left) / Math.max(1, rect.width)) * 100)
+      latest = Math.min(80, Math.max(20, ratio))
+      setSplitRatio(latest)
+    }
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+      try {
+        window.localStorage.setItem(MD_SPLIT_KEY, String(latest))
+      } catch {
+        /* ignore */
+      }
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }
 
   const changeMdView = (mode: MdViewMode) => {
     setMdView(mode)
@@ -177,7 +229,7 @@ export default function TextEditorPage({
     const ed = monacoRef.current
     const pv = previewScrollRef.current
     if (!ed || !pv || syncLockRef.current) return
-    const edMax = Math.max(1, ed.getScrollHeight() - ed.getHeight())
+    const edMax = Math.max(1, ed.getScrollHeight() - ed.getLayoutInfo().height)
     const ratio = Math.min(1, ed.getScrollTop() / edMax)
     syncLockRef.current = true
     pv.scrollTop = ratio * Math.max(1, pv.scrollHeight - pv.clientHeight)
@@ -193,7 +245,7 @@ export default function TextEditorPage({
     const pvMax = Math.max(1, pv.scrollHeight - pv.clientHeight)
     const ratio = Math.min(1, pv.scrollTop / pvMax)
     syncLockRef.current = true
-    ed.setScrollTop(ratio * Math.max(1, ed.getScrollHeight() - ed.getHeight()))
+    ed.setScrollTop(ratio * Math.max(1, ed.getScrollHeight() - ed.getLayoutInfo().height))
     window.requestAnimationFrame(() => {
       syncLockRef.current = false
     })
@@ -209,6 +261,7 @@ export default function TextEditorPage({
         setName(meta.name)
         setText(content)
         dirtyRef.current = false
+        setDirty(false)
       })
       .catch((err) => {
         if (alive) setError(err instanceof Error ? err.message : msg('loadFailed'))
@@ -220,6 +273,58 @@ export default function TextEditorPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fileId])
 
+  const save = useCallback(async () => {
+    if (saving) return
+    setSaving(true)
+    setError('')
+    setNotice('')
+    try {
+      await uploadFileVersion(new File([text], name, { type: mimeTypes[kind] }), fileId, () => {})
+      dirtyRef.current = false
+      setDirty(false)
+      setNotice(msg('saved'))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : msg('saveFailed'))
+    } finally {
+      setSaving(false)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [saving, text, name, fileId, kind])
+
+  // Ctrl/Cmd+S 保存（编辑态）：拦截浏览器默认「保存网页」。
+  useEffect(() => {
+    if (viewMode) return
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+        e.preventDefault()
+        void save()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [save, viewMode])
+
+  // 返回（退出）：与其他编辑页一致的未保存二次确认 + beforeunload 兜底。
+  const exitWithConfirm = () => {
+    if (!dirtyRef.current) {
+      closeEditorWithFallback(navigate, returnTo)
+      return
+    }
+    antdModal.confirm({
+      title: locale === 'zh-CN' ? '有未保存的修改' : 'Unsaved changes',
+      content: locale === 'zh-CN'
+        ? '文档存在尚未保存的修改，直接退出可能丢失。仍要退出吗？'
+        : 'The document has unsaved changes. Exit anyway?',
+      okText: locale === 'zh-CN' ? '仍然退出' : 'Exit anyway',
+      okButtonProps: { danger: true },
+      cancelText: locale === 'zh-CN' ? '继续编辑' : 'Keep editing',
+      onOk: () => {
+        dirtyRef.current = false
+        closeEditorWithFallback(navigate, returnTo)
+      },
+    })
+  }
+
   useEffect(() => {
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
       if (!dirtyRef.current) return
@@ -229,22 +334,6 @@ export default function TextEditorPage({
     window.addEventListener('beforeunload', onBeforeUnload)
     return () => window.removeEventListener('beforeunload', onBeforeUnload)
   }, [])
-
-  const save = async () => {
-    if (saving) return
-    setSaving(true)
-    setError('')
-    setNotice('')
-    try {
-      await uploadFileVersion(new File([text], name, { type: mimeTypes[kind] }), fileId, () => {})
-      dirtyRef.current = false
-      setNotice(msg('saved'))
-    } catch (err) {
-      setError(err instanceof Error ? err.message : msg('saveFailed'))
-    } finally {
-      setSaving(false)
-    }
-  }
 
   if (viewMode) return (
     <main className="text-editor-page viewer-only">
@@ -259,9 +348,17 @@ export default function TextEditorPage({
   return (
     <main className="text-editor-page">
       <header className="text-editor-head">
-        <div>
-          <h1>{isMarkdown ? msg('markdownEditor') : `${name.split('.').pop()?.toUpperCase() ?? '文本'} 编辑器`}</h1>
-          <div className="muted">{name}</div>
+        <div className="text-editor-head-title">
+          <div className="text-editor-back">
+            <Button type="text" size="small" onClick={exitWithConfirm}>{msg('back')}</Button>
+          </div>
+          <div>
+            <h1>{isMarkdown ? msg('markdownEditor') : `${name.split('.').pop()?.toUpperCase() ?? '文本'} 编辑器`}</h1>
+            <div className="muted">
+              {name}
+              {dirty && <span className="badge uploading text-editor-dirty-badge">{locale === 'zh-CN' ? '未保存' : 'Unsaved'}</span>}
+            </div>
+          </div>
         </div>
         <div className="editor-head-actions">
           {/* markdown：视图切换（编辑/分栏/预览，默认分栏，localStorage 记住）。 */}
@@ -296,8 +393,9 @@ export default function TextEditorPage({
             <MarkdownViewer source={text} />
           </div>
         ) : mdView === 'split' ? (
-          <div className="md-split">
-            {/* 分栏：左源码（Monaco）右预览，百分比同步滚动。 */}
+          <div className="md-split md-split-draggable" ref={splitHostRef} style={{ gridTemplateColumns: `minmax(0, ${splitRatio}fr) 6px minmax(0, ${100 - splitRatio}fr)` }}>
+            {/* 分栏：左源码（Monaco）右预览，百分比同步滚动；中间分隔条可拖拽
+                调整比例（20-80%，localStorage 记住）。 */}
             <div className="md-split-editor">
               <Suspense fallback={<div className="text-editor-state">{msg('loading')}</div>}>
                 <MonacoEditor
@@ -311,12 +409,18 @@ export default function TextEditorPage({
                   }}
                   onChange={(value) => {
                     setText(value ?? '')
-                    setNotice('')
-                    dirtyRef.current = true
+                    markDirty()
                   }}
                 />
               </Suspense>
             </div>
+            <div
+              className="md-split-divider"
+              role="separator"
+              aria-orientation="vertical"
+              title={locale === 'zh-CN' ? '拖拽调整分栏比例' : 'Drag to resize'}
+              onMouseDown={startSplitDrag}
+            />
             <div className="md-split-preview" ref={previewScrollRef} onScroll={syncScrollToEditor}>
               <MarkdownViewer source={text} />
             </div>
@@ -331,8 +435,7 @@ export default function TextEditorPage({
                 options={monacoOptions(false)}
                 onChange={(value) => {
                   setText(value ?? '')
-                  setNotice('')
-                  dirtyRef.current = true
+                  markDirty()
                 }}
               />
             </Suspense>
@@ -350,8 +453,7 @@ export default function TextEditorPage({
               options={monacoOptions(false)}
               onChange={(value) => {
                 setText(value ?? '')
-                setNotice('')
-                dirtyRef.current = true
+                markDirty()
               }}
             />
           </Suspense>

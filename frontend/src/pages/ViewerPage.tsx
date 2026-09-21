@@ -258,6 +258,27 @@ function RawSourceViewer({ fileId }: { fileId: string }) {
   return <main className="text-editor-page viewer-only"><pre className="preview-text">{text}</pre></main>
 }
 
+/**
+ * 按文件名/扩展名分发的编辑器组件（v2.7 弹窗内编辑复用）：与
+ * FileViewerDispatch 同口径的编辑分发——office → EditorPage（弹窗内嵌
+ * OnlyOffice，二次初始化已修：全新 placeholder + api.js 常驻）；drawio →
+ * DrawioPage 编辑；excalidraw → ExcalidrawPage 编辑；.dfrt/.dfdoc →
+ * DfdocEditorPage；md 家族 → TextEditorPage(markdown)；css/js → code；
+ * 其余文本 → TextEditorPage(text)。不支持编辑的类型回退查看。
+ */
+export function FileEditorDispatch({ fileId, name }: { fileId: string; name: string }) {
+  const lower = name.toLowerCase()
+  if (isOfficeFile(lower)) return <EditorPage mode="edit" fileId={fileId} />
+  if (isDrawioFile(lower)) return <DrawioPage mode="edit" fileId={fileId} />
+  if (isExcalidrawFile(lower)) return <ExcalidrawPage mode="edit" fileId={fileId} />
+  if (isDfdocFile(lower)) return <DfdocEditorPage mode="edit" fileId={fileId} />
+  if (lower.endsWith('.md') || lower.endsWith('.markdown')) return <TextEditorPage kind="markdown" mode="edit" fileId={fileId} />
+  if (lower.endsWith('.css') || lower.endsWith('.js') || lower.endsWith('.mjs') || lower.endsWith('.json')) {
+    return <TextEditorPage kind={lower.endsWith('.css') ? 'css' : 'javascript'} mode="edit" fileId={fileId} />
+  }
+  return <TextEditorPage kind="text" mode="edit" fileId={fileId} />
+}
+
 export default function ViewerPage() {
   const { fileId = '' } = useParams()
   const [searchParams] = useSearchParams()

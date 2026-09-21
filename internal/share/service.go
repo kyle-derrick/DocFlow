@@ -683,6 +683,45 @@ func (s *Service) BundleItems(sh Share) ([]files.File, error) {
 	return out, nil
 }
 
+// AttachReferenceFiles 把富文本文档引用的资源附加为分享的可见 grant 条目
+//（share_files，与打包分享同一张表；单文件分享亦支持）：逐条要求 owner 可读
+// 且未删除、条目本身须为文件；不可读/已删的越界引用静默跳过（公开页渲染
+// 占位）。已存在的条目去重跳过。返回实际新增条目数；持久化失败返回错误
+//（调用方决定是否吞掉——附加资源失败不应阻断分享本身）。
+func (s *Service) AttachReferenceFiles(sh Share, owner uuid.UUID, fileIDs []uuid.UUID) (int, error) {
+	if len(fileIDs) == 0 || sh.ID == uuid.Nil {
+		return 0, nil
+	}
+	existing, err := s.repo.ListShareFileIDs(sh.ID)
+	if err != nil {
+		return 0, err
+	}
+	seen := make(map[uuid.UUID]struct{}, len(existing)+len(fileIDs))
+	for _, id := range existing {
+		seen[id] = struct{}{}
+	}
+	seen[sh.FileID] = struct{}{} // 分享根自身不重复附加
+	added := make([]uuid.UUID, 0, len(fileIDs))
+	for _, id := range fileIDs {
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		f, ferr := s.files.Get(owner, id)
+		if ferr != nil || f.DeletedAt != nil || f.Type != "file" {
+			continue
+		}
+		seen[id] = struct{}{}
+		added = append(added, id)
+	}
+	if len(added) == 0 {
+		return 0, nil
+	}
+	if err := s.repo.AddShareFiles(sh.ID, added, s.now()); err != nil {
+		return 0, err
+	}
+	return len(added), nil
+}
+
 // CreatePrivate 为 owner 名下文件创建私有分享：不生成公开 token（token_hash 为空），
 // 访问仅限 share_users 显式授权用户与 share_spaces 授权空间的成员。
 // userIds/spaceIds 自动去重；私有分享不受密码影响（显式传入密码返回错误）。
@@ -948,7 +987,29 @@ func (s *Service) ListWithFileNames(owner uuid.UUID, limit int) ([]ShareWithFile
 	if err != nil {
 		return nil, err
 	}
+	return s.withFileNames(owner, shares), nil
+}
+
+// withFileNames 为分享行批量补齐关联文件名：*files.Store 实现
+// GetFileNamesForOwner 时走单条 IN 查询（每页一次）；测试 fake 未实现时
+// 回退逐条 Get（保持原行为）。注意不能统一走 Get——它会更新
+// last_access_at，列表展示将污染「最近访问」。
+func (s *Service) withFileNames(owner uuid.UUID, shares []Share) []ShareWithFile {
 	out := make([]ShareWithFile, 0, len(shares))
+	if bs, ok := s.files.(interface {
+		GetFileNamesForOwner(owner uuid.UUID, ids []uuid.UUID) map[uuid.UUID]string
+	}); ok {
+		ids := make([]uuid.UUID, 0, len(shares))
+		for _, sh := range shares {
+			ids = append(ids, sh.FileID)
+		}
+		names := bs.GetFileNamesForOwner(owner, ids)
+		for _, sh := range shares {
+			item := ShareWithFile{Share: sh, FileName: names[sh.FileID]}
+			out = append(out, item)
+		}
+		return out
+	}
 	for _, sh := range shares {
 		item := ShareWithFile{Share: sh}
 		if f, ferr := s.files.Get(sh.OwnerID, sh.FileID); ferr == nil {
@@ -956,7 +1017,7 @@ func (s *Service) ListWithFileNames(owner uuid.UUID, limit int) ([]ShareWithFile
 		}
 		out = append(out, item)
 	}
-	return out, nil
+	return out
 }
 
 // ListPage 分页返回 owner 的分享并附关联文件名（created_at 倒序），支持
@@ -970,15 +1031,7 @@ func (s *Service) ListPage(owner uuid.UUID, f OwnerListFilter, limit, offset int
 	if err != nil {
 		return nil, 0, err
 	}
-	out := make([]ShareWithFile, 0, len(shares))
-	for _, sh := range shares {
-		item := ShareWithFile{Share: sh}
-		if f, ferr := s.files.Get(sh.OwnerID, sh.FileID); ferr == nil {
-			item.FileName = f.Name
-		}
-		out = append(out, item)
-	}
-	return out, total, nil
+	return s.withFileNames(owner, shares), total, nil
 }
 
 // SharedWithMeItem 是「与我共享」列表条目：有效私有分享 + 文件元数据 + 分享者用户名。

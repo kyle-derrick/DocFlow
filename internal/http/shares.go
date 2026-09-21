@@ -30,6 +30,7 @@ type shareRequest struct {
 	WatermarkEnabled *bool    `json:"watermark_enabled"` // 缺省用 settings 默认
 	WatermarkText    *string  `json:"watermark_text"`    // 自定义模板；缺省用 settings 默认
 	Title            string   `json:"title"`             // 打包分享自定义标题（≤200 rune；缺省回退默认命名）
+	RefIDs           []string `json:"ref_ids"`           // 富文本引用资源（file_id 列表）：创建时并入 share grants（bundle 式），公开页按文件名解析
 }
 
 // parseIDList 解析 UUID 列表（去重顺序保留）。
@@ -124,6 +125,26 @@ func (h *Handler) createShare(c *gin.Context) {
 	if !ok {
 		return
 	}
+	// 富文本引用资源（refs）：越界/非法条目由 AttachReferenceFiles 静默跳过，
+	// 解析失败（非 UUID）整体 400——前端按文档 JSON 收集，不应出现脏值。
+	var refIDs []uuid.UUID
+	if len(req.RefIDs) > 0 {
+		refIDs, ok = parseIDList(c, req.RefIDs)
+		if !ok {
+			return
+		}
+	}
+	attachRefs := func(sh share.Share) int {
+		if len(refIDs) == 0 {
+			return 0
+		}
+		n, err := h.shares.AttachReferenceFiles(sh, owner, refIDs)
+		if err != nil {
+			// 附加资源失败不阻断分享本身（主文档分享已创建）。
+			return 0
+		}
+		return n
+	}
 	var out gin.H
 	if visibility == share.VisibilityPrivate {
 		if req.Password != "" {
@@ -146,6 +167,7 @@ func (h *Handler) createShare(c *gin.Context) {
 		h.recordAudit(c, audit.Entry{UserID: &owner, Action: audit.ActionShareCreate, ResourceType: audit.ResourceShare, ResourceID: created.ID.String(), Metadata: `{"file_id":"` + created.FileID.String() + `","permission":"` + created.Permission + `","visibility":"private","users":` + strconv.Itoa(len(userIDs)) + `,"spaces":` + strconv.Itoa(len(spaceIDs)) + `}`})
 		out = shareJSON(created)
 		out["visibility"] = share.VisibilityPrivate
+		out["ref_count"] = attachRefs(created)
 		// 私有分享无 token / share_url。
 	} else {
 		if len(req.UserIDs) > 0 || len(req.SpaceIDs) > 0 {
@@ -166,6 +188,7 @@ func (h *Handler) createShare(c *gin.Context) {
 		out["visibility"] = share.VisibilityPublic
 		out["token"] = token
 		out["share_url"] = "/api/v1/public/shares/" + token
+		out["ref_count"] = attachRefs(created)
 	}
 	c.JSON(http.StatusCreated, out)
 }

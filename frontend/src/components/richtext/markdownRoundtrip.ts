@@ -6,9 +6,9 @@
 //   纯源码编辑一并移除。
 
 /** 支持的嵌入块类型。 */
-export type EmbedKind = 'drawio' | 'excalidraw' | 'office' | 'web' | 'file'
+export type EmbedKind = 'drawio' | 'excalidraw' | 'xmind' | 'office' | 'web' | 'file'
 
-export const EMBED_KINDS: readonly EmbedKind[] = ['drawio', 'excalidraw', 'office', 'web', 'file']
+export const EMBED_KINDS: readonly EmbedKind[] = ['drawio', 'excalidraw', 'xmind', 'office', 'web', 'file']
 
 /** 嵌入块引用（对应 DocflowEmbed node 的 attrs）。 */
 export interface EmbedRef {

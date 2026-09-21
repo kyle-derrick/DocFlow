@@ -72,6 +72,18 @@ func (t *fakeTree) ListFolderChildren(folderID uuid.UUID, limit int) ([]files.Fi
 	return out, nil
 }
 
+func (t *fakeTree) CurrentBlobs(ids []uuid.UUID) map[uuid.UUID]files.ObjectBlob {
+	out := make(map[uuid.UUID]files.ObjectBlob, len(ids))
+	for _, id := range ids {
+		if v, ok := t.versions[id]; ok {
+			if b, ok2 := t.blobs[v.ObjectBlobID]; ok2 {
+				out[id] = b
+			}
+		}
+	}
+	return out
+}
+
 // newTreeTestEnv 组装目录分享测试环境：owner 的 /资料/{a.txt, 子目录/b.png}。
 // 返回 (svc, repo, tree, owner, 根目录 ID)。
 func newTreeTestEnv(t *testing.T) (*Service, *MemoryStore, *fakeTree, uuid.UUID, uuid.UUID) {

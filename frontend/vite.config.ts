@@ -18,6 +18,30 @@ export default defineConfig({
   define: {
     'process.env.IS_PREACT': JSON.stringify('false'),
   },
+  build: {
+    rollupOptions: {
+      output: {
+        // vendor 拆分（首屏 gzip 目标 <400KB）：react 运行时 / antd 全家
+        // （@rc-component、dayjs、@ant-design 等）/ lucide 图标各自独立
+        // chunk——库代码变动频率远低于业务代码，独立分包显著提升 SW/HTTP
+        // 缓存命中（发版只失效业务 chunk）。仅列举确定被首屏静态引用的包；
+        // 按需加载的重组件（monaco/mermaid/excalidraw/tiptap/markmap 等）
+        // 不匹配任何规则，保持 rollup 默认按使用方分包（懒加载语义不变）。
+        manualChunks(id) {
+          if (!id.includes('node_modules')) return undefined
+          if (/[\\/]node_modules[\\/](react|react-dom|scheduler)[\\/]/.test(id)) return 'vendor-react'
+          if (
+            /[\\/]node_modules[\\/](@ant-design|@rc-component|antd|rc-[a-z0-9-]+|dayjs|@babel\/runtime|clsx|scroll-into-view-if-needed|compute-scroll-into-view|throttle-debounce|async-validator|staged-components|json2typescript|react-slick|@floating-ui)[\\/]/.test(
+              id,
+            )
+          )
+            return 'vendor-antd'
+          if (/[\\/]node_modules[\\/]lucide-react[\\/]/.test(id)) return 'vendor-icons'
+          return undefined
+        },
+      },
+    },
+  },
   plugins: [
     react(),
     // PWA 基础（v1.1）：可安装（manifest）+ 应用 Shell 预缓存，不做离线数据。

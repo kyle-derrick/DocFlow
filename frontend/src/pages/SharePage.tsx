@@ -223,6 +223,43 @@ function ViewerState({ text }: { text: string }) {
 }
 
 /**
+ * 单文件分享的富文本文档查看：同一 RichTextEditor 只读渲染；内容与
+ * raw_base 均经 tree API 获取（单文件分享的根即文件自身，raw 直取 .dfrt
+ * 文本——/preview 端点对存储 mime=octet-stream 的文档会 415，raw 扩展名
+ * 白名单更稳）。引用节点以 publicBase 走 raw/share 探测；单文件分享无
+ * 兄弟资源授权，探测不到显示占位提示。
+ */
+function PublicSingleDfdocViewer({ token }: { token: string }) {
+  const [state, setState] = useState<{ rawBase: string; docPath: string; text: string } | null>(null)
+  const [error, setError] = useState('')
+  useEffect(() => {
+    let alive = true
+    publicShareTree(token)
+      .then(async (res) => {
+        // 单文件分享根即文件自身：raw 空路径（尾斜杠）命中根文件；
+        // 拼文件名会走子树解析（文件基座无子路径）而 404。
+        const raw = await fetch(`${res.raw_base}/`)
+        if (!raw.ok) throw new Error(`内容加载失败（${raw.status}）`)
+        const text = await raw.text()
+        if (alive) setState({ rawBase: res.raw_base, docPath: res.path, text })
+      })
+      .catch(() => {
+        if (alive) setError('文档内容加载失败')
+      })
+    return () => { alive = false }
+  }, [token])
+  if (error) return <div className="error-text">{error}</div>
+  if (!state) return <p className="hint">正在加载文档…</p>
+  return (
+    <RichTextEditor
+      initialJSON={state.text}
+      readonly
+      publicBase={{ rawBase: state.rawBase, docPath: state.docPath }}
+    />
+  )
+}
+
+/**
  * 目录分享条目的弹窗查看内容（v2.4）：按扩展名分发只读渲染，与文件页
  * FileViewerDispatch 同口径——富文本(.dfrt/.dfdoc)/Markdown/mermaid/
  * xmind/白板(drawio/excalidraw)/图片/PDF/纯文本。内容经 raw/share 获取
@@ -258,13 +295,14 @@ function PublicEntryViewer({ rawBase, entry }: { rawBase: string; entry: ShareTr
     return () => { alive = false }
   }, [url, needsText])
 
-  // 富文本（Tiptap JSON）readonly 渲染（嵌入块内图片等认证资源不可用，正文正常）。
+  // 富文本（Tiptap JSON）readonly 渲染：同一 RichTextEditor 组件（嵌入块/
+  // 图片/文件卡片按 publicBase 走 raw/share 公开端点解析）。
   if (isDfdocFile(lower)) {
     if (error) return <ViewerState text={error} />
     if (text === null) return <ViewerState text="正在加载文档…" />
     return (
       <Suspense fallback={<ViewerState text="正在加载查看器…" />}>
-        <RichTextEditor initialJSON={text} readonly />
+        <RichTextEditor initialJSON={text} readonly publicBase={{ rawBase, docPath: entry.path }} />
       </Suspense>
     )
   }
@@ -504,7 +542,7 @@ function FolderShareView({ token, info }: { token: string; info: PublicShareInfo
         {view === 'site' && siteReady === true && !rawBase && <p className="hint">加载网页…</p>}
 
         {(view === 'files' || siteReady !== true) && (
-          <div className="share-tree">
+          <div className="share-tree soft-fade" key={dir}>
             {siteReady === null && <p className="hint">正在检查网页入口…</p>}
             <nav className="share-tree-crumb">
               <button className={dirSegments.length === 0 ? 'current' : ''} onClick={() => void loadDir('')}>
@@ -721,7 +759,7 @@ export default function SharePage() {
   return (
     <div className="share-page">
       {showWatermark && <WatermarkOverlay text={info.watermark_text as string} />}
-      <main className="share-card">
+      <main className="share-card soft-fade">
         <h1 className="share-title">{info.name}</h1>
         <div className="share-meta">
           <span>大小：{formatSize(info.size ?? 0)}</span>
@@ -744,6 +782,14 @@ export default function SharePage() {
         ) : isOfficeFile(info.name) ? (
           // Office 文档：OnlyOffice 只读查看会话（公开端点，访客无需登录）。
           <PublicOfficeViewer token={token} name={info.name} />
+        ) : isDfdocFile(info.name) ? (
+          // 富文本文档（.dfrt/.dfdoc）：同一 RichTextEditor 只读渲染
+          //（内容与引用资源均经 raw/share 公开端点，单文件分享无兄弟资源授权）。
+          <div className="preview-box">
+            <Suspense fallback={<p className="hint">正在加载查看器…</p>}>
+              <PublicSingleDfdocViewer token={token} />
+            </Suspense>
+          </div>
         ) : kind === 'image' ? (
           <div className="preview-box">
             <img className="preview-image" src={previewUrl} alt={info.name} />

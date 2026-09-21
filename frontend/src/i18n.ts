@@ -150,7 +150,7 @@ const zh = {
   whiteboard: '白板', whiteboardEdit: 'Excalidraw 白板编辑', newWhiteboard: '✎ 新建白板',
   whiteboardCreating: '创建白板中…', whiteboardCreateFailed: '创建白板失败',
   whiteboardLoading: '正在加载白板编辑器…', whiteboardSaved: '已保存为新版本',
-  saveAndBack: '保存并返回', back: '← 返回', saving: '保存中…', currentVersion: '当前版本 v{n}',
+  saveAndBack: '保存并退出', back: '← 返回', saving: '保存中…', currentVersion: '当前版本 v{n}',
   // ---- AI 摘要（v1.3） ----
   aiSummary: 'AI 摘要', aiSummaryLoading: '摘要生成中…', aiSummaryDisabled: 'AI 未启用',
   aiSummaryUnsupported: '不支持该文件类型', aiSummaryFailed: '摘要生成失败',
@@ -303,7 +303,7 @@ const en: { [K in keyof typeof zh]: string } = {
   whiteboard: 'Whiteboard', whiteboardEdit: 'Excalidraw whiteboard editor', newWhiteboard: '✎ New whiteboard',
   whiteboardCreating: 'Creating…', whiteboardCreateFailed: 'Failed to create whiteboard',
   whiteboardLoading: 'Loading whiteboard editor…', whiteboardSaved: 'Saved as a new version',
-  saveAndBack: 'Save & back', back: '← Back', saving: 'Saving…', currentVersion: 'Version v{n}',
+  saveAndBack: 'Save & exit', back: '← Back', saving: 'Saving…', currentVersion: 'Version v{n}',
   // ---- AI summary (v1.3) ----
   aiSummary: 'AI summary', aiSummaryLoading: 'Generating summary…', aiSummaryDisabled: 'AI is not enabled',
   aiSummaryUnsupported: 'Unsupported file type', aiSummaryFailed: 'Failed to generate summary',

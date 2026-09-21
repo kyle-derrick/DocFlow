@@ -226,7 +226,9 @@ body {
   max-width: calc(100vw - 32px);
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  /* 8px：与应用内卡片/浮层统一口径（team-card/user-menu-panel/file-table；
+     认证页 login/share 大卡片 10px 为独立场景口径）。 */
+  border-radius: 8px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
   z-index: 50;
 }
@@ -340,7 +342,8 @@ body {
   max-width: calc(100vw - 32px);
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  /* 与 .notif-panel 同口径（8px，见其注释）。 */
+  border-radius: 8px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
   z-index: 50;
 }
@@ -484,7 +487,22 @@ body {
 .tls-cert-upload { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; }
 .tls-cert-upload .field { flex: 1 1 260px; margin-bottom: 0; }
 .tls-cert-upload input[type='file'] { width: 100%; font-size: 12px; color: var(--muted); }
-@media (max-width: 700px) { .section-page, .admin-page { display: block; } .section-sidebar { position: static; flex-direction: row; overflow-x: auto; margin-bottom: 16px; } .section-sidebar h3 { display: none; } .section-sidebar a { white-space: nowrap; } .topbar { gap: 8px; } .nav { display: none; } .topbar-search { flex: 1; width: auto; } }
+@media (max-width: 700px) {
+  /* 特异性须≥ .page.section-page/.page.admin-page（display:flex），否则
+     桌面 flex 布局覆盖移动端 block 回退，窄屏侧栏与内容横向溢出（375px
+     视口 scrollWidth 489px 实测）。 */
+  .page.section-page, .page.admin-page { display: block; }
+  .section-sidebar { position: static; flex-direction: row; overflow-x: auto; margin-bottom: 16px; }
+  .section-sidebar h3 { display: none; }
+  .section-sidebar a { white-space: nowrap; }
+  .topbar { gap: 8px; }
+  .nav { display: none; }
+  .topbar-search { flex: 1; width: auto; }
+  /* 设置行左侧主体 min-width:240px 在 ~330px 可用宽下与右侧控件同排
+     仍溢出：窄屏收窄下限并允许整行换行纵排（label 上、控件下）。 */
+  .setting-main { min-width: 0; }
+  .setting-row { flex-direction: column; align-items: stretch; }
+}
 
 /* ---------- 全局过渡（v2.4：150-200ms ease 统一口径） ----------
    克制、统一：卡片与按钮 hover 的边框/背景过渡 ~180ms，列表行 hover 背景
@@ -861,6 +879,17 @@ svg.lucide {
   padding: 2px 6px;
   margin-left: -6px;
   border-radius: 4px;
+}
+
+/* 长文件名截断（列表视图）：单行 ellipsis + 悬停 title 显全名（FileBrowser
+   行按钮 title={item.name}）；超长名不再撑破行布局挤占大小/时间列。 */
+.file-table .name-btn {
+  display: inline-block;
+  vertical-align: bottom;
+  max-width: min(52ch, 48vw);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .name-btn:hover {
@@ -1520,6 +1549,13 @@ svg.lucide {
   flex-direction: column;
   gap: 2px;
   font-size: 12px;
+  /* 「存储用量 24.5 GiB」等统计行可断行（卡片 ~235px 宽下实测溢出 9px）。 */
+  max-width: 100%;
+}
+
+.team-card-stats .muted {
+  word-break: break-word;
+  min-width: 0;
 }
 
 .team-card-actions {
@@ -1967,6 +2003,13 @@ svg.lucide {
 /* 我的分享 antd Table（v1.7.1 服务端分页）。 */
 .share-antd-table .ant-table-cell {
   font-size: 12.5px;
+}
+
+/* 窄屏横滚：分享表列多（勾选/文件/权限/状态/过期/访问量/操作），375px 视口
+   实测 table 元素 484px 溢出页面——antd 未配 scroll.x 时容器不裁剪，
+   给表格容器加横向滚动（与 .files-toolbar 同款「可滚动不塌方」口径）。 */
+.share-antd-table .ant-table {
+  overflow-x: auto;
 }
 
 /* 加入空间落地页操作按钮。 */
@@ -3944,6 +3987,154 @@ kbd {
   color: var(--danger);
 }
 
+/* ---------- 内联文件卡片（docflowFileCard） ---------- */
+
+.rich-text-filecard {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  margin: 0 2px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 0.92em;
+  line-height: 1.6;
+  vertical-align: baseline;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  overflow: hidden;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.rich-text-filecard:hover {
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 8%, var(--surface-2));
+}
+
+.rich-text-filecard.selected,
+.rich-text-filecard.ProseMirror-selectednode {
+  border-color: var(--primary);
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+
+.rich-text-filecard.gone {
+  opacity: 0.6;
+  border-style: dashed;
+}
+
+.rich-text-filecard-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--primary);
+}
+
+.rich-text-filecard-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rich-text-filecard-size {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+/* ---------- 图片块（docflowImage） ---------- */
+
+.rich-text-dfimg {
+  position: relative;
+  margin: 10px 0;
+  text-align: center;
+}
+
+.rich-text-dfimg.ProseMirror-selectednode {
+  outline: 2px solid var(--primary);
+  outline-offset: 4px;
+  border-radius: 4px;
+}
+
+.rich-text-dfimg-el {
+  display: inline-block;
+  height: auto;
+  max-width: 100%;
+  border-radius: 6px;
+}
+
+.rich-text-dfimg-hint {
+  padding: 24px;
+  color: var(--muted);
+}
+
+.rich-text-dfimg-tools {
+  position: absolute;
+  top: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--surface) 90%, transparent);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+}
+
+.rich-text-dfimg-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 14px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  color: var(--muted);
+}
+
+.rich-text-dfimg-error-title {
+  color: var(--text);
+}
+
+.rich-text-dfimg-error small {
+  color: var(--danger);
+}
+
+/* ---------- 选中浮动工具条（BubbleMenu，body 直挂浮层） ---------- */
+
+.rich-text-bubble {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+:root[data-mode='light'] .rich-text-bubble {
+  box-shadow: 0 8px 24px rgba(24, 30, 42, 0.16);
+}
+
+.rich-text-bubble .rich-text-tbtn.ant-btn {
+  min-width: 28px;
+}
+
+.rich-text-bubble-label {
+  padding: 0 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+:root[data-mode='light'] .rich-text-dfimg-tools {
+  box-shadow: 0 2px 8px rgba(24, 30, 42, 0.16);
+}
+
 /* ---------- Slash 插入菜单（body 直挂浮层） ---------- */
 
 .rich-text-slash-menu {
@@ -4576,6 +4767,8 @@ kbd {
   display: flex;
   align-items: center;
   gap: 8px;
+  /* <768px 换行（375px 实测按钮组 366px 单行溢出 37px 造成页面横向滚动）。 */
+  flex-wrap: wrap;
 }
 
 /* ---- 项16：个人信息弹窗。 ---- */
@@ -4904,4 +5097,373 @@ kbd {
 
 .profile-edit-fields .field {
   margin-bottom: 0;
+}
+
+/* ==================== v2.7 增补样式（17 项整改） ==================== */
+
+/* ---- 项3/4：嵌入块尺寸（宽度百分比 + 高度自适应/固定）与 drawio 导出图 ---- */
+
+/* 画布容器：默认高度自适应（贴合内容）——drawio 为导出 SVG 的 <img>（宽度
+   等比缩放、高度 auto），白板为 fit=width 的 SVG（高按宽高比自适应）；
+   不产生内部滚动条，修正「上白下灰（容器高于图内容）」。内联 style 提供
+   height 时（拖拽角柄/固定高度）按定高 + 内部滚动。 */
+.rich-text-embed-canvas {
+  height: auto;
+  overflow: visible;
+  background: var(--surface);
+}
+
+.rich-text-embed-canvas[style*='height'] {
+  overflow: auto;
+}
+
+/* drawio 导出图：<img> 宽 100% 高 auto（矢量等比缩放）。 */
+.drawio-export-image {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: var(--surface);
+}
+
+/* 嵌入导出用的隐藏 iframe 宿主（不占布局）。 */
+.drawio-export-frame-host {
+  position: fixed;
+  left: -10000px;
+  top: 0;
+  width: 800px;
+  height: 600px;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* 白板 fit=width（嵌入块）：容器高度随内容撑开。 */
+.excalidraw-viewer.fit-width {
+  overflow: visible;
+}
+
+/* 尺寸工具条（选中浮出）：宽度 25/50/75/100 + 高度自适应复位。 */
+.rich-text-embed-size {
+  position: absolute;
+  top: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 6;
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--surface) 90%, transparent);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+}
+
+:root[data-mode='light'] .rich-text-embed-size {
+  box-shadow: 0 2px 8px rgba(24, 30, 42, 0.16);
+}
+
+/* 高度拖拽角柄（右下角，画布类嵌入选中时）。 */
+.rich-text-embed-resizer {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  z-index: 6;
+  width: 16px;
+  height: 16px;
+  cursor: ns-resize;
+  background: linear-gradient(135deg, transparent 50%, var(--primary) 50%);
+  border-bottom-right-radius: 8px;
+  opacity: 0.85;
+}
+
+.rich-text-embed-resizer:hover {
+  opacity: 1;
+}
+
+/* 拖拽期间的全屏事件遮罩（防 iframe/文本选中抢事件）。 */
+.rich-text-embed-resizing-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 999;
+  cursor: ns-resize;
+}
+
+/* ---- 项7：富文本编辑页右键菜单（复用 .ctx-menu / .ctx-antd-menu） ---- */
+
+.rich-text-editor-host {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* ---- 项9：文件卡片内容嵌入（图片 / XMind，inline-block 块视觉） ---- */
+
+.rich-text-card-embed {
+  display: inline-block;
+  vertical-align: top;
+  max-width: 100%;
+  margin: 6px 0;
+}
+
+.rich-text-card-embed-inner {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  vertical-align: top;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.rich-text-card-embed.selected .rich-text-card-embed-inner,
+.rich-text-card-embed.ProseMirror-selectednode .rich-text-card-embed-inner {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+
+.rich-text-card-embed-image {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.rich-text-card-embed-hint {
+  display: block;
+  padding: 24px;
+  color: var(--muted);
+}
+
+.rich-text-card-embed-xmind {
+  position: relative;
+  width: 100%;
+  height: 420px;
+  overflow: hidden;
+}
+
+.rich-text-card-embed-tools {
+  position: absolute;
+  top: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--surface) 90%, transparent);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+}
+
+:root[data-mode='light'] .rich-text-card-embed-tools {
+  box-shadow: 0 2px 8px rgba(24, 30, 42, 0.16);
+}
+
+/* ---- 项12：文件选择器（目录树 + 文件列表 + 面包屑） ---- */
+
+.rich-text-picker-layout {
+  display: grid;
+  grid-template-columns: minmax(180px, 240px) minmax(0, 1fr);
+  gap: 12px;
+  min-height: 340px;
+  max-height: 60vh;
+}
+
+.rich-text-picker-side {
+  min-width: 0;
+  overflow: auto;
+  /* auto 行 grid 下容器 max-height 不约束条目高度，直接钳制自身 */
+  max-height: 56vh;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px;
+}
+
+.rich-text-picker-side-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.rich-text-picker-side .ant-tree {
+  background: transparent;
+  font-size: 13px;
+}
+
+.rich-text-picker-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rich-text-picker-main .ant-breadcrumb {
+  flex-shrink: 0;
+}
+
+.rich-text-picker-main .ant-breadcrumb ol {
+  align-items: center;
+}
+
+.rich-text-picker-main .ant-breadcrumb a,
+.rich-text-picker-main .ant-breadcrumb span:last-child {
+  cursor: pointer;
+}
+
+.rich-text-picker-tree .rich-text-picker-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.rich-text-picker-dir .icon {
+  color: var(--primary);
+}
+
+@media (max-width: 760px) {
+  .rich-text-picker-layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(200px, 1fr);
+  }
+}
+
+/* ---- 项14：查看弹窗内编辑 + 最大化 ---- */
+
+.modal-viewer-fullscreen {
+  /* antd Modal 宽度经内联 width 生效，这里以类选择器提高优先级覆盖。 */
+}
+
+.modal-viewer-fullscreen .ant-modal,
+.docflow-modal.modal-viewer-fullscreen {
+  width: calc(100vw - 24px) !important;
+  max-width: calc(100vw - 24px);
+  margin: 12px auto;
+  top: 12px;
+}
+
+.modal-viewer-fullscreen .docflow-modal-body,
+.modal-viewer-fullscreen .ant-modal-body {
+  height: calc(100vh - 140px) !important;
+  max-height: calc(100vh - 140px);
+}
+
+.modal-fullscreen-btn {
+  flex-shrink: 0;
+}
+
+/* 编辑视图（FileEditorDispatch）在弹窗内去视口化：编辑页组件默认
+   height:100vh，弹窗内改为撑满 .preview-embed。 */
+.preview-embed .text-editor-page {
+  height: 100%;
+  min-height: 320px;
+  padding: 12px;
+  gap: 10px;
+}
+
+.preview-embed .editor-page {
+  height: 100%;
+  min-height: 320px;
+  padding: 0;
+  gap: 8px;
+}
+
+.preview-embed .editor-head {
+  padding: 4px 8px;
+}
+
+/* ---- 项17：md 分栏拖拽分隔条 / 文本编辑页头部（返回 + 未保存徽标） ---- */
+
+.md-split-divider {
+  position: relative;
+  cursor: col-resize;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--border) 70%, transparent);
+  transition: background 0.15s ease;
+}
+
+.md-split-divider:hover,
+.md-split-divider:active {
+  background: var(--primary);
+}
+
+.text-editor-head-title {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.text-editor-back {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.text-editor-dirty-badge {
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
+.drawio-save-hint {
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* ---- 项16：全站过渡（180ms fade/slide，克制口径） ---- */
+
+/* 内容块淡入（路由之外的局部切换：文件列表重载、分享页状态切换、树切换
+   后的列表区），与 .content 页面淡入同 180ms 口径。 */
+.soft-fade {
+  animation: soft-fadein 0.18s ease;
+}
+
+@keyframes soft-fadein {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .soft-fade {
+    animation: none;
+  }
+}
+
+/* ---- 项16：文件列表加载骨架行（紧凑灰条，避免闪空白） ---- */
+
+.files-loading-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.files-loading-row {
+  height: 30px;
+  border-radius: 6px;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--border) 45%, transparent) 25%,
+    color-mix(in srgb, var(--border) 80%, transparent) 45%,
+    color-mix(in srgb, var(--border) 45%, transparent) 65%
+  );
+  background-size: 200% 100%;
+  animation: files-loading-shimmer 1.1s ease-in-out infinite;
+}
+
+@keyframes files-loading-shimmer {
+  from { background-position: 120% 0; }
+  to { background-position: -80% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .files-loading-row {
+    animation: none;
+  }
 }

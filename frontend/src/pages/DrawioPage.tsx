@@ -12,7 +12,7 @@
 //   通知父页脏态，autosave:0 亦不产生自动保存事件）。
 // - 集成禁用或探测失败显示「图表服务不可用」。
 import { useEffect, useRef, useState } from 'react'
-import { Button } from 'antd'
+import { App as AntdApp, Button } from 'antd'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import {
   EMPTY_DRAWIO_XML,
@@ -31,8 +31,9 @@ import { closeEditorWithFallback, safeReturnTo } from '../editorNavigation'
  * draw.io embed 编辑器/查看器 iframe URL（proto=json postMessage 协议）。
  * lang 跟随界面语言（drawio 资源名 zh/en）；ui 跟随站点明暗（浅色 min /
  * 深色 dark，编辑器界面主题与站点一致，避免深色站点里白闪编辑器）；
- * view=true 为只读查看器（viewer=1，隐藏编辑工具与保存），否则编辑模式
- * （保存并退出按钮）。
+ * view=true 为只读查看器（viewer=1，隐藏编辑工具与保存），否则编辑模式。
+ * v2.7：不再传 saveAndExit=1——drawio 的「保存并退出」按钮与 Ctrl+S 均只
+ * 触发 save 事件（保存不退出），退出统一走页面「← 返回」（带 dirty 确认）。
  */
 function drawioEditorURL(base: string, lang: string, view: boolean, dark: boolean): string {
   const trimmed = base.replace(/\/+$/, '')
@@ -46,7 +47,6 @@ function drawioEditorURL(base: string, lang: string, view: boolean, dark: boolea
   })
   if (view) params.set('viewer', '1')
   else {
-    params.set('saveAndExit', '1')
     params.set('noSaveBtn', '0')
   }
   return `${trimmed}/?${params.toString()}`
@@ -88,7 +88,12 @@ export default function DrawioPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
   const dirtyRef = useRef(false)
   const savingRef = useRef(false)
   const savePromiseRef = useRef<Promise<boolean> | null>(null)
-  const exitPendingRef = useRef(false)
+  // 自动保存 debounce（autosave 事件静置 10s 落版本；v2.7 自动保存间隔）。
+  const autosaveTimerRef = useRef(0)
+  // 「保存并退出」之外的退出流程抑制 beforeunload（返回确认走 antd 弹窗，
+  // 不再叠加浏览器原生弹窗）。
+  const closingRef = useRef(false)
+  const { modal: antdModal } = AntdApp.useApp()
 
   // 探测集成 → 拉取文件元数据与内容 → 挂 iframe。内容读取失败或为空
   // （含新建模板上传后立即打开）回退初始模板，不阻塞编辑。
@@ -132,8 +137,10 @@ export default function DrawioPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
   // history。脚本可关闭由 window.open 创建的窗口；普通标签页则确定性导航。
   const closeEditor = () => closeEditorWithFallback(navigate, returnTo)
 
-  // postMessage JSON 协议：init → load；save/export → 覆盖为新版本
-  // （exit 标记或 exit 事件时保存成功后退出编辑器）。
+  // postMessage JSON 协议：init → load（autosave:1 启用 autosave 事件，供
+  // 父页跟踪脏态与静置自动保存）；save/export → 覆盖为新版本（保存后不退
+  // 出——v2.7：Ctrl=S/保存按钮仅保存 + banner 提示，退出走「← 返回」带
+  // dirty 确认）；autosave → 置脏 + 10s 静置自动落版本。
   useEffect(() => {
     if (!editorURL || viewMode) return
     const onMessage = (e: MessageEvent) => {
@@ -146,26 +153,32 @@ export default function DrawioPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
         return // 非 JSON 协议消息忽略
       }
       if (msg.event === 'init') {
-        frame.contentWindow?.postMessage(JSON.stringify({ action: 'load', xml: xmlRef.current, autosave: 0 }), '*')
+        frame.contentWindow?.postMessage(JSON.stringify({ action: 'load', xml: xmlRef.current, autosave: 1 }), '*')
         return
       }
       if (msg.event === 'exit') {
-        if (savePromiseRef.current) exitPendingRef.current = true
-        else closeEditor()
+        closeEditor()
+        return
+      }
+      if (msg.event === 'autosave') {
+        if (msg.xml) {
+          dirtyRef.current = true
+          window.clearTimeout(autosaveTimerRef.current)
+          autosaveTimerRef.current = window.setTimeout(() => {
+            // 静置自动保存：静默落版本（不弹 banner），仍脏且无保存进行时。
+            if (dirtyRef.current && !savingRef.current) void saveDiagram(msg.xml ?? '', true)
+          }, 10000)
+        }
         return
       }
       if (msg.event === 'save' || msg.event === 'export') {
         if (msg.xml) {
-          exitPendingRef.current = msg.exit === true
+          window.clearTimeout(autosaveTimerRef.current)
           const pending = saveDiagram(msg.xml)
           savePromiseRef.current = pending
-          void pending.then((ok) => {
-            if (ok && exitPendingRef.current) closeEditor()
-          }).finally(() => {
+          void pending.finally(() => {
             if (savePromiseRef.current === pending) savePromiseRef.current = null
           })
-        } else if (msg.exit) {
-          closeEditor()
         }
       }
     }
@@ -176,7 +189,9 @@ export default function DrawioPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
 
   // 保存：导出 XML 作为新版本上传（file_id 会话沿用目标文件名/父目录），
   // 成功后刷新元数据展示新版本号；失败置未保存标记。返回是否保存成功。
-  const saveDiagram = async (xml: string): Promise<boolean> => {
+  // silent=true 为静置自动保存（不弹「已保存为新版本」banner）。
+  const saveDiagram = async (xml: string, silent = false): Promise<boolean> => {
+    if (!xml) return false
     if (savingRef.current) return savePromiseRef.current ?? false
     savingRef.current = true
     setSaving(true)
@@ -185,7 +200,7 @@ export default function DrawioPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
       const blob = new File([xml], file?.name ?? 'diagram.drawio', { type: 'text/xml' })
       await uploadFileVersion(blob, fileId, () => {})
       dirtyRef.current = false
-      setNotice('已保存为新版本')
+      if (!silent) setNotice('已保存为新版本')
       try {
         setFile(await getFileMeta(fileId))
       } catch {
@@ -202,16 +217,39 @@ export default function DrawioPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
     }
   }
 
-  // 未保存兜底提示：仅保存失败时拦截（协议不通知父页常规脏态，
-  // 常规未保存保护依赖 drawio 的「保存并退出」按钮）。
+  // 返回（退出）：有未落盘修改（autosave 事件置脏且静置窗口内未保存）时
+  // 二次确认；与 OnlyOffice/白板/文本编辑页一致。
+  const exitWithConfirm = () => {
+    if (!dirtyRef.current) {
+      closeEditor()
+      return
+    }
+    antdModal.confirm({
+      title: '有未保存的修改',
+      content: '图表存在尚未保存到服务器的修改，直接退出可能丢失。仍要退出吗？（编辑静置 10 秒后会自动保存）',
+      okText: '仍然退出',
+      okButtonProps: { danger: true },
+      cancelText: '继续编辑',
+      onOk: () => {
+        closingRef.current = true
+        closeEditor()
+      },
+    })
+  }
+
+  // 未保存兜底提示：仅保存失败/静置窗口内退出时拦截（dirty 由 autosave
+  // 事件驱动）；退出确认流程（closingRef）不叠加浏览器原生弹窗。
   useEffect(() => {
     const onBeforeUnload = (e: BeforeUnloadEvent) => {
-      if (!dirtyRef.current) return
+      if (!dirtyRef.current || closingRef.current) return
       e.preventDefault()
       e.returnValue = ''
     }
     window.addEventListener('beforeunload', onBeforeUnload)
-    return () => window.removeEventListener('beforeunload', onBeforeUnload)
+    return () => {
+      window.removeEventListener('beforeunload', onBeforeUnload)
+      window.clearTimeout(autosaveTimerRef.current)
+    }
   }, [])
 
   const versionNo = file?.current_version?.version
@@ -219,10 +257,11 @@ export default function DrawioPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
   return (
     <div className={`editor-page${viewMode ? ' viewer-only' : ''}`}>
       {!viewMode && <div className="editor-head">
-        <Button type="text" size="small" onClick={closeEditor}>← 返回</Button>
+        <Button type="text" size="small" onClick={exitWithConfirm}>← 返回</Button>
         <h2 className="editor-title">{file?.name ?? '加载中…'}</h2>
         {versionNo !== undefined && <span className="badge current">当前版本 v{versionNo}</span>}
         {saving && <span className="badge uploading">保存中…</span>}
+        {!viewMode && <span className="muted drawio-save-hint">Ctrl+S 保存（不退出）</span>}
       </div>}
 
       {!viewMode && notice && <div className="banner ok editor-hint">{notice}</div>}

@@ -105,10 +105,11 @@
 		}
 	}
 
-	# draw.io Diagrams 静态层：官方 webapp 在构建期并入本镜像 /srv/drawio
-	#（frontend/Dockerfile 第三阶段），浏览器经本路径以 iframe embed 模式
-	# 加载编辑器（postMessage JSON 协议，零后端依赖）。.env 设
-	# DRAWIO_PUBLIC_URL=https://<域名>/drawio（后端 /drawio/config 返回给前端）。
+	# draw.io 图表编辑器静态层：官方 webapp 在构建期并入本镜像 /srv/drawio
+	#（frontend/Dockerfile 第三阶段 → /srv/drawio，经 /drawio/* 路径服务），
+	# 不再需要独立 drawio 服务（原 jgraph/drawio:27.0.9 容器内的 Tomcat/Java
+	# 仅服务其自建站云盘 OAuth 回调，本场景不使用）。对应 .env 联动：
+	# DRAWIO_ENABLED=true、DRAWIO_PUBLIC_URL=https://<对外域名>/drawio。
 	@drawioEditor path_regexp drawioEditor ^/drawio/[0-9a-fA-F-]{36}$
 	handle @drawioEditor {
 		root * /srv/frontend
@@ -118,6 +119,9 @@
 
 	handle_path /drawio/* {
 		root * /srv/drawio
+		# 静态层无内容哈希文件名（随镜像版本整体更新），给一天缓存平衡
+		# 重复访问流量与镜像升级生效速度；不使用 immutable。
+		header Cache-Control "public, max-age=86400"
 		try_files {path} /index.html
 		file_server
 	}
@@ -126,10 +130,21 @@
 	#（未匹配路径落到下方 SPA，返回 index.html 而非指标）；内网监控在
 	# compose 网络内直连 backend:8080/metrics 抓取，或设 METRICS_ENABLED=false。
 
-	# 前端 SPA 静态产物（构建期拷入 /srv/frontend）。
+	# 前端 SPA 静态产物（构建期拷入 /srv/frontend）：
+	# - /assets/* 文件名内含内容哈希（vite 产物），内容永不复用文件名，
+	#   可永久缓存（含 SW 预缓存与 HTTP 缓存，浏览器二次访问零请求）；
+	# - 其余路径（index.html / sw.js / manifest / 图标）发版即变，须每次
+	#   经验证（no-cache 允许缓存副本但使用前 304 校验），保证发布后
+	#   用户刷新即得新版本，PWA 更新提示也能及时出现。
+	handle /assets/* {
+		root * /srv/frontend
+		header Cache-Control "public, max-age=31536000, immutable"
+		file_server
+	}
 	handle {
 		root * /srv/frontend
 		try_files {path} /index.html
+		header Cache-Control "no-cache"
 		file_server
 	}
 

@@ -26,6 +26,8 @@ import {
   Globe,
   LayoutGrid,
   List,
+  Maximize2,
+  Minimize2,
   MoreHorizontal,
   Plus,
   Search,
@@ -110,7 +112,8 @@ import {
 } from '../uploadTasks'
 // 弹窗内嵌查看：复用独立查看页的按类型分发器（office/drawio/白板/
 // xmind/mermaid/md/网页/文本等），保证弹窗与新窗口打开渲染一致。
-import { FileViewerDispatch } from '../pages/ViewerPage'
+// v2.7 弹窗内编辑：FileEditorDispatch 同口径的编辑分发（各编辑页组件复用）。
+import { FileViewerDispatch, FileEditorDispatch } from '../pages/ViewerPage'
 
 /** 文件浏览视图模式（设计 6.3.7）：list = 现有表格，grid = 卡片网格。 */
 export type ViewMode = 'list' | 'grid'
@@ -814,6 +817,10 @@ export default function FileBrowser({
   const [previewTarget, setPreviewTarget] = useState<FileItem | null>(null)
   const [webPreviewUrl, setWebPreviewUrl] = useState<string | null>(null)
   const [previewPathOverride, setPreviewPathOverride] = useState<string[] | null>(null)
+  // v2.7 弹窗内编辑：previewEdit = 弹窗切换到编辑器视图（FileEditorDispatch
+  // 复用各编辑页组件）；previewFullscreen = 最大化（视口级尺寸）。
+  const [previewEdit, setPreviewEdit] = useState(false)
+  const [previewFullscreen, setPreviewFullscreen] = useState(false)
 
   // ---- 全局上传任务（v2.6 顶部栏「传输」入口 + 模块级 store，见 uploadTasks.ts） ----
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -1518,16 +1525,21 @@ export default function FileBrowser({
   }
 
   // 弹窗查看：内容渲染由 FileViewerDispatch 就地完成（无预加载逻辑）。
-  const openPreview = (item: FileItem) => {
+  // opts.edit=true 直接以编辑视图打开（右键「编辑」）。
+  const openPreview = (item: FileItem, opts?: { edit?: boolean }) => {
     setPreviewTarget(item)
     setPreviewPathOverride(null)
     setWebPreviewUrl(null)
+    setPreviewEdit(Boolean(opts?.edit) && item.type === 'file')
+    setPreviewFullscreen(false)
   }
 
   const closePreview = () => {
     setPreviewTarget(null)
     setPreviewPathOverride(null)
     setWebPreviewUrl(null)
+    setPreviewEdit(false)
+    setPreviewFullscreen(false)
   }
 
   // 外部「打开文件」受控信号（左侧目录树文件节点点击）：当前列表命中直接
@@ -1549,6 +1561,7 @@ export default function FileBrowser({
       setPreviewTarget(found)
       setPreviewPathOverride(null)
       setWebPreviewUrl(null)
+      setPreviewEdit(false)
       return
     }
     const meta = fileMetaFn ?? ((id: string) => getFileMeta(id))
@@ -1558,6 +1571,7 @@ export default function FileBrowser({
         setPreviewTarget(m)
         setPreviewPathOverride(pathSegments ?? null)
         setWebPreviewUrl(null)
+        setPreviewEdit(false)
       })
       .catch(() => {
         /* 元数据拉取失败（无权限/已删除）：静默 */
@@ -1997,10 +2011,11 @@ export default function FileBrowser({
   /**
    * 查看弹窗标题行操作区（与标题同行，左标题右操作）：
    * - 网页目录：「作为网页打开（新窗口）」；
-   * - 文件：「新窗口查看」拆分按钮（主点击=默认查看 by-path；下拉可选
-   *   查看 Office / 查看网页 / 查看文本 / 下载，按文件类型显示适用项）
-   *   +「编辑」拆分按钮（主点击=默认编辑；下拉可选 编辑 Office / 编辑文本 /
-   *   图表编辑 / 白板编辑，无适用编辑方式的类型不渲染）。
+   * - 文件（v2.7）：「编辑」（弹窗内编辑，FileEditorDispatch 复用编辑器组件）
+   *   +「新窗口查看」拆分按钮（主点击=默认查看；下拉可选 查看 Office /
+   *   查看网页 / 查看文本 / 下载）+「新窗口编辑」拆分按钮（主点击=默认编辑；
+   *   下拉可选 编辑 Office / 编辑文本 / 图表编辑 / 白板编辑；无适用编辑方式
+   *   的类型不渲染）+ 最大化/还原切换。
    */
   const previewHeadExtra = (item: FileItem) => {
     if (item.type === 'folder') {
@@ -2034,6 +2049,9 @@ export default function FileBrowser({
     if (isBoard) editOptions.push({ label: locale === 'zh-CN' ? '白板编辑' : 'Edit whiteboard', run: () => openEditorWindow(routeFor('edit', item)) })
     // .dfrt/.dfdoc 富文本文档：编辑进 Tiptap（by-path 按扩展名分发）。
     if (isRichDoc) editOptions.push({ label: locale === 'zh-CN' ? '编辑富文本' : 'Edit rich text', run: () => openEditorWindow(routeFor('edit', item)) })
+    // 弹窗内编辑可用性：无对应编辑器组件的类型（集成未启用的 office/drawio）
+    // 不提供弹窗内编辑。
+    const inModalEditable = editOptions.length > 0 && !((isOffice && !ooEnabled) || (isDrawio && !drawioEnabled))
     // 默认编辑路由：office/drawio 集成未启用时回落只读查看（与 openFileWith 一致）。
     const editFallbackView = (isOffice && !ooEnabled) || (isDrawio && !drawioEnabled)
     const menuOf = (options: Array<{ label: string; run: () => void }>): MenuProps => ({
@@ -2042,6 +2060,21 @@ export default function FileBrowser({
     })
     return (
       <>
+        {/* 弹窗内编辑（v2.7）：编辑视图 ↔ 查看视图就地切换。 */}
+        {inModalEditable && (
+          <Button
+            size="small"
+            type={previewEdit ? 'default' : 'primary'}
+            onClick={() => setPreviewEdit((v) => !v)}
+            title={previewEdit
+              ? (locale === 'zh-CN' ? '返回查看视图' : 'Back to view')
+              : (locale === 'zh-CN' ? '在弹窗内编辑' : 'Edit in this dialog')}
+          >
+            {previewEdit
+              ? (locale === 'zh-CN' ? '完成编辑' : 'Done editing')
+              : (locale === 'zh-CN' ? '编辑' : 'Edit')}
+          </Button>
+        )}
         <Dropdown.Button
           size="small"
           menu={menuOf(viewOptions)}
@@ -2055,9 +2088,26 @@ export default function FileBrowser({
             menu={menuOf(editOptions)}
             onClick={() => openEditorWindow(routeFor(editFallbackView ? 'view' : 'edit', item))}
           >
-            {locale === 'zh-CN' ? '编辑' : 'Edit'}
+            {locale === 'zh-CN' ? '新窗口编辑' : 'Edit in new window'}
           </Dropdown.Button>
         )}
+        {/* 最大化 / 还原（v2.7 弹窗内编辑配套）。 */}
+        <Button
+          size="small"
+          type="text"
+          className="modal-fullscreen-btn"
+          aria-label={previewFullscreen
+            ? (locale === 'zh-CN' ? '还原' : 'Restore')
+            : (locale === 'zh-CN' ? '最大化' : 'Fullscreen')}
+          title={previewFullscreen
+            ? (locale === 'zh-CN' ? '还原窗口' : 'Restore')
+            : (locale === 'zh-CN' ? '最大化窗口' : 'Fullscreen')}
+          onClick={() => setPreviewFullscreen((v) => !v)}
+        >
+          {previewFullscreen
+            ? <Minimize2 size={14} strokeWidth={2} aria-hidden="true" />
+            : <Maximize2 size={14} strokeWidth={2} aria-hidden="true" />}
+        </Button>
       </>
     )
   }
@@ -2144,7 +2194,10 @@ export default function FileBrowser({
       }
       const effEdit = editMethods.includes(effective.edit) ? effective.edit : null
       if (effEdit) {
-        entries.push({ key: 'edit-default', label: zh ? `编辑（${editMethodLabel(effEdit, true)}）` : `Edit (${editMethodLabel(effEdit, false)})` })
+        // v2.7：「编辑」= 弹窗内编辑（查看弹窗切换编辑视图）；「新窗口编辑」
+        // 独立窗口打开（与查看弹窗按钮组同区分）。
+        entries.push({ key: 'edit-default', label: zh ? '编辑（弹窗）' : 'Edit (in dialog)' })
+        entries.push({ key: 'edit-window', label: zh ? '新窗口编辑' : 'Edit in new window' })
       }
       // 「打开方式 >」：全量查看方式组 + 分组线 + 全量编辑方式组——所有
       // 可见项均可点（不置灰；对该扩展非法的方式也可选，点击后按用户显式
@@ -2230,6 +2283,10 @@ export default function FileBrowser({
         openWithMethod(item, 'view', effectiveOpenWithFor(item.name, openWith).view)
         return
       case 'edit-default':
+        // 弹窗内编辑（v2.7）：office/drawio 集成未启用时回落只读弹窗。
+        openPreview(item, { edit: true })
+        return
+      case 'edit-window':
         openWithMethod(item, 'edit', effectiveOpenWithFor(item.name, openWith).edit)
         return
       case 'unpack':
@@ -2587,13 +2644,18 @@ export default function FileBrowser({
       )}
 
       {error && <div className="banner error">{error}</div>}
-      {loading && <div className="hint">{msg('loading')}</div>}
+      {/* 加载态：紧凑骨架行（避免闪空白；内容到达后 180ms 淡入）。 */}
+      {loading && (
+        <div className="files-loading-skeleton soft-fade" aria-busy="true" aria-label={msg('loading')}>
+          {Array.from({ length: 6 }, (_, i) => <div key={i} className="files-loading-row" />)}
+        </div>
+      )}
       {!loading && visibleItems.length === 0 && !error && (
         <div className="empty">{directoryQuery.trim() || searchMode ? msg('noMatch') : emptyHint ?? (locale === 'zh-CN' ? '此目录为空，上传文件或新建文件夹开始使用' : 'This folder is empty. Upload a file or create a folder to get started.')}</div>
       )}
 
       {visibleItems.length > 0 && viewMode === 'list' && (
-        <table className="file-table">
+        <table className="file-table soft-fade" key={`list-${currentFolderId ?? 'root'}`}>
           <thead>
             <tr>
               <th className="col-check">
@@ -2679,19 +2741,19 @@ export default function FileBrowser({
                     <Star size={16} strokeWidth={2} aria-hidden="true" fill={item.is_starred ? 'currentColor' : 'none'} />
                   </button>
                   {item.type === 'folder' && !searchMode ? (
-                    <button className="name-btn" onClick={(e) => { e.stopPropagation(); openItem(item) }}>
+                    <button className="name-btn" title={item.name} onClick={(e) => { e.stopPropagation(); openItem(item) }}>
                       <span className="icon">{item.has_index_web
                         ? <Globe size={14} strokeWidth={2} aria-hidden="true" />
                         : <Folder size={14} strokeWidth={2} aria-hidden="true" />}</span>
                       {item.name}{item.has_index_web && <span className="web-folder-badge">网页</span>}
                     </button>
                   ) : item.type === 'folder' ? (
-                    <span className="name-btn muted">
+                    <span className="name-btn muted" title={item.name}>
                       <span className="icon"><Folder size={14} strokeWidth={2} aria-hidden="true" /></span>
                       {item.name}
                     </span>
                   ) : (
-                    <button className="name-btn" title={msg('preview')} onClick={(e) => { e.stopPropagation(); openItem(item) }}>
+                    <button className="name-btn" title={item.name} onClick={(e) => { e.stopPropagation(); openItem(item) }}>
                       <span className="icon">{item.has_index_web
                         ? <Globe size={14} strokeWidth={2} aria-hidden="true" />
                         : <FileText size={14} strokeWidth={2} aria-hidden="true" />}</span>
@@ -2735,7 +2797,7 @@ export default function FileBrowser({
           进入，文件卡片点击预览；右上「⋯」打开与列表行一致的操作菜单；
           选择状态与列表视图共享（多选 + 批量工具条两视图通用）。 */}
       {visibleItems.length > 0 && viewMode === 'grid' && (
-        <div className="file-grid">
+        <div className="file-grid soft-fade" key={`grid-${currentFolderId ?? 'root'}`}>
           {visibleItems.map((item) => {
             const size = sizeCache.current.get(item.id) ?? 0
             return (
@@ -3118,14 +3180,19 @@ export default function FileBrowser({
       {previewTarget && (
         <Modal
           wide
-          className="modal-viewer"
-          title={previewTarget.type === 'folder' ? `网页目录「${previewTarget.name}」` : `查看「${previewTarget.name}」`}
+          className={`modal-viewer${previewFullscreen ? ' modal-viewer-fullscreen' : ''}`}
+          title={previewTarget.type === 'folder'
+            ? `网页目录「${previewTarget.name}」`
+            : previewEdit
+              ? `编辑「${previewTarget.name}」`
+              : `查看「${previewTarget.name}」`}
           onClose={closePreview}
           headExtra={previewHeadExtra(previewTarget)}
         >
-          {/* 弹窗内容：网页目录 = sandbox iframe（raw_url）；其余类型（含
-              office，内嵌 OnlyOffice 只读视图）统一经 FileViewerDispatch
-              就地内嵌渲染，与独立查看页完全一致。 */}
+          {/* 弹窗内容：网页目录 = sandbox iframe（raw_url）；编辑视图（v2.7）=
+              FileEditorDispatch 就地内嵌对应编辑器；其余类型（含 office，内嵌
+              OnlyOffice 只读视图）统一经 FileViewerDispatch 就地内嵌渲染，与
+              独立查看页完全一致。 */}
           <div className="preview-embed">
             {previewTarget.type === 'folder' ? (
               webPreviewUrl ? (
@@ -3138,6 +3205,8 @@ export default function FileBrowser({
               ) : (
                 <div className="text-editor-state">正在加载网页…</div>
               )
+            ) : previewEdit ? (
+              <FileEditorDispatch fileId={previewTarget.id} name={previewTarget.name} />
             ) : (
               <FileViewerDispatch
                 fileId={previewTarget.id}

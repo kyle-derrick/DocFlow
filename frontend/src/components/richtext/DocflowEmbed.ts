@@ -22,9 +22,13 @@ export interface DocflowEmbedAttrs {
   kind: EmbedKind
   fileId: string
   title: string
+  /** 显示宽度（百分比 25-100；右下角 resize 把手拖拽调整）。 */
+  width: number
+  /** 显示高度（px；0 = 按内容/宽度自适应，不出现内部滚动）。 */
+  height: number
 }
 
-const DEFAULT_ATTRS: DocflowEmbedAttrs = { kind: 'file', fileId: '', title: '' }
+const DEFAULT_ATTRS: DocflowEmbedAttrs = { kind: 'file', fileId: '', title: '', width: 100, height: 0 }
 
 export const DocflowEmbed = Node.create({
   name: 'docflowEmbed',
@@ -48,6 +52,16 @@ export const DocflowEmbed = Node.create({
         default: DEFAULT_ATTRS.title,
         parseHTML: (element) => element.getAttribute('data-title') || '',
         renderHTML: (attributes) => ({ 'data-title': attributes.title }),
+      },
+      width: {
+        default: DEFAULT_ATTRS.width,
+        parseHTML: (element) => Number(element.getAttribute('data-width')) || DEFAULT_ATTRS.width,
+        renderHTML: (attributes) => ({ 'data-width': String(attributes.width) }),
+      },
+      height: {
+        default: DEFAULT_ATTRS.height,
+        parseHTML: (element) => Number(element.getAttribute('data-height')) || DEFAULT_ATTRS.height,
+        renderHTML: (attributes) => (attributes.height ? { 'data-height': String(attributes.height) } : {}),
       },
     }
   },

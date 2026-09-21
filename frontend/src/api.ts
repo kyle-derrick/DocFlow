@@ -827,9 +827,10 @@ export async function downloadFile(item: FileItem): Promise<void> {
   saveBlob(blob, item.name)
 }
 
-/** 认证读取文件当前版本内容为文本（draw.io 编辑器加载 XML 用；走下载端点）。 */
-export async function fetchFileText(fileId: string): Promise<string> {
-  const res = await authFetch(`/api/v1/files/${fileId}/download`)
+/** 认证读取文件当前版本内容为文本（draw.io 编辑器加载 XML 用；走下载端点）。
+ * bust 非空时追加查询参数绕过浏览器 HTTP 缓存（嵌入块「刷新」/返回检测用）。 */
+export async function fetchFileText(fileId: string, bust?: number | string): Promise<string> {
+  const res = await authFetch(`/api/v1/files/${fileId}/download${bust ? `?_v=${bust}` : ''}`)
   if (!res.ok) {
     const data = (await res.json().catch(() => null)) as { error?: string } | null
     throw new ApiError(res.status, data?.error ?? '文件读取失败')
@@ -838,8 +839,8 @@ export async function fetchFileText(fileId: string): Promise<string> {
 }
 
 /** 认证读取文件当前版本内容为 ArrayBuffer（.xmind 等二进制查看器加载用）。 */
-export async function fetchFileArrayBuffer(fileId: string): Promise<ArrayBuffer> {
-  const res = await authFetch(`/api/v1/files/${fileId}/download`)
+export async function fetchFileArrayBuffer(fileId: string, bust?: number | string): Promise<ArrayBuffer> {
+  const res = await authFetch(`/api/v1/files/${fileId}/download${bust ? `?_v=${bust}` : ''}`)
   if (!res.ok) {
     const data = (await res.json().catch(() => null)) as { error?: string } | null
     throw new ApiError(res.status, data?.error ?? '文件读取失败')
@@ -910,9 +911,10 @@ async function previewFromResponse(res: Response): Promise<PreviewContent> {
   return { kind, mime, url: URL.createObjectURL(blob) }
 }
 
-/** 认证预览：请求 /files/:id/preview，按响应 Content-Type 决定渲染方式；415 → unsupported。 */
-export async function fetchPreview(fileId: string): Promise<PreviewContent> {
-  const res = await authFetch(`/api/v1/files/${fileId}/preview`)
+/** 认证预览：请求 /files/:id/preview，按响应 Content-Type 决定渲染方式；415 → unsupported。
+ * bust 非空时追加查询参数绕过浏览器 HTTP 缓存（嵌入块刷新用）。 */
+export async function fetchPreview(fileId: string, bust?: number | string): Promise<PreviewContent> {
+  const res = await authFetch(`/api/v1/files/${fileId}/preview${bust ? `?_v=${bust}` : ''}`)
   return previewFromResponse(res)
 }
 
@@ -987,10 +989,14 @@ export interface PublicShareOffice {
 /**
  * 公开分享 Office 查看会话（无认证）：返回 OnlyOffice 只读 DocEditor 配置。
  * 集成未启用/分享失效等抛 ApiError，由调用方回退「不支持在线预览」分支。
+ * refFileId 非空时查看该分享的引用资源（refs，share_files 白名单内）而非分享根。
  */
-export async function fetchPublicShareOffice(token: string, lang: string): Promise<PublicShareOffice> {
-  const q = lang ? `?lang=${encodeURIComponent(lang)}` : ''
-  return publicApi<PublicShareOffice>(`/api/v1/public/shares/${encodeURIComponent(token)}/office${q}`)
+export async function fetchPublicShareOffice(token: string, lang: string, refFileId?: string): Promise<PublicShareOffice> {
+  const params = new URLSearchParams()
+  if (lang) params.set('lang', lang)
+  if (refFileId) params.set('ref', refFileId)
+  const q = params.toString()
+  return publicApi<PublicShareOffice>(`/api/v1/public/shares/${encodeURIComponent(token)}/office${q ? `?${q}` : ''}`)
 }
 
 // ---------- 目录分享树（公开，/public/shares/{token}/tree） ----------
@@ -1225,6 +1231,9 @@ export interface CreateShareOptions {
   watermarkText?: string
   /** 打包分享自定义标题（≤200 字符；缺省回退「打包分享（N 项）」）。 */
   title?: string
+  /** 引用资源（refs）：富文本文档内引用的 file_id 列表，默认纳入分享
+   *（后端 share_files 白名单，公开页按 ref 解析内容；越界/已删条目静默跳过）。 */
+  refIds?: string[]
 }
 /**
  * 分享明文 token 的前端内存态：公开分享创建时返回一次，暂存内存 Map 供
@@ -1257,6 +1266,7 @@ export async function createShare(opts: CreateShareOptions): Promise<CreatedShar
   }
   if (opts.watermarkEnabled !== undefined) body.watermark_enabled = opts.watermarkEnabled
   if (opts.watermarkText) body.watermark_text = opts.watermarkText
+  if (opts.refIds?.length) body.ref_ids = opts.refIds
   const created = await api<CreatedShare>('/api/v1/shares', jsonInit('POST', body))
   rememberShareMeta(created.id, { token: created.token ?? undefined })
   return created

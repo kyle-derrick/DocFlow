@@ -1,398 +1,438 @@
-// 12 项整改部署验收（直连 http://localhost，账号 admin@example.com）。
-// 重点：项5（树点击弹窗串扰）与项9（弹窗高频开关卡死）反复复现验证。
-import { test, expect, type Page } from '@playwright/test'
+// 10 项修复的部署环境验收（http://localhost，admin@example.com）。
+// 数据准备走独立 APIRequestContext（Bearer，无浏览器 cookie → 免 CSRF），
+// 行为断言走浏览器 UI。
+import { test, expect, request, type APIRequestContext, type Page } from '@playwright/test'
 
 const EMAIL = 'admin@example.com'
 const PASSWORD = 'AdminPassword123'
-const ts = Date.now().toString().slice(-6)
-const SPACE_NAME = `e2e-验收-${ts}`
 
-test.describe.configure({ mode: 'serial' })
+let api: APIRequestContext
+let token = ''
 
-let page: Page
-/** 网络失败（≥400）与控制台错误收集（失败时输出诊断）。 */
-const netErrors: string[] = []
-
-test.beforeAll(async ({ browser }) => {
-  page = await browser.newPage()
-  page.on('pageerror', (e) => { throw new Error(`页面未捕获异常：${e.message}`) })
-  page.on('console', (m) => { if (m.type() === 'error') netErrors.push(`console: ${m.text().slice(0, 200)}`) })
-  page.on('response', (r) => { if (r.status() >= 400) netErrors.push(`${r.status()} ${r.request().method()} ${r.url().slice(0, 120)}`) })
-  await page.goto('/login', { waitUntil: 'domcontentloaded', timeout: 30_000 })
-  await page.waitForSelector('.login-card', { timeout: 30_000 })
-  await page.getByPlaceholder('you@example.com 或 username').fill(EMAIL)
-  await page.getByPlaceholder('••••••••').fill(PASSWORD)
-  await page.locator('.login-submit').click()
-  await expect(page).not.toHaveURL(/\/login/, { timeout: 20_000 })
+test.beforeAll(async () => {
+  api = await request.newContext({ baseURL: 'http://127.0.0.1' })
+  const res = await api.post('/api/v1/auth/login', { data: { identifier: EMAIL, password: PASSWORD } })
+  expect(res.ok(), `login failed: ${res.status()}`).toBeTruthy()
+  token = (await res.json()).access_token
 })
 
 test.afterAll(async () => {
-  if (netErrors.length > 0) console.log(`[diag] 网络/控制台错误（${netErrors.length}）：\n` + netErrors.slice(-40).join('\n'))
-  await page?.close()
+  await api?.dispose()
 })
 
-/** 等待弹层动画与 sweepModalLayer（60ms）完成，再断言无可见弹窗 + body 滚动锁已释放。 */
-async function assertNoModalAndUnlocked(p: Page) {
-  await p.waitForTimeout(450)
-  await expect(p.locator('.ant-modal-wrap:visible')).toHaveCount(0)
-  const overflow = await p.evaluate(() => document.body.style.overflow)
-  expect(overflow, 'body 滚动锁应已释放（项9）').not.toBe('hidden')
+const H = () => ({ Authorization: `Bearer ${token}` })
+
+/** UI 登录（浏览器侧，等跳转文件页）。 */
+async function loginUI(page: Page) {
+  await page.goto('/login')
+  await page.getByLabel(/邮箱/).first().fill(EMAIL)
+  await page.getByLabel('密码').fill(PASSWORD)
+  await page.getByRole('button', { name: /^登\s*录$/ }).click()
+  await expect(page).toHaveURL(/\/(files)?$/)
 }
 
-/** 关闭当前可见 antd 弹窗（点右上角 ×）；无可见弹窗时立即返回（防挂起）。 */
-async function closeModal(p: Page) {
-  const btn = p.locator('.ant-modal-wrap:visible .ant-modal-close').first()
-  if (await btn.isVisible().catch(() => false)) await btn.click()
-  await p.waitForTimeout(150)
+/** 已保存的会话 cookie（首个测试 UI 登录后采集；后续测试免登录，防限流）。 */
+let savedCookies: Array<{ name: string; value: string; domain: string; path: string; expires: number; httpOnly: boolean; secure: boolean; sameSite: 'Strict' | 'Lax' | 'None' }> | null = null
+
+/** 复用会话打开页面。后端 refresh token 严格旋转（旧 cookie 复用即 401），
+ *  故每次成功恢复会话后回写该 context 的最新 cookie，后续测试链式使用；
+ *  若会话失效被重定向回登录页，自动回退 UI 登录并刷新 cookie 快照。 */
+async function openAuthed(page: Page, path: string) {
+  const tryOpen = async () => {
+    await page.context().addCookies(savedCookies!)
+    await page.goto(path)
+    // 等会话恢复完成：顶栏渲染（成功）；超时或被踢回登录页均视为失败。
+    try {
+      await page.waitForSelector('.topbar', { timeout: 12000 })
+      return !page.url().includes('/login')
+    } catch {
+      return false
+    }
+  }
+  if (!savedCookies) {
+    await loginUI(page)
+    savedCookies = await page.context().cookies()
+    await page.goto(path)
+  } else if (!(await tryOpen())) {
+    console.log('openAuthed: session expired on', path, '→ re-login')
+    await loginUI(page)
+    savedCookies = await page.context().cookies()
+    await page.goto(path)
+  }
+  await page.waitForLoadState('domcontentloaded')
+  // 链式回写：refresh 旋转后的最新 cookie 供下一个测试使用。
+  savedCookies = await page.context().cookies()
 }
 
-// ---------- 项6：/spaces 卡片操作收进右上角 ⋯ ----------
-test('项6 空间卡片：⋯ 菜单 + 主点击直跳文件页，无底部按钮行', async () => {
-  await page.goto('/spaces')
-  await page.waitForSelector('.team-card', { timeout: 15_000 })
-  // 卡片底部不再有按钮行（team-card-actions 已删除，高度不再被拉高）
-  await expect(page.locator('.team-card-actions')).toHaveCount(0)
-  // admin 对默认空间：⋯ 菜单含「空间管理」（默认空间不可解散）
-  await page.locator('.team-card-more').first().click()
-  await expect(page.locator('.ant-dropdown-menu-item').filter({ hasText: '空间管理' })).toBeVisible()
+/** 随机后缀（隔离多次运行的数据）。 */
+const R = () => Math.random().toString(36).slice(2, 8)
+
+/** API 建目录（默认空间根 parent=null）。 */
+async function mkDir(name: string, parent: string | null): Promise<string> {
+  const res = await api.post('/api/v1/folders', { headers: H(), data: { name, parent_id: parent } })
+  expect(res.ok(), `mkdir ${name}: ${res.status()} ${await res.text()}`).toBeTruthy()
+  return (await res.json()).id
+}
+
+// ---------------------------------------------------------------- 修复 1
+test('1 树导航三层子目录：仅一次列表请求、无根闪现', async ({ page }) => {
+  const r = R()
+  const l1 = await mkDir(`V25L1-${r}`, null)
+  const l2 = await mkDir(`V25L2-${r}`, l1)
+  await mkDir(`V25L3-${r}`, l2)
+  await mkDir(`V25Decoy-${r}`, null) // 干扰目录：若闪根列表会包含它
+
+  await openAuthed(page, '/')
+
+  // 列表请求（区别于树懒加载：列表查询带 sort 参数）
+  const listUrls: string[] = []
+  const listItems: string[][] = []
+  page.on('response', async (res) => {
+    const url = res.request().url()
+    if (/\/api\/v1\/(files|spaces\/[^/]+\/files)\?/.test(url) && url.includes('sort=')) {
+      listUrls.push(url)
+      try {
+        const body = await res.json()
+        const names = (body.files ?? body.items ?? []).map((it: { name: string }) => it.name)
+        listItems.push(names)
+      } catch {
+        listItems.push([])
+      }
+    }
+  })
+
+  const treeName = (name: string) =>
+    page.locator('.folder-tree-row .folder-tree-name-text').filter({ hasText: name })
+  const caretOf = (name: string) =>
+    page.locator('.folder-tree-row', { has: page.locator('.folder-tree-name-text', { hasText: name }) })
+      .locator('> .folder-tree-caret')
+
+  // 点击 L1：一次列表请求，面包屑直达 L1（不闪根）
+  // 先等初始根列表渲染完成（response 事件已 fire），避免迟到响应污染基线。
+  await expect(page.locator('.file-browser .file-table, .file-browser .empty').first()).toBeVisible()
+  await page.waitForTimeout(300)
+  const baseCount = listItems.length
+  await treeName(`V25L1-${r}`).first().click()
+  await expect(page.locator('.files-toolbar .crumb').last()).toContainText(`V25L1-${r}`)
+  await page.waitForTimeout(600)
+  const afterL1 = listUrls.length
+  console.log('LIST URLS:', JSON.stringify(listUrls, null, 1))
+  expect(afterL1 - baseCount, '进入 L1 应只有一次列表请求').toBeLessThanOrEqual(1)
+  // 无根闪现：点击后的列表响应里没有 Decoy 目录
+  expect(listItems.slice(baseCount).some((names) => names.includes(`V25Decoy-${r}`)), '不应出现根目录内容闪现').toBeFalsy()
+
+  // 展开 L1（树懒加载）→ 点 L2：再一次列表请求
+  await caretOf(`V25L1-${r}`).first().click()
+  await expect(treeName(`V25L2-${r}`).first()).toBeVisible()
+  await treeName(`V25L2-${r}`).first().click()
+  await expect(page.locator('.files-toolbar .crumb').last()).toContainText(`V25L2-${r}`)
+  await page.waitForTimeout(600)
+  expect(listUrls.length - afterL1, '进入 L2 应只有一次列表请求').toBeLessThanOrEqual(1)
+
+  // 展开 L2 → 点 L3（三层）
+  await caretOf(`V25L2-${r}`).first().click()
+  await expect(treeName(`V25L3-${r}`).first()).toBeVisible()
+  const beforeL3 = listItems.length
+  await treeName(`V25L3-${r}`).first().click()
+  await expect(page.locator('.files-toolbar .crumb').last()).toContainText(`V25L3-${r}`)
+  await page.waitForTimeout(600)
+  // 全程无根闪现（基线之后的列表响应从未包含根级目录；最后的回根是
+  // 用户主动操作，不在本断言范围）
+  expect(listItems.slice(baseCount, beforeL3 + 1).some((names) => names.includes(`V25Decoy-${r}`)), '全程不应出现根目录内容闪现').toBeFalsy()
+
+  // 回根（点树根节点名）：一次列表请求 + 面包屑回到根
+  const rootClicks = listUrls.length
+  await page.locator('.folder-tree-row').first().locator('.folder-tree-name').click()
+  await page.waitForTimeout(600)
+  expect(listUrls.length - rootClicks, '回根应只有一次列表请求').toBeLessThanOrEqual(1)
+})
+
+// ---------------------------------------------------------------- 修复 2
+test('2 三栏等高：中间列表空目录也撑满', async ({ page }) => {
+  const r = R()
+  const l1 = await mkDir(`V25H1-${r}`, null)
+  await mkDir(`V25Empty-${r}`, l1)
+
+  await openAuthed(page, '/')
+  // 诊断：页面实际状态
+  console.log('T2 url:', page.url(), JSON.stringify(await page.evaluate(() => ({
+    topbar: Boolean(document.querySelector('.topbar')),
+    filesShell: Boolean(document.querySelector('.files-shell')),
+    bodyText: document.body.innerText.slice(0, 80),
+  }))))
+  // 等三栏布局渲染完成再测量。
+  await expect(page.locator('.files-tree-main .file-browser')).toBeVisible()
+  await expect(page.locator('.folder-tree-nav')).toBeVisible()
+
+  const heights = (sel: string) =>
+    page.evaluate((s) => {
+      const el = document.querySelector(s)
+      return el ? Math.round(el.getBoundingClientRect().height) : -1
+    }, sel)
+
+  const treeH = await heights('.folder-tree-nav')
+  const mainH = await heights('.files-tree-main')
+  expect(Math.abs(treeH - mainH), `左树 ${treeH} vs 中区 ${mainH} 应等高`).toBeLessThanOrEqual(2)
+
+  // 进入空目录：中区高度不变（空态等高）
+  const caretOf = (name: string) =>
+    page.locator('.folder-tree-row', { has: page.locator('.folder-tree-name-text', { hasText: name }) })
+      .locator('> .folder-tree-caret')
+  await page.locator('.folder-tree-row .folder-tree-name-text').filter({ hasText: `V25H1-${r}` }).first().click()
+  await expect(page.locator('.files-toolbar .crumb').last()).toContainText(`V25H1-${r}`)
+  await caretOf(`V25H1-${r}`).first().click()
+  await page.locator('.folder-tree-row .folder-tree-name-text').filter({ hasText: `V25Empty-${r}` }).first().click()
+  await expect(page.locator('.files-toolbar .crumb').last()).toContainText(`V25Empty-${r}`)
+  await page.waitForTimeout(400)
+  const mainH2 = await heights('.files-tree-main')
+  expect(Math.abs(mainH - mainH2), `空目录中区高度应保持（${mainH} → ${mainH2}）`).toBeLessThanOrEqual(2)
+})
+
+// ---------------------------------------------------------------- 修复 4/5
+test('4/5 弹窗打开不挤压页面；文件页 1560 限宽居中', async ({ page }) => {
+  await openAuthed(page, '/dashboard')
+  await page.waitForLoadState('networkidle')
+
+  const contentX = () =>
+    page.evaluate(() => Math.round(document.querySelector('.content')?.getBoundingClientRect().x ?? -1))
+
+  // 概览页：打开任意 antd 弹窗（个人信息）前后 .content 左边距不变
+  const before = await contentX()
+  console.log('T4 diag url:', page.url(), 'trigger:', await page.locator('.user-menu-trigger').count())
+  await page.locator('.user-menu-trigger').click()
+  await page.waitForTimeout(600)
+  console.log('T4 dropdown items:', await page.locator('.ant-dropdown-menu-item').allTextContents())
+  await page.locator('.ant-dropdown-menu-item').filter({ hasText: '个人信息' }).click()
+  await page.waitForTimeout(600)
+  console.log('T4 modal count:', await page.locator('.ant-modal').count())
+  // 弹窗打开标志：标题「个人信息」的 modal 已挂载（不依赖动画可见性）。
+  await expect(page.locator('.ant-modal-title').filter({ hasText: '个人信息' })).toHaveCount(1)
+  await page.waitForTimeout(300)
+  const during = await contentX()
+  expect(during, `弹窗打开前后 .content 左边距应不变（${before} → ${during}）`).toBe(before)
+
+  // 概览最近文件弹窗（若存在数据）
   await page.keyboard.press('Escape')
-  await page.waitForTimeout(250)
-  // 主点击 = 进入文件页
-  await page.locator('.team-card .team-card-main').first().click()
-  await expect(page).toHaveURL(/\/files/, { timeout: 15_000 })
-})
-
-// ---------- 项1/2/3：空间管理弹窗（成员一行式 + 配额单位 + 危险区） ----------
-test('项1/2/3 空间管理弹窗：一行布局 / 配额单位 / 危险区（默认空间禁用）', async () => {
-  await page.goto('/spaces')
-  await page.waitForSelector('.team-card', { timeout: 15_000 })
-  await page.locator('.team-card-more').first().click()
-  await page.locator('.ant-dropdown-menu-item').filter({ hasText: '空间管理' }).click()
-  const modal = page.locator('.ant-modal:visible', { hasText: '空间管理' }).first()
-  await expect(modal).toBeVisible()
-
-  // 项1：邀请 tab 的「添加已有用户」一行式（多选 Select flex 撑满）
-  await modal.locator('.ant-menu-item').filter({ hasText: '邀请' }).click()
-  const rows = modal.locator('.member-add-row')
-  await expect(rows).toHaveCount(2, { timeout: 10_000 })
-  // 第一行 = 添加已有用户（多选 Select），第二行 = 邮箱邀请
-  const mainInput = rows.nth(0).locator('.member-add-main').first()
-  const width = await mainInput.evaluate((el) => el.getBoundingClientRect().width)
-  expect(width, '添加已有用户 Select 宽度应 ≥ 200px（修复异常窄）').toBeGreaterThanOrEqual(200)
-  await expect(rows.nth(0).locator('.member-add-role')).toBeVisible()
-  await expect(rows.nth(0).locator('.member-add-submit')).toBeVisible()
-  const emailWidth = await rows.nth(1).locator('.member-add-main').first().evaluate((el) => el.getBoundingClientRect().width)
-  expect(emailWidth, '邮箱输入框也应同行撑满').toBeGreaterThanOrEqual(200)
-
-  // 项2：设置 tab 配额带单位（KiB/MiB/GiB/TiB/B 或 不限）
-  await modal.locator('.ant-menu-item').filter({ hasText: '空间设置' }).click()
-  await expect(modal.getByText('存储用量')).toBeVisible()
-  const quotaText = await modal.locator('.hint').filter({ hasText: '存储用量' }).first().textContent()
-  expect(quotaText ?? '', '配额显示应带单位或“不限”').toMatch(/(\d+(\.\d+)?\s?(B|KiB|MiB|GiB|TiB))|不限/)
-
-  // 项3：危险区（owner 可见；默认空间禁用解散）
-  await expect(modal.getByText('危险区')).toBeVisible()
-  await expect(modal.getByText('默认空间不可删除（可改名）')).toBeVisible()
-  await expect(modal.getByRole('button', { name: '解散空间' })).toHaveCount(0)
-  await closeModal(page)
-  await assertNoModalAndUnlocked(page)
-})
-
-// ---------- 项7/8：设置页重分配 ----------
-test('项7/8 设置页：无资料 tab；admin 含邮件/TLS/系统设置；键名直显', async () => {
-  await page.goto('/settings/profile')
-  // /settings/profile（资料已删）重定向到 appearance
-  await expect(page).toHaveURL(/\/settings\/appearance/, { timeout: 15_000 })
-  const sidebarText = await page.locator('.section-sidebar').innerText()
-  expect(sidebarText, '设置页不应再有「资料」入口（项7）').not.toContain('资料')
-  // admin 可见：邮件配置 / TLS / 系统设置（项8）
-  for (const label of ['邮件配置', 'TLS', '系统设置']) {
-    expect(sidebarText, `admin 设置页应含「${label}」`).toContain(label)
+  await page.waitForTimeout(200)
+  const recentBtn = page.locator('.dash-recent-item').first()
+  if (await recentBtn.count()) {
+    const x0 = await contentX()
+    await recentBtn.click()
+    await expect(page.locator('.ant-modal')).toBeVisible()
+    await page.waitForTimeout(300)
+    expect(await contentX(), '最近文件弹窗打开后 .content 左边距应不变').toBe(x0)
+    await page.keyboard.press('Escape')
   }
-  // 系统设置面板：键名直显 + 值渲染
-  await page.locator('.section-sidebar a').filter({ hasText: '系统设置' }).click()
-  await expect(page.locator('.setting-key-code').first()).toBeVisible({ timeout: 15_000 })
-  const count = await page.locator('.setting-key-code').count()
-  expect(count, '系统设置应有大量设置项直显').toBeGreaterThan(10)
-  await expect(page.locator('.setting-key-code', { hasText: 'audit.retention_days' })).toBeVisible()
-  await assertNoModalAndUnlocked(page)
+
+  // 文件页：.content 恢复 1560 限宽（与其他页一致）
+  await page.goto('/')
+  await page.waitForLoadState('networkidle')
+  const box = await page.evaluate(() => {
+    const el = document.querySelector('.content')
+    const r = el!.getBoundingClientRect()
+    const cs = getComputedStyle(el)
+    return { x: Math.round(r.x), width: Math.round(r.width), maxW: cs.maxWidth }
+  })
+  expect(box.maxW, '文件页 .content 应恢复 max-width 1560px').toBe('1560px')
+  expect(box.width, `文件页内容宽度应受 1560 约束（实际 ${box.width}）`).toBeLessThanOrEqual(1560)
+  // 居中留白：左右边距 > 0（1600 视口）
+  expect(box.x, `文件页应左右留白居中（左缘 ${box.x}）`).toBeGreaterThan(0)
+
+  // 文件页弹窗同样不挤压（新建 → 文件夹）
+  await page.getByRole('button', { name: /新\s*建/ }).first().click()
+  await page.locator('.ant-dropdown-menu-item').filter({ hasText: '文件夹' }).click()
+  await expect(page.locator('.ant-modal:visible').first()).toBeVisible()
+  await page.waitForTimeout(300)
+  const box2 = await page.evaluate(() => {
+    const r = document.querySelector('.content')!.getBoundingClientRect()
+    return { x: Math.round(r.x), width: Math.round(r.width) }
+  })
+  expect(box2.x, `文件页弹窗打开后左边距不变（${box.x} → ${box2.x}）`).toBe(box.x)
 })
 
-// ---------- 项10/11：管理页人员与组 + 邀请记录 ----------
-test('项10/11 管理页：人员与组合并页 + 邀请记录弹窗（含重发）', async () => {
-  await page.goto('/admin/people')
-  // 左组树 + 右成员表
-  await expect(page.locator('.people-groups-layout')).toBeVisible({ timeout: 15_000 })
-  await expect(page.locator('.people-group-tree .people-group-node').first()).toContainText('全部用户')
-  await expect(page.locator('.people-group-main .ant-table')).toBeVisible()
-  await expect(page.getByRole('button', { name: '新建用户组' })).toBeVisible()
-  // 邀请记录弹窗（项11）
-  await page.getByRole('button', { name: '邀请记录' }).click()
-  const invModal = page.locator('.ant-modal:visible', { hasText: '邀请记录' }).first()
-  await expect(invModal).toBeVisible()
-  await expect(invModal.getByRole('columnheader', { name: '邮箱' })).toBeVisible()
-  // 造一条待接受邀请（重发/撤销仅对 pending 行显示）
-  const INVITE_EMAIL = `e2e-invite-${ts}@example.com`
-  await invModal.getByRole('button', { name: '创建邀请' }).click()
-  const createInv = page.locator('.ant-modal:visible', { hasText: '创建注册邀请' }).last()
-  await createInv.locator('input[type="email"], input').first().fill(INVITE_EMAIL)
-  await createInv.getByRole('button', { name: /创\s*建/ }).click()
-  const invRow = invModal.locator('.ant-table-row', { hasText: INVITE_EMAIL })
-  await expect(invRow).toBeVisible({ timeout: 15_000 })
-  // 重发（项11：撤销旧 token + 生成新一次性链接）
-  await invRow.getByRole('button', { name: /重\s*发/ }).click()
-  await expect(page.locator('.banner.ok', { hasText: '已重发' })).toBeVisible({ timeout: 15_000 })
-  await expect(page.locator('.share-link input').first()).toHaveValue(/\/register\//, { timeout: 10_000 })
-  // 清理：撤销该邀请（后端删除该条，行消失）
-  await invRow.getByRole('button', { name: /撤\s*销/ }).click()
-  await expect(page.locator('.banner.ok', { hasText: '已撤销邀请' })).toBeVisible({ timeout: 15_000 })
-  await expect(invRow).toHaveCount(0, { timeout: 15_000 })
-  await closeModal(page)
-  await assertNoModalAndUnlocked(page)
-  // 管理导航收敛（项8）：人员与组 / 威胁防护；无「用户组」「安全」
-  const nav = await page.locator('.section-sidebar').innerText()
-  expect(nav).toContain('人员与组')
-  expect(nav, '「用户组」已合并').not.toContain('用户组')
-  expect(nav).toContain('威胁防护')
-  expect(nav, '原「安全」应改名「威胁防护」').not.toContain('安全')
+// ---------------------------------------------------------------- 修复 3
+test('3 空间设置危险区：转让与解散两个独立子卡片', async ({ page }) => {
+  const r = R()
+  const res = await api.post('/api/v1/spaces', { headers: H(), data: { name: `V25S-${r}`, description: '' } })
+  expect(res.ok()).toBeTruthy()
+  const spaceId = (await res.json()).id
+
+  await openAuthed(page, '/spaces')
+  const card = page.locator('.team-card').filter({ hasText: `V25S-${r}` })
+  await card.getByRole('button', { name: /^管\s*理$/ }).click()
+  // 左导航切「空间设置」
+  await page.getByRole('menuitem', { name: '空间设置' }).click()
+  const zone = page.locator('.danger-card')
+  await expect(zone).toHaveCount(2)
+  await expect(zone.first()).toContainText('转让所有权')
+  await expect(zone.first()).toContainText('降为管理员')
+  await expect(zone.nth(1)).toContainText('解散空间')
+  await expect(zone.nth(1)).toHaveClass(/danger-card-destructive/)
+  await expect(zone.nth(1)).toContainText('不可恢复')
 })
 
-// ---------- 项12a：空间软删 → 已解散筛选 → 彻底删除 ----------
-test('项12a 空间：解散（输入名确认）→ 已解散视图 → 彻底删除（二次确认）', async () => {
-  // 1. 创建空间
-  await page.goto('/spaces')
-  await page.waitForSelector('.team-card', { timeout: 15_000 })
-  await page.locator('.page-head button', { hasText: '创建空间' }).click()
-  const createModal = page.locator('.ant-modal:visible', { hasText: '创建空间' }).first()
-  await createModal.locator('input').first().fill(SPACE_NAME)
-  await createModal.getByRole('button', { name: /创\s*建/ }).click()
-  const card = page.locator('.team-card', { hasText: SPACE_NAME })
-  await expect(card).toBeVisible({ timeout: 15_000 })
+// ---------------------------------------------------------------- 修复 6
+test('6 /spaces 卡片 SplitButton：管理 / 解散', async ({ page }) => {
+  const r = R()
+  const res = await api.post('/api/v1/spaces', { headers: H(), data: { name: `V25S-${r}`, description: '' } })
+  expect(res.ok()).toBeTruthy()
 
-  // 2. ⋯ → 解散 → 直开管理弹窗「空间设置」tab 危险区（项3/6 联动）
-  await card.locator('.team-card-more').click()
-  await page.locator('.ant-dropdown-menu-item').filter({ hasText: '解散空间' }).click()
-  const manage = page.locator('.ant-modal:visible', { hasText: '空间管理' }).first()
-  await expect(manage).toBeVisible()
-  await expect(manage.getByText('危险区')).toBeVisible()
-  await manage.getByRole('button', { name: '解散空间' }).click()
-  const confirmModal = page.locator('.ant-modal:visible').filter({ hasText: '以确认解散' }).first()
-  await confirmModal.locator('input').fill(SPACE_NAME)
-  await confirmModal.getByRole('button', { name: /解\s*散/ }).click()
-  // 解散成功：弹窗关闭 + 回 /spaces + 卡片消失
-  await expect(page.locator('.ant-modal-wrap:visible')).toHaveCount(0, { timeout: 15_000 })
-  await expect(page).toHaveURL(/\/spaces/, { timeout: 10_000 })
-  await expect(page.locator('.team-card', { hasText: SPACE_NAME })).toHaveCount(0, { timeout: 15_000 })
-  await assertNoModalAndUnlocked(page)
-
-  // 3. admin 空间页：已解散视图（解散时间列 + 彻底删除）
-  await page.goto('/admin/spaces')
-  await expect(page.locator('.ant-segmented')).toBeVisible({ timeout: 15_000 })
-  await page.locator('.ant-segmented-item').filter({ hasText: '已解散' }).click()
-  await expect(page.locator('.ant-table')).toBeVisible()
-  const row = page.locator('.ant-table-row', { hasText: SPACE_NAME })
-  await expect(row).toBeVisible({ timeout: 15_000 })
-  await expect(row.locator('.badge', { hasText: '已解散' })).toBeVisible()
-  await expect(page.locator('.ant-table-thead').getByText('解散时间')).toBeVisible()
-  await expect(row.getByRole('button', { name: '彻底删除' })).toBeVisible()
-
-  // 4. 彻底删除：名字不匹配 → 拦截；匹配 → 物理删除
-  await row.getByRole('button', { name: '彻底删除' }).click()
-  let prompt = page.locator('.ant-modal:visible').filter({ hasText: '彻底删除空间' }).first()
-  await prompt.locator('input').fill('错误的名字')
-  await prompt.getByRole('button', { name: /彻底删除/ }).click()
-  await expect(page.locator('.banner.error').filter({ hasText: '不匹配' })).toBeVisible({ timeout: 10_000 })
-  await expect(page.locator('.ant-table-row', { hasText: SPACE_NAME })).toBeVisible()
-  await row.getByRole('button', { name: '彻底删除' }).click()
-  prompt = page.locator('.ant-modal:visible').filter({ hasText: '彻底删除空间' }).first()
-  await prompt.locator('input').fill(SPACE_NAME)
-  await prompt.getByRole('button', { name: /彻底删除/ }).click()
-  await expect(page.locator('.banner.ok').filter({ hasText: '已彻底删除' })).toBeVisible({ timeout: 20_000 })
-  await expect(page.locator('.ant-table-row', { hasText: SPACE_NAME })).toHaveCount(0, { timeout: 10_000 })
-  // 切回正常视图仍正常
-  await page.locator('.ant-segmented-item').filter({ hasText: '正常' }).click()
-  await expect(page.locator('.ant-table-row').first()).toBeVisible({ timeout: 15_000 })
+  await openAuthed(page, '/spaces')
+  const card = page.locator('.team-card').filter({ hasText: `V25S-${r}` })
+  // 主按钮文案 = 管理（非「空间管理」）
+  await expect(card.locator('.team-card-actions-split .ant-btn-primary').first()).toHaveText(/^管\s*理$/)
+  // 下拉危险项 = 解散（非「解散空间」）
+  await card.locator('.team-card-actions-split button[aria-label="更多操作"]').click()
+  const item = page.locator('.ant-dropdown-menu-item').filter({ hasText: '解散' })
+  await expect(item).toHaveText('解散')
+  await expect(page.locator('.ant-dropdown-menu-item').filter({ hasText: '解散空间' })).toHaveCount(0)
 })
 
-// ---------- 项12b：审计保留期设置 ----------
-test('项12b 审计页：保留期设置项（0=永久，保存生效并持久化）', async () => {
-  await page.goto('/admin/audit')
-  const retentionRow = page.locator('.setting-row', { hasText: '审计日志保留期' })
-  await expect(retentionRow).toBeVisible({ timeout: 15_000 })
-  await expect(retentionRow.locator('code')).toContainText('audit.retention_days')
-  // 改为 30 天保存
-  await retentionRow.locator('input').fill('30')
-  await retentionRow.getByRole('button', { name: /保\s*存/ }).click()
-  await expect(page.locator('.banner.ok').filter({ hasText: '30 天' })).toBeVisible({ timeout: 15_000 })
-  // 改回 0（永久）
-  await retentionRow.locator('input').fill('0')
-  await retentionRow.getByRole('button', { name: /保\s*存/ }).click()
-  await expect(page.locator('.banner.ok').filter({ hasText: '永久保留' })).toBeVisible({ timeout: 15_000 })
-  // 刷新后仍是 0（服务端持久化）
-  await page.reload()
-  const row2 = page.locator('.setting-row', { hasText: '审计日志保留期' })
-  await expect(row2).toBeVisible({ timeout: 15_000 })
-  await expect(row2.locator('input')).toHaveValue('0')
-})
+// ---------------------------------------------------------------- 修复 7
+test('7 设置页分区直达：邮件配置/TLS/系统设置不再跳外观', async ({ page }) => {
+  await openAuthed(page, '/settings/appearance')
 
-// ---------- 项4（数据面）：用户组挂进空间 → 成员表组来源徽标 ----------
-test('项4 成员 tab 显示组员（「组」徽标，组员只读）', async () => {
-  // 建组（含 admin 本人）
-  await page.goto('/admin/people')
-  await page.getByRole('button', { name: '新建用户组' }).click()
-  const gModal = page.locator('.ant-modal:visible', { hasText: '新建用户组' }).first()
-  await gModal.locator('input').first().fill(`e2e组${ts}`)
-  await gModal.getByRole('button', { name: /创\s*建/ }).click()
-  await page.locator('.people-group-node', { hasText: `e2e组${ts}` }).waitFor({ timeout: 15_000 })
-  // 选中组 → 右侧「加入该组」：远程搜索 admin 并加入（UI 全流程，不绕 API）
-  await page.locator('.people-group-node', { hasText: `e2e组${ts}` }).click()
-  await page.getByText('用户（昵称 / 用户名 / 邮箱，至少 2 字）').waitFor({ timeout: 10_000 })
-  await page.locator('.people-group-main .ant-select').first().click()
-  await page.keyboard.type('admin')
-  await page.locator('.ant-select-dropdown .ant-select-item-option').first().waitFor({ timeout: 10_000 })
-  await page.locator('.ant-select-dropdown .ant-select-item-option').first().click()
-  await page.getByRole('button', { name: `加入「e2e组${ts}」` }).click()
-  // 加入成功：左树该组节点成员计数变为 1（admin 本人）
-  const groupNode = page.locator('.people-group-node', { hasText: `e2e组${ts}` })
-  await expect(groupNode.locator('.people-group-count')).toHaveText('1', { timeout: 15_000 })
-  // 把组挂到 admin 的默认空间（第一个卡片 = 默认空间）
-  await page.goto('/spaces')
-  await page.waitForSelector('.team-card', { timeout: 15_000 })
-  await page.locator('.team-card').first().locator('.team-card-more').click()
-  await page.locator('.ant-dropdown-menu-item').filter({ hasText: '空间管理' }).click()
-  const modal = page.locator('.ant-modal:visible', { hasText: '空间管理' }).first()
-  await expect(modal).toBeVisible()
-  await modal.locator('.ant-menu-item').filter({ hasText: '用户组' }).click()
-  await modal.locator('.member-add-row .ant-select').first().click()
-  await page.locator('.ant-select-dropdown .ant-select-item-option', { hasText: `e2e组${ts}` }).first().click()
-  await modal.locator('.member-add-row .member-add-submit').click()
-  await expect(modal.locator('.ant-table-row', { hasText: `e2e组${ts}` })).toBeVisible({ timeout: 15_000 })
-  // 成员 tab：admin 行出现「组」徽标（合并显示直接成员 + 组内用户）
-  await modal.locator('.ant-menu-item').filter({ hasText: '成员' }).click()
-  await expect(modal.locator('.badge-group-src').first()).toBeVisible({ timeout: 15_000 })
-  // 清理：移除空间组挂载（「移除」→ 确认「删除」）
-  await modal.locator('.ant-menu-item').filter({ hasText: '用户组' }).click()
-  const gRow = modal.locator('.ant-table-row', { hasText: `e2e组${ts}` })
-  await gRow.getByRole('button', { name: /移\s*除/ }).click()
-  const confirmWrap = page.locator('.ant-modal-wrap:visible').filter({ hasText: '的授权' })
-  await expect(confirmWrap).toHaveCount(1, { timeout: 10_000 })
-  await confirmWrap.getByRole('button', { name: /删\s*除/ }).click()
-  // onOk 完成后确认层关闭
-  await expect(confirmWrap).toHaveCount(0, { timeout: 15_000 })
-  await expect(gRow).toHaveCount(0, { timeout: 15_000 })
-  await closeModal(page)
-  await assertNoModalAndUnlocked(page)
-  // 删组
-  await page.goto('/admin/people')
-  const node = page.locator('.people-group-node', { hasText: `e2e组${ts}` })
-  await node.waitFor({ timeout: 15_000 })
-  await node.getByRole('button', { name: '删' }).click()
-  const delConfirm = page.locator('.ant-modal-wrap:visible').filter({ hasText: '确定删除用户组' })
-  await expect(delConfirm).toHaveCount(1, { timeout: 10_000 })
-  await delConfirm.getByRole('button', { name: /删\s*除/ }).click()
-  // 组已删：左树节点消失（业务结果断言）
-  await expect(node).toHaveCount(0, { timeout: 15_000 })
-})
-
-// ---------- 项5（高优）：树点击弹窗串扰 ----------
-test('项5（高优）回收站→关闭→点目录树：正序 10 轮 + 乱序 5 轮零串扰', async () => {
-  await page.goto('/files')
-  // 造一个目录，保证树有可点的目录节点
-  const newBtn = page.locator('.files-topbar button', { hasText: /新\s*建/ }).first()
-  if (await newBtn.isVisible().catch(() => false)) {
-    await newBtn.click()
-    await page.locator('.ant-dropdown-menu-item').filter({ hasText: '文件夹' }).click()
-    const fModal = page.locator('.ant-modal:visible', { hasText: '新建文件夹' }).first()
-    await fModal.locator('input').first().fill(`e2e目录${ts}`)
-    await fModal.getByRole('button', { name: /创\s*建/ }).click()
-    await page.waitForTimeout(900)
-    await closeModal(page).catch(() => {})
+  for (const [section, marker] of [
+    ['mail', '邮件配置（SMTP）'],
+    ['tls', 'HTTPS / TLS'],
+    ['system', '过滤设置键'],
+  ] as const) {
+    await page.goto(`/settings/${section}`)
+    await page.waitForLoadState('networkidle')
+    await expect(page, `${section} 应停留在本分区`).toHaveURL(new RegExp(`/settings/${section}$`))
+    await expect(page.locator('.section-content'), `${section} 应渲染对应面板`).toContainText(marker)
   }
-  await page.waitForSelector('.folder-tree-row', { timeout: 20_000 })
-  const treeRows = page.locator('.folder-tree-row:not(.file-leaf)')
-  await expect(treeRows.first()).toBeVisible()
+
+  // 全部 tab 逐个点击断言内容正确
+  const tabs: Array<[string, string]> = [
+    ['外观', '主题色'],
+    ['打开方式', '打开方式'],
+    ['账号安全', '两步验证'],
+    ['通知', '通知'],
+    ['开发者', '开发者'],
+    ['邮件配置', '邮件配置（SMTP）'],
+    ['TLS', 'HTTPS / TLS'],
+    ['系统设置', '过滤设置键'],
+  ]
+  await page.goto('/settings/appearance')
+  for (const [label, marker] of tabs) {
+    await page.locator('.section-sidebar a').filter({ hasText: label }).click()
+    await expect(page).toHaveURL(new RegExp(`/settings/([a-z]+)$`))
+    await expect(page.locator('.section-content')).toContainText(marker, { timeout: 10_000 })
+  }
+})
+
+// ---------------------------------------------------------------- 修复 8
+test('8 主题不漂移：emerald 高频导航/弹窗 30 轮后不变', async ({ page }) => {
+  await openAuthed(page, '/')
+  await page.evaluate(() => {
+    localStorage.setItem('docflow.theme', JSON.stringify({ accent: 'emerald', mode: 'dark' }))
+  })
+  await page.goto('/')
+  await page.waitForLoadState('networkidle')
+
+  const theme = () => page.evaluate(() => document.documentElement.dataset.theme)
+  expect(await theme()).toBe('emerald')
+
+  // antd cssVar 主色（primary 按钮背景）
+  const primaryColor = () =>
+    page.evaluate(() => {
+      const el = document.querySelector<HTMLElement>('.ant-btn-primary')
+      return el ? getComputedStyle(el).backgroundColor : ''
+    })
+  const before = await primaryColor()
+  expect(before, 'primary 按钮应有 accent 色').not.toBe('')
 
   for (let i = 0; i < 10; i++) {
-    // 打开回收站
-    await page.locator('.files-topbar button', { hasText: '回收站' }).first().click()
-    await expect(page.locator('.ant-modal:visible .ant-modal-title', { hasText: '回收站' })).toBeVisible()
-    // 关闭（交替 × / Esc）
-    if (i % 2 === 0) await closeModal(page)
-    else await page.keyboard.press('Escape')
-    await expect(page.locator('.ant-modal-wrap:visible')).toHaveCount(0)
-    // 立即点目录树（偶数轮点根，奇数轮点业务目录）
-    await treeRows.nth(i % 2 === 0 ? 0 : Math.min(1, (await treeRows.count()) - 1)).click()
-    await page.waitForTimeout(350)
-    // 断言：无任何弹窗重放（串扰）
-    const leaked = await page.locator('.ant-modal-wrap:visible').count()
-    expect(leaked, `第 ${i + 1} 轮：点目录后不应自动弹窗（串扰），实际可见弹窗 ${leaked} 个`).toBe(0)
-    const overflow = await page.evaluate(() => document.body.style.overflow)
-    expect(overflow, `第 ${i + 1} 轮：body 不应残留滚动锁`).not.toBe('hidden')
+    // SPA 内导航（顶栏链接）：内存 access token 保留，无整页重载。
+    await page.locator('.nav a[href="/spaces"]').click()
+    await page.waitForSelector('.team-grid, .empty', { timeout: 10_000 })
+    await page.locator('.nav a[href="/shared"]').click()
+    await page.waitForLoadState('domcontentloaded')
+    await page.locator('.nav a[href="/"]').click()
+    await page.waitForSelector('.files-tree-main', { timeout: 10_000 })
+    // 开弹窗（新建 → 文件夹）再关闭
+    await page.getByRole('button', { name: /新\s*建/ }).first().click()
+    await page.locator('.ant-dropdown-menu-item').filter({ hasText: '文件夹' }).click()
+    await expect(page.locator('.ant-modal:visible').first()).toBeVisible()
+    await page.keyboard.press('Escape')
+    await page.waitForTimeout(200)
   }
-  // 乱序变体：点树 → 开回收站 → 关 → 立即点树
-  for (let i = 0; i < 5; i++) {
-    await treeRows.first().click()
-    await page.locator('.files-topbar button', { hasText: '回收站' }).first().click()
-    await expect(page.locator('.ant-modal:visible .ant-modal-title', { hasText: '回收站' })).toBeVisible()
-    await closeModal(page)
-    await treeRows.last().click()
-    await page.waitForTimeout(300)
-    expect(await page.locator('.ant-modal-wrap:visible').count(), `乱序第 ${i + 1} 轮不应串扰`).toBe(0)
-  }
+
+  expect(await theme(), '30 轮高频操作后 accent 不应漂移').toBe('emerald')
+  expect(await primaryColor(), 'antd cssVar 主色不应漂移').toBe(before)
 })
 
-// ---------- 项9（高优）：弹窗高频开关 50 次零卡死 ----------
-test('项9（高优）弹窗高频开关 50 次：零 mask 残留 / 滚动锁 / 点不动', async () => {
-  await page.goto('/files')
-  await page.waitForSelector('.files-topbar', { timeout: 20_000 })
-  // ① 回收站 × 25（交替 × / Esc / mask 点击）
-  for (let i = 0; i < 25; i++) {
-    await page.locator('.files-topbar button', { hasText: '回收站' }).first().click()
-    await expect(page.locator('.ant-modal:visible .ant-modal-title', { hasText: '回收站' })).toBeVisible()
-    if (i % 3 === 0) await closeModal(page)
-    else if (i % 3 === 1) await page.keyboard.press('Escape')
-    else await page.locator('.ant-modal-wrap:visible', { hasText: '回收站' }).first().click({ position: { x: 8, y: 8 } })
-    await page.waitForTimeout(100)
-  }
-  await assertNoModalAndUnlocked(page)
-  // ② 新建文件夹弹窗 × 12
-  for (let i = 0; i < 12; i++) {
-    await page.locator('.files-topbar button', { hasText: /新\s*建/ }).first().click()
-    await page.locator('.ant-dropdown-menu-item').filter({ hasText: '文件夹' }).click()
-    await expect(page.locator('.ant-modal:visible', { hasText: '新建文件夹' }).first()).toBeVisible()
-    await closeModal(page)
-  }
-  await assertNoModalAndUnlocked(page)
-  // ③ /spaces 空间管理弹窗 × 13（交替 × / Esc）
-  await page.goto('/spaces')
-  await page.waitForSelector('.team-card', { timeout: 15_000 })
-  for (let i = 0; i < 13; i++) {
-    await page.locator('.team-card-more').first().click()
-    await page.locator('.ant-dropdown-menu-item').filter({ hasText: '空间管理' }).click()
-    await expect(page.locator('.ant-modal:visible', { hasText: '空间管理' }).first()).toBeVisible()
-    if (i % 2 === 0) await closeModal(page)
-    else await page.keyboard.press('Escape')
-    // 关闭动画（~300ms）结束后再进入下一轮，避免动画中重开的竞态。
-    await page.waitForTimeout(400)
-    // 每轮复核关闭成功（失败即早暴露并带轮次号）。
-    const leaked = await page.locator('.ant-modal-wrap:visible').count()
-    expect(leaked, `第 ${i} 轮关闭后仍有 ${leaked} 个可见弹窗`).toBe(0)
-  }
-  await assertNoModalAndUnlocked(page)
-  // ④ 终检：页面仍可交互（真实点击打开/关闭弹窗成功 = 无 pointer-events 卡死），
-  //    且无残留空弹层根节点
-  await page.locator('.page-head button', { hasText: '创建空间' }).click()
-  await expect(page.locator('.ant-modal:visible', { hasText: '创建空间' }).first()).toBeVisible()
-  await closeModal(page)
-  await assertNoModalAndUnlocked(page)
-  const strayLayers = await page.evaluate(() => {
-    const roots = document.querySelectorAll('body > .ant-modal-root')
-    let stray = 0
-    roots.forEach((r) => {
-      const wrap = r.querySelector('.ant-modal-wrap')
-      if (!wrap || wrap.style.display === 'none' || wrap.childElementCount === 0) stray++
-    })
-    return { stray, total: roots.length }
-  })
-  expect(strayLayers.stray, '不应残留空弹层根节点').toBe(0)
+// ---------------------------------------------------------------- 修复 9
+test('9 人员与组：antd Menu 左树 + 图标按钮 + 无包裹边框', async ({ page }) => {
+  const r = R()
+  const g = await api.post('/api/v1/admin/groups', { headers: H(), data: { name: `V25G-${r}`, description: '' } })
+  expect(g.ok(), await g.text()).toBeTruthy()
+
+  await openAuthed(page, '/admin/people')
+  await page.waitForLoadState('networkidle')
+
+  // 左树 = antd Menu
+  const menu = page.locator('.people-group-menu.ant-menu')
+  await expect(menu).toBeVisible()
+  await expect(menu).toContainText('全部用户')
+  await expect(menu).toContainText(`V25G-${r}`)
+
+  // 组行图标按钮（Edit3/Trash2 svg），无「改」「删」文字按钮
+  const groupItem = menu.locator('.ant-menu-item').filter({ hasText: `V25G-${r}` })
+  await expect(groupItem.locator('.people-group-action svg')).toHaveCount(2)
+  expect(await menu.locator('button').filter({ hasText: /^改$/ }).count(), '不应再有「改」文字按钮').toBe(0)
+  expect(await menu.locator('button').filter({ hasText: /^删$/ }).count(), '不应再有「删」文字按钮').toBe(0)
+
+  // 无包裹边框（旧卡片边框已去除）
+  const borderWidth = await page.evaluate(() => getComputedStyle(document.querySelector('.people-group-tree')!).borderWidth)
+  expect(borderWidth, '左树容器不应有包裹边框').toBe('0px')
+
+  // 点选组过滤右表
+  await groupItem.click()
+  await page.waitForTimeout(400)
+  await expect(groupItem).toHaveClass(/ant-menu-item-selected/)
 })
+
+// ---------------------------------------------------------------- 修复 10
+test('10 成员栏组行展开显示组内成员', async ({ page }) => {
+  const r = R()
+  // 组 + admin 入组 + 新空间 + 组入空间
+  const g = await api.post('/api/v1/admin/groups', { headers: H(), data: { name: `V25G-${r}`, description: '' } })
+  expect(g.ok(), await g.text()).toBeTruthy()
+  const groupId = (await g.json()).id
+  const me = await api.get('/api/v1/me', { headers: H() })
+  const meId = (await me.json()).id
+  const add = await api.post(`/api/v1/admin/groups/${groupId}/members`, { headers: H(), data: { user_id: meId } })
+  expect(add.ok(), await add.text()).toBeTruthy()
+  const sp = await api.post('/api/v1/spaces', { headers: H(), data: { name: `V25S-${r}`, description: '' } })
+  expect(sp.ok()).toBeTruthy()
+  const spaceId = (await sp.json()).id
+  const ag = await api.post(`/api/v1/spaces/${spaceId}/groups`, { headers: H(), data: { group_id: groupId, role: 'member' } })
+  expect(ag.ok(), await ag.text()).toBeTruthy()
+
+  await openAuthed(page, `/files?space=${spaceId}`)
+  await page.waitForLoadState('networkidle')
+  // 诊断：页面与成员栏状态
+  console.log('T10 page url:', page.url(), JSON.stringify(await page.evaluate(() => ({
+    hasAside: Boolean(document.querySelector('.workspace-aside')),
+    hasPanel: Boolean(document.querySelector('.member-panel')),
+    panelText: document.querySelector('.member-panel')?.textContent?.slice(0, 120) ?? '',
+  }))))
+
+  // 右侧成员栏：组行（caret）点击展开 → 显示组内成员（admin）
+  const groupRow = page.locator('.member-group-row').filter({ hasText: `V25G-${r}` })
+  await expect(groupRow).toBeVisible()
+  await expect(groupRow).toContainText('1 人')
+  await groupRow.locator('.member-info-btn').click()
+  const members = page.locator('.member-group-members')
+  await expect(members).toBeVisible()
+  await expect(members).toContainText('admin')
+  // 组内成员行有头像 + 点击可弹用户信息
+  await expect(members.locator('.member-avatar').first()).toBeVisible()
+  await members.locator('.member-info-btn').first().click()
+  await expect(page.locator('.ant-modal').filter({ hasText: /admin/ })).toBeVisible()
+})
+
+
+
