@@ -4669,9 +4669,10 @@ paths:
       operationId: aiModels
       summary: 可用模型列表（登录即可，非管理员）
       description: >-
-        返回启用 Provider 的可用模型（含能力勾选 chat/embedding/vision/
-        rerank/reasoning——reasoning 标记模型支持推理思考，前端据此判断
-        think 参数是否默认开启）与场景默认模型（default_models：chat/
+        返回启用 Provider 的可用模型（capabilities 为类型+能力并集：kind
+        互斥单选 chat/embedding/rerank/image + reasoning/vision/audio/video
+        能力勾选——reasoning 标记模型支持推理思考，前端据此判断 think 参数
+        是否默认开启）与场景默认模型（default_models：chat/
         summary/edit，运行时 summary/edit 无效回落 chat）。绝不返回
         api_key/base_url 等密钥类信息；AI 未启用时 404（与 /ai/chat 同语义）。
       responses:
@@ -4702,16 +4703,13 @@ paths:
                               label: { type: string }
                               capabilities:
                                 type: object
-                                description: 类型互斥单选 + 能力并集（Cherry Studio 语义）；写出双形态（kind + 旧 chat/embedding/rerank 布尔向后兼容）
+                                description: 类型互斥单选 + 能力并集（Cherry Studio 语义）；单形态（kind + 四能力，无旧布尔键）
                                 properties:
-                                  kind: { type: string, enum: [chat, embedding, rerank, image], description: 模型类型（互斥单选；读取旧对象时自动映射） }
+                                  kind: { type: string, enum: [chat, embedding, rerank, image], description: 模型类型（互斥单选，默认 chat） }
                                   reasoning: { type: boolean, description: 支持推理思考（think 参数） }
                                   vision: { type: boolean }
                                   audio: { type: boolean }
                                   video: { type: boolean }
-                                  chat: { type: boolean, description: 旧布尔兼容形态（= kind==="chat"，由服务端派生写出） }
-                                  embedding: { type: boolean, description: 旧布尔兼容形态（= kind==="embedding"） }
-                                  rerank: { type: boolean, description: 旧布尔兼容形态（= kind==="rerank"） }
                   default_models:
                     type: object
                     description: 场景默认模型（provider_id+model_id）
@@ -4777,16 +4775,13 @@ paths:
                                   label: { type: string }
                                   capabilities:
                                     type: object
-                                    description: 类型互斥单选 + 能力并集（同平台语义；读取旧对象自动映射 kind）
+                                    description: 类型互斥单选 + 能力并集（同平台语义，单形态）
                                     properties:
                                       kind: { type: string, enum: [chat, embedding, rerank, image] }
                                       reasoning: { type: boolean }
                                       vision: { type: boolean }
                                       audio: { type: boolean }
                                       video: { type: boolean }
-                                      chat: { type: boolean, description: 旧布尔兼容形态（服务端派生） }
-                                      embedding: { type: boolean, description: 旧布尔兼容形态（服务端派生） }
-                                      rerank: { type: boolean, description: 旧布尔兼容形态（服务端派生） }
                       default_models:
                         type: object
                         description: 个人场景默认模型（provider_id+model_id 须指向个人池）
@@ -4850,16 +4845,13 @@ paths:
                             label: { type: string }
                             capabilities:
                               type: object
-                              description: 类型互斥单选 + 能力并集（同平台语义；读取旧对象自动映射 kind）
+                              description: 类型互斥单选 + 能力并集（同平台语义，单形态）
                               properties:
                                 kind: { type: string, enum: [chat, embedding, rerank, image] }
                                 reasoning: { type: boolean }
                                 vision: { type: boolean }
                                 audio: { type: boolean }
                                 video: { type: boolean }
-                                chat: { type: boolean, description: 旧布尔兼容形态（服务端派生） }
-                                embedding: { type: boolean, description: 旧布尔兼容形态（服务端派生） }
-                                rerank: { type: boolean, description: 旧布尔兼容形态（服务端派生） }
                 default_models:
                   type: object
                   additionalProperties:
@@ -5503,16 +5495,13 @@ paths:
                               label: { type: string }
                               capabilities:
                                 type: object
-                                description: 类型互斥单选 + 能力并集（Cherry Studio 语义）；写出双形态（kind + 旧 chat/embedding/rerank 布尔向后兼容），读取旧对象自动映射 kind
+                                description: 类型互斥单选 + 能力并集（Cherry Studio 语义）；单形态（kind + 四能力，无旧布尔键）
                                 properties:
                                   kind: { type: string, enum: [chat, embedding, rerank, image], description: 模型类型（互斥单选，默认 chat） }
                                   reasoning: { type: boolean }
                                   vision: { type: boolean }
                                   audio: { type: boolean }
                                   video: { type: boolean }
-                                  chat: { type: boolean, description: 旧布尔兼容形态（= kind==="chat"，由服务端派生写出） }
-                                  embedding: { type: boolean, description: 旧布尔兼容形态（= kind==="embedding"） }
-                                  rerank: { type: boolean, description: 旧布尔兼容形态（= kind==="rerank"） }
                         enabled: { type: boolean }
                         api_key_configured: { type: boolean }
                         is_env: { type: boolean }

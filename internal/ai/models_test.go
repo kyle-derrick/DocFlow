@@ -24,10 +24,10 @@ func TestEffectiveModelsLegacyCompat(t *testing.T) {
 		t.Fatalf("providers = %d", len(providers))
 	}
 	models := providers[0].EffectiveModels()
-	if len(models) != 1 || models[0].ID != "gpt-4o-mini" || !models[0].Capabilities.Chat {
+	if len(models) != 1 || models[0].ID != "gpt-4o-mini" || !models[0].Capabilities.IsChat() {
 		t.Fatalf("legacy EffectiveModels = %+v", models)
 	}
-	if models[0].Capabilities.Embedding || models[0].Capabilities.Vision || models[0].Capabilities.Rerank {
+	if models[0].Capabilities.Kind != settings.AIModelKindChat || models[0].Capabilities.Vision {
 		t.Fatalf("legacy 合成模型不应带其他能力: %+v", models[0].Capabilities)
 	}
 	if providers[0].PrimaryModel() != "gpt-4o-mini" {
@@ -35,8 +35,8 @@ func TestEffectiveModelsLegacyCompat(t *testing.T) {
 	}
 	// models 非空时原样返回、PrimaryModel 取首个 chat 能力模型。
 	multi := settings.AIProvider{Model: "legacy-primary", Models: []settings.AIModel{
-		{ID: "emb-only", Capabilities: settings.AIModelCapabilities{Embedding: true}},
-		{ID: "chat-a", Capabilities: settings.AIModelCapabilities{Chat: true}},
+		{ID: "emb-only", Capabilities: settings.AIModelCapabilities{Kind: settings.AIModelKindEmbedding}},
+		{ID: "chat-a", Capabilities: settings.AIModelCapabilities{Kind: settings.AIModelKindChat}},
 	}}
 	if got := multi.PrimaryModel(); got != "chat-a" {
 		t.Fatalf("multi PrimaryModel = %q, want chat-a", got)
@@ -53,8 +53,8 @@ func TestResolveChatTargetScenarioDefaults(t *testing.T) {
 		Providers: []settings.AIProvider{{
 			ID: "m1", Name: "Mock", Kind: settings.AIKindMock, Enabled: true,
 			Models: []settings.AIModel{
-				{ID: "chat-m", Capabilities: settings.AIModelCapabilities{Chat: true}},
-				{ID: "sum-m", Capabilities: settings.AIModelCapabilities{Chat: true}},
+				{ID: "chat-m", Capabilities: settings.AIModelCapabilities{Kind: settings.AIModelKindChat}},
+				{ID: "sum-m", Capabilities: settings.AIModelCapabilities{Kind: settings.AIModelKindChat}},
 			},
 		}},
 		DefaultProvider: "m1",
@@ -94,8 +94,8 @@ func TestResolveChatTargetModelNotAllowed(t *testing.T) {
 		Providers: []settings.AIProvider{{
 			ID: "m1", Name: "Mock", Kind: settings.AIKindMock, Enabled: true,
 			Models: []settings.AIModel{
-				{ID: "chat-m", Capabilities: settings.AIModelCapabilities{Chat: true}},
-				{ID: "emb-m", Capabilities: settings.AIModelCapabilities{Embedding: true}},
+				{ID: "chat-m", Capabilities: settings.AIModelCapabilities{Kind: settings.AIModelKindChat}},
+				{ID: "emb-m", Capabilities: settings.AIModelCapabilities{Kind: settings.AIModelKindEmbedding}},
 			},
 		}},
 		DefaultProvider: "m1",
@@ -121,8 +121,8 @@ func TestChatScenarioDefaultUsedBySummarize(t *testing.T) {
 		Providers: []settings.AIProvider{{
 			ID: "m1", Name: "Mock", Kind: settings.AIKindMock, Enabled: true,
 			Models: []settings.AIModel{
-				{ID: "chat-m", Capabilities: settings.AIModelCapabilities{Chat: true}},
-				{ID: "sum-m", Capabilities: settings.AIModelCapabilities{Chat: true}},
+				{ID: "chat-m", Capabilities: settings.AIModelCapabilities{Kind: settings.AIModelKindChat}},
+				{ID: "sum-m", Capabilities: settings.AIModelCapabilities{Kind: settings.AIModelKindChat}},
 			},
 		}},
 		DefaultProvider: "m1",
@@ -145,8 +145,8 @@ func TestValidateAIDefaultModels(t *testing.T) {
 		Providers: []settings.AIProvider{{
 			ID: "p1", Name: "P1", Kind: settings.AIKindOpenAICompatible, BaseURL: "https://api.example.com/v1", Enabled: true,
 			Models: []settings.AIModel{
-				{ID: "chat-m", Capabilities: settings.AIModelCapabilities{Chat: true}},
-				{ID: "emb-m", Capabilities: settings.AIModelCapabilities{Embedding: true}},
+				{ID: "chat-m", Capabilities: settings.AIModelCapabilities{Kind: settings.AIModelKindChat}},
+				{ID: "emb-m", Capabilities: settings.AIModelCapabilities{Kind: settings.AIModelKindEmbedding}},
 			},
 		}},
 		Temperature: 0.3, MaxTokens: 1024, PerUserPerMin: 20,
@@ -195,9 +195,9 @@ func TestValidateAIRAGEmbeddingFromProviders(t *testing.T) {
 		Providers: []settings.AIProvider{{
 			ID: "p1", Name: "P1", Kind: settings.AIKindOpenAICompatible, BaseURL: "https://api.example.com/v1", Enabled: true,
 			Models: []settings.AIModel{
-				{ID: "chat-m", Capabilities: settings.AIModelCapabilities{Chat: true}},
-				{ID: "emb-m", Capabilities: settings.AIModelCapabilities{Embedding: true}},
-				{ID: "rr-m", Capabilities: settings.AIModelCapabilities{Rerank: true}},
+				{ID: "chat-m", Capabilities: settings.AIModelCapabilities{Kind: settings.AIModelKindChat}},
+				{ID: "emb-m", Capabilities: settings.AIModelCapabilities{Kind: settings.AIModelKindEmbedding}},
+				{ID: "rr-m", Capabilities: settings.AIModelCapabilities{Kind: settings.AIModelKindRerank}},
 			},
 		}},
 		Temperature: 0.3, MaxTokens: 1024, PerUserPerMin: 20,
@@ -242,8 +242,8 @@ func TestResolveEmbeddingTargetLegacyFallback(t *testing.T) {
 		Providers: []settings.AIProvider{{
 			ID: "p1", Name: "P1", Kind: settings.AIKindOpenAICompatible, BaseURL: "https://api.example.com/v1", Enabled: true,
 			Models: []settings.AIModel{
-				{ID: "chat-m", Capabilities: settings.AIModelCapabilities{Chat: true}},
-				{ID: "emb-m", Capabilities: settings.AIModelCapabilities{Embedding: true}},
+				{ID: "chat-m", Capabilities: settings.AIModelCapabilities{Kind: settings.AIModelKindChat}},
+				{ID: "emb-m", Capabilities: settings.AIModelCapabilities{Kind: settings.AIModelKindEmbedding}},
 			},
 		}},
 		DefaultProvider: "p1",
@@ -294,7 +294,7 @@ func TestValidateAIProviderModelsAndLimits(t *testing.T) {
 	// models 非空时旧 model 字段可缺省。
 	if err := settings.ValidateAIProvider(settings.AIProvider{
 		ID: "p", Name: "P", Kind: settings.AIKindOpenAICompatible, BaseURL: "https://api.example.com/v1",
-		Models: []settings.AIModel{{ID: "a", Capabilities: settings.AIModelCapabilities{Chat: true}}},
+		Models: []settings.AIModel{{ID: "a", Capabilities: settings.AIModelCapabilities{Kind: settings.AIModelKindChat}}},
 	}); err != nil {
 		t.Fatalf("models 非空时 model 可缺省: %v", err)
 	}

@@ -79,10 +79,11 @@ const CAPABILITY_FIELDS: { key: 'reasoning' | 'vision' | 'audio' | 'video'; zh: 
 
 const emptyCaps = (): AIModelCapabilities => ({ kind: 'chat', reasoning: false, vision: false, audio: false, video: false })
 
-/** caps 宽松归一（旧后端可能仍回旧布尔形态：kind 缺省按 chat 布尔推导）。 */
+/** caps 归一：kind 为单形态必填字段，缺省（undefined/空串）回退默认类型
+ *  chat（与后端 NormalizeAIModelKind 的默认值语义一致）。 */
 const normalizeCaps = (raw?: AIModelCapabilities | null): AIModelCapabilities => {
   const c = raw ?? emptyCaps()
-  const kind = (c.kind ?? (c.embedding ? 'embedding' : c.rerank ? 'rerank' : 'chat')) as AIModelKind
+  const kind = (c.kind || 'chat') as AIModelKind
   return { kind, reasoning: !!c.reasoning, vision: !!c.vision, audio: !!c.audio, video: !!c.video }
 }
 

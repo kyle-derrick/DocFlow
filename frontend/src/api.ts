@@ -3006,9 +3006,8 @@ export type AIModelKind = 'chat' | 'embedding' | 'rerank' | 'image'
 
 /**
  * 模型类型 + 能力并集：类型互斥单选（kind），能力可多选勾选
- * （reasoning/vision/audio/video）。后端写出双形态（同时携带旧
- * chat/embedding/rerank 布尔向后兼容）；PUT 载荷只填 kind+能力即可，
- * 旧形态读入由后端自动映射 kind。
+ * （reasoning/vision/audio/video）。单形态（无旧 chat/embedding/rerank
+ * 布尔）；kind 空/非法由后端归一为默认类型 chat。
  */
 export interface AIModelCapabilities {
   kind: AIModelKind
@@ -3016,10 +3015,6 @@ export interface AIModelCapabilities {
   vision: boolean
   audio: boolean
   video: boolean
-  /** 旧布尔兼容形态（后端派生写出；前端载荷无需填写）。 */
-  chat?: boolean
-  embedding?: boolean
-  rerank?: boolean
 }
 
 /** Provider 下的模型条目。 */

@@ -170,7 +170,7 @@ func TestAIPersonalSubsetIsolation(t *testing.T) {
 	}
 
 	// 主 PUT（掩码回读形态：不含 skills/mcp_servers 字段）不清空两子集。
-	maskedView := `{"providers":[{"id":"mine","name":"我的网关","kind":"openai_compatible","base_url":"https://gw.example.com/v1","models":[{"id":"my-chat","capabilities":{"chat":true}}]}],"personas":[],"prefer_personal":true}`
+	maskedView := `{"providers":[{"id":"mine","name":"我的网关","kind":"openai_compatible","base_url":"https://gw.example.com/v1","models":[{"id":"my-chat","capabilities":{"kind":"chat"}}]}],"personas":[],"prefer_personal":true}`
 	if w := personalJSON(r, http.MethodPut, "/api/v1/ai/personal-settings", maskedView); w.Code != http.StatusOK {
 		t.Fatalf("主 PUT 二次: %d %s", w.Code, w.Body.String())
 	}

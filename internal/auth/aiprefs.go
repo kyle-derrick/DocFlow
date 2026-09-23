@@ -225,10 +225,10 @@ func ValidateAIPersonalPrefs(p AIPersonalPrefs) error {
 		if !ok {
 			return fmt.Errorf("%w: default_models.%s.model_id %q 不在 Provider %q 中", ErrInvalidAIPrefs, scenario, ref.ModelID, prov.ID)
 		}
-		if scenario == settings.AIScenarioEmbedding && !m.Capabilities.Embedding {
+		if scenario == settings.AIScenarioEmbedding && !m.Capabilities.IsEmbedding() {
 			return fmt.Errorf("%w: default_models.%s 模型 %q 缺少 embedding 能力", ErrInvalidAIPrefs, scenario, ref.ModelID)
 		}
-		if scenario != settings.AIScenarioEmbedding && !m.Capabilities.Chat {
+		if scenario != settings.AIScenarioEmbedding && !m.Capabilities.IsChat() {
 			return fmt.Errorf("%w: default_models.%s 模型 %q 缺少 chat 能力", ErrInvalidAIPrefs, scenario, ref.ModelID)
 		}
 	}

@@ -316,8 +316,8 @@ func aiModelsTestConfig() settings.AIConfig {
 				ID: "p1", Name: "DeepSeek", Kind: settings.AIKindOpenAICompatible,
 				BaseURL: "https://api.deepseek.com/v1", APIKey: "sk-secret-key", Enabled: true,
 				Models: []settings.AIModel{
-					{ID: "deepseek-chat", Label: "对话", Capabilities: settings.AIModelCapabilities{Chat: true}},
-					{ID: "deepseek-emb", Capabilities: settings.AIModelCapabilities{Embedding: true}},
+					{ID: "deepseek-chat", Label: "对话", Capabilities: settings.AIModelCapabilities{Kind: settings.AIModelKindChat}},
+					{ID: "deepseek-emb", Capabilities: settings.AIModelCapabilities{Kind: settings.AIModelKindEmbedding}},
 				},
 			},
 			{ID: "p2", Name: "Off", Kind: settings.AIKindMock, Model: "off-model", Enabled: false},
@@ -338,7 +338,7 @@ func TestAIModelsNoKeyLeak(t *testing.T) {
 		t.Fatalf("status = %d body %s", w.Code, w.Body.String())
 	}
 	body := w.Body.String()
-	for _, want := range []string{`"id":"p1"`, `"deepseek-chat"`, `"embedding":true`, `"default_models"`, `"chat"`} {
+	for _, want := range []string{`"id":"p1"`, `"deepseek-chat"`, `"kind":"embedding"`, `"default_models"`, `"chat"`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("body 缺 %q: %s", want, body)
 		}
@@ -358,8 +358,8 @@ func TestAIChatModelParamValidAndRejected(t *testing.T) {
 	cfg.Providers = append(cfg.Providers, settings.AIProvider{
 		ID: "mock1", Name: "Mock", Kind: settings.AIKindMock, Enabled: true,
 		Models: []settings.AIModel{
-			{ID: "mock-chat", Capabilities: settings.AIModelCapabilities{Chat: true}},
-			{ID: "mock-emb", Capabilities: settings.AIModelCapabilities{Embedding: true}},
+			{ID: "mock-chat", Capabilities: settings.AIModelCapabilities{Kind: settings.AIModelKindChat}},
+			{ID: "mock-emb", Capabilities: settings.AIModelCapabilities{Kind: settings.AIModelKindEmbedding}},
 		},
 	})
 	r := newAIv1Router(newAIv1ServiceCfg(cfg), uuid.New(), nil, "")
@@ -392,7 +392,7 @@ func TestAIChatProviderRateLimit(t *testing.T) {
 	cfg := settings.AIConfig{
 		Providers: []settings.AIProvider{{
 			ID: "mock1", Name: "Mock", Kind: settings.AIKindMock, Enabled: true,
-			Models:         []settings.AIModel{{ID: "m", Capabilities: settings.AIModelCapabilities{Chat: true}}},
+			Models:         []settings.AIModel{{ID: "m", Capabilities: settings.AIModelCapabilities{Kind: settings.AIModelKindChat}}},
 			RequestsPerMin: 1,
 		}},
 		DefaultProvider: "mock1", Temperature: 0.3, MaxTokens: 512, PerUserPerMin: 100,
@@ -412,7 +412,7 @@ func TestAIChatDailyQuota(t *testing.T) {
 	cfg := settings.AIConfig{
 		Providers: []settings.AIProvider{{
 			ID: "mock1", Name: "Mock", Kind: settings.AIKindMock, Enabled: true,
-			Models:         []settings.AIModel{{ID: "m", Capabilities: settings.AIModelCapabilities{Chat: true}}},
+			Models:         []settings.AIModel{{ID: "m", Capabilities: settings.AIModelCapabilities{Kind: settings.AIModelKindChat}}},
 			RequestsPerMin: 100, DailyQuota: 1,
 		}},
 		DefaultProvider: "mock1", Temperature: 0.3, MaxTokens: 512, PerUserPerMin: 100,

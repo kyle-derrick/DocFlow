@@ -28,7 +28,7 @@ func rerankCfgFor(baseURL string, mutate func(*settings.AIConfig)) ConfigProvide
 			Providers: []settings.AIProvider{
 				{ID: "m1", Name: "Mock", Kind: settings.AIKindMock, Model: "mock-echo", Enabled: true},
 				{ID: "rr", Name: "Rerank", Kind: settings.AIKindOpenAICompatible, BaseURL: baseURL, APIKey: "rk", Enabled: true,
-					Models: []settings.AIModel{{ID: "rerank-x", Capabilities: settings.AIModelCapabilities{Rerank: true}}}},
+					Models: []settings.AIModel{{ID: "rerank-x", Capabilities: settings.AIModelCapabilities{Kind: settings.AIModelKindRerank}}}},
 			},
 			DefaultProvider: "m1",
 			Temperature:     settings.AITemperatureDefault,

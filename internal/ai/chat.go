@@ -301,7 +301,7 @@ func (s *Service) resolveChatTarget(providerID, modelID, scenario string) (setti
 	}
 	if mid == "" {
 		mid = providerDefaultModel(cfg, provider, scenario)
-	} else if m, ok := provider.ModelWithID(mid); !ok || !m.Capabilities.Chat {
+	} else if m, ok := provider.ModelWithID(mid); !ok || !m.Capabilities.IsChat() {
 		return settings.AIProvider{}, "", cfg, ErrModelNotAllowed
 	}
 	return provider, mid, cfg, nil
@@ -315,7 +315,7 @@ func providerDefaultModel(cfg settings.AIConfig, p settings.AIProvider, scenario
 	}
 	for _, s := range []string{scenario, settings.AIScenarioChat} {
 		if ref, ok := cfg.DefaultModels[s]; ok && ref.ProviderID == p.ID {
-			if m, ok2 := p.ModelWithID(ref.ModelID); ok2 && m.Capabilities.Chat {
+			if m, ok2 := p.ModelWithID(ref.ModelID); ok2 && m.Capabilities.IsChat() {
 				return m.ID
 			}
 		}

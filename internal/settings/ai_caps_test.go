@@ -1,7 +1,7 @@
-// ai_caps_test.go：AIModelCapabilities 类型+能力并集重构（Cherry Studio
-// 语义）的兼容迁移测试——旧对象读入自动映射 kind（含多 true 优先级与
-// 全 false 默认）、新写出双形态（kind+旧布尔）、kind 权威读入、复合
-// 字面量构造（Kind 为空）经旧布尔推导、ValidateAI 的 kind 白名单。
+// ai_caps_test.go：AIModelCapabilities 最终形态（类型+能力并集，Cherry
+// Studio 语义）单测——kind 归一（空/非法→chat、合法原样）、IsXxx 方法、
+// 序列化单形态（kind+四能力，无旧布尔键）、providers 整体读入无 kind
+// 经 EffectiveModels 归一（能力字段不丢）、ValidateAIProvider kind 白名单。
 package settings
 
 import (
@@ -10,150 +10,95 @@ import (
 	"testing"
 )
 
-// mustUnmarshalCaps 反序列化 JSON 到 AIModelCapabilities（失败即 fatal）。
-func mustUnmarshalCaps(t *testing.T, raw string) AIModelCapabilities {
-	t.Helper()
-	var c AIModelCapabilities
-	if err := json.Unmarshal([]byte(raw), &c); err != nil {
-		t.Fatalf("unmarshal %s: %v", raw, err)
-	}
-	return c
-}
-
-// TestAIModelCapabilitiesLegacyMapping 旧对象（无 kind、有 chat/embedding/
-// rerank 布尔）读入自动映射 kind；多 true 按优先 embedding>rerank>chat
-// （旧 UI chat 为默认勾选噪音，embedding/rerank 为主动勾选）；全 false
-// （含 vision-only）默认 chat。
-func TestAIModelCapabilitiesLegacyMapping(t *testing.T) {
+// TestNormalizeAIModelKind 归一规则：合法 kind 原样保留（含 trim），空/
+// 非法一律归 chat（默认类型）。
+func TestNormalizeAIModelKind(t *testing.T) {
 	cases := []struct {
-		name string
-		raw  string
-		kind string
-	}{
-		{"chat only", `{"chat":true}`, AIModelKindChat},
-		{"embedding only", `{"embedding":true}`, AIModelKindEmbedding},
-		{"rerank only", `{"rerank":true}`, AIModelKindRerank},
-		// 多 true：embedding > rerank > chat 优先级（bge-m3 旧数据
-		// {chat:true,embedding:true} 必须归 embedding，否则 default
-		// embedding model 校验误拒）。
-		{"embedding beats chat", `{"chat":true,"embedding":true,"rerank":true}`, AIModelKindEmbedding},
-		{"rerank beats chat", `{"chat":true,"rerank":true}`, AIModelKindRerank},
-		{"embedding beats rerank", `{"embedding":true,"rerank":true}`, AIModelKindEmbedding},
-		// 全 false / 全缺省：默认 chat（旧 vision-only 归一 chat+vision 能力）。
-		{"all false defaults chat", `{"chat":false,"embedding":false,"rerank":false,"vision":true}`, AIModelKindChat},
-		{"empty object defaults chat", `{}`, AIModelKindChat},
-		// 旧 reasoning 能力保留。
-		{"keeps reasoning", `{"chat":true,"reasoning":true}`, AIModelKindChat},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			c := mustUnmarshalCaps(t, tc.raw)
-			if c.Kind != tc.kind {
-				t.Fatalf("kind = %q, want %q (raw %s)", c.Kind, tc.kind, tc.raw)
-			}
-			// 归一后旧布尔与 kind 恒一致（内存态一致性）。
-			if want := tc.kind == AIModelKindChat; c.Chat != want {
-				t.Fatalf("chat = %v, want %v", c.Chat, want)
-			}
-			if want := tc.kind == AIModelKindEmbedding; c.Embedding != want {
-				t.Fatalf("embedding = %v, want %v", c.Embedding, want)
-			}
-			if want := tc.kind == AIModelKindRerank; c.Rerank != want {
-				t.Fatalf("rerank = %v, want %v", c.Rerank, want)
-			}
-		})
-	}
-	// 旧 vision/reasoning 能力字段读入保留。
-	if c := mustUnmarshalCaps(t, `{"chat":true,"vision":true,"reasoning":true}`); !c.Vision || !c.Reasoning {
-		t.Fatalf("vision/reasoning lost: %+v", c)
-	}
-}
-
-// TestAIModelCapabilitiesKindAuthoritative 新形态读入：kind 为权威（载荷
-// 携带的旧布尔与 kind 冲突时被忽略并按 kind 派生），能力并集保留。
-func TestAIModelCapabilitiesKindAuthoritative(t *testing.T) {
-	c := mustUnmarshalCaps(t, `{"kind":"embedding","chat":true,"reasoning":true,"audio":true}`)
-	if c.Kind != AIModelKindEmbedding {
-		t.Fatalf("kind = %q, want embedding", c.Kind)
-	}
-	if c.Chat {
-		t.Fatalf("chat derived from kind must be false for embedding")
-	}
-	if !c.Embedding {
-		t.Fatalf("embedding derived from kind must be true")
-	}
-	if !c.Reasoning || !c.Audio {
-		t.Fatalf("capability union lost: %+v", c)
-	}
-	// 未知 kind 按缺失处理（旧布尔推导，默认 chat）。
-	if c := mustUnmarshalCaps(t, `{"kind":"weird"}`); c.Kind != AIModelKindChat {
-		t.Fatalf("unknown kind should fall back to chat, got %q", c.Kind)
-	}
-}
-
-// TestAIModelCapabilitiesMarshalDualForm 新写出双形态：kind+能力并集在前，
-// 旧布尔由 kind 派生（已部署旧前端按 chat 布尔过滤不受影响）。
-func TestAIModelCapabilitiesMarshalDualForm(t *testing.T) {
-	cases := []struct {
-		name string
-		caps AIModelCapabilities
+		in   string
 		want string
 	}{
-		{
-			"chat+reasoning writes dual form",
-			AIModelCapabilities{Kind: AIModelKindChat, Reasoning: true},
-			`{"kind":"chat","reasoning":true,"vision":false,"audio":false,"video":false,"chat":true,"embedding":false,"rerank":false}`,
-		},
-		{
-			"embedding derives legacy booleans",
-			AIModelCapabilities{Kind: AIModelKindEmbedding},
-			`{"kind":"embedding","reasoning":false,"vision":false,"audio":false,"video":false,"chat":false,"embedding":true,"rerank":false}`,
-		},
-		{
-			"rerank with vision/audio/video union",
-			AIModelCapabilities{Kind: AIModelKindRerank, Vision: true, Audio: true, Video: true},
-			`{"kind":"rerank","reasoning":false,"vision":true,"audio":true,"video":true,"chat":false,"embedding":false,"rerank":true}`,
-		},
-		{
-			"image kind",
-			AIModelCapabilities{Kind: AIModelKindImage},
-			`{"kind":"image","reasoning":false,"vision":false,"audio":false,"video":false,"chat":false,"embedding":false,"rerank":false}`,
-		},
-		// 复合字面量构造（Kind 为空，如旧代码 {Chat: true}）：序列化时按
-		// 旧布尔推导 kind，保证读旧布尔的调用方与写出的 kind 一致。
-		{
-			"legacy literal {Chat:true} derives kind=chat",
-			AIModelCapabilities{Chat: true},
-			`{"kind":"chat","reasoning":false,"vision":false,"audio":false,"video":false,"chat":true,"embedding":false,"rerank":false}`,
-		},
-		{
-			"legacy literal {Embedding:true} derives kind=embedding",
-			AIModelCapabilities{Embedding: true},
-			`{"kind":"embedding","reasoning":false,"vision":false,"audio":false,"video":false,"chat":false,"embedding":true,"rerank":false}`,
-		},
-		{
-			"legacy literal {Rerank:true} derives kind=rerank",
-			AIModelCapabilities{Rerank: true},
-			`{"kind":"rerank","reasoning":false,"vision":false,"audio":false,"video":false,"chat":false,"embedding":false,"rerank":true}`,
-		},
+		{"chat", AIModelKindChat},
+		{"embedding", AIModelKindEmbedding},
+		{"rerank", AIModelKindRerank},
+		{"image", AIModelKindImage},
+		{"  embedding  ", AIModelKindEmbedding}, // trim 后合法
+		{"", AIModelKindChat},                   // 空 → 默认 chat
+		{"  ", AIModelKindChat},                 // 纯空白 → chat
+		{"weird", AIModelKindChat},              // 非法 → chat
+		{"tts", AIModelKindChat},
 	}
 	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			raw, err := json.Marshal(tc.caps)
-			if err != nil {
-				t.Fatalf("marshal: %v", err)
-			}
-			if string(raw) != tc.want {
-				t.Fatalf("marshal = %s, want %s", raw, tc.want)
-			}
-		})
+		c := AIModelCapabilities{Kind: tc.in}
+		c.NormalizeAIModelKind()
+		if c.Kind != tc.want {
+			t.Fatalf("NormalizeAIModelKind(%q) = %q, want %q", tc.in, c.Kind, tc.want)
+		}
+	}
+	// 归一只动 kind：能力并集字段原样保留。
+	c := AIModelCapabilities{Kind: "", Reasoning: true, Vision: true, Audio: true, Video: true}
+	c.NormalizeAIModelKind()
+	if !c.Reasoning || !c.Vision || !c.Audio || !c.Video {
+		t.Fatalf("归一不应丢能力字段: %+v", c)
+	}
+	// 归一幂等（重复调用稳定）。
+	again := c
+	again.NormalizeAIModelKind()
+	if again != c {
+		t.Fatalf("归一应幂等: %+v vs %+v", again, c)
 	}
 }
 
-// TestAIModelCapabilitiesRoundTrip 写出→读入往返：kind 与能力并集稳定，
-// 且读入后旧布尔与 kind 一致（双形态自洽）。
+// TestAIModelCapabilitiesIsXxx IsChat/IsEmbedding/IsRerank 按 kind 判定
+// （image 类型三者皆非）。
+func TestAIModelCapabilitiesIsXxx(t *testing.T) {
+	cases := []struct {
+		kind              string
+		chat, emb, rerank bool
+	}{
+		{AIModelKindChat, true, false, false},
+		{AIModelKindEmbedding, false, true, false},
+		{AIModelKindRerank, false, false, true},
+		{AIModelKindImage, false, false, false},
+	}
+	for _, tc := range cases {
+		c := AIModelCapabilities{Kind: tc.kind}
+		if c.IsChat() != tc.chat || c.IsEmbedding() != tc.emb || c.IsRerank() != tc.rerank {
+			t.Fatalf("kind %q: IsChat=%v IsEmbedding=%v IsRerank=%v", tc.kind, c.IsChat(), c.IsEmbedding(), c.IsRerank())
+		}
+	}
+}
+
+// TestAIModelCapabilitiesMarshalSingleForm 序列化单形态：只写 kind+四能力
+// 键，不含旧 chat/embedding/rerank 布尔键（项目未发布，无旧形态兼容）。
+func TestAIModelCapabilitiesMarshalSingleForm(t *testing.T) {
+	raw, err := json.Marshal(AIModelCapabilities{Kind: AIModelKindEmbedding, Reasoning: true, Vision: true})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	want := `{"kind":"embedding","reasoning":true,"vision":true,"audio":false,"video":false}`
+	if string(raw) != want {
+		t.Fatalf("marshal = %s, want %s", raw, want)
+	}
+	// 防御旧布尔键回归（整串相等已覆盖，此处显式断言语义）。
+	for _, legacy := range []string{`"chat":`, `"chat":true`, `"embedding":true`, `"rerank":true`} {
+		if strings.Contains(string(raw), legacy) {
+			t.Fatalf("输出不应含旧布尔键 %s: %s", legacy, raw)
+		}
+	}
+	// 全能力并集写出。
+	raw2, err := json.Marshal(AIModelCapabilities{Kind: AIModelKindChat, Reasoning: true, Vision: true, Audio: true, Video: true})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	want2 := `{"kind":"chat","reasoning":true,"vision":true,"audio":true,"video":true}`
+	if string(raw2) != want2 {
+		t.Fatalf("marshal = %s, want %s", raw2, want2)
+	}
+}
+
+// TestAIModelCapabilitiesRoundTrip 写出→读入往返：kind 与能力并集稳定。
 func TestAIModelCapabilitiesRoundTrip(t *testing.T) {
-	orig := AIModelCapabilities{Kind: AIModelKindChat, Reasoning: true, Vision: true, Audio: true, Video: true}
+	orig := AIModelCapabilities{Kind: AIModelKindRerank, Reasoning: true, Vision: true, Audio: true, Video: true}
 	raw, err := json.Marshal(orig)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -162,64 +107,59 @@ func TestAIModelCapabilitiesRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(raw, &back); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if back.Kind != AIModelKindChat || !back.Reasoning || !back.Vision || !back.Audio || !back.Video || !back.Chat {
+	if back != orig {
 		t.Fatalf("round trip lost fields: %+v (raw %s)", back, raw)
-	}
-	// 旧形态写出同样可被旧语义消费：仅旧布尔的读法（模拟已部署前端）。
-	var legacy struct {
-		Chat      bool `json:"chat"`
-		Embedding bool `json:"embedding"`
-		Rerank    bool `json:"rerank"`
-	}
-	if err := json.Unmarshal(raw, &legacy); err != nil {
-		t.Fatalf("legacy unmarshal: %v", err)
-	}
-	if !legacy.Chat || legacy.Embedding || legacy.Rerank {
-		t.Fatalf("legacy view mismatch: %+v", legacy)
 	}
 }
 
-// TestAIModelCapabilitiesInProviderConfig providers JSON 整体读入即迁移：
-// 旧配置（capabilities 为旧布尔对象）反序列化后模型 kind 已归一，且
-// PrimaryModel 等按旧布尔读的解析函数行为不变。
+// TestAIModelCapabilitiesInProviderConfig providers JSON 整体读入：无 kind
+// 的存量条目经 EffectiveModels 归一为 chat（唯一归一落点），能力字段
+// 保留、PrimaryModel 等类型判定正确。
 func TestAIModelCapabilitiesInProviderConfig(t *testing.T) {
 	raw := `[{"id":"p1","name":"P1","kind":"openai_compatible","base_url":"https://x.example/v1","enabled":true,"models":[
-		{"id":"chat-m","capabilities":{"chat":true,"reasoning":true}},
-		{"id":"emb-m","capabilities":{"embedding":true}},
-		{"id":"rr-m","capabilities":{"rerank":true}}
+		{"id":"m-no-kind","capabilities":{"vision":true}},
+		{"id":"emb-m","capabilities":{"kind":"embedding"}},
+		{"id":"rr-m","capabilities":{"kind":"rerank","vision":true}}
 	]}]`
 	var providers []AIProvider
 	if err := json.Unmarshal([]byte(raw), &providers); err != nil {
 		t.Fatalf("unmarshal providers: %v", err)
 	}
 	p := providers[0]
-	if got := p.Models[0].Capabilities.Kind; got != AIModelKindChat {
-		t.Fatalf("chat-m kind = %q", got)
+	eff := p.EffectiveModels()
+	// 无 kind 存量条目归 chat，且 vision 能力保留（归一只动 kind）。
+	if got := eff[0].Capabilities.Kind; got != AIModelKindChat {
+		t.Fatalf("no-kind model kind = %q, want chat", got)
 	}
-	if got := p.Models[1].Capabilities.Kind; got != AIModelKindEmbedding {
-		t.Fatalf("emb-m kind = %q", got)
+	if !eff[0].Capabilities.IsChat() || !eff[0].Capabilities.Vision {
+		t.Fatalf("no-kind model after normalize: %+v", eff[0].Capabilities)
 	}
-	if got := p.Models[2].Capabilities.Kind; got != AIModelKindRerank {
-		t.Fatalf("rr-m kind = %q", got)
+	if !eff[1].Capabilities.IsEmbedding() || !eff[2].Capabilities.IsRerank() {
+		t.Fatalf("explicit kinds lost: %+v %+v", eff[1].Capabilities, eff[2].Capabilities)
 	}
-	// 旧布尔读取路径（PrimaryModel 首个 chat 模型）行为保持。
-	if got := p.PrimaryModel(); got != "chat-m" {
-		t.Fatalf("PrimaryModel = %q, want chat-m", got)
+	// PrimaryModel（首个 chat 类型模型）行为保持。
+	if got := p.PrimaryModel(); got != "m-no-kind" {
+		t.Fatalf("PrimaryModel = %q, want m-no-kind", got)
 	}
-	// 二次序列化（写库）产出双形态。
-	out, err := json.Marshal(providers)
+	// 二次序列化（写库）单形态：kind 恒在，无旧布尔键。
+	out, err := json.Marshal(p.EffectiveModels())
 	if err != nil {
-		t.Fatalf("marshal providers: %v", err)
+		t.Fatalf("marshal models: %v", err)
 	}
-	for _, want := range []string{`"kind":"chat"`, `"kind":"embedding"`, `"kind":"rerank"`, `"chat":true`, `"embedding":true`, `"rerank":true`} {
+	for _, want := range []string{`"kind":"chat"`, `"kind":"embedding"`, `"kind":"rerank"`, `"vision":true`} {
 		if !strings.Contains(string(out), want) {
-			t.Fatalf("dual-form output missing %s: %s", want, out)
+			t.Fatalf("output missing %s: %s", want, out)
+		}
+	}
+	for _, legacy := range []string{`"chat":true`, `"embedding":true`, `"rerank":true`} {
+		if strings.Contains(string(out), legacy) {
+			t.Fatalf("output must not contain legacy boolean %s: %s", legacy, out)
 		}
 	}
 }
 
 // TestValidateAIProviderModelKind ValidateAIProvider 拒绝 capabilities.kind
-// 白名单外的取值（UnmarshalJSON 已归一，此处防御直接构造）。
+// 白名单外的取值（空 kind 合法——默认 chat 由消费路径归一）。
 func TestValidateAIProviderModelKind(t *testing.T) {
 	p := AIProvider{ID: "p1", Name: "P1", Kind: AIKindOpenAICompatible, BaseURL: "https://x.example/v1",
 		Models: []AIModel{{ID: "m", Capabilities: AIModelCapabilities{Kind: "tts"}}}}
@@ -230,5 +170,9 @@ func TestValidateAIProviderModelKind(t *testing.T) {
 	p.Models[0].Capabilities.Kind = AIModelKindImage
 	if err := ValidateAIProvider(p); err != nil {
 		t.Fatalf("valid kind rejected: %v", err)
+	}
+	p.Models[0].Capabilities.Kind = ""
+	if err := ValidateAIProvider(p); err != nil {
+		t.Fatalf("empty kind (defaults to chat) must pass validation: %v", err)
 	}
 }

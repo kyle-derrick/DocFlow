@@ -131,7 +131,7 @@ func resolvePersonalTarget(prefs auth.AIPersonalPrefs, target, mid, scenario str
 			}
 			return ChatTarget{Provider: provider, Model: model, Personal: true}, true
 		}
-		if m, ok := provider.ModelWithID(mid); ok && m.Capabilities.Chat {
+		if m, ok := provider.ModelWithID(mid); ok && m.Capabilities.IsChat() {
 			return ChatTarget{Provider: provider, Model: m.ID, Personal: true}, true
 		}
 		return ChatTarget{}, false
@@ -139,7 +139,7 @@ func resolvePersonalTarget(prefs auth.AIPersonalPrefs, target, mid, scenario str
 	// 仅 modelID：反查个人池。
 	for _, p := range prefs.Providers {
 		provider, _ := ResolvePersonalProvider(prefs, p.ID)
-		if m, ok := provider.ModelWithID(mid); ok && m.Capabilities.Chat {
+		if m, ok := provider.ModelWithID(mid); ok && m.Capabilities.IsChat() {
 			return ChatTarget{Provider: provider, Model: m.ID, Personal: true}, true
 		}
 	}
@@ -161,7 +161,7 @@ func personalDefaultTarget(prefs auth.AIPersonalPrefs, scenario string) (ChatTar
 		if !ok {
 			continue
 		}
-		if m, ok := provider.ModelWithID(ref.ModelID); ok && m.Capabilities.Chat {
+		if m, ok := provider.ModelWithID(ref.ModelID); ok && m.Capabilities.IsChat() {
 			return ChatTarget{Provider: provider, Model: m.ID, Personal: true}, true
 		}
 	}
@@ -176,7 +176,7 @@ func personalDefaultModel(prefs auth.AIPersonalPrefs, provider settings.AIProvid
 	}
 	for _, s := range []string{scenario, settings.AIScenarioChat} {
 		if ref, ok := prefs.DefaultModels[s]; ok && ref.ProviderID == provider.ID {
-			if m, ok2 := provider.ModelWithID(ref.ModelID); ok2 && m.Capabilities.Chat {
+			if m, ok2 := provider.ModelWithID(ref.ModelID); ok2 && m.Capabilities.IsChat() {
 				return m.ID
 			}
 		}

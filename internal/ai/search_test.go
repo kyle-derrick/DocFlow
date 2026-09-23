@@ -203,7 +203,7 @@ func reasoningProviderCfg(kind, model string, reasoning bool, baseURL string) se
 			ID: "p1", Name: "P1", Kind: kind, BaseURL: baseURL, Enabled: true,
 			Models: []settings.AIModel{{
 				ID:           model,
-				Capabilities: settings.AIModelCapabilities{Chat: true, Reasoning: reasoning},
+				Capabilities: settings.AIModelCapabilities{Kind: settings.AIModelKindChat, Reasoning: reasoning},
 			}},
 		}},
 		Temperature: 0.3, MaxTokens: 2048, PerUserPerMin: 20,
@@ -306,7 +306,7 @@ func TestThinkAnthropicPayload(t *testing.T) {
 // EffectiveModels 旧单模型合成默认 false、/ai/models 链路（ModelWithID）。
 func TestReasoningCapabilityParse(t *testing.T) {
 	raw := `[{"id":"p","name":"P","kind":"openai_compatible","base_url":"https://api.example.com/v1","enabled":true,` +
-		`"models":[{"id":"o1","capabilities":{"chat":true,"reasoning":true}},{"id":"g1","capabilities":{"chat":true}}]}]`
+		`"models":[{"id":"o1","capabilities":{"kind":"chat","reasoning":true}},{"id":"g1","capabilities":{"kind":"chat"}}]}]`
 	var providers []settings.AIProvider
 	if err := json.Unmarshal([]byte(raw), &providers); err != nil {
 		t.Fatalf("unmarshal: %v", err)

@@ -21,9 +21,9 @@ func hotConfig(provider, model string) settings.AIConfig {
 		Providers: []settings.AIProvider{{
 			ID: "p1", Kind: settings.AIKindOpenAICompatible, BaseURL: "http://embedding.example", APIKey: "k1", Enabled: true,
 			Models: []settings.AIModel{
-				{ID: "m1", Capabilities: settings.AIModelCapabilities{Embedding: true}},
-				{ID: "m2", Capabilities: settings.AIModelCapabilities{Embedding: true}},
-				{ID: "mc", Capabilities: settings.AIModelCapabilities{Chat: true}},
+				{ID: "m1", Capabilities: settings.AIModelCapabilities{Kind: settings.AIModelKindEmbedding}},
+				{ID: "m2", Capabilities: settings.AIModelCapabilities{Kind: settings.AIModelKindEmbedding}},
+				{ID: "mc", Capabilities: settings.AIModelCapabilities{Kind: settings.AIModelKindChat}},
 			},
 		}},
 		RAG: settings.AIRAGConfig{CollectionPrefix: "docflow_", EmbeddingProvider: provider, EmbeddingModel: model},
@@ -59,7 +59,7 @@ func TestResolveEmbeddingCollection(t *testing.T) {
 	}
 	// 换 provider 即换库。
 	cfg := hotConfig("p2", "m1")
-	cfg.Providers = append(hotConfig("p1", "m1").Providers, settings.AIProvider{ID: "p2", Kind: settings.AIKindOpenAICompatible, BaseURL: "http://x", Enabled: true, Models: []settings.AIModel{{ID: "m1", Capabilities: settings.AIModelCapabilities{Embedding: true}}}})
+	cfg.Providers = append(hotConfig("p1", "m1").Providers, settings.AIProvider{ID: "p2", Kind: settings.AIKindOpenAICompatible, BaseURL: "http://x", Enabled: true, Models: []settings.AIModel{{ID: "m1", Capabilities: settings.AIModelCapabilities{Kind: settings.AIModelKindEmbedding}}}})
 	if _, c4, _ := hotService(cfg).ResolveEmbedding(); c4 == c1 {
 		t.Fatalf("switching provider must switch collection (%q)", c4)
 	}

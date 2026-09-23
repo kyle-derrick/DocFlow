@@ -16,8 +16,8 @@ func personalTestPrefs() auth.AIPersonalPrefs {
 			ID: "mine", Name: "我的网关", Kind: settings.AIKindOpenAICompatible,
 			BaseURL: "https://gw.example.com/v1", APIKey: "sk-mine",
 			Models: []auth.AIPersonalModel{
-				{ID: "my-chat", Capabilities: settings.AIModelCapabilities{Chat: true}},
-				{ID: "my-emb", Capabilities: settings.AIModelCapabilities{Embedding: true}},
+				{ID: "my-chat", Capabilities: settings.AIModelCapabilities{Kind: settings.AIModelKindChat}},
+				{ID: "my-emb", Capabilities: settings.AIModelCapabilities{Kind: settings.AIModelKindEmbedding}},
 			},
 		}},
 		DefaultModels: map[string]auth.AIPersonalModelRef{
@@ -31,10 +31,10 @@ func personalTestPlatformCfg() settings.AIConfig {
 	return settings.AIConfig{
 		Providers: []settings.AIProvider{
 			{ID: "plat", Name: "平台", Kind: settings.AIKindMock, Model: "plat-chat", Enabled: true,
-				Models: []settings.AIModel{{ID: "plat-chat", Capabilities: settings.AIModelCapabilities{Chat: true}}}},
+				Models: []settings.AIModel{{ID: "plat-chat", Capabilities: settings.AIModelCapabilities{Kind: settings.AIModelKindChat}}}},
 			// 与个人池同 ID 的平台 Provider（冲突场景：显式指定时个人优先）。
 			{ID: "mine", Name: "平台同名", Kind: settings.AIKindMock, Enabled: true,
-				Models: []settings.AIModel{{ID: "plat-chat", Capabilities: settings.AIModelCapabilities{Chat: true}}}},
+				Models: []settings.AIModel{{ID: "plat-chat", Capabilities: settings.AIModelCapabilities{Kind: settings.AIModelKindChat}}}},
 		},
 		DefaultProvider: "plat",
 		Temperature:     settings.AITemperatureDefault,

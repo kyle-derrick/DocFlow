@@ -78,7 +78,7 @@ func (u *personalUpstream) lastAuth() string {
 
 // personalPrefsPayload 构造含个人 Provider 的合法 PUT 载荷。
 func personalPrefsPayload(baseURL string) string {
-	return `{"providers":[{"id":"mine","name":"我的网关","kind":"openai_compatible","base_url":"` + baseURL + `","api_key":"sk-personal-1","models":[{"id":"my-chat","capabilities":{"chat":true}},{"id":"my-emb","capabilities":{"embedding":true}}]}],"default_models":{"chat":{"provider_id":"mine","model_id":"my-chat"}},"personas":[{"id":"writer","name":"写作助手","system_prompt":"你是写作助手"}],"prefer_personal":true}`
+	return `{"providers":[{"id":"mine","name":"我的网关","kind":"openai_compatible","base_url":"` + baseURL + `","api_key":"sk-personal-1","models":[{"id":"my-chat","capabilities":{"kind":"chat"}},{"id":"my-emb","capabilities":{"kind":"embedding"}}]}],"default_models":{"chat":{"provider_id":"mine","model_id":"my-chat"}},"personas":[{"id":"writer","name":"写作助手","system_prompt":"你是写作助手"}],"prefer_personal":true}`
 }
 
 // newAIPersonalRouter 组装个人 AI 配置端点测试路由（store 注入 + 用户注入）。
@@ -173,7 +173,7 @@ func TestAIPersonalSettingsAPIKeyInherit(t *testing.T) {
 		t.Fatalf("首次 PUT: %d %s", w.Code, w.Body.String())
 	}
 	// 二次 PUT：不携带 api_key（掩码回读视图天然无 key 字段）。
-	noKey := `{"providers":[{"id":"mine","name":"改名网关","kind":"openai_compatible","base_url":"https://gw2.example.com/v1","models":[{"id":"my-chat","capabilities":{"chat":true}}]}],"prefer_personal":false}`
+	noKey := `{"providers":[{"id":"mine","name":"改名网关","kind":"openai_compatible","base_url":"https://gw2.example.com/v1","models":[{"id":"my-chat","capabilities":{"kind":"chat"}}]}],"prefer_personal":false}`
 	w2 := personalJSON(r, http.MethodPut, "/api/v1/ai/personal-settings", noKey)
 	if w2.Code != http.StatusOK {
 		t.Fatalf("继承 PUT: %d %s", w2.Code, w2.Body.String())
@@ -200,11 +200,11 @@ func TestAIPersonalSettingsValidationBranches(t *testing.T) {
 		want string
 	}{
 		{"非法 JSON", `{"providers":`, "invalid request"},
-		{"kind 非法", `{"providers":[{"id":"a","name":"n","kind":"mock","base_url":"https://x.example.com","models":[{"id":"m","capabilities":{"chat":true}}]}]}`, "kind"},
-		{"base_url 非法", `{"providers":[{"id":"a","name":"n","kind":"anthropic","base_url":"not-a-url","models":[{"id":"m","capabilities":{"chat":true}}]}]}`, "base_url"},
-		{"默认引用越权", `{"providers":[{"id":"a","name":"n","kind":"anthropic","base_url":"https://x.example.com","models":[{"id":"m","capabilities":{"chat":true}}]}],"default_models":{"chat":{"provider_id":"nope","model_id":"m"}}}`, "provider_id"},
-		{"场景键非法", `{"providers":[{"id":"a","name":"n","kind":"anthropic","base_url":"https://x.example.com","models":[{"id":"m","capabilities":{"chat":true}}]}],"default_models":{"other":{"provider_id":"a","model_id":"m"}}}`, "未知场景"},
-		{"persona 缺名称", `{"providers":[{"id":"a","name":"n","kind":"anthropic","base_url":"https://x.example.com","models":[{"id":"m","capabilities":{"chat":true}}]}],"personas":[{"id":"p","name":"","system_prompt":"s"}]}`, "personas[0].name"},
+		{"kind 非法", `{"providers":[{"id":"a","name":"n","kind":"mock","base_url":"https://x.example.com","models":[{"id":"m","capabilities":{"kind":"chat"}}]}]}`, "kind"},
+		{"base_url 非法", `{"providers":[{"id":"a","name":"n","kind":"anthropic","base_url":"not-a-url","models":[{"id":"m","capabilities":{"kind":"chat"}}]}]}`, "base_url"},
+		{"默认引用越权", `{"providers":[{"id":"a","name":"n","kind":"anthropic","base_url":"https://x.example.com","models":[{"id":"m","capabilities":{"kind":"chat"}}]}],"default_models":{"chat":{"provider_id":"nope","model_id":"m"}}}`, "provider_id"},
+		{"场景键非法", `{"providers":[{"id":"a","name":"n","kind":"anthropic","base_url":"https://x.example.com","models":[{"id":"m","capabilities":{"kind":"chat"}}]}],"default_models":{"other":{"provider_id":"a","model_id":"m"}}}`, "未知场景"},
+		{"persona 缺名称", `{"providers":[{"id":"a","name":"n","kind":"anthropic","base_url":"https://x.example.com","models":[{"id":"m","capabilities":{"kind":"chat"}}]}],"personas":[{"id":"p","name":"","system_prompt":"s"}]}`, "personas[0].name"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -316,7 +316,7 @@ func TestAIChatPersonalRateLimitExempt(t *testing.T) {
 	cfg := settings.AIConfig{
 		Providers: []settings.AIProvider{{
 			ID: "plat", Name: "平台", Kind: settings.AIKindMock, Enabled: true,
-			Models:         []settings.AIModel{{ID: "plat-chat", Capabilities: settings.AIModelCapabilities{Chat: true}}},
+			Models:         []settings.AIModel{{ID: "plat-chat", Capabilities: settings.AIModelCapabilities{Kind: settings.AIModelKindChat}}},
 			RequestsPerMin: 1, DailyQuota: 1,
 		}},
 		DefaultProvider: "plat", Temperature: 0.3, MaxTokens: 512, PerUserPerMin: 100,

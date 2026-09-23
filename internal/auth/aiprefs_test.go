@@ -16,8 +16,8 @@ func validPrefs() AIPersonalPrefs {
 			ID: "mine", Name: "我的 DeepSeek", Kind: AIPersonalKindOpenAICompatible,
 			BaseURL: "https://api.deepseek.com/v1", APIKey: "sk-personal",
 			Models: []AIPersonalModel{
-				{ID: "deepseek-chat", Label: "对话", Capabilities: settings.AIModelCapabilities{Chat: true, Reasoning: true}},
-				{ID: "deepseek-emb", Capabilities: settings.AIModelCapabilities{Embedding: true}},
+				{ID: "deepseek-chat", Label: "对话", Capabilities: settings.AIModelCapabilities{Kind: settings.AIModelKindChat, Reasoning: true}},
+				{ID: "deepseek-emb", Capabilities: settings.AIModelCapabilities{Kind: settings.AIModelKindEmbedding}},
 			},
 		}},
 		DefaultModels: map[string]AIPersonalModelRef{
