@@ -1,12 +1,15 @@
 package http
 
 import (
+	"context"
 	"io"
 	"net/http"
 
+	"github.com/docflow/docflow/internal/ai"
 	"github.com/docflow/docflow/internal/auth"
 	"github.com/docflow/docflow/internal/mcp"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 // mcpRateLimitPerMin 为 /mcp 端点的独立按 IP 轻限流（每分钟 60 次；
@@ -32,6 +35,10 @@ func (h *Handler) registerMCP(r *gin.Engine, jwtSecret string) {
 	}
 	// search 为可选能力（SetSearch 注入；未注入时 df_search_files 不可用）。
 	deps.Search = h.search
+	// AI 为可选能力（SetAIService 注入；未注入时 ask_docs 等 AI 工具不可用）。
+	if h.aiSvc != nil {
+		deps.AI = &mcpAIAssistant{svc: h.aiSvc, source: aiFileContentSource{files: h.aiFiles, storage: h.storage}}
+	}
 	h.mcpServer = mcp.NewServer(deps)
 
 	// PAT 认证路径与 api 组一致：h.auth 未注入（契约测试）时 dfpat_ 一律 401。
@@ -106,3 +113,37 @@ func (h *Handler) mcpPost(c *gin.Context) {
 
 // jsonNull 为 JSON-RPC 应答的 null id 常量。
 var jsonNull = []byte("null")
+
+// mcpAIAssistant 把 *ai.Service 适配为 mcp.AIAssistant（每调用 ForUser
+// 关联用量记账；文件摘要复用 aiFileContentSource 的读授权链）。
+type mcpAIAssistant struct {
+	svc    *ai.Service
+	source ai.FileSource
+}
+
+// Enabled 实现 mcp.AIAssistant（AI 能力可用性，工具列表显隐依据）。
+func (m *mcpAIAssistant) Enabled() bool { return m.svc.EnabledNow() }
+
+// AskDocs 实现 mcp.AIAssistant（RAG-lite 问答；topK/spaceID 见 ask_docs）。
+func (m *mcpAIAssistant) AskDocs(ctx context.Context, user uuid.UUID, query string, topK int, spaceID *uuid.UUID) (string, []ai.Source, error) {
+	svc := m.svc.ForUser(user)
+	answer, sources, _, err := svc.AskDocsOpt(ctx, user, query, ai.AskOptions{TopK: topK, SpaceID: spaceID}, nil, nil, nil)
+	return answer, sources, err
+}
+
+// SummarizeFile 实现 mcp.AIAssistant（全类型抽取 + 摘要）。
+func (m *mcpAIAssistant) SummarizeFile(ctx context.Context, user, fileID uuid.UUID) (string, error) {
+	svc := m.svc.ForUser(user)
+	summary, _, err := svc.SummarizeFile(ctx, user, m.source, fileID, nil)
+	return summary, err
+}
+
+// Chat 实现 mcp.AIAssistant（通用对话）。
+func (m *mcpAIAssistant) Chat(ctx context.Context, user uuid.UUID, messages []ai.Message) (string, error) {
+	svc := m.svc.ForUser(user)
+	res, err := svc.Chat(ctx, ai.ChatRequest{Messages: messages, Stream: false}, nil)
+	if err != nil {
+		return "", err
+	}
+	return res.Content, nil
+}

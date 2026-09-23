@@ -568,10 +568,21 @@ func TestMCPToolsList(t *testing.T) {
 	if len(tools) < 20 {
 		t.Fatalf("tools = %d, want >= 20", len(tools))
 	}
+	aiTools := map[string]bool{"ask_docs": false, "summarize_file": false, "ai_chat": false}
 	for _, item := range tools {
 		tool, _ := item.(map[string]any)
-		if name, _ := tool["name"].(string); !strings.HasPrefix(name, "df_") {
+		name, _ := tool["name"].(string)
+		if _, isAI := aiTools[name]; isAI {
+			aiTools[name] = true
+			continue
+		}
+		if !strings.HasPrefix(name, "df_") {
 			t.Fatalf("tool %v missing df_ prefix", name)
+		}
+	}
+	for name, present := range aiTools {
+		if !present {
+			t.Fatalf("ai tool %v missing from tools/list", name)
 		}
 	}
 }

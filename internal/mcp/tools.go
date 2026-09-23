@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/docflow/docflow/internal/ai"
 	"github.com/docflow/docflow/internal/files"
 	"github.com/docflow/docflow/internal/search"
 	"github.com/docflow/docflow/internal/share"
@@ -1106,6 +1107,12 @@ func errorMessage(tool string, err error) string {
 		errors.Is(err, upload.ErrSize), errors.Is(err, upload.ErrTooManyUploads),
 		errors.Is(err, upload.ErrTargetUnavailable):
 		msg = err.Error()
+	case errors.Is(err, ai.ErrNoProvider):
+		msg = "no ai provider is configured on this deployment (ask the administrator to add one in admin settings)"
+	case errors.Is(err, ai.ErrProviderNotFound):
+		msg = "the specified ai provider does not exist or is disabled"
+	case errors.Is(err, ai.ErrUpstreamChat), errors.Is(err, ai.ErrUpstream):
+		msg = "the ai upstream request failed (network, timeout, or provider error)"
 	case errors.Is(err, share.ErrInvalidPermission), errors.Is(err, share.ErrInvalidExpiry),
 		errors.Is(err, share.ErrInvalidVisibility), errors.Is(err, share.ErrInvalidPassword),
 		errors.Is(err, share.ErrPublicDisabled), errors.Is(err, share.ErrNotFound),

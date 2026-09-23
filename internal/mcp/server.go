@@ -110,6 +110,8 @@ type Deps struct {
 	Shares  ShareService
 	Spaces  SpaceService
 	Search  SearchService
+	// AI 为 AI 能力（ask_docs/summarize_file/ai_chat；AI 能力第一版）。
+	AI AIAssistant
 }
 
 // Tool 为一个 MCP 工具定义：inputSchema 手写 JSON Schema（不引 zod）；
@@ -144,13 +146,14 @@ type Server struct {
 	tools []Tool
 }
 
-// NewServer 构造服务端并注册全部 df_ 工具。
+// NewServer 构造服务端并注册全部工具（df_ 文件工具 + ask_docs/
+// summarize_file/ai_chat AI 工具）。
 func NewServer(deps *Deps) *Server {
 	if deps == nil {
 		deps = &Deps{}
 	}
 	s := &Server{deps: deps}
-	s.tools = allTools()
+	s.tools = append(allTools(), aiTools()...)
 	return s
 }
 

@@ -177,7 +177,8 @@ func TestInitialize(t *testing.T) {
 	}
 }
 
-// tools/list：至少 20 个工具，全部 df_ 前缀且 inputSchema 为 object。
+// tools/list：至少 20 个工具；文件工具 df_ 前缀，AI 工具
+// （ask_docs/summarize_file/ai_chat，任务书命名）除外；inputSchema 为 object。
 func TestToolsListAtLeast20(t *testing.T) {
 	s, _, _ := newTestServer(false)
 	raw := s.Handle(context.Background(), []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`), testIdentity())
@@ -196,10 +197,14 @@ func TestToolsListAtLeast20(t *testing.T) {
 	if len(out.Result.Tools) < 20 {
 		t.Fatalf("tools count = %d, want >= 20", len(out.Result.Tools))
 	}
+	aiTools := map[string]bool{"ask_docs": false, "summarize_file": false, "ai_chat": false}
 	seen := map[string]bool{}
 	for _, tool := range out.Result.Tools {
-		if !strings.HasPrefix(tool.Name, "df_") {
-			t.Fatalf("tool %q missing df_ prefix", tool.Name)
+		if _, isAI := aiTools[tool.Name]; !strings.HasPrefix(tool.Name, "df_") && !isAI {
+			t.Fatalf("tool %q unexpected name (df_ prefix or known AI tool required)", tool.Name)
+		}
+		if _, isAI := aiTools[tool.Name]; isAI {
+			aiTools[tool.Name] = true
 		}
 		if seen[tool.Name] {
 			t.Fatalf("duplicate tool %q", tool.Name)
@@ -216,6 +221,12 @@ func TestToolsListAtLeast20(t *testing.T) {
 	for _, name := range []string{"df_list_files", "df_write_file", "df_read_file", "df_resolve_path", "df_create_share", "df_search_files"} {
 		if !seen[name] {
 			t.Fatalf("tool %q missing from tools/list", name)
+		}
+	}
+	// AI 工具（任务书命名）全部在场。
+	for name, present := range aiTools {
+		if !present {
+			t.Fatalf("ai tool %q missing from tools/list", name)
 		}
 	}
 }
