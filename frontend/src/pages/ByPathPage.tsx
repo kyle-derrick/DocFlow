@@ -215,16 +215,24 @@ export function EditByPathPage() {
 
   const lower = target.name.toLowerCase()
   // ?open= 强制编辑方式：text→Monaco（md 家族 markdown 源码）、richtext→
-  // .dfdoc 富文本（Tiptap JSON）；md 的 richtext 已退役，回落 Monaco 源码、
-  // office/drawio/excalidraw→专项编辑器。
-  if (forceOpen === 'office') return <EditorPage fileId={target.fileId} />
-  if (forceOpen === 'drawio') return <DrawioPage fileId={target.fileId} />
-  if (forceOpen === 'excalidraw') return <ExcalidrawPage fileId={target.fileId} />
-  if (forceOpen === 'richtext') {
+  // .dfrt/.dfdoc 富文本（Tiptap JSON）；office/drawio/excalidraw→专项编辑器。
+  // force 兜底：非法「扩展名 × 引擎」组合（如 .dfrt 强制 office——OnlyOffice
+  // fileType invalid 同类问题）回落按扩展名自动分发。
+  const forceOk =
+    (forceOpen === 'office' && (isOfficeFile(lower) || /\.(pdf|txt|rtf)$/.test(lower))) ||
+    (forceOpen === 'drawio' && isDrawioFile(lower)) ||
+    (forceOpen === 'excalidraw' && isExcalidrawFile(lower)) ||
+    forceOpen === 'richtext' ||
+    forceOpen === 'text'
+  const effForce = forceOk ? forceOpen : undefined
+  if (effForce === 'office') return <EditorPage fileId={target.fileId} />
+  if (effForce === 'drawio') return <DrawioPage fileId={target.fileId} />
+  if (effForce === 'excalidraw') return <ExcalidrawPage fileId={target.fileId} />
+  if (effForce === 'richtext') {
     if (isDfdocFile(lower)) return <DfdocEditorPage fileId={target.fileId} />
     return <TextEditorPage kind="markdown" fileId={target.fileId} />
   }
-  if (forceOpen === 'text') {
+  if (effForce === 'text') {
     const kind = textEditorKindFor(lower)
     return <TextEditorPage kind={kind === 'markdown' || kind === null ? 'text' : kind} fileId={target.fileId} />
   }

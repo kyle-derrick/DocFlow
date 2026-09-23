@@ -40,6 +40,9 @@ import SpaceMemberPanel from '../components/SpaceMemberPanel'
 import SpaceSwitcher from '../components/SpaceSwitcher'
 import { useHotkeys } from '../useHotkeys'
 import { MessageKey, formatMessage, t, useLocale } from '../i18n'
+import { useAIEnabled } from '../aiFeature'
+import { aiFeatureEnabled } from '../aiFeature'
+import { createAgentTask, getAgentTask, cancelAgentTask, rollbackAgentTask, applyAgentTask, discardAgentTask } from '../agentTasks'
 
 /** 权限动作 → i18n key（ACL 勾选表单共用）。 */
 const PERM_LABEL_KEYS: Record<string, MessageKey> = {
@@ -101,6 +104,16 @@ export default function FilesPage() {
   const locale = useLocale()
   const { modal: antdModal } = AntdApp.useApp()
   const msg = (key: MessageKey) => t(locale, key)
+  const aiOn = useAIEnabled()
+  const [agentTarget, setAgentTarget] = useState<FileItem | null>(null)
+  const [agentPrompt, setAgentPrompt] = useState('')
+  const [agentImage, setAgentImage] = useState('')
+  const [agentTimeout, setAgentTimeout] = useState('900')
+  const [agentTask, setAgentTask] = useState<Awaited<ReturnType<typeof getAgentTask>> | null>(null)
+  const [agentBusy, setAgentBusy] = useState(false)
+  const [agentError, setAgentError] = useState('')
+  const [agentResult, setAgentResult] = useState('')
+  const [agentSelected, setAgentSelected] = useState<string[]>([])
   const [searchParams] = useSearchParams()
   const spaceIdParam = searchParams.get('space') ?? ''
 
@@ -336,6 +349,34 @@ export default function FilesPage() {
     }, 300)
     return () => window.clearTimeout(timer)
   }, [shareUserQuery])
+
+  const openAgent = (item: FileItem) => { setAgentTarget(item); setAgentPrompt(''); setAgentImage(''); setAgentTimeout('900'); setAgentError('') }
+  const createAgent = async (e: FormEvent) => {
+    e.preventDefault()
+    if (!agentTarget || !agentPrompt.trim()) return
+    setAgentBusy(true); setAgentError('')
+    try {
+      const task = await createAgentTask(agentTarget.id, agentPrompt.trim(), agentImage.trim(), Number(agentTimeout) || 900)
+      setAgentTarget(null)
+      setAgentTask(await getAgentTask(task.id))
+    } catch (err) { setAgentError(err instanceof Error ? err.message : '创建任务失败') } finally { setAgentBusy(false) }
+  }
+  const refreshAgent = async () => { if (agentTask) setAgentTask(await getAgentTask(agentTask.task.id)) }
+  const confirmAgent = async () => {
+    if (!agentTask) return
+    const selectedDiff = agentTask.diff.filter((d) => agentSelected.includes(d.path))
+    const hasDeletes = selectedDiff.some((d) => d.action === 'deleted')
+    if (hasDeletes && !window.confirm('删除产物将移入回收站，确认继续？')) return
+    setAgentBusy(true); setAgentError(''); setAgentResult('')
+    try {
+      const canonical = JSON.stringify(agentTask.diff)
+      const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(canonical))
+      const hash = Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('')
+      const response = await applyAgentTask(agentTask.task.id, agentSelected, agentTask.task.snapshot_id, hash, hasDeletes)
+      setAgentResult(response.results.map((r) => `${r.path}: ${r.status}${r.error ? ` (${r.error})` : ''}`).join('\n') || '没有选中可写回的产物')
+      refresh()
+    } catch (err) { setAgentError(err instanceof Error ? err.message : '写回失败') } finally { setAgentBusy(false) }
+  }
 
   const handleRename = async (e: FormEvent) => {
     e.preventDefault()
@@ -579,6 +620,7 @@ export default function FilesPage() {
         shareFn={openShare}
         renameFn={(item) => { setRenameTarget(item); setRenameValue(item.name); setRenameError('') }}
         deleteFn={confirmDelete}
+        agentTaskFn={aiOn && aiFeatureEnabled() ? openAgent : undefined}
         rowActions={(item) => (
           <div className="row-actions-group">
             {item.type === 'folder' && isOwner && (
@@ -591,6 +633,31 @@ export default function FilesPage() {
         )}
       />
 
+      {agentTarget && (
+        <Modal title={`AI 创作任务：${agentTarget.name}`} onClose={() => setAgentTarget(null)}>
+          <form onSubmit={createAgent}>
+            <label className="field"><span>Prompt</span><Input.TextArea rows={4} value={agentPrompt} onChange={(e) => setAgentPrompt(e.target.value)} maxLength={4000} /></label>
+            <label className="field"><span>镜像（可选）</span><Input value={agentImage} onChange={(e) => setAgentImage(e.target.value)} /></label>
+            <label className="field"><span>超时（秒）</span><Input type="number" min={1} max={86400} value={agentTimeout} onChange={(e) => setAgentTimeout(e.target.value)} /></label>
+            {agentError && <div className="error-text">{agentError}</div>}
+            <div className="modal-actions"><Button onClick={() => setAgentTarget(null)}>取消</Button><Button type="primary" htmlType="submit" loading={agentBusy} disabled={!agentPrompt.trim()}>创建</Button></div>
+          </form>
+        </Modal>
+      )}
+      {agentTask && (
+        <Modal title="AI 创作任务详情" onClose={() => setAgentTask(null)}>
+          <p>状态：{agentTask.task.status}{agentTask.dry_run ? '（dry-run）' : ''}</p>
+          {agentTask.task.error && <div className="error-text">{agentTask.task.error}</div>}
+          <pre className="task-log">{agentTask.logs.map((l) => `[${l.stream}] ${l.content}`).join('\\n')}</pre>
+          <p>差异预览（仅路径、动作、大小及 SHA-256；删除需单独勾选）</p>
+          {(agentTask.diff ?? []).map((d) => <label key={d.path} className="check-item"><input type="checkbox" checked={agentSelected.includes(d.path)} onChange={(e) => setAgentSelected(e.target.checked ? [...agentSelected, d.path] : agentSelected.filter((p) => p !== d.path))} />{d.action} · {d.path} · {d.size} B · {d.sha256}</label>)}
+          {(agentTask.diff ?? []).length === 0 && <p className="hint">暂无产物差异</p>}
+          {agentTask.task.workspace_expires_at && <p className="hint">产物保留至 {formatTime(agentTask.task.workspace_expires_at)}</p>}
+          {agentError && <div className="error-text">{agentError}</div>}
+          {agentResult && <pre className="task-log">{agentResult}</pre>}
+          <div className="modal-actions"><Button onClick={() => void refreshAgent()}>刷新</Button><Button disabled={!['queued','running'].includes(agentTask.task.status)} onClick={async () => { await cancelAgentTask(agentTask.task.id); await refreshAgent() }}>取消</Button><Button disabled={agentBusy || !agentTask.task.workspace_expires_at || !agentSelected.length} onClick={() => void confirmAgent()}>确认写回</Button><Button disabled={agentBusy || !agentTask.task.workspace_expires_at} onClick={async () => { await discardAgentTask(agentTask.task.id); setAgentResult('产物已放弃'); await refreshAgent() }}>放弃产物</Button><Button disabled={agentTask.task.status === 'rolled_back'} onClick={async () => { await rollbackAgentTask(agentTask.task.id); await refreshAgent() }}>回滚</Button></div>
+        </Modal>
+      )}
       {historyTarget && (
         <VersionHistoryModal
           file={historyTarget}

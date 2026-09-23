@@ -78,13 +78,14 @@ export default function FileCardView({ node, editor, selected, getPos }: NodeVie
   const [meta, setMeta] = useState<{ name: string; size: number } | null>(() =>
     attrs.fileId ? metaCache.get(attrs.fileId) ?? null : null,
   )
+  const resolvedName = meta?.name || attrs.title || (attrs.fileId ? `${attrs.fileId.slice(0, 8)}…` : '（无效引用）')
   const [metaGone, setMetaGone] = useState(false)
   const [rawUrl, setRawUrl] = useState<string | null>(null)
   // 图片内容嵌入 blob URL。
   const [imgSrc, setImgSrc] = useState('')
   const [imgError, setImgError] = useState(false)
 
-  const name = attrs.title || meta?.name || (attrs.fileId ? `${attrs.fileId.slice(0, 8)}…` : '（无效引用）')
+  const name = resolvedName
   const size = attrs.size || meta?.size || 0
   const ext = extOf(name)
   // 内容嵌入：图片（认证态用预览 blob；公开分享态用 raw/share URL，白名单
@@ -94,7 +95,7 @@ export default function FileCardView({ node, editor, selected, getPos }: NodeVie
 
   // 认证态：大小缺省时懒拉元数据（404 → 已删除样式）。
   useEffect(() => {
-    if (publicBase || !attrs.fileId || size > 0 || metaCache.has(attrs.fileId)) return
+    if (publicBase || !attrs.fileId || metaCache.has(attrs.fileId)) return
     let alive = true
     getFileMeta(attrs.fileId)
       .then((m) => {
@@ -108,7 +109,7 @@ export default function FileCardView({ node, editor, selected, getPos }: NodeVie
       })
     return () => { alive = false }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [attrs.fileId, size, publicBase])
+  }, [attrs.fileId, publicBase])
 
   // 图片内容嵌入：认证预览取 blob URL。
   useEffect(() => {
@@ -134,7 +135,7 @@ export default function FileCardView({ node, editor, selected, getPos }: NodeVie
       if (objectURL) URL.revokeObjectURL(objectURL)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [asImage, attrs.fileId, imgSrc])
+  }, [asImage, attrs.fileId])
 
   // 公开分享态：解析 raw/share URL 供点击新窗口打开。
   useEffect(() => {

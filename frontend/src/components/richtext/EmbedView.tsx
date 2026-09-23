@@ -129,7 +129,7 @@ export default function EmbedView({ node, editor, selected, deleteNode, getPos }
   const editable = editor.isEditable
 
   // 拖拽高度角柄：拖拽中记录起始 Y 与起始高度，mousemove 全局监听。
-  const resizingRef = useRef<{ startY: number; startH: number } | null>(null)
+  const resizingRef = useRef<{ startX: number; startY: number; startH: number; startW: number; parentW: number } | null>(null)
   const [resizing, setResizing] = useState(false)
 
   const reload = useCallback(() => {
@@ -155,8 +155,9 @@ export default function EmbedView({ node, editor, selected, deleteNode, getPos }
     const onMove = (e: MouseEvent) => {
       const st = resizingRef.current
       if (!st) return
-      const next = Math.max(120, Math.round(st.startH + (e.clientY - st.startY)))
-      setAttrs({ height: next })
+      const nextH = Math.max(120, Math.round(st.startH + (e.clientY - st.startY)))
+      const nextW = Math.min(100, Math.max(25, Math.round(st.startW + ((e.clientX - st.startX) / Math.max(1, st.parentW)) * 100)))
+      setAttrs({ height: nextH, width: nextW })
     }
     const onUp = () => {
       resizingRef.current = null
@@ -357,6 +358,7 @@ export default function EmbedView({ node, editor, selected, deleteNode, getPos }
       data-title={attrs.title || undefined}
       data-width={String(widthPct)}
       data-height={heightPx > 0 ? String(heightPx) : undefined}
+      style={{ width: `${widthPct}%` }}
     >
       {editable && fileId && (
         <div className="rich-text-embed-tools" contentEditable={false}>
@@ -478,7 +480,14 @@ export default function EmbedView({ node, editor, selected, deleteNode, getPos }
           onMouseDown={(e) => {
             e.preventDefault()
             e.stopPropagation()
-            resizingRef.current = { startY: e.clientY, startH: heightPx > 0 ? heightPx : Math.max(160, Math.round(e.currentTarget.parentElement?.getBoundingClientRect().height ?? 380)) }
+            const parent = e.currentTarget.parentElement
+            resizingRef.current = {
+              startX: e.clientX,
+              startY: e.clientY,
+              startH: heightPx > 0 ? heightPx : Math.max(160, Math.round(parent?.getBoundingClientRect().height ?? 380)),
+              startW: widthPct,
+              parentW: parent?.parentElement?.getBoundingClientRect().width ?? 800,
+            }
             setResizing(true)
           }}
         />

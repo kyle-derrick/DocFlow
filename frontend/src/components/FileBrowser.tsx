@@ -16,6 +16,7 @@
 // 独立查看页一致，FileViewerDispatch 统一分发）；树点击文件经
 // fileOpenSignal 受控信号触发本组件弹窗（见 FolderTreeNav）。
 import { FormEvent, ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { CloseOutlined } from '@ant-design/icons'
 import { createPortal } from 'react-dom'
 import { App as AntdApp, Button, Dropdown, Input, Menu, Modal as AntdModal, Popover, Select } from 'antd'
 import type { DragEvent as ReactDragEvent } from 'react'
@@ -55,6 +56,10 @@ import {
   createOfficeTemplate,
   createShare,
   createShareBundle,
+  createDirectorySnapshot,
+  diffDirectorySnapshot,
+  listDirectorySnapshots,
+  restoreDirectorySnapshot,
   createTag,
   deleteFile,
   downloadBatchFiles,
@@ -114,6 +119,9 @@ import {
 // xmind/mermaid/md/网页/文本等），保证弹窗与新窗口打开渲染一致。
 // v2.7 弹窗内编辑：FileEditorDispatch 同口径的编辑分发（各编辑页组件复用）。
 import { FileViewerDispatch, FileEditorDispatch } from '../pages/ViewerPage'
+// 查看弹窗 AI 摘要（AI 能力第一版，全类型）。
+import { AISummaryInline, AISummaryDialog } from './AISummary'
+import { useAIEnabled } from '../aiFeature'
 
 /** 文件浏览视图模式（设计 6.3.7）：list = 现有表格，grid = 卡片网格。 */
 export type ViewMode = 'list' | 'grid'
@@ -184,7 +192,72 @@ export function sweepModalLayer(): void {
       const visible = wrap != null && wrap.style.display !== 'none' && wrap.childElementCount > 0
       if (!visible) root.remove()
     })
+    // Drawer 遮罩残留同理（v2.x 平台设置页偶现卡死：AI 助手/编辑器抽屉关闭
+    // 动画被打断时 .ant-drawer-root 遮罩残留、全页 pointer-events 被拦截）。
+    document.querySelectorAll<HTMLElement>('body > .ant-drawer-root, body > .ant-drawer-container').forEach((root) => {
+      if (!root.querySelector('.ant-drawer-open')) root.remove()
+    })
   }, 60)
+}
+
+/**
+ * 全局弹层自愈：路由切换 / 窗口重新聚焦 / 页面切回前台时清扫残留遮罩。
+ * 偶现卡死（遮罩拦截一切点击与右键）时用户切换窗口再回来即自愈，无需
+ * 刷新页面；sweep 自身幂等且会避开可见弹窗。
+ *
+ * v2.7 增强（持续自愈，不再依赖用户切换窗口）：MutationObserver 观察
+ * document.body 直接子元素增删——antd 开/关被打断（弹窗关闭动画被组件
+ * 卸载截断等）时，rc-dialog 的遮罩可能先入 DOM 而 wrap 未跟上/已被移除，
+ * 形成「孤儿遮罩」（无配对弹窗内容却拦截 pointer-events）。回调内经
+ * requestAnimationFrame 延迟一帧校验（等 antd 完成同帧的开/关时序）：
+ * - .ant-modal-mask：所在 root 内存在 .ant-modal-wrap → 视为正常
+ *   （即使 wrap 暂为 display:none 也可能是关闭动画时序，不动，交给
+ *   sweepModalLayer 延迟复核）；root 内无 wrap → 孤儿，移除。
+ * - .ant-drawer-mask：所在 root 内存在 .ant-drawer（开启态交给 sweep
+ *   判断）→ 不动；无 .ant-drawer → 孤儿，移除。
+ * 移除后调用 sweepModalLayer 顺带清掉因此变空的 root 与 body 滚动锁。
+ */
+export function installModalSweepAutoheal(): () => void {
+  const run = () => sweepModalLayer()
+
+  /** 孤儿遮罩校验（rAF 延迟后执行；见函数头注释的防误删规则）。 */
+  const checkOrphanMasks = () => {
+    document.querySelectorAll<HTMLElement>(
+      'body .ant-modal-mask, body .ant-drawer-mask',
+    ).forEach((mask) => {
+      // root：antd5 为 .ant-modal-root/.ant-drawer-root，antd6 为
+      // .ant-modal-container/.ant-drawer-container（层级多一层，仍取最近
+      // 祖先 root/container）。
+      const root = mask.closest<HTMLElement>(
+        '.ant-modal-root, .ant-modal-container, .ant-drawer-root, .ant-drawer-container',
+      )
+      if (!root) return // 非 antd 常规结构（自定义挂载点），保守不动
+      const hasWrap = mask.classList.contains('ant-modal-mask')
+        ? root.querySelector('.ant-modal-wrap') != null
+        : root.querySelector('.ant-drawer') != null
+      if (hasWrap) return
+      console.warn('[docflow] removing orphan antd mask (no paired wrap):', mask)
+      mask.remove()
+      sweepModalLayer()
+    })
+  }
+
+  const observer = new MutationObserver((records) => {
+    // 仅在有节点新增时复核（移除类记录无需处理）。
+    if (!records.some((r) => r.addedNodes.length > 0)) return
+    // 延迟一帧校验：antd 开启动画中 mask 可能先于 wrap 入 DOM（同批次
+    // mutations），rAF 后 wrap 已落位即可避免误删。
+    requestAnimationFrame(checkOrphanMasks)
+  })
+  observer.observe(document.body, { childList: true })
+
+  window.addEventListener('focus', run)
+  document.addEventListener('visibilitychange', run)
+  return () => {
+    observer.disconnect()
+    window.removeEventListener('focus', run)
+    document.removeEventListener('visibilitychange', run)
+  }
 }
 
 /**
@@ -223,6 +296,7 @@ export function Modal({
   wide,
   className,
   headExtra,
+  preClose,
   children,
 }: {
   title: string
@@ -232,6 +306,9 @@ export function Modal({
   className?: string
   /** 标题行右侧追加内容（查看弹窗的「新窗口查看/编辑/下载」拆分按钮组）。 */
   headExtra?: ReactNode
+  /** 渲染在右上角关闭按钮左侧的内容（如查看弹窗的「最大化」按钮；
+   * 点击不会触发关闭——内部按钮自行 stopPropagation）。 */
+  preClose?: ReactNode
   children: ReactNode
 }) {
   const viewer = className?.split(/\s+/).includes('modal-viewer') ?? false
@@ -262,6 +339,11 @@ export function Modal({
         body: 'docflow-modal-body',
         close: 'docflow-modal-close',
       }}
+      /* preClose：自定义 closeIcon 组（preClose 内容 + 原生关闭 X）——antd
+       * closeIcon 为整体渲染，组内按钮各自 stopPropagation 防误触关闭。 */
+      closeIcon={preClose ? (
+        <span className="docflow-modal-close-group">{preClose}<CloseOutlined aria-hidden="true" /></span>
+      ) : undefined}
       onCancel={handleClose}
       title={
         headExtra ? (
@@ -546,6 +628,8 @@ export interface FileBrowserProps {
    * 横幅）；缺省回退本组件内置的通用删除确认（deleteFile，回收站可恢复）。
    */
   deleteFn?: (item: FileItem) => void
+  /** AI 创作任务入口仅由宿主在 AI 与 Agent 同时启用时注入。 */
+  agentTaskFn?: (item: FileItem) => void
   /**
    * 隐藏工具栏行尾的「回收站」按钮（v2.2：文件页把回收站移到工具行左端
    * 空间切换旁，经 trashSignal 受控触发本组件的回收站弹窗）。
@@ -582,6 +666,7 @@ export default function FileBrowser({
   shareFn,
   renameFn,
   deleteFn,
+  agentTaskFn,
   hideToolbarTrash,
   trashSignal,
 }: FileBrowserProps) {
@@ -618,6 +703,9 @@ export default function FileBrowser({
 
   // 右键 / 列表行「⋯」菜单：目标条目 + 视口坐标（null = 关闭）。
   const [ctxMenu, setCtxMenu] = useState<{ item: FileItem; x: number; y: number } | null>(null)
+  // AI 能力可用性（右键「AI 摘要」入口显隐）与摘要弹窗目标。
+  const aiOn = useAIEnabled()
+  const [aiSummaryTarget, setAiSummaryTarget] = useState<FileItem | null>(null)
   // 菜单浮层元素：渲染后按实测尺寸收进视口（右/下越界向左/上翻，见 clampFixedMenu）。
   const ctxMenuRef = useRef<HTMLDivElement | null>(null)
   useLayoutEffect(() => {
@@ -628,6 +716,10 @@ export default function FileBrowser({
   const [createMenuOpen, setCreateMenuOpen] = useState(false)
   // 回收站弹窗（v1.5：整页路由删除，入口为工具栏按钮）。
   const [trashOpen, setTrashOpen] = useState(false)
+  const [snapshotOpen, setSnapshotOpen] = useState<FileItem | null>(null)
+  const [snapshots, setSnapshots] = useState<Awaited<ReturnType<typeof listDirectorySnapshots>>>([])
+  const [snapshotDiff, setSnapshotDiff] = useState<Awaited<ReturnType<typeof diffDirectorySnapshot>> | null>(null)
+  const [snapshotBusy, setSnapshotBusy] = useState(false)
 
   // 右键菜单与新建下拉点击外部关闭（菜单内部动作在冒泡阶段完成后收口）。
   // 注意：antd Dropdown 菜单面板挂在 body（.ant-dropdown），Menu 内联子菜单
@@ -2037,18 +2129,18 @@ export default function FileBrowser({
     const isBoard = isExcalidrawFile(lower)
     const isRichDoc = isDfdocFile(lower)
     const viewOptions: Array<{ label: string; run: () => void }> = []
-    if (isOffice && ooEnabled) viewOptions.push({ label: locale === 'zh-CN' ? '查看 Office' : 'View Office', run: () => openEditorWindow(routeFor('view', item)) })
-    if (isHtml) viewOptions.push({ label: locale === 'zh-CN' ? '查看网页' : 'View web', run: () => openEditorWindow(routeFor('view', item)) })
+    if (isOffice && ooEnabled) viewOptions.push({ label: locale === 'zh-CN' ? '查看 Office' : 'View Office', run: () => openWithMethod(item, 'view', 'office') })
+    if (isHtml) viewOptions.push({ label: locale === 'zh-CN' ? '查看网页' : 'View web', run: () => openWithMethod(item, 'view') })
     // 查看文本走 /view 只读分发（by-path），绝不进 /text 编辑页（查看=纯渲染）。
-    if (isTxtLike) viewOptions.push({ label: locale === 'zh-CN' ? '查看文本' : 'View text', run: () => openEditorWindow(routeFor('view', item)) })
+    if (isTxtLike) viewOptions.push({ label: locale === 'zh-CN' ? '查看文本' : 'View text', run: () => openWithMethod(item, 'view', 'raw') })
     viewOptions.push({ label: msg('download'), run: () => void handleDownload(item) })
     const editOptions: Array<{ label: string; run: () => void }> = []
-    if (isOffice && ooEnabled) editOptions.push({ label: locale === 'zh-CN' ? '编辑 Office' : 'Edit Office', run: () => openEditorWindow(routeFor('edit', item)) })
-    if (isTxtLike) editOptions.push({ label: locale === 'zh-CN' ? '编辑文本' : 'Edit text', run: () => openEditorWindow(routeFor('edit', item)) })
-    if (isDrawio && drawioEnabled) editOptions.push({ label: locale === 'zh-CN' ? '图表编辑' : 'Edit diagram', run: () => openEditorWindow(routeFor('edit', item)) })
-    if (isBoard) editOptions.push({ label: locale === 'zh-CN' ? '白板编辑' : 'Edit whiteboard', run: () => openEditorWindow(routeFor('edit', item)) })
+    if (isOffice && ooEnabled) editOptions.push({ label: locale === 'zh-CN' ? '编辑 Office' : 'Edit Office', run: () => openWithMethod(item, 'edit', 'office') })
+    if (isTxtLike) editOptions.push({ label: locale === 'zh-CN' ? '编辑文本' : 'Edit text', run: () => openWithMethod(item, 'edit', 'text') })
+    if (isDrawio && drawioEnabled) editOptions.push({ label: locale === 'zh-CN' ? '图表编辑' : 'Edit diagram', run: () => openWithMethod(item, 'edit', 'drawio') })
+    if (isBoard) editOptions.push({ label: locale === 'zh-CN' ? '白板编辑' : 'Edit whiteboard', run: () => openWithMethod(item, 'edit', 'excalidraw') })
     // .dfrt/.dfdoc 富文本文档：编辑进 Tiptap（by-path 按扩展名分发）。
-    if (isRichDoc) editOptions.push({ label: locale === 'zh-CN' ? '编辑富文本' : 'Edit rich text', run: () => openEditorWindow(routeFor('edit', item)) })
+    if (isRichDoc) editOptions.push({ label: locale === 'zh-CN' ? '编辑富文本' : 'Edit rich text', run: () => openWithMethod(item, 'edit', 'richtext') })
     // 弹窗内编辑可用性：无对应编辑器组件的类型（集成未启用的 office/drawio）
     // 不提供弹窗内编辑。
     const inModalEditable = editOptions.length > 0 && !((isOffice && !ooEnabled) || (isDrawio && !drawioEnabled))
@@ -2078,7 +2170,7 @@ export default function FileBrowser({
         <Dropdown.Button
           size="small"
           menu={menuOf(viewOptions)}
-          onClick={() => openEditorWindow(routeFor('view', item))}
+          onClick={() => openWithMethod(item, 'view', effectiveOpenWithFor(item.name, openWith).view)}
         >
           {locale === 'zh-CN' ? '新窗口查看' : 'View in new window'}
         </Dropdown.Button>
@@ -2086,28 +2178,16 @@ export default function FileBrowser({
           <Dropdown.Button
             size="small"
             menu={menuOf(editOptions)}
-            onClick={() => openEditorWindow(routeFor(editFallbackView ? 'view' : 'edit', item))}
+            onClick={() => {
+              if (editFallbackView) openWithMethod(item, 'view')
+              else openWithMethod(item, 'edit', effectiveOpenWithFor(item.name, openWith).edit)
+            }}
           >
             {locale === 'zh-CN' ? '新窗口编辑' : 'Edit in new window'}
           </Dropdown.Button>
         )}
-        {/* 最大化 / 还原（v2.7 弹窗内编辑配套）。 */}
-        <Button
-          size="small"
-          type="text"
-          className="modal-fullscreen-btn"
-          aria-label={previewFullscreen
-            ? (locale === 'zh-CN' ? '还原' : 'Restore')
-            : (locale === 'zh-CN' ? '最大化' : 'Fullscreen')}
-          title={previewFullscreen
-            ? (locale === 'zh-CN' ? '还原窗口' : 'Restore')
-            : (locale === 'zh-CN' ? '最大化窗口' : 'Fullscreen')}
-          onClick={() => setPreviewFullscreen((v) => !v)}
-        >
-          {previewFullscreen
-            ? <Minimize2 size={14} strokeWidth={2} aria-hidden="true" />
-            : <Maximize2 size={14} strokeWidth={2} aria-hidden="true" />}
-        </Button>
+        {/* AI 摘要（AI 开启时渲染）：与「新窗口查看/编辑」同一按钮行。 */}
+        {!previewEdit && item.type === 'file' && <AISummaryInline fileId={item.id} />}
       </>
     )
   }
@@ -2172,6 +2252,8 @@ export default function FileBrowser({
         key: 'open',
         label: zh ? '进入' : 'Open',
       })
+      entries.push({ key: 'snapshots', label: zh ? '查看快照' : 'View snapshots' })
+      entries.push({ key: 'create-snapshot', label: zh ? '创建快照' : 'Create snapshot' })
       entries.push({
         key: 'zip',
         disabled: zipBusyId !== null,
@@ -2182,6 +2264,9 @@ export default function FileBrowser({
       if (ns && !searchMode && item.has_index_web) {
         entries.push({ key: 'preview-web', label: zh ? '网页预览（弹窗）' : 'Preview as website' })
         entries.push({ key: 'open-web', label: zh ? '作为网页打开' : 'Open as website' })
+      }
+      if (agentTaskFn) {
+        entries.push({ key: 'agent-task', label: zh ? 'AI 创作任务' : 'AI creation task' })
       }
     } else {
       // 查看方式：用户偏好合并内置默认；集成门槛（office/drawio）过滤。
@@ -2199,13 +2284,26 @@ export default function FileBrowser({
         entries.push({ key: 'edit-default', label: zh ? '编辑（弹窗）' : 'Edit (in dialog)' })
         entries.push({ key: 'edit-window', label: zh ? '新窗口编辑' : 'Edit in new window' })
       }
-      // 「打开方式 >」：全量查看方式组 + 分组线 + 全量编辑方式组——所有
-      // 可见项均可点（不置灰；对该扩展非法的方式也可选，点击后按用户显式
-      // 选择经 ?open= 强制分发，非法组合的兜底由查看分发层负责，如 raw 看
-      // 二进制给下载提示）；仅集成未启用（office/drawio）的项隐藏。
+      // 「打开方式 >」：全量查看方式组 + 分组线 + 全量编辑方式组。门槛：
+      // 集成未启用（office/drawio）隐藏；office 仅对 OnlyOffice 支持的扩展
+      // 显示——.dfrt 等平台专属类型强制走 OnlyOffice 时后端 400（DS 会报
+      // 晦涩的 fileType invalid），直接不提供该非法组合。其余非法方式仍可
+      // 点（如 raw 看二进制给下载提示，兜底由查看分发层负责）。
       const ext = extOf(item.name)
       const av = { office: ooEnabled, drawio: drawioEnabled }
-      const gated = (m: string) => (m === 'office' && !ooEnabled) || (m === 'drawio' && !drawioEnabled)
+      // 非法组合门槛（与 OnlyOffice fileType 校验同思路）：每种引擎只对
+      // 其支持的扩展名显示——office 白名单（pdf/txt/rtf 补充）、drawio/
+      // excalidraw/xmind 各自专属扩展、richtext 查看限 md 家族+dfrt/dfdoc、
+      // richtext 编辑限 dfrt/dfdoc。强制 URL（?open=）仍可能直达，分发层
+      // 另有兜底（非法 force 回落自动分发）。
+      const officeOk = isOfficeFile(item.name.toLowerCase()) || ext === 'pdf' || ext === 'txt' || ext === 'rtf'
+      const mdFamily = ext === 'md' || ext === 'markdown' || ext === 'mdx'
+      const gated = (m: string) =>
+        (m === 'office' && (!ooEnabled || !officeOk)) ||
+        (m === 'drawio' && (!drawioEnabled || ext !== 'drawio')) ||
+        (m === 'excalidraw' && ext !== 'excalidraw') ||
+        (m === 'xmind' && ext !== 'xmind') ||
+        (m === 'richtext' && !(mdFamily || ext === 'dfrt' || ext === 'dfdoc'))
       const viewEntries = allViewEntries(ext, av, zh).filter(({ method }) => !gated(method))
       const editEntries = allEditEntries(ext, av, zh).filter(({ method }) => !gated(method))
       entries.push({
@@ -2233,6 +2331,11 @@ export default function FileBrowser({
         ],
       })
       entries.push({ key: 'download', label: msg('download') })
+      // AI 摘要（AI 能力第一版，右键菜单）：弹窗流式摘要（全类型抽取；
+      // AI 未启用不显示）。
+      if (aiOn) {
+        entries.push({ key: 'ai-summary', label: zh ? 'AI 摘要' : 'AI Summary' })
+      }
       if (item.name.toLowerCase().endsWith('.zip')) {
         entries.push({
           key: 'unpack',
@@ -2270,6 +2373,13 @@ export default function FileBrowser({
       case 'open':
         openFolder(item)
         return
+      case 'snapshots':
+        setSnapshotOpen(item); setSnapshotDiff(null); setSnapshotBusy(true)
+        void listDirectorySnapshots(item.id).then(setSnapshots).finally(() => setSnapshotBusy(false))
+        return
+      case 'create-snapshot':
+        void createDirectorySnapshot(item.id).then(() => { antdModal.success({ title: locale === 'zh-CN' ? '快照已创建' : 'Snapshot created' }) }).catch((err) => { antdModal.error({ title: err instanceof Error ? err.message : '创建失败' }) })
+        return
       case 'zip':
         void handleZipDownload(item)
         return
@@ -2294,6 +2404,12 @@ export default function FileBrowser({
         return
       case 'download':
         void handleDownload(item)
+        return
+      case 'ai-summary':
+        setAiSummaryTarget(item)
+        return
+      case 'agent-task':
+        agentTaskFn?.(item)
         return
       case 'tag':
         void openTagModal(item)
@@ -3188,6 +3304,27 @@ export default function FileBrowser({
               : `查看「${previewTarget.name}」`}
           onClose={closePreview}
           headExtra={previewHeadExtra(previewTarget)}
+          /* 最大化/还原：移至右上角关闭按钮左侧（closeIcon 组内），点击
+           * stopPropagation 防误触关闭。 */
+          preClose={(
+            <Button
+              size="small"
+              type="text"
+              className="modal-fullscreen-btn"
+              aria-label={previewFullscreen ? '还原' : '最大化'}
+              title={previewFullscreen
+                ? (locale === 'zh-CN' ? '还原窗口' : 'Restore')
+                : (locale === 'zh-CN' ? '最大化窗口' : 'Fullscreen')}
+              onClick={(e) => {
+                e.stopPropagation()
+                setPreviewFullscreen((v) => !v)
+              }}
+            >
+              {previewFullscreen
+                ? <Minimize2 size={14} strokeWidth={2} aria-hidden="true" />
+                : <Maximize2 size={14} strokeWidth={2} aria-hidden="true" />}
+            </Button>
+          )}
         >
           {/* 弹窗内容：网页目录 = sandbox iframe（raw_url）；编辑视图（v2.7）=
               FileEditorDispatch 就地内嵌对应编辑器；其余类型（含 office，内嵌
@@ -3237,6 +3374,29 @@ export default function FileBrowser({
         >
           {renderItemMenu(ctxMenu.item)}
         </div>
+      )}
+
+      {/* 右键菜单「AI 摘要」弹窗（流式渲染，见 AISummaryDialog）。 */}
+      {aiSummaryTarget && (
+        <Modal
+          title={locale === 'zh-CN' ? `AI 摘要 · ${aiSummaryTarget.name}` : `AI Summary · ${aiSummaryTarget.name}`}
+          onClose={() => setAiSummaryTarget(null)}
+        >
+          <AISummaryDialog fileId={aiSummaryTarget.id} name={aiSummaryTarget.name} />
+        </Modal>
+      )}
+
+      {snapshotOpen && (
+        <Modal title={`目录快照 · ${snapshotOpen.name}`} onClose={() => setSnapshotOpen(null)}>
+          {snapshotBusy ? <div>加载中…</div> : snapshots.length === 0 ? <div>暂无快照</div> : snapshots.map((snap) => (
+            <div key={snap.id} style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+              <span style={{ flex: 1 }}>{snap.name} · {formatTime(snap.created_at)}</span>
+              <Button size="small" onClick={() => void diffDirectorySnapshot(snapshotOpen.id, snap.id).then(setSnapshotDiff)}>查看 diff</Button>
+              <Button size="small" danger onClick={() => { if (window.confirm('仅恢复快照中仍存在文件的版本指针，继续？')) void restoreDirectorySnapshot(snap.id).then(() => void load(currentParent)) }}>恢复版本</Button>
+            </div>
+          ))}
+          {snapshotDiff && <pre style={{ whiteSpace: 'pre-wrap' }}>{JSON.stringify(snapshotDiff, null, 2)}</pre>}
+        </Modal>
       )}
 
       {/* 回收站弹窗（恢复/彻底删除/清空；操作成功后刷新当前目录）。 */}

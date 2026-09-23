@@ -3,7 +3,6 @@
 # 规避 BuildKit 在 WSL2 内编译高内存负载引发的 Docker Desktop 僵死）。
 node_modules
 .npm-cache
-src
 e2e
 playwright.config.ts
 *.md

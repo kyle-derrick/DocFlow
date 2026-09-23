@@ -3,7 +3,7 @@
 // 空间（含「已解散」筛选与彻底删除）/ 审计日志（含保留期设置）/ 威胁防护
 //（隔离区 + 扫描 + 凭据状态）/ 备份。TLS / 邮件配置 / 系统设置已迁至
 // 「设置」页（admin 可见）；邀请管理并入「人员与组」右上角弹窗。
-import { FormEvent, Key, useEffect, useMemo, useState } from 'react'
+import { FormEvent, Key, Suspense, lazy, useEffect, useMemo, useState } from 'react'
 import { NavLink, Navigate, useNavigate, useParams } from 'react-router-dom'
 import { App as AntdApp, Button, Card, Checkbox, Input, InputNumber, Menu, Segmented, Select, Table, Tag } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
@@ -55,6 +55,18 @@ import {
 import { Modal, confirmDialog, formatQuota, formatTime, promptViaModal } from '../components/FileBrowser'
 import QuotaInput from '../components/QuotaInput'
 import { MessageKey, t, useLocale } from '../i18n'
+/* 平台设置分区（个人/平台分离）：平台级面板自 SettingsPage 导出复用。 */
+// 平台设置五面板懒加载（v2.7 页面偶现卡死治理）：AISettingsPanel 与
+// SettingsPage 导出的四面板体量可观（SettingsPage 100KB+ 源码及其依赖），
+// 直 import 会全部进入管理页首屏 chunk，tag 切换前也常驻渲染压力。改
+// React.lazy 后 vite 自动分包，进入对应 tag 才拉取并挂载（Suspense 兜底
+// loading）；SettingsPage 的面板为命名导出，经 then 映射为 default。
+const AISettingsPanel = lazy(() => import('../components/AISettingsPanel'))
+const AgentPanel = lazy(() => import('../components/AgentPanel'))
+const ConfigOverviewPanel = lazy(() => import('../components/ConfigOverviewPanel'))
+const MailPanel = lazy(() => import('./SettingsPage').then((m) => ({ default: m.MailPanel })))
+const TlsPanel = lazy(() => import('./SettingsPage').then((m) => ({ default: m.TlsPanel })))
+const SystemSettingsPanel = lazy(() => import('./SettingsPage').then((m) => ({ default: m.SystemSettingsPanel })))
 
 /** 凭据状态卡的语义键 → 环境变量名展示（值绝不回显，仅展示配置状态）。 */
 const secretLabels: Array<{ key: string; env: string; label: string }> = [
@@ -2233,8 +2245,11 @@ function SpacesPanel({ onError, onNotice }: { onError: (msg: string) => void; on
 }
 
 const adminSections = [
-  ['overview', '概览'], ['people', '人员与组'], ['spaces', '空间'], ['audit', '审计日志'], ['threat', '威胁防护'],
-  ['backup', '备份'],
+  ['overview', '概览'], ['people', '人员与组'], ['spaces', '空间'], ['audit', '审计日志'], ['threat', '威胁防护'], ['backup', '备份'],
+  // 平台设置拆分（v2.x）：AI / 创作舱 / 邮件 / TLS / 系统设置 各自独立分区，
+  // 不再堆一个大 tag（用户反馈）；v2.8 增第六个 tag「配置总览」
+  //（ConfigOverviewPanel：启动级 env / 运行时设置索引 / AI 能力状态）。
+  ['ai', 'AI 设置'], ['agent', 'AI 创作舱'], ['mail', '邮件'], ['tls', 'TLS'], ['system', '系统设置'], ['config', '配置总览'],
 ] as const
 
 export default function AdminPage() {
@@ -2356,6 +2371,55 @@ export default function AdminPage() {
       {section === 'backup' && !loading && !forbidden && <BackupPanel onError={(m) => { setError(m); setNotice('') }} onNotice={(m) => { setNotice(m); setError('') }} />}
       {section === 'threat' && !loading && !forbidden && <QuarantinePanel onError={(m) => { setError(m); setNotice('') }} onNotice={(m) => { setNotice(m); setError('') }} />}
       {section === 'threat' && !loading && !forbidden && <SecretsPanel secrets={secrets} />}
+      {/* 平台设置拆分分区（v2.x）：各自独立 tag（面板自 SettingsPage 导出
+          复用），仅管理员可达；旧地址 /admin/platform 重定向至 ai。v2.7 起
+          五面板均为 React.lazy 懒加载（见文件头），Suspense 兜底加载态。 */}
+      {section === 'ai' && !loading && !forbidden && (
+        <div className="admin-platform-stack">
+          <Suspense fallback={<div className="hint">{msg('loading')}</div>}>
+            <AISettingsPanel
+              onError={(m) => { setError(m); setNotice('') }}
+              onNotice={(m) => { setNotice(m); setError('') }}
+            />
+          </Suspense>
+        </div>
+      )}
+      {section === 'agent' && !loading && !forbidden && (
+        <Suspense fallback={<div className="hint">{msg('loading')}</div>}>
+          <AgentPanel
+            onError={(m) => { setError(m); setNotice('') }}
+            onNotice={(m) => { setNotice(m); setError('') }}
+          />
+        </Suspense>
+      )}
+      {section === 'mail' && !loading && !forbidden && (
+        <Suspense fallback={<div className="hint">{msg('loading')}</div>}>
+          <MailPanel
+            onNotice={(m) => { setNotice(m); setError('') }}
+            onError={(m) => { setError(m); setNotice('') }}
+          />
+        </Suspense>
+      )}
+      {section === 'tls' && !loading && !forbidden && (
+        <Suspense fallback={<div className="hint">{msg('loading')}</div>}>
+          <TlsPanel onNotice={(m) => { setNotice(m); setError('') }} />
+        </Suspense>
+      )}
+      {section === 'system' && !loading && !forbidden && (
+        <Suspense fallback={<div className="hint">{msg('loading')}</div>}>
+          <SystemSettingsPanel
+            onError={(m) => { setError(m); setNotice('') }}
+            onNotice={(m) => { setNotice(m); setError('') }}
+          />
+        </Suspense>
+      )}
+      {/* v2.8 第六个平台设置 tag：配置总览（启动级 env 只读 / 运行时设置
+          分类索引 / AI 能力状态；env 端点未就绪时占位降级）。 */}
+      {section === 'config' && !loading && !forbidden && (
+        <Suspense fallback={<div className="hint">{msg('loading')}</div>}>
+          <ConfigOverviewPanel onError={(m) => { setError(m); setNotice('') }} />
+        </Suspense>
+      )}
       </div>
     </div>
   )

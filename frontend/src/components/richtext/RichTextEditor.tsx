@@ -14,13 +14,24 @@
 //   v2.7 编辑态右键菜单（antd Menu，与文件页右键同风格）：撤销重做/粗斜/
 //   标题/列表/高亮/代码/链接 + 插入（图片/文件/表格/分割线/代码块）+ 嵌入
 //   （drawio/白板）；查看页（readonly）不接管右键。
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { BubbleMenu, EditorContent, useEditor } from '@tiptap/react'
 import type { Editor } from '@tiptap/react'
 import type { Transaction } from '@tiptap/pm/state'
 import { NodeSelection } from '@tiptap/pm/state'
+import { Fragment } from '@tiptap/pm/model'
+import { Step } from '@tiptap/pm/transform'
+import { receiveTransaction, sendableSteps } from '@tiptap/pm/collab'
 import { App as AntdApp, Button, Dropdown, Input, Menu, Modal as AntdModal, Popover, Tooltip } from 'antd'
 import type { MenuProps } from 'antd'
 import {
@@ -37,6 +48,7 @@ import {
   Italic,
   Link2,
   List,
+  MessageSquare,
   ListOrdered,
   ListTodo,
   Minus,
@@ -44,6 +56,8 @@ import {
   PenLine,
   Pilcrow,
   Redo2,
+  Clipboard,
+  Scissors,
   Strikethrough,
   Table as TableIcon,
   TextQuote,
@@ -52,6 +66,7 @@ import {
   Undo2,
 } from 'lucide-react'
 import StarterKit from '@tiptap/starter-kit'
+import { Mark } from '@tiptap/core'
 import Underline from '@tiptap/extension-underline'
 import Highlight from '@tiptap/extension-highlight'
 import Link from '@tiptap/extension-link'
@@ -65,7 +80,8 @@ import TableCell from '@tiptap/extension-table-cell'
 import Placeholder from '@tiptap/extension-placeholder'
 import CodeBlockLowlight from '@tiptap/extension-code-block-lowlight'
 import { common, createLowlight } from 'lowlight'
-import { getFileMeta, resolveNamespaceOf, uploadFile, ApiError } from '../../api'
+import { getFileMeta, resolveNamespaceOf, uploadFile, ApiError, createDocumentComment, replyDocumentComment, updateDocumentComment, deleteDocumentComment, currentUserId, getMe, websocketToken } from '../../api'
+import type { DocumentComment } from '../../api'
 import { useLocale } from '../../i18n'
 import { clampFixedMenu, promptViaModal } from '../FileBrowser'
 import DocflowEmbed from './DocflowEmbed'
@@ -84,6 +100,19 @@ import type { RichTextPublicBase } from './RichTextPublicContext'
 import { createSlashMenuExtension } from './SlashMenu'
 import type { SlashMenuCallbacks } from './SlashMenu'
 import { sanitizePastedHTML, rewriteRemoteImages } from './pasteHTML'
+import {
+  CollabSession,
+  avatarCharOf,
+  clearRemoteCarets,
+  collabColorFor,
+  collabWsUrl,
+  createCollabExtension,
+  randomCollabClientID,
+  remoteCaretsKey,
+  removeRemoteCaret,
+  setRemoteCaret,
+} from './CollabSession'
+import type { CollabParticipant, CollabSnapshot, CollabStatus } from './CollabSession'
 
 export interface RichTextEditorProps {
   /** 装载期使用的文档 JSON（Tiptap doc 序列化串；外部更新不自动同步，用 key 重挂载）。 */
@@ -93,8 +122,18 @@ export interface RichTextEditorProps {
   readonly?: boolean
   /** dfdoc 文件自身 ID：图片上传时解析其所在目录（其下 assets/ 子目录）。 */
   fileId?: string
+  versionId?: string
+  comments?: DocumentComment[]
+  onCommentsChange?: () => void
+  onCommentError?: (error: string) => void
   /** 公开分享渲染态：提供分享树 raw 基址与文档自身路径（readonly 配合使用）。 */
   publicBase?: RichTextPublicBase
+  /** 编辑器实例就绪/销毁回调（编辑器 AI 等宿主能力挂接用）。 */
+  onEditor?: (editor: Editor | null) => void
+  /** 多人实时协作（连 /api/v1/collab/:fileId/ws；失败自动回退单机编辑，编辑器不销毁）。 */
+  collab?: boolean
+  /** 协作状态快照回调（status/participants/self/leader/message；卸载时回 null）。 */
+  onCollabState?: (snapshot: CollabSnapshot | null) => void
 }
 
 /** 解析 .dfdoc 内容：JSON 合法且为 {type:'doc'} 时原样使用，否则回退空段（不抛错——查看态损坏内容仍可打开编辑修复）。 */
@@ -112,6 +151,18 @@ function parseDocJSON(text: string): Record<string, unknown> {
 }
 
 const IMAGE_MIME = /^image\//
+
+const CommentMark = Mark.create({
+  name: 'comment',
+  inclusive: false,
+  addAttributes() {
+    return { id: { default: '' }, text: { default: '' } }
+  },
+  parseHTML() { return [{ tag: 'span[data-comment-id]' }] },
+  renderHTML({ HTMLAttributes }) {
+    return ['span', { ...HTMLAttributes, 'data-comment-id': HTMLAttributes.id, class: 'rich-text-comment' }, 0]
+  },
+})
 
 /** 文件卡片点击 → 查看弹窗内容（FileViewerDispatch 懒加载，避开
  * ViewerPage→DfdocEditorPage→RichTextEditor 静态循环依赖）。 */
@@ -145,7 +196,14 @@ export default function RichTextEditor({
   onChange,
   readonly = false,
   fileId,
+  versionId,
+  comments = [],
+  onCommentsChange,
+  onCommentError,
   publicBase,
+  onEditor,
+  collab = false,
+  onCollabState,
 }: RichTextEditorProps) {
   const locale = useLocale()
   const zh = locale === 'zh-CN'
@@ -167,6 +225,31 @@ export default function RichTextEditor({
   // 工具栏链接 Popover：输入 URL 的受控态。
   const [linkOpen, setLinkOpen] = useState(false)
   const [linkUrl, setLinkUrl] = useState('https://')
+  const [outline, setOutline] = useState<Array<{ level: number; text: string; pos: number }>>([])
+  // 多人实时协作状态（null = 未启用 collab；离线/失败即回退单机编辑）。
+  const [collabStatus, setCollabStatus] = useState<CollabStatus | null>(null)
+  const [collabParticipants, setCollabParticipants] = useState<CollabParticipant[]>([])
+  // 协作编辑器基座（起点文档 JSON + 对应权威版本）：协作模式 bootstrap 完成
+  // （init/init-doc/失败回退）前为 null，编辑器挂起渲染加载提示；非协作模式
+  // 恒为 {json:initialJSON, version:0}。基座落位后随 useEditor deps 重建编辑器。
+  const [collabBase, setCollabBase] = useState<{ json: string; version: number } | null>(
+    collab && !readonly ? null : { json: initialJSON, version: 0 },
+  )
+  // 协作会话（bootstrap 建立后常驻；sessionSeq 在会话重建时自增以重挂 wiring）。
+  const sessionRef = useRef<CollabSession | null>(null)
+  const [sessionSeq, setSessionSeq] = useState(0)
+  // 协作提示文案（快照上提用）与基座是否已落位（跨会话重建持久，防重置内容）。
+  const collabMessageRef = useRef('')
+  const collabInitedRef = useRef(false)
+  const initialJSONRef = useRef(initialJSON)
+  initialJSONRef.current = initialJSON
+  const [commentBusy, setCommentBusy] = useState(false)
+  const commentAction = async (action: () => Promise<unknown>) => {
+    setCommentBusy(true)
+    try { await action(); onCommentsChange?.(); onCommentError?.('') }
+    catch (err) { onCommentError?.(err instanceof Error ? err.message : (zh ? '评论操作失败' : 'Comment action failed')) }
+    finally { setCommentBusy(false) }
+  }
 
   const callbacksRef = useRef<SlashMenuCallbacks>({
     onInsertEmbed: (filter) => setPicker({ filter }),
@@ -372,11 +455,19 @@ export default function RichTextEditor({
   }
 
   const lowlight = useMemo(() => createLowlight(common), [])
+  // 协作扩展：prosemirror-collab({clientID,version}) 插件 + 远程光标插件
+  //（仅 collab 编辑态且基座已落位；version 为基座权威版本）。bootstrap 期间
+  // 的占位编辑器不装协作插件（不可见、不参与收发）。
+  const collabClientID = useMemo(() => randomCollabClientID(), [])
+  const collabExtension = useMemo(
+    () => (collab && !readonly && collabBase ? createCollabExtension(collabClientID, collabBase.version) : null),
+    [collab, readonly, collabClientID, collabBase],
+  )
   const editor = useEditor({
     extensions: [
       StarterKit.configure({
         codeBlock: false,
-        heading: { levels: [1, 2, 3] },
+        heading: { levels: [1, 2, 3, 4, 5, 6] },
       }),
       CodeBlockLowlight.configure({ lowlight }),
       Underline,
@@ -396,9 +487,12 @@ export default function RichTextEditor({
       DocflowEmbed,
       DocflowFileCard,
       DocflowImage,
+      CommentMark,
       createSlashMenuExtension(callbacksRef),
+      ...(collabExtension ? [collabExtension] : []),
     ],
-    content: parseDocJSON(initialJSON),
+    // 协作 bootstrap 期间用空段占位（编辑器不渲染，基座落位后随 deps 重建）。
+    content: parseDocJSON(collabBase ? collabBase.json : (collab && !readonly ? '' : initialJSON)),
     editable: !readonly,
     editorProps: {
       attributes: { class: 'rich-text-content', spellcheck: 'false' },
@@ -454,8 +548,19 @@ export default function RichTextEditor({
         return true
       },
     },
-  })
+    // deps：协作基座落位（null → init/init-doc/失败回退值）时以起点文档重建
+    // 编辑器（collab 插件带基座版本，版本计数与服务端权威序列对齐）。
+  }, [collabBase])
   editorRef.current = editor
+  // 宿主编辑器实例回调（编辑器 AI 挂接）：就绪/销毁均通知。
+  const onEditorRef = useRef(onEditor)
+  onEditorRef.current = onEditor
+  useEffect(() => {
+    onEditorRef.current?.(editor)
+    return () => {
+      if (editor) onEditorRef.current?.(null)
+    }
+  }, [editor])
 
   // 编辑 → 文档 JSON 回吐（仅文档真实变化）。
   useEffect(() => {
@@ -463,16 +568,294 @@ export default function RichTextEditor({
     const handler = ({ transaction }: { transaction: Transaction }) => {
       if (!transaction.docChanged) return
       onChangeRef.current?.(JSON.stringify(editor.getJSON()))
+      const next: Array<{ level: number; text: string; pos: number }> = []
+      editor.state.doc.descendants((node, pos) => {
+        if (node.type.name === 'heading') next.push({ level: Number(node.attrs.level), text: node.textContent, pos })
+      })
+      setOutline(next)
     }
     editor.on('update', handler)
+    const initial: Array<{ level: number; text: string; pos: number }> = []
+    editor.state.doc.descendants((node, pos) => {
+      if (node.type.name === 'heading') initial.push({ level: Number(node.attrs.level), text: node.textContent, pos })
+    })
+    setOutline(initial)
     return () => {
       editor.off('update', handler)
     }
   }, [editor])
 
   useEffect(() => {
+    if (!editor || readonly) return
+    const root = editor.view.dom
+    Array.from(root.children).forEach((child, index) => {
+      const element = child as HTMLElement
+      element.dataset.topBlock = String(index)
+      element.draggable = true
+    })
+  }, [editor, readonly, outline])
+
+  useEffect(() => {
     editor?.setEditable(!readonly)
   }, [editor, readonly])
+
+  // ---- 多人实时协作（collab=true）：三层解耦 ----
+  // a. bootstrap（不依赖编辑器）：建 WS 会话（getMe 取名/颜色、token 携带
+  //    同旧版），构造期回调维护状态区/成员/错误提示；onInit/onInitDoc 落
+  //    collabBase 基座（起点文档 + 权威版本），WS 持续失败（连续重连超
+  //    3 次）或致命 error 经 onFatal 回退单机基座（version=0）解除挂起；
+  // b. 编辑器基座：基座未落位时挂起渲染「协作连接中…」加载提示；
+  // c. wiring（编辑器 + 会话就绪）：attachStepsSink 应用远端 steps、
+  //    attachHandlers 处理 sync 流程（leader 快照上报）、transaction 发送
+  //    与 presence。会话与编辑器解耦：WS 失败/离线仅停止协作（状态区
+  //    「协作离线」），本地编辑照常（collab 插件隔离他人 steps，undo 不受
+  //    影响）；onChange 全文回吐不变，宿主保存逻辑不受影响。重连后版本
+  //    不一致无法追赶 steps → 提示刷新。
+  const onCollabStateRef = useRef(onCollabState)
+  onCollabStateRef.current = onCollabState
+
+  /** 协作状态快照上提（状态区/成员/leader/提示文案；卸载时回 null）。 */
+  const pushCollabSnapshot = useCallback(() => {
+    const session = sessionRef.current
+    onCollabStateRef.current?.({
+      status: session ? session.currentStatus : 'offline',
+      participants: session ? session.currentParticipants : [],
+      selfConnId: session ? session.currentSelfConnId : null,
+      leaderConnId: session ? session.leaderConnId : null,
+      message: collabMessageRef.current,
+    })
+  }, [])
+  const setCollabMessage = useCallback((text: string) => {
+    collabMessageRef.current = text
+    pushCollabSnapshot()
+  }, [pushCollabSnapshot])
+
+  // a. bootstrap：会话生命周期（不依赖编辑器；基座落位前远端 steps 在会话内排队）。
+  useEffect(() => {
+    if (!collab || readonly || !fileId) {
+      setCollabStatus(null)
+      setCollabParticipants([])
+      return
+    }
+    let alive = true
+    const userId = currentUserId()
+    const color = collabColorFor(userId ?? 'anonymous')
+    collabMessageRef.current = ''
+
+    /** 基座落位（幂等：仅首次生效——跨会话重建/重连不重置编辑器内容）。 */
+    const settleBase = (base: { json: string; version: number }): boolean => {
+      if (collabInitedRef.current) return false
+      collabInitedRef.current = true
+      setCollabBase(base)
+      return true
+    }
+    /** 重连漂移检测：服务端版本与断线前不一致 = 期间有未同步 steps（无追赶能力）。 */
+    const checkDrift = (version: number) => {
+      const session = sessionRef.current
+      if (session && session.lastServerVersion !== null && version !== session.lastServerVersion) {
+        setCollabMessage(zh ? '协作已重连，文档与服务端版本不一致，请刷新页面完成同步' : 'Collab reconnected with version drift; refresh to resync')
+      }
+    }
+
+    const start = (name: string) => {
+      if (!alive) return
+      const session = new CollabSession({
+        url: collabWsUrl(fileId),
+        // tokenProvider 动态取（token 恢复前为 null 时 CollabSession 短退避
+        // 等待，避免旧 null 快照 401 死循环）。
+        tokenProvider: websocketToken,
+        userId,
+        name,
+        color,
+        maxFailedAttempts: 3,
+        onStatus: (status) => {
+          if (!alive) return
+          setCollabStatus(status)
+          if (status === 'connected') setCollabMessage('')
+        },
+        onInit: (version) => {
+          // 空房首成员：磁盘文档为基座；重连则比较版本漂移提示刷新。
+          if (!settleBase({ json: initialJSONRef.current, version })) checkDrift(version)
+        },
+        onInitDoc: (doc, version) => {
+          // 非空房加入者：leader 实时文档为基座；重连同样比较漂移。
+          if (!settleBase({ json: JSON.stringify(doc), version })) checkDrift(version)
+        },
+        onPresence: (p) => {
+          if (!alive) return
+          const editor = editorRef.current
+          const current = sessionRef.current
+          if (!editor || !current || p.connId === current.currentSelfConnId) return
+          setRemoteCaret(editor.view, {
+            connId: p.connId,
+            name: p.name,
+            color: p.color,
+            anchor: p.selection ? p.selection.anchor : -1,
+            head: p.selection ? p.selection.head : -1,
+          })
+        },
+        onParticipants: (participants) => {
+          if (!alive) return
+          setCollabParticipants(participants)
+          // 成员列表已不含的光标一并清除（leave 之外的一致性兜底）。
+          const editor = editorRef.current
+          if (editor) {
+            const ids = new Set(participants.map((p) => p.connId))
+            remoteCaretsKey.getState(editor.state)?.carets.forEach((_entry, connId) => {
+              if (!ids.has(connId)) removeRemoteCaret(editor.view, connId)
+            })
+          }
+          pushCollabSnapshot()
+        },
+        onLeave: (connId) => {
+          const editor = editorRef.current
+          if (alive && editor) removeRemoteCaret(editor.view, connId)
+        },
+        onError: (message) => {
+          if (alive) setCollabMessage(message)
+        },
+        onFatal: (reason) => {
+          // 连接已停（error 信封 / 连续重连超 3 次失败）：编辑器保持单机可用；
+          // 基座仍未落位（一直在「协作连接中…」）时立即落单机基座解除挂起。
+          if (!alive) return
+          setCollabMessage(/reconnect failed/i.test(reason)
+            ? (zh ? '协作连接失败，已回退单机编辑，可继续编辑并手动保存' : 'Collaboration connection failed; fell back to standalone editing')
+            : reason)
+          settleBase({ json: initialJSONRef.current, version: 0 })
+        },
+      })
+      sessionRef.current = session
+      setSessionSeq((n) => n + 1)
+      setCollabStatus('connecting')
+      session.connect()
+      pushCollabSnapshot()
+    }
+
+    // 展示名：档案昵称 → 用户名 → userId 前 8 位（getMe 失败不阻断协作）。
+    void getMe()
+      .then((me) => {
+        if (alive) start(me.profile.nickname || me.username)
+      })
+      .catch(() => {
+        if (alive) start(userId ? userId.slice(0, 8) : (zh ? '匿名' : 'Guest'))
+      })
+
+    return () => {
+      alive = false
+      sessionRef.current?.close()
+      sessionRef.current = null
+      const current = editorRef.current
+      if (current && !current.isDestroyed) clearRemoteCarets(current.view)
+      setCollabStatus(null)
+      setCollabParticipants([])
+      onCollabStateRef.current?.(null)
+    }
+  }, [collab, readonly, fileId, zh, pushCollabSnapshot, setCollabMessage])
+
+  // c. wiring：编辑器（基座已落位、collab 插件就绪）+ 会话可用后挂接
+  // steps 应用、sync 流程与发送逻辑；deps 含 sessionSeq（会话重建时对
+  // 新会话重新挂接）与 collabBase/editor（基座落位重建编辑器时重挂）。
+  useEffect(() => {
+    if (!collab || readonly || !fileId || !editor || !collabBase) return
+    const session = sessionRef.current
+    if (!session) return
+    let alive = true
+    const clientID = collabClientID
+    // 本端已应用的最新权威版本（基座版本起步；应用远端 steps/sync-end 推进）。
+    let appliedVersion = collabBase.version
+    let lastSentStep: unknown = null
+    let presenceTimer: number | null = null
+    let lastPresenceSentAt = 0
+    let lastPresence: { anchor: number; head: number } | null = null
+    let syncPollTimer: number | null = null
+
+    /** 应用远端 steps（Step.fromJSON → receiveTransaction → dispatch）。
+     * 自己的 echo 也走 receiveTransaction：其自会识别自己前缀的 steps 仅
+     * 做确认（清 sendable、推进版本）不重复应用——这正是「客户端按
+     * clientID 忽略自己的 steps」的协议约定；映射失败提示刷新。 */
+    const applyRemoteSteps = (steps: unknown[], clientIDs: number[]) => {
+      try {
+        const parsed = steps.map((s) => Step.fromJSON(editor.schema, s))
+        const tr = receiveTransaction(editor.state, parsed, clientIDs)
+        editor.view.dispatch(tr)
+      } catch {
+        setCollabMessage(zh ? '协作变更应用失败，建议刷新页面后重试' : 'Failed to apply collab changes; refresh recommended')
+      }
+    }
+
+    /** 发送未确认 steps（末位 step 引用去重；发送失败保持 sendable 重试）。 */
+    const flushSendable = () => {
+      const sendable = sendableSteps(editor.state)
+      if (!sendable || sendable.steps.length === 0) return
+      const last = sendable.steps[sendable.steps.length - 1]
+      if (last === lastSentStep) return
+      if (session.sendSteps(sendable.steps.map((s) => s.toJSON()), clientID, sendable.version)) lastSentStep = last
+    }
+
+    session.attachStepsSink((version, steps, clientIDs) => {
+      if (version <= appliedVersion) return // 已含于基座，防重复应用
+      applyRemoteSteps(steps, clientIDs)
+      appliedVersion = version
+    })
+
+    session.attachHandlers({
+      // 暂停由 session.sendsHeld 表达（onTransaction 发送侧跳过非 leader）。
+      onSyncBegin: () => {},
+      onSyncEnd: (version) => {
+        if (version > appliedVersion) appliedVersion = version
+        flushSendable() // 恢复发送：立即补发暂停期间积压的 sendable
+      },
+      onSyncRequest: (target) => {
+        // leader 冲账上报：先立即发送 sendable，再 80ms 轮询直至排空或 2s
+        // 超时，随后上报实时快照（版本落后会被服务端判 stale 并重发
+        // sync-request，届时再次进入本流程直至追平）。
+        flushSendable()
+        if (syncPollTimer !== null) window.clearInterval(syncPollTimer)
+        const startedAt = Date.now()
+        syncPollTimer = window.setInterval(() => {
+          const sendable = sendableSteps(editor.state)
+          if (!alive || !sendable || sendable.steps.length === 0 || Date.now() - startedAt >= 2000) {
+            if (syncPollTimer !== null) {
+              window.clearInterval(syncPollTimer)
+              syncPollTimer = null
+            }
+            if (alive) session.sendSnapshot(editor.getJSON(), appliedVersion, target)
+          }
+        }, 80)
+      },
+    })
+
+    /** 每次 transaction 后：发送未确认 steps（sync 暂停期间非 leader 跳过，
+     * steps 留 sendable 待 sync-end 补发）+ presence 节流 300ms。 */
+    const onTransaction = ({ transaction }: { transaction: Transaction }) => {
+      if (session.currentStatus !== 'connected') return
+      const held = session.sendsHeld && session.leaderConnId !== session.currentSelfConnId
+      if (!held) flushSendable()
+      if (transaction.selectionSet || transaction.docChanged) {
+        const sel = editor.state.selection
+        if (!lastPresence || sel.anchor !== lastPresence.anchor || sel.head !== lastPresence.head) {
+          const fire = () => {
+            presenceTimer = null
+            if (!alive) return
+            const s = editor.state.selection
+            lastPresence = { anchor: s.anchor, head: s.head }
+            lastPresenceSentAt = Date.now()
+            session.sendPresence({ anchor: s.anchor, head: s.head })
+          }
+          if (Date.now() - lastPresenceSentAt >= 300) fire()
+          else if (presenceTimer === null) presenceTimer = window.setTimeout(fire, 300)
+        }
+      }
+    }
+    editor.on('transaction', onTransaction)
+
+    return () => {
+      alive = false
+      editor.off('transaction', onTransaction)
+      if (presenceTimer !== null) window.clearTimeout(presenceTimer)
+      if (syncPollTimer !== null) window.clearInterval(syncPollTimer)
+    }
+  }, [collab, readonly, fileId, editor, collabBase, sessionSeq, zh, collabClientID, setCollabMessage])
 
   // 右键/卡片菜单浮层：渲染后按实测尺寸收缩进视口（与文件页右键菜单同法）。
   const ctxMenuRef = useRef<HTMLDivElement | null>(null)
@@ -494,8 +877,9 @@ export default function RichTextEditor({
 
   /** 编辑器右键菜单项（与工具栏同能力，antd Menu：查看页不渲染右键）。 */
   const editorCtxItems = (): MenuProps['items'] => [
-    { key: 'undo', label: zh ? '撤销' : 'Undo', disabled: !editor?.can().undo() },
-    { key: 'redo', label: zh ? '重做' : 'Redo', disabled: !editor?.can().redo() },
+    { key: 'copy', icon: icon(Clipboard), label: zh ? '复制' : 'Copy' },
+    { key: 'cut', icon: icon(Scissors), label: zh ? '剪切' : 'Cut' },
+    { key: 'paste', label: zh ? '粘贴' : 'Paste' },
     { type: 'divider' },
     { key: 'bold', label: zh ? '加粗' : 'Bold' },
     { key: 'italic', label: zh ? '斜体' : 'Italic' },
@@ -535,8 +919,27 @@ export default function RichTextEditor({
     setCtxMenu(null)
     if (!editor) return
     switch (key) {
-      case 'undo': chain().undo().run(); break
-      case 'redo': chain().redo().run(); break
+      case 'copy': {
+        const { from, to } = editor.state.selection
+        const text = editor.state.doc.textBetween(from, to, '\n')
+        if (text) void navigator.clipboard?.writeText(text)
+        break
+      }
+      case 'cut': {
+        const { from, to } = editor.state.selection
+        const text = editor.state.doc.textBetween(from, to, '\n')
+        if (text) {
+          void navigator.clipboard?.writeText(text)
+          chain().deleteSelection().run()
+        }
+        break
+      }
+      case 'paste': {
+        void navigator.clipboard?.readText().then((text) => {
+          if (text) editor.chain().focus().insertContent(text).run()
+        }).catch(() => setError(zh ? '浏览器未授予剪贴板读取权限，请使用 Ctrl+V' : 'Clipboard permission denied; use Ctrl+V'))
+        break
+      }
       case 'bold': chain().toggleBold().run(); break
       case 'italic': chain().toggleItalic().run(); break
       case 'highlight': chain().toggleHighlight().run(); break
@@ -713,10 +1116,76 @@ export default function RichTextEditor({
   }
   const bubbleMode = bubbleStateOf(editor)
 
+  const addComment = async () => {
+    if (!editor || editor.state.selection.empty) return
+    const text = await promptViaModal(antdModal, {
+      title: zh ? '添加评论' : 'Add comment',
+      label: zh ? '评论内容' : 'Comment',
+      initialValue: '',
+      okText: zh ? '添加' : 'Add',
+      cancelText: zh ? '取消' : 'Cancel',
+    })
+    if (!text?.trim()) return
+    const { from, to } = editor.state.selection
+    const quote = editor.state.doc.textBetween(from, to, ' ').slice(0, 1000)
+    if (!fileId || !versionId) { onCommentError?.(zh ? '文档版本尚未就绪' : 'Document version is not ready'); return }
+    await commentAction(async () => {
+      const created = await createDocumentComment(fileId, { version_id: versionId, anchor_from: from, anchor_to: to, quote, body: text.trim() })
+      editor.chain().focus().setMark('comment', { id: created.id, text: created.body }).run()
+    })
+  }
+
+  const resolveComment = (comment: DocumentComment) => commentAction(() => updateDocumentComment(comment.id, { status: comment.status === 'resolved' ? 'open' : 'resolved' }))
+  const replyToComment = async (comment: DocumentComment) => {
+    const body = await promptViaModal(antdModal, { title: zh ? '回复评论' : 'Reply', label: zh ? '回复内容' : 'Reply', initialValue: '', okText: zh ? '回复' : 'Reply', cancelText: zh ? '取消' : 'Cancel' })
+    if (body?.trim()) await commentAction(() => replyDocumentComment(comment.id, body.trim()))
+  }
+  const removeComment = (comment: DocumentComment) => commentAction(() => deleteDocumentComment(comment.id))
+
+  const moveTopBlock = (fromIndex: number, toIndex: number) => {
+    if (!editor || fromIndex === toIndex || fromIndex < 0 || toIndex < 0) return
+    const nodes = Array.from({ length: editor.state.doc.childCount }, (_, i) => editor.state.doc.child(i))
+    if (!nodes[fromIndex] || !nodes[toIndex]) return
+    const moved = nodes.splice(fromIndex, 1)[0]
+    nodes.splice(toIndex, 0, moved)
+    editor.view.dispatch(editor.state.tr.replaceWith(0, editor.state.doc.content.size, Fragment.from(nodes)))
+  }
+
   const body = (
     <div className={`rich-text-wrap${readonly ? ' readonly' : ''}`}>
       {!readonly && editor && (
         <div className="rich-text-toolbar" contentEditable={false}>
+          {collabStatus === null ? (
+            <span className="rich-text-collab-state" title={zh ? '多人实时编辑尚未启用' : 'Realtime collaboration is not enabled'}>{zh ? '协作暂未启用' : 'Collaboration unavailable'}</span>
+          ) : (
+            <span
+              className={`rich-text-collab-state on ${collabStatus}`}
+              title={zh ? '多人实时协作（绿=在线，黄=连接中，灰=离线）' : 'Realtime collaboration (green=online, yellow=connecting, gray=offline)'}
+            >
+              <span className={`rich-text-collab-dot ${collabStatus}`} aria-hidden="true" />
+              <span className="rich-text-collab-avatars">
+                {collabParticipants.slice(0, 8).map((p) => (
+                  <span
+                    key={p.connId}
+                    className="rich-text-collab-avatar"
+                    style={{ background: p.color }}
+                    title={`${p.name}${p.leader ? (zh ? '（主持）' : ' (host)') : ''}`}
+                  >
+                    {p.leader && <span className="rich-text-collab-star" aria-hidden="true">★</span>}
+                    {avatarCharOf(p.name)}
+                  </span>
+                ))}
+                {collabParticipants.length > 8 && (
+                  <span className="rich-text-collab-avatar more" title={collabParticipants.slice(8).map((p) => p.name).join(', ')}>
+                    +{collabParticipants.length - 8}
+                  </span>
+                )}
+              </span>
+              {collabStatus === 'connected' ? (zh ? '协作已启用' : 'Collaboration on')
+                : collabStatus === 'connecting' ? (zh ? '协作连接中…' : 'Connecting…')
+                : (zh ? '协作离线' : 'Offline')}
+            </span>
+          )}
           <div className="rich-text-toolbar-group">
             {toolbarBtn('undo', icon(Undo2), zh ? '撤销' : 'Undo', false, !editor.can().undo(), () => chain().undo().run())}
             {toolbarBtn('redo', icon(Redo2), zh ? '重做' : 'Redo', false, !editor.can().redo(), () => chain().redo().run())}
@@ -736,6 +1205,7 @@ export default function RichTextEditor({
             {toolbarBtn('code', icon(Code), zh ? '行内代码' : 'Inline code', editor.isActive('code'), false, () => chain().toggleCode().run())}
           </div>
           <div className="rich-text-toolbar-group">
+            {toolbarBtn('comment', icon(MessageSquare), zh ? '添加评论' : 'Add comment', false, editor.state.selection.empty, () => void addComment())}
             {toolbarBtn('ul', icon(List), zh ? '无序列表' : 'Bullet list', editor.isActive('bulletList'), false, () => chain().toggleBulletList().run())}
             {toolbarBtn('ol', icon(ListOrdered), zh ? '有序列表' : 'Ordered list', editor.isActive('orderedList'), false, () => chain().toggleOrderedList().run())}
             {toolbarBtn('task', icon(ListTodo), zh ? '任务列表' : 'Task list', editor.isActive('taskList'), false, () => chain().toggleTaskList().run())}
@@ -841,15 +1311,65 @@ export default function RichTextEditor({
       )}
       {/* 编辑器主体：编辑态接管 contextmenu 弹自有右键菜单（与文件页右键
           同风格 antd Menu）；查看页（readonly）不接管，保持浏览器原生。 */}
+      {!readonly && outline.length > 0 && (
+        <aside className="rich-text-outline" aria-label={zh ? '文档大纲' : 'Document outline'}>
+          <strong>{zh ? '大纲' : 'Outline'}</strong>
+          {outline.map((item, index) => (
+            <button key={`${item.pos}-${index}`} className={`rich-text-outline-item level-${item.level}`} onClick={() => {
+              editor?.chain().focus().setTextSelection(item.pos + 1).run()
+              editor?.view.dom.querySelectorAll('h1,h2,h3,h4,h5,h6')[index]?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+            }}>{item.text || (zh ? '未命名标题' : 'Untitled')}</button>
+          ))}
+        </aside>
+      )}
+      {!readonly && comments.length > 0 && (
+        <aside className="rich-text-comments" aria-label={zh ? '评论' : 'Comments'}>
+          <strong>{zh ? '评论' : 'Comments'} ({comments.length})</strong>
+          {comments.filter((c) => !c.parent_id).map((comment) => (
+            <div className={`rich-text-comment-item${comment.status === 'resolved' ? ' resolved' : ''}`} key={comment.id}>
+              <div className="rich-text-comment-quote">{comment.quote}</div>
+              <div>{comment.body}</div>
+              <div className="rich-text-comment-actions">
+                <Button size="small" disabled={commentBusy} onClick={() => void resolveComment(comment)}>{comment.status === 'resolved' ? (zh ? '重开' : 'Reopen') : (zh ? '解决' : 'Resolve')}</Button>
+                <Button size="small" disabled={commentBusy} onClick={() => void replyToComment(comment)}>{zh ? '回复' : 'Reply'}</Button>
+                <Button size="small" danger disabled={commentBusy} onClick={() => void removeComment(comment)}>{zh ? '删除' : 'Delete'}</Button>
+              </div>
+              {comments.filter((reply) => reply.parent_id === comment.id).map((reply) => <div className="rich-text-comment-reply" key={reply.id}>{reply.body}</div>)}
+            </div>
+          ))}
+        </aside>
+      )}
       <div
         className="rich-text-editor-host"
+        onDragStart={(e) => {
+          if (readonly) return
+          const target = (e.target as HTMLElement).closest('[data-top-block]') as HTMLElement | null
+          if (target) e.dataTransfer.setData('text/plain', target.dataset.topBlock || '')
+        }}
+        onDragOver={(e) => { if (!readonly && (e.target as HTMLElement).closest('[data-top-block]')) e.preventDefault() }}
+        onDrop={(e) => {
+          if (readonly) return
+          const target = (e.target as HTMLElement).closest('[data-top-block]') as HTMLElement | null
+          if (!target) return
+          const from = Number(e.dataTransfer.getData('text/plain'))
+          const to = Number(target.dataset.topBlock)
+          if (Number.isFinite(from) && Number.isFinite(to)) moveTopBlock(from, to)
+        }}
         onContextMenu={(e) => {
           if (readonly) return
           e.preventDefault()
           setCtxMenu({ x: e.clientX, y: e.clientY })
         }}
       >
-        <EditorContent editor={editor} className="rich-text-editor-body" />
+        {/* 协作 bootstrap 未完成（基座未落位）时挂起编辑器，渲染加载提示；
+            WS 持续失败经 onFatal 落单机基座后照常渲染（状态区「协作离线」）。 */}
+        {collab && !readonly && collabBase === null ? (
+          <div className="text-editor-state" contentEditable={false}>
+            {zh ? '协作连接中…' : 'Connecting to collaboration…'}
+          </div>
+        ) : (
+          <EditorContent editor={editor} className="rich-text-editor-body" />
+        )}
       </div>
       {/* 右键菜单浮层（antd Menu，与文件页 .ctx-antd-menu 同视觉）。经 Portal
           挂 body：直接渲染在 .rich-text-wrap 内会排在 BubbleMenu（tippy 已把

@@ -67,6 +67,12 @@ import {
   updateToken,
   updateNotificationPreference,
   updateWebhook,
+  listWebDAVTokens,
+  createWebDAVToken,
+  revokeWebDAVToken,
+  WebDAVToken,
+  getAgentSettings,
+  putAgentSettings,
 } from '../api'
 import {
   ALL_EDIT_METHODS,
@@ -79,6 +85,8 @@ import {
   viewMethodLabel,
 } from '../openers'
 import { formatQuota, formatTime, Modal } from '../components/FileBrowser'
+import AIPersonalPanel from '../components/settings/AIPersonalPanel'
+import { useAIEnabled } from '../aiFeature'
 import { THEME_ACCENTS, ThemeAccent, ThemeMode, ThemePreference, THEME_EVENT, loadTheme, saveTheme } from '../theme'
 import { MessageKey, saveLocale, t, useLocale } from '../i18n'
 
@@ -210,6 +218,8 @@ const EXPIRY_OPTIONS: Array<{ value: number; label: string }> = [
 function TokensPanel({ onError, onNotice }: { onError: (msg: string) => void; onNotice: (msg: string) => void }) {
   const locale = useLocale()
   const msg = (key: MessageKey) => t(locale, key)
+  // AI 未启用时 ai:chat scope 选项隐藏（与全站 AI 入口显隐一致）。
+  const aiOn = useAIEnabled()
   const [tokens, setTokens] = useState<ApiTokenItem[]>([])
   const [loading, setLoading] = useState(true)
   const [showCreate, setShowCreate] = useState(false)
@@ -321,10 +331,10 @@ function TokensPanel({ onError, onNotice }: { onError: (msg: string) => void; on
               {editing === t.id ? (
                 <div className="team-create-row">
                   <Input allowClear value={editName} onChange={(e) => setEditName(e.target.value)} />
-                  {['files:read', 'files:write'].map((scope) => (
+                  {(aiOn ? ['files:read', 'files:write', 'ai:chat'] : ['files:read', 'files:write']).map((scope) => (
                     <label key={scope} className="check-item" title={scope}>
                       <input type="checkbox" checked={editScopes.includes(scope)} onChange={(e) => setEditScopes(e.target.checked ? [...editScopes, scope] : editScopes.filter((s) => s !== scope))} />
-                      {scope === 'files:read' ? '文件只读（files:read）' : '文件读写（files:write）'}
+                      {scope === 'files:read' ? '文件只读（files:read）' : scope === 'files:write' ? '文件读写（files:write）' : 'AI 对话（ai:chat）'}
                     </label>
                   ))}
                 </div>
@@ -1619,7 +1629,7 @@ function TlsCertInfo({ cert }: { cert: TlsCert | null | undefined }) {
  * （立即生效，无需重启容器；caddy 拒绝时原子回退）。未托管（managed=false）
  * 时降级为提示。切换到 HTTPS 后提示 COOKIE_SECURE 联动。custom 模式附
  * 证书上传（multipart cert/key，后端解析校验并落盘共享卷）与摘要展示。 */
-function TlsPanel({ onNotice }: { onNotice: (msg: string) => void }) {
+export function TlsPanel({ onNotice }: { onNotice: (msg: string) => void }) {
   const [status, setStatus] = useState<TlsStatus | null>(null)
   const [mode, setMode] = useState<TlsMode>('http')
   const [domain, setDomain] = useState('')
@@ -1795,7 +1805,7 @@ function TlsPanel({ onNotice }: { onNotice: (msg: string) => void }) {
  * 支持运行时修改（DB 覆盖 → env 回退合并，保存即时生效：邮件发送处每次
  * 读库）；pass 留空 = 保持现值（任何读路径不回显，仅报 configured），
  * env 基线（.env 部署值）作对照展示，PUBLIC_BASE_URL 仍为 env-only。 */
-function MailPanel({ onNotice, onError }: { onNotice: (m: string) => void; onError: (m: string) => void }) {
+export function MailPanel({ onNotice, onError }: { onNotice: (m: string) => void; onError: (m: string) => void }) {
   const [view, setView] = useState<SmtpSettingsView | null>(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -2027,31 +2037,38 @@ function MailPanel({ onNotice, onError }: { onNotice: (m: string) => void; onErr
   )
 }
 
-/** 设置键前缀 → 分组标题（v2.3 补 audit/space；未知前缀回退原样）。 */
-const groupTitles: Record<string, string> = {
-  site: '站点',
-  upload: '上传',
-  share: '分享',
-  retention: '保留策略',
-  security: '安全与限流',
-  batch: '批量操作',
-  folder: '目录',
-  backup: '备份',
-  audit: '审计',
-  space: '空间',
+/** 设置键前缀 → 分组标题（v2.3 补 audit/space；未知前缀回退原样）。
+ * v2.7（反馈 14）：分组标题中英双语，随界面语言切换；补齐 ai/webdav/
+ * collab/agent 前缀（此前这些分组直接裸显前缀 key）。 */
+const groupTitles: Record<string, { zh: string; en: string }> = {
+  ai: { zh: 'AI 检索与联网搜索', en: 'AI retrieval & web search' },
+  site: { zh: '站点', en: 'Site' },
+  upload: { zh: '上传', en: 'Upload' },
+  share: { zh: '分享', en: 'Share' },
+  retention: { zh: '保留策略', en: 'Retention' },
+  security: { zh: '安全与限流', en: 'Security & rate limits' },
+  batch: { zh: '批量操作', en: 'Batch operations' },
+  folder: { zh: '目录', en: 'Folders' },
+  backup: { zh: '备份', en: 'Backup' },
+  audit: { zh: '审计', en: 'Audit' },
+  space: { zh: '空间', en: 'Spaces' },
+  webdav: { zh: 'WebDAV', en: 'WebDAV' },
+  collab: { zh: '实时协作', en: 'Realtime collaboration' },
+  agent: { zh: 'AI 创作舱（Agent）', en: 'AI agent studio' },
 }
 
-const typeText: Record<SettingType, string> = {
-  bool: '布尔',
-  int: '整数',
-  string: '文本',
+/** 值类型徽章文案（typeText，随界面语言切换）。 */
+const typeText: Record<SettingType, { zh: string; en: string }> = {
+  bool: { zh: '布尔', en: 'Boolean' },
+  int: { zh: '整数', en: 'Integer' },
+  string: { zh: '文本', en: 'Text' },
 }
 
-/** 设置生效方式徽章文案（effect 字段）。 */
-const effectText: Record<string, string> = {
-  immediate: '立即生效',
-  new_session: '新会话生效',
-  restart: '需重启生效',
+/** 设置生效方式徽章文案（effect 字段，随界面语言切换）。 */
+const effectText: Record<string, { zh: string; en: string }> = {
+  immediate: { zh: '立即生效', en: 'Immediate' },
+  new_session: { zh: '新会话生效', en: 'New session' },
+  restart: { zh: '需重启生效', en: 'Restart required' },
 }
 
 /** 字节量设置键（配额/大小上限类，值以字节存储；v2.6 展示层统一人类可读）。 */
@@ -2060,37 +2077,76 @@ const QUOTA_BYTE_KEYS = new Set([
   'space.default_quota',
   'space.max_quota',
   'upload.max_file_size',
+  'agent.max_memory_bytes',
 ])
 
-/** 全部内置设置键的中文名（v2.3：key 直显 + 中文名 label，覆盖 audit/space
- * 等全部前缀；未命中回退空串仅显示 key）。 */
-const SETTING_KEY_LABELS: Record<string, string> = {
-  'upload.max_versions_per_file': '每文件版本数上限',
-  'upload.version_retention_days': '版本保留时间窗',
-  'upload.blocked_extensions': '上传扩展名黑名单',
-  'upload.max_file_size': '单文件上传大小上限',
-  'upload.default_quota': '新用户默认存储配额',
-  'upload.max_concurrent_uploads_per_user': '每用户并发上传上限',
-  'share.default_expiry_hours': '分享默认有效期',
-  'share.default_watermark': '分享默认启用水印',
-  'share.watermark_text': '水印默认模板',
-  'share.public_enabled': '允许公开分享',
-  'retention.trash_days': '回收站保留天数',
-  'retention.access_events_days': '访问事件保留天数',
-  'security.rate_limit_per_minute': '认证 API 每分钟限流',
-  'security.login_max_retries': '登录失败锁定阈值',
-  'security.login_lock_minutes': '登录锁定时长',
-  'security.scan_quarantine_policy': '扫描失败处理策略',
-  'batch.max_items': '批量操作单次上限',
-  'folder.max_depth': '目录最大深度',
-  'backup.enabled': '启用备份任务',
-  'backup.retention_days': '备份保留天数',
-  'backup.encryption_required': '要求备份加密',
-  'backup.last_verify': '最近备份校验时间',
-  'audit.retention_days': '审计日志保留期',
-  'space.default_quota': '新空间默认配额',
-  'space.max_quota': '空间配额上限',
-  'space.max_per_user': '每用户空间数上限',
+/** 全部内置设置键的双语名称与简短说明（v2.7 反馈 14：此前仅部分键有
+ * 中文名、其余裸显 key，且不随界面语言切换）。清单与后端 settings
+ * Definitions 一一对应（admin settings 端点只输出内置键，smtp 与 ai 的
+ * 运行时行不进此列表）；未收录的 key 回退显示原 key（不硬造）。
+ * dzh/den 为简短说明：优先于后端 description 展示（后端描述中英混杂）。
+ * 导出（v2.8）：供「配置总览」面板（ConfigOverviewPanel）复用分组索引。 */
+export const SETTING_KEY_META: Record<string, { zh: string; en: string; dzh: string; den: string }> = {
+  // ---- ai.rag.*（RAG 检索） ----
+  'ai.rag.mode': { zh: 'RAG 检索模式', en: 'RAG mode', dzh: 'keyword（关键词）或 hybrid（混合检索）', den: 'keyword or hybrid' },
+  'ai.rag.vector_enabled': { zh: '启用向量检索', en: 'Vector RAG enabled', dzh: '开启后问答检索额外走向量召回（需 Qdrant）', den: 'Enable optional vector retrieval (requires Qdrant)' },
+  'ai.rag.qdrant_url': { zh: 'Qdrant 服务地址', en: 'Qdrant URL', dzh: '向量库访问地址（容器内网名或服务地址）', den: 'Qdrant vector store address' },
+  'ai.rag.collection_prefix': { zh: '向量集合前缀', en: 'Collection prefix', dzh: 'Qdrant 集合名前缀', den: 'Qdrant collection name prefix' },
+  'ai.rag.embedding_provider': { zh: '向量化提供方', en: 'Embedding provider', dzh: '生成向量的服务提供方', den: 'Provider for embedding vectors' },
+  'ai.rag.embedding_model': { zh: '向量化模型', en: 'Embedding model', dzh: '向量化使用的模型名', den: 'Model used for embeddings' },
+  'ai.rag.top_k': { zh: '向量召回条数', en: 'Vector top K', dzh: '向量检索每次召回的片段数上限', den: 'Max chunks fetched per vector query' },
+  'ai.rag.chunk_size': { zh: 'RAG 分块大小', en: 'RAG chunk size', dzh: '文档切分为片段的目标大小（字符）', den: 'Target chunk size in characters' },
+  'ai.rag.chunk_overlap': { zh: 'RAG 分块重叠', en: 'RAG chunk overlap', dzh: '相邻片段重叠字符数（提高边界连续性）', den: 'Overlap between adjacent chunks' },
+  // ---- ai.search.*（联网搜索） ----
+  'ai.search.provider': { zh: '联网搜索提供方', en: 'Web search provider', dzh: '空 = 关闭；可选 searxng 或 tavily', den: 'Empty (disabled), searxng or tavily' },
+  'ai.search.searxng_url': { zh: 'SearXNG 地址', en: 'SearXNG URL', dzh: 'SearXNG 基地址（需启用 JSON API）', den: 'SearXNG base URL (JSON API enabled)' },
+  'ai.search.max_results': { zh: '搜索结果条数上限', en: 'Search max results', dzh: '每次联网搜索返回的结果数上限', den: 'Max results per web search query' },
+  // ---- upload.* ----
+  'upload.max_versions_per_file': { zh: '每文件版本数上限', en: 'Max versions per file', dzh: '覆盖上传后按版本号裁剪历史版本', den: 'Trim history versions above this count after overwrites' },
+  'upload.version_retention_days': { zh: '版本保留时间窗', en: 'Version retention window', dzh: '窗口内的版本不因数量裁剪删除；0 = 不启用', den: 'Versions inside the window survive count trims; 0 = disabled' },
+  'upload.blocked_extensions': { zh: '上传扩展名黑名单', en: 'Blocked extensions', dzh: '逗号分隔（如 exe,bat,sh）；空 = 不拦截', den: 'Comma-separated (e.g. exe,bat,sh); empty = allow all' },
+  'upload.max_file_size': { zh: '单文件上传大小上限', en: 'Max file size', dzh: '单文件上传的字节上限', den: 'Per-file upload size limit in bytes' },
+  'upload.default_quota': { zh: '新用户默认存储配额', en: 'Default user quota', dzh: '仅对新创建用户生效；存量用户经管理端调整', den: 'Applies to newly created users only' },
+  'upload.max_concurrent_uploads_per_user': { zh: '每用户并发上传上限', en: 'Concurrent uploads per user', dzh: '非终态上传会话达到上限时新建返回 429', den: 'New sessions get 429 when active sessions hit the cap' },
+  // ---- share.* ----
+  'share.default_expiry_hours': { zh: '分享默认有效期', en: 'Default share expiry', dzh: '新建公开分享的默认有效时长（小时）', den: 'Default validity for new public shares (hours)' },
+  'share.default_watermark': { zh: '分享默认启用水印', en: 'Default watermark', dzh: '创建分享未显式指定水印时采用', den: 'Applied when share creation omits watermark flag' },
+  'share.watermark_text': { zh: '水印默认模板', en: 'Watermark template', dzh: '支持 {email}/{date}/{name} 占位符', den: 'Supports {email}/{date}/{name} placeholders' },
+  'share.public_enabled': { zh: '允许公开分享', en: 'Public shares allowed', dzh: '关闭后不允许创建公开分享链接', den: 'When off, public share links cannot be created' },
+  // ---- retention.* ----
+  'retention.trash_days': { zh: '回收站保留天数', en: 'Trash retention days', dzh: '软删除超过该天数后由后台任务彻底删除', den: 'Background job purges soft-deleted items beyond this' },
+  'retention.access_events_days': { zh: '访问事件保留天数', en: 'Access event retention', dzh: '文件访问事件超过该天数后删除', den: 'Access events older than this are deleted' },
+  // ---- security.* ----
+  'security.rate_limit_per_minute': { zh: '认证 API 每分钟限流', en: 'Auth API rate limit', dzh: '每分钟请求上限（须重启生效：限流器启动时装配）', den: 'Requests per minute (restart required: limiter built at startup)' },
+  'security.login_max_retries': { zh: '登录失败锁定阈值', en: 'Login lockout threshold', dzh: '连续失败达到阈值后锁定（须重启生效）', den: 'Lock after consecutive failures (restart required)' },
+  'security.login_lock_minutes': { zh: '登录锁定时长', en: 'Login lockout duration', dzh: '触发锁定后的锁定分钟数（须重启生效）', den: 'Lockout duration in minutes (restart required)' },
+  'security.scan_quarantine_policy': { zh: '扫描失败处理策略', en: 'Scan failure policy', dzh: 'quarantine（隔离）或 reject（拒绝）', den: 'quarantine or reject' },
+  // ---- batch / folder ----
+  'batch.max_items': { zh: '批量操作单次上限', en: 'Batch max items', dzh: '批量操作单次可处理的最大项目数', den: 'Max items per batch operation' },
+  'folder.max_depth': { zh: '目录最大深度', en: 'Max folder depth', dzh: '根为 1；创建/移动超过上限拒绝', den: 'Root is 1; deeper create/move is rejected' },
+  // ---- backup.* ----
+  'backup.enabled': { zh: '启用备份任务', en: 'Backup enabled', dzh: '是否启用定时备份任务（须重启生效）', den: 'Enable scheduled backup jobs (restart required)' },
+  'backup.retention_days': { zh: '备份保留天数', en: 'Backup retention days', dzh: '备份文件超过该天数后清理（须重启生效）', den: 'Backups older than this are pruned (restart required)' },
+  'backup.encryption_required': { zh: '要求备份加密', en: 'Backup encryption required', dzh: '开启后未加密的备份将被拒绝（须重启生效）', den: 'Reject unencrypted backups when on (restart required)' },
+  'backup.last_verify': { zh: '最近备份校验时间', en: 'Last backup verify', dzh: '最近一次备份校验的时间戳（须重启生效）', den: 'Timestamp of last backup verification (restart required)' },
+  // ---- audit / space ----
+  'audit.retention_days': { zh: '审计日志保留期', en: 'Audit retention days', dzh: '0 = 永久保留；后台任务每日清理过期记录', den: '0 = keep forever; daily job prunes expired records' },
+  'space.default_quota': { zh: '新空间默认配额', en: 'Default space quota', dzh: '新建空间的初始配额；0 = 不限', den: 'Initial quota for new spaces; 0 = unlimited' },
+  'space.max_quota': { zh: '空间配额上限', en: 'Max space quota', dzh: 'owner/admin 调整配额不得超过；0 = 不限', den: 'Cap for owner/admin quota changes; 0 = unlimited' },
+  'space.max_per_user': { zh: '每用户空间数上限', en: 'Max spaces per user', dzh: 'owner 维度计数，含默认空间', den: 'Counted per owner, including the default space' },
+  // ---- webdav / collab ----
+  'webdav.enabled': { zh: '启用 WebDAV 访问', en: 'WebDAV enabled', dzh: '开启后可经 /webdav 以个人令牌挂载文件', den: 'Mount files via /webdav with personal tokens' },
+  'collab.enabled': { zh: '启用富文本实时协作', en: 'Rich-text collaboration', dzh: '协作 WebSocket 房间（关闭时端点 404）', den: 'Collab WebSocket rooms (endpoint 404s when off)' },
+  // ---- agent.* ----
+  'agent.enabled': { zh: '启用 Docker Agent 创作舱', en: 'Agent studio enabled', dzh: '关闭时 API 不可用且不启动容器', den: 'API disabled and no containers when off' },
+  'agent.runtime': { zh: 'Agent 运行时', en: 'Agent runtime', dzh: '当前仅支持 docker（须重启生效）', den: 'Currently docker only (restart required)' },
+  'agent.allowed_images': { zh: 'Agent 镜像白名单', en: 'Allowed agent images', dzh: '逗号分隔的容器镜像列表', den: 'Comma-separated container image list' },
+  'agent.max_concurrent': { zh: 'Agent 最大并发任务数', en: 'Agent max concurrency', dzh: '同时运行的 Agent 任务上限', den: 'Max concurrently running agent tasks' },
+  'agent.default_timeout_seconds': { zh: 'Agent 默认超时（秒）', en: 'Agent default timeout', dzh: '单个任务的默认超时秒数', den: 'Default per-task timeout in seconds' },
+  'agent.max_cpu': { zh: 'Agent 最大 CPU 数', en: 'Agent max CPU', dzh: '单容器可用 CPU 上限', den: 'CPU limit per container' },
+  'agent.max_memory_bytes': { zh: 'Agent 最大内存', en: 'Agent max memory', dzh: '单容器内存上限（字节）', den: 'Memory limit per container (bytes)' },
+  'agent.network_mode': { zh: 'Agent 网络模式', en: 'Agent network mode', dzh: 'none 或 restricted（受限出网）', den: 'none or restricted' },
+  'agent.mcp_callback_base_url': { zh: '受限 MCP 回调基地址', en: 'MCP callback base URL', dzh: '不含凭据的回调地址前缀', den: 'Credential-free callback URL prefix' },
 }
 
 /**
@@ -2099,7 +2155,10 @@ const SETTING_KEY_LABELS: Record<string, string> = {
  * （bool 开关直开直关 / int 数字 / string 文本），行内编辑保存；
  * 顶部搜索框按 key/中文名/描述过滤，分组可折叠。
  */
-function SystemSettingsPanel({ onError, onNotice }: { onError: (msg: string) => void; onNotice: (msg: string) => void }) {
+export function SystemSettingsPanel({ onError, onNotice }: { onError: (msg: string) => void; onNotice: (msg: string) => void }) {
+  // v2.7（反馈 14）：名称/说明/分组标题随界面语言切换（SETTING_KEY_META）。
+  const locale = useLocale()
+  const zh = locale === 'zh-CN'
   const [result, setResult] = useState<AdminSettingsResult | null>(null)
   const [loading, setLoading] = useState(true)
   const [forbidden, setForbidden] = useState(false)
@@ -2120,7 +2179,7 @@ function SystemSettingsPanel({ onError, onNotice }: { onError: (msg: string) => 
       onError('')
     } catch (err) {
       if (err instanceof ApiError && err.status === 403) setForbidden(true)
-      else onError(err instanceof Error ? err.message : '系统设置加载失败')
+      else onError(err instanceof Error ? err.message : (zh ? '系统设置加载失败' : 'Failed to load system settings'))
     } finally {
       setLoading(false)
     }
@@ -2133,14 +2192,30 @@ function SystemSettingsPanel({ onError, onNotice }: { onError: (msg: string) => 
 
   const settings = result?.settings ?? []
 
-  /** 按键前缀分组（保持 Definitions 输出顺序），支持按 key/中文名/描述过滤。 */
+  /** 按键取当前语言的名称；未收录回退空串（行内仅显示原 key，不硬造）。 */
+  const keyLabel = (key: string) => {
+    const meta = SETTING_KEY_META[key]
+    return meta ? (zh ? meta.zh : meta.en) : ''
+  }
+
+  /** 按键取当前语言的简短说明；未收录回退后端 description。 */
+  const keyDesc = (key: string, fallback: string) => {
+    const meta = SETTING_KEY_META[key]
+    return meta ? (zh ? meta.dzh : meta.den) : fallback
+  }
+
+  /** 按键前缀分组（保持 Definitions 输出顺序），支持按 key/名称/说明过滤
+   *（双语名称均参与匹配，中英文界面过滤行为一致）。 */
   const settingGroups = useMemo(() => {
     const needle = settingsQuery.trim().toLowerCase()
     const map = new Map<string, SettingItem[]>()
     for (const item of settings) {
-      const label = SETTING_KEY_LABELS[item.key] ?? ''
-      if (needle !== '' && !item.key.toLowerCase().includes(needle) && !label.toLowerCase().includes(needle) && !item.description.toLowerCase().includes(needle)) {
-        continue
+      const meta = SETTING_KEY_META[item.key]
+      if (needle !== '') {
+        const haystack = meta
+          ? `${item.key} ${meta.zh} ${meta.en} ${meta.dzh} ${meta.den}`.toLowerCase()
+          : `${item.key} ${item.description}`.toLowerCase()
+        if (!haystack.includes(needle)) continue
       }
       const prefix = item.key.split('.')[0]
       const list = map.get(prefix) ?? []
@@ -2157,12 +2232,12 @@ function SystemSettingsPanel({ onError, onNotice }: { onError: (msg: string) => 
     setSavingKey(item.key)
     try {
       const normalized = await adminPutSetting(item.key, !item.value)
-      onNotice(`已保存 ${item.key}（当前值：${normalized ? '开启' : '关闭'}）`)
+      onNotice(zh ? `已保存 ${item.key}（当前值：${normalized ? '开启' : '关闭'}）` : `Saved ${item.key} (now ${normalized ? 'on' : 'off'})`)
       const refreshed = await adminGetSettings()
       setResult(refreshed)
     } catch (err) {
-      if (err instanceof ApiError && err.status === 403) setRowError('无权限')
-      else setRowError(err instanceof Error ? err.message : '保存失败')
+      if (err instanceof ApiError && err.status === 403) setRowError(zh ? '无权限' : 'Forbidden')
+      else setRowError(err instanceof Error ? err.message : (zh ? '保存失败' : 'Save failed'))
     } finally {
       setSavingKey(null)
     }
@@ -2178,7 +2253,7 @@ function SystemSettingsPanel({ onError, onNotice }: { onError: (msg: string) => 
     } else if (item.type === 'int') {
       const parsed = Number(draft)
       if (draft === '' || !Number.isInteger(parsed)) {
-        setRowError('请输入整数')
+        setRowError(zh ? '请输入整数' : 'Enter an integer')
         return
       }
       value = parsed
@@ -2189,16 +2264,16 @@ function SystemSettingsPanel({ onError, onNotice }: { onError: (msg: string) => 
     try {
       const normalized = await adminPutSetting(item.key, value)
       setEditingKey(null)
-      onNotice(`已保存 ${item.key}（当前值：${String(normalized)}）`)
+      onNotice(zh ? `已保存 ${item.key}（当前值：${String(normalized)}）` : `Saved ${item.key} (value: ${String(normalized)})`)
       try {
         setResult(await adminGetSettings())
       } catch {
         // 列表刷新失败不打断，保留本地已保存状态
       }
     } catch (err) {
-      if (err instanceof ApiError && err.status === 403) setRowError('无权限')
-      else if (err instanceof ApiError && err.status === 400) setRowError('取值超出允许范围')
-      else setRowError(err instanceof Error ? err.message : '保存失败')
+      if (err instanceof ApiError && err.status === 403) setRowError(zh ? '无权限' : 'Forbidden')
+      else if (err instanceof ApiError && err.status === 400) setRowError(zh ? '取值超出允许范围' : 'Value out of allowed range')
+      else setRowError(err instanceof Error ? err.message : (zh ? '保存失败' : 'Save failed'))
     } finally {
       setSavingKey(null)
     }
@@ -2207,8 +2282,8 @@ function SystemSettingsPanel({ onError, onNotice }: { onError: (msg: string) => 
   if (forbidden) {
     return (
       <div className="panel setting-group">
-        <h3>系统设置</h3>
-        <div className="empty">仅系统管理员可访问</div>
+        <h3>{zh ? '系统设置' : 'System settings'}</h3>
+        <div className="empty">{zh ? '仅系统管理员可访问' : 'Administrators only'}</div>
       </div>
     )
   }
@@ -2218,60 +2293,66 @@ function SystemSettingsPanel({ onError, onNotice }: { onError: (msg: string) => 
       <div className="panel setting-group" style={{ padding: '12px 16px' }}>
         <form className="team-create-row" style={{ marginBottom: 0 }} onSubmit={(e) => e.preventDefault()}>
           <label className="field" style={{ flex: 1 }}>
-            <span>过滤设置键（按 key / 中文名 / 说明匹配；过滤时分组自动展开）</span>
+            <span>{zh ? '过滤设置键（按 key / 名称 / 说明匹配；过滤时分组自动展开）' : 'Filter setting keys (by key / name / description; groups auto-expand while filtering)'}</span>
             <Input
               allowClear
               autoCapitalize="none"
               spellCheck={false}
               value={settingsQuery}
               onChange={(e) => setSettingsQuery(e.target.value)}
-              placeholder="如：upload、space.max_quota 或“配额”"
+              placeholder={zh ? '如：upload、space.max_quota 或“配额”' : 'e.g. upload, space.max_quota or "quota"'}
             />
           </label>
           {settingsQuery && (
-            <Button style={{ alignSelf: 'flex-end' }} onClick={() => setSettingsQuery('')}>清除</Button>
+            <Button style={{ alignSelf: 'flex-end' }} onClick={() => setSettingsQuery('')}>{zh ? '清除' : 'Clear'}</Button>
           )}
         </form>
       </div>
 
-      {loading && <div className="hint">加载中…</div>}
-      {!loading && settingGroups.length === 0 && <div className="empty">没有匹配的设置项</div>}
+      {loading && <div className="hint">{zh ? '加载中…' : 'Loading…'}</div>}
+      {!loading && settingGroups.length === 0 && <div className="empty">{zh ? '没有匹配的设置项' : 'No matching settings'}</div>}
 
       {settingGroups.map(([prefix, items]) => {
         const searching = settingsQuery.trim() !== ''
         const isCollapsed = !searching && collapsed[prefix]
+        const groupTitle = groupTitles[prefix]
         return (
           <div key={prefix} className="panel setting-group">
             <h3 style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <Button
                 type="text"
                 size="small"
-                title={isCollapsed ? '展开分组' : '折叠分组'}
+                title={isCollapsed ? (zh ? '展开分组' : 'Expand group') : (zh ? '折叠分组' : 'Collapse group')}
                 onClick={() => setCollapsed((prev) => ({ ...prev, [prefix]: !isCollapsed }))}
               >
                 {isCollapsed ? '▸' : '▾'}
               </Button>
-              {groupTitles[prefix] ?? prefix}
-              <span className="setting-meta muted">（{items.length} 项）</span>
+              {groupTitle ? (zh ? groupTitle.zh : groupTitle.en) : prefix}
+              <span className="setting-meta muted">{zh ? `（${items.length} 项）` : `(${items.length})`}</span>
             </h3>
             {!isCollapsed && items.map((item) => {
               const editing = editingKey === item.key
+              const label = keyLabel(item.key)
               return (
                 <div key={item.key} className="setting-row">
                   <div className="setting-main">
                     <div className="setting-key">
-                      {SETTING_KEY_LABELS[item.key] && <span>{SETTING_KEY_LABELS[item.key]}</span>}
+                      {label && <span>{label}</span>}
                       <code className="setting-key-code" title={item.key}>{item.key}</code>
                       {item.effect && (
-                        <span className="badge" style={{ marginLeft: 8 }} title="变更生效方式">
-                          {effectText[item.effect] ?? item.effect}
+                        <span className="badge" style={{ marginLeft: 8 }} title={zh ? '变更生效方式' : 'How changes take effect'}>
+                          {(() => {
+                            const text = effectText[item.effect]
+                            return text ? (zh ? text.zh : text.en) : item.effect
+                          })()}
                         </span>
                       )}
                     </div>
-                    <div className="setting-desc muted">{item.description}</div>
+                    <div className="setting-desc muted">{keyDesc(item.key, item.description)}</div>
                     <div className="setting-meta muted">
-                      类型 {typeText[item.type]} · 默认值 {QUOTA_BYTE_KEYS.has(item.key) ? formatQuota(Number(item.default)) : String(item.default)}
-                      {item.updated_at && ` · 更新于 ${formatTime(item.updated_at)}`}
+                      {zh ? '类型' : 'Type'} {(() => { const t = typeText[item.type]; return t ? (zh ? t.zh : t.en) : item.type })()}
+                      {' · '}{zh ? '默认值' : 'Default'} {QUOTA_BYTE_KEYS.has(item.key) ? formatQuota(Number(item.default)) : String(item.default)}
+                      {item.updated_at && ` · ${zh ? '更新于' : 'updated'} ${formatTime(item.updated_at)}`}
                     </div>
                   </div>
                   <div className="setting-control">
@@ -2280,7 +2361,7 @@ function SystemSettingsPanel({ onError, onNotice }: { onError: (msg: string) => 
                         {item.type === 'bool' ? (
                           <span className="setting-bool">
                             <Switch size="small" checked={Boolean(draft)} onChange={(v) => setDraft(v)} />
-                            <span>{draft ? '开启' : '关闭'}</span>
+                            <span>{draft ? (zh ? '开启' : 'On') : (zh ? '关闭' : 'Off')}</span>
                           </span>
                         ) : item.type === 'int' ? (
                           <InputNumber
@@ -2304,39 +2385,39 @@ function SystemSettingsPanel({ onError, onNotice }: { onError: (msg: string) => 
                           disabled={savingKey !== null || (item.type === 'string' && String(draft).trim() === '')}
                           loading={savingKey === item.key}
                         >
-                          保存
+                          {zh ? '保存' : 'Save'}
                         </Button>
                         <Button
                           size="small"
                           disabled={savingKey !== null}
                           onClick={() => { setEditingKey(null); setRowError('') }}
                         >
-                          取消
+                          {zh ? '取消' : 'Cancel'}
                         </Button>
                       </form>
                     ) : item.type === 'bool' ? (
-                      <span className="setting-bool" title="bool 行直开直关：切换后立即保存">
+                      <span className="setting-bool" title={zh ? 'bool 行直开直关：切换后立即保存' : 'Boolean rows save immediately on toggle'}>
                         <Switch
                           size="small"
                           checked={Boolean(item.value)}
                           loading={savingKey === item.key}
                           onChange={() => void toggleBool(item)}
                         />
-                        <span>{savingKey === item.key ? '保存中…' : item.value ? '开启' : '关闭'}</span>
+                        <span>{savingKey === item.key ? (zh ? '保存中…' : 'Saving…') : item.value ? (zh ? '开启' : 'On') : (zh ? '关闭' : 'Off')}</span>
                       </span>
                     ) : (
                       <>
                         {/* 字节量设置键（配额/大小上限，v2.6）：值显示人类可读
                             大小（formatQuota 口径），title 悬浮原始字节数；编辑
                             仍输入原始整数（字节）。 */}
-                        <span className="setting-value-mono" title={QUOTA_BYTE_KEYS.has(item.key) ? `${String(item.value)} 字节` : undefined}>
+                        <span className="setting-value-mono" title={QUOTA_BYTE_KEYS.has(item.key) ? (zh ? `${String(item.value)} 字节` : `${String(item.value)} bytes`) : undefined}>
                           {QUOTA_BYTE_KEYS.has(item.key) ? formatQuota(Number(item.value)) : String(item.value)}
                         </span>
                         <Button size="small" onClick={() => {
                           setEditingKey(item.key)
                           setDraft(item.type === 'bool' ? Boolean(item.value) : String(item.value))
                           setRowError('')
-                        }}>编辑</Button>
+                        }}>{zh ? '编辑' : 'Edit'}</Button>
                       </>
                     )}
                   </div>
@@ -2351,9 +2432,13 @@ function SystemSettingsPanel({ onError, onNotice }: { onError: (msg: string) => 
   )
 }
 
-/** 设置页分区：全员（外观/打开方式/账号安全/通知/开发者）+ admin（邮件配置/TLS/系统设置）。 */
-const baseSettingsSections = [['appearance', '外观'], ['openers', '打开方式'], ['security', '账号安全'], ['notifications', '通知'], ['developer', '开发者']] as const
-const adminSettingsSections = [['mail', '邮件配置'], ['tls', 'TLS'], ['system', '系统设置']] as const
+/** 设置页分区（v2.x 个人/平台分离）：设置页只保留**个人**配置——外观/
+ * 打开方式/账号安全/通知/开发者（PAT/Webhook/MCP）/WebDAV 个人令牌。
+ * 平台级配置（AI 全局/创作舱/邮件/TLS/系统设置）全部迁往「平台管理」
+ *（AdminPage /admin/platform），仅管理员可见。 */
+const baseSettingsSections = [['appearance', '外观'], ['openers', '打开方式'], ['security', '账号安全'], ['notifications', '通知'], ['developer', '开发者'], ['webdav', 'WebDAV'], ['aipersonal', 'AI 个人配置']] as const
+export function AgentPanel({ onError, onNotice }: { onError: (m: string) => void; onNotice: (m: string) => void }) { const [cfg,setCfg]=useState<Record<string,unknown>|null>(null); const [busy,setBusy]=useState(false); useEffect(()=>{void getAgentSettings().then(setCfg).catch(e=>onError(e instanceof Error?e.message:'Agent 配置加载失败'))},[]); if(!cfg)return <div className="panel setting-group"><h3>AI 创作舱</h3><div className="hint">加载中…</div></div>; const save=async(enabled:boolean)=>{setBusy(true);try{const next=await putAgentSettings({enabled});setCfg(next);onNotice(enabled?'Agent 已开启':'Agent 已关闭')}catch(e){onError(e instanceof Error?e.message:'保存失败')}finally{setBusy(false)}}; return <div className="panel setting-group"><h3>Docker Agent 创作舱</h3><div className="setting-desc muted">安全边界：关闭时 API 不可用且不启动容器；任务会先创建目录快照；Agent 产物必须经过差异预览和用户确认后才会写回平台，Docker runtime 按需启用。</div><div className="setting-row"><div className="setting-main"><div className="setting-key">Agent 开关</div><div className="setting-desc muted">默认关闭；开启后仍需配置镜像白名单。</div></div><div className="setting-control"><Switch checked={Boolean(cfg.enabled)} disabled={busy} onChange={(v)=>void save(v)} /></div></div></div> }
+export function WebDAVPanel({ onError, onNotice }: { onError: (m: string) => void; onNotice: (m: string) => void }) { const [items,setItems]=useState<WebDAVToken[]>([]); const [name,setName]=useState(''); const [token,setToken]=useState(''); const load=async()=>{try{setItems(await listWebDAVTokens())}catch(e){onError(e instanceof Error?e.message:'加载失败')}}; useEffect(()=>{void load()},[]); const create=async()=>{try{const x=await createWebDAVToken(name,90);setToken(x.token);setName('');await load();onNotice('令牌已创建，请立即复制') }catch(e){onError(e instanceof Error?e.message:'创建失败')}}; return <div className="panel setting-group"><h3>WebDAV 文件挂载（个人令牌）</h3><div className="setting-desc muted">URL：{window.location.origin}/webdav；Windows 映射网络驱动器，Linux 使用 davfs2，macOS 使用 Finder“连接服务器”。WebDAV 使用 Basic Auth：用户名为平台邮箱/用户名，密码为下方一次性令牌；服务端开关由管理员在「平台管理 → 平台设置」配置。</div>{token&&<div className="share-link"><Input readOnly value={token}/><Button onClick={()=>void navigator.clipboard.writeText(token)}>复制令牌</Button></div>} {items.map(x=><div className="setting-row" key={x.id}><div className="setting-main"><b>{x.name}</b><div className="muted">最后使用：{x.last_used_at||'未使用'} · 过期：{x.expires_at||'永不过期'}</div></div><Button danger onClick={()=>void revokeWebDAVToken(x.id).then(load)}>吊销</Button></div>)}<div className="team-create-row"><Input placeholder="令牌名称（如：我的电脑）" style={{ maxWidth: 240 }} value={name} onChange={e=>setName(e.target.value)}/><Button type="primary" disabled={!name.trim()} onClick={()=>void create()}>创建令牌</Button></div></div>}
 
 export default function SettingsPage() {
   const { section = 'appearance' } = useParams()
@@ -2383,12 +2468,11 @@ export default function SettingsPage() {
       </div>
     )
   }
-  const sections = admin ? [...baseSettingsSections, ...adminSettingsSections] : baseSettingsSections
+  // 个人/平台分离（v2.x）：设置页不再区分 admin 分区——平台级配置全部
+  // 位于「平台管理」（/admin/platform）；此处仅个人分区，admin 探测仅用于
+  // 旧地址（/settings/mail|tls|system|ai|agent）平滑弹回个人「外观」。
+  const sections = baseSettingsSections
   if (!sections.some(([key]) => key === section)) {
-    return <Navigate to="/settings/appearance" replace />
-  }
-  const isAdminSection = adminSettingsSections.some(([key]) => key === section)
-  if (isAdminSection && !admin) {
     return <Navigate to="/settings/appearance" replace />
   }
   return (
@@ -2400,6 +2484,8 @@ export default function SettingsPage() {
       </div>
       {notice && <div className="banner ok">{notice}</div>}
       {error && <div className="banner error">{error}</div>}
+      {section === 'webdav' && <WebDAVPanel onError={(m) => { setError(m); setNotice('') }} onNotice={(m) => { setNotice(m); setError('') }} />}
+      {section === 'aipersonal' && <AIPersonalPanel onError={(m) => { setError(m); setNotice('') }} onNotice={(m) => { setNotice(m); setError('') }} />}
       {section === 'appearance' && <AppearancePanel />}
       {section === 'openers' && <OpenWithPanel
         onError={(msg) => { setError(msg); setNotice('') }}
@@ -2441,15 +2527,6 @@ export default function SettingsPage() {
       {section === 'developer' && <TokensPanel
         onError={(msg) => { setError(msg); setNotice('') }}
         onNotice={(msg) => { setNotice(msg); setError('') }}
-      />}
-      {section === 'mail' && <MailPanel
-        onNotice={(m) => { setNotice(m); setError('') }}
-        onError={(m) => { setError(m); setNotice('') }}
-      />}
-      {section === 'tls' && <TlsPanel onNotice={(m) => { setNotice(m); setError('') }} />}
-      {section === 'system' && <SystemSettingsPanel
-        onError={(m) => { setError(m); setNotice('') }}
-        onNotice={(m) => { setNotice(m); setError('') }}
       />}
       </div>
     </div>
