@@ -1,6 +1,6 @@
 import { ReactElement, useEffect, useRef, useState } from 'react'
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
-import { ArrowUpDown, Bell, ChevronDown, FileText, Folder, Palette, Search } from 'lucide-react'
+import { ArrowUpDown, Bell, ChevronDown, FileText, Folder, Palette, Search, Sparkles } from 'lucide-react'
 import { Badge, Button, Dropdown, Input, Popover, Segmented, Tooltip } from 'antd'
 import type { MenuProps } from 'antd'
 import {
@@ -20,9 +20,11 @@ import {
   updateMe,
   websocketToken,
 } from './api'
-import { formatQuota, formatTime, Modal } from './components/FileBrowser'
+import { formatQuota, formatTime, installModalSweepAutoheal, Modal, sweepModalLayer } from './components/FileBrowser'
 import HotkeysHelp from './components/HotkeysHelp'
 import { OfflineBadge, UpdateToast } from './components/PwaStatus'
+import AIAssistant, { AIAssistantButton, openAIAssistant } from './components/AIAssistant'
+import { useAIEnabled } from './aiFeature'
 import { useHotkeys } from './useHotkeys'
 import {
   clearFinishedUploadTasks,
@@ -43,7 +45,6 @@ import SpacesPage from './pages/SpacesPage'
 import JoinSpacePage from './pages/JoinSpacePage'
 import SharedPage from './pages/SharedPage'
 import AdminPage from './pages/AdminPage'
-import EditorPage from './pages/EditorPage'
 import DrawioPage from './pages/DrawioPage'
 import ExcalidrawPage from './pages/ExcalidrawPage'
 import TextEditorPage from './pages/TextEditorPage'
@@ -51,6 +52,8 @@ import DfdocEditorPage from './pages/DfdocEditorPage'
 import SettingsPage from './pages/SettingsPage'
 import DashboardPage from './pages/DashboardPage'
 import ViewerPage from './pages/ViewerPage'
+import { EditDispatchPage } from './pages/ViewerPage'
+import StudioPage from './pages/StudioPage'
 import { EditByPathPage, ViewByPathPage } from './pages/ByPathPage'
 import { messages, saveLocale, t, useLocale } from './i18n'
 
@@ -328,6 +331,17 @@ function TopBarSearch() {
   const [results, setResults] = useState<SearchResultItem[]>([])
   const [error, setError] = useState('')
   const wrapRef = useRef<HTMLDivElement | null>(null)
+  // 「问 AI」入口（AI 未启用不渲染）：携带当前输入打开 AI 抽屉并以检索
+  // 增强模式提问（流式回答 + 引用文件列表）。
+  const locale = useLocale()
+  const aiOn = useAIEnabled()
+  const zh = locale === 'zh-CN'
+  const askAI = () => {
+    const question = q.trim()
+    setOpen(false)
+    if (question) openAIAssistant(undefined, question)
+    else openAIAssistant()
+  }
 
   const doSearch = async (query: string) => {
     setLoading(true)
@@ -403,6 +417,8 @@ function TopBarSearch() {
           if (q.trim()) setOpen(true)
         }}
       />
+      {/* AI 入口去重（顶栏仅保留 AIAssistantButton 图标）：「问 AI」按钮
+          移入搜索面板底部作为次级操作，携带当前输入转 AI 抽屉问答。 */}
       {open && (
         <div className="search-panel">
           {loading && <div className="search-empty">搜索中…</div>}
@@ -430,6 +446,12 @@ function TopBarSearch() {
           )}
           <div className="search-foot">
             名称与内容匹配；二进制文件仅名称。回车立即搜索。
+            {aiOn && (
+              <Button size="small" type="link" className="search-ask-ai-link" onClick={askAI}>
+                <Sparkles size={13} strokeWidth={2} aria-hidden="true" />
+                {zh ? '用 AI 回答（引用文件）' : 'Ask AI (with sources)'}
+              </Button>
+            )}
           </div>
         </div>
       )}
@@ -691,6 +713,7 @@ function TopBar() {
   const location = useLocation()
   const locale = useLocale()
   const msg = (key: keyof typeof messages['zh-CN']) => t(locale, key)
+  const aiOn = useAIEnabled()
   // admin 探测：JWT 无 role 声明，降级为请求 /admin/stats（200/403）判定，
   // 结果按会话缓存（登录/登出后失效）；非 admin 隐藏「管理」入口。
   const [admin, setAdmin] = useState(false)
@@ -749,10 +772,19 @@ function TopBar() {
         <Link to="/" className={location.pathname === '/' ? 'active' : ''}>{msg('files')}</Link>
         {/* 空间管理页（v2.0 统一空间模型）：我的空间卡片 + 成员/用户组/配额/解散/转让入口。 */}
         <Link to="/spaces" className={location.pathname.startsWith('/spaces') ? 'active' : ''}>{msg('teams')}</Link>
-          <Link to="/shared" className={location.pathname === '/shared' ? 'active' : ''}>{msg('shared')}</Link>
+        <Link to="/shared" className={location.pathname === '/shared' ? 'active' : ''}>{msg('shared')}</Link>
+        {/* AI 创作空间（AI 启用时显示）：独立创作页（文件快速访问 + AI 对话/
+            智能体任务聚合），顶栏直达。 */}
+        {aiOn && (
+          <Link to="/studio" className={location.pathname.startsWith('/studio') ? 'active' : ''}>
+            {locale === 'zh-CN' ? 'AI 创作' : 'AI Studio'}
+          </Link>
+        )}
       </nav>
       <TopBarSearch />
       <OfflineBadge />
+      {/* AI 助手入口（AI 能力第一版）：Drawer 侧边栏全局可用。 */}
+      <AIAssistantButton />
       {/* 传输任务入口（v2.6：与「消息」通知并排；任务状态全局 store）。 */}
       <UploadTasksBell />
       <NotificationBell />
@@ -805,6 +837,8 @@ function RequireAuth({ children, bare = false }: { children: ReactElement; bare?
     <div className="app-shell">
       <TopBar />
       <GlobalHotkeys />
+      {/* AI 助手 Drawer（全局挂载，顶栏 Sparkles 打开）。 */}
+      <AIAssistant />
       {/* key=pathname：路由切换时重挂载 .content，触发 180ms 淡入过渡
           （styles.css @keyframes content-fadein）。 */}
       <main className="content" key={location.pathname}>{children}</main>
@@ -812,11 +846,22 @@ function RequireAuth({ children, bare = false }: { children: ReactElement; bare?
   )
 }
 
+/** 路由切换时清扫弹层残留（遮罩卡死自愈一环，见 sweepModalLayer）。 */
+function ModalSweepOnNavigate() {
+  const location = useLocation()
+  useEffect(() => { sweepModalLayer() }, [location.pathname])
+  return null
+}
+
 export default function App() {
+  // 全局弹层自愈（v2.x 偶现卡死兜底）：窗口聚焦/切回前台清扫残留遮罩；
+  // 路由切换（AppShell 内 useLocation）亦触发一次。
+  useEffect(() => installModalSweepAutoheal(), [])
   return (
     <BrowserRouter>
       {/* SW 新版本提示：全局（含公开页），与登录态无关。 */}
       <UpdateToast />
+      <ModalSweepOnNavigate />
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         {/* SSO 落地页：后端 OIDC 回调 302 到 /sso#access_token=...，读取后转首页。 */}
@@ -843,8 +888,10 @@ export default function App() {
         <Route path="/edit/by-path/:nsType/:nsScope/*" element={<RequireAuth bare><EditByPathPage /></RequireAuth>} />
         {/* 按文件类型分发的独立只读查看页；不挂 DocFlow 顶栏。 */}
         <Route path="/view/:fileId" element={<RequireAuth bare><ViewerPage /></RequireAuth>} />
-        {/* ONLYOFFICE 在线编辑页（仅显式「编辑 Office」入口进入）。 */}
-        <Route path="/edit/:fileId" element={<RequireAuth bare><EditorPage /></RequireAuth>} />
+        {/* UUID 直链编辑分发页：按扩展名（及 ?open= 偏好）分发各编辑器——
+            仅显式「编辑 Office」等合法 force 才进入 OnlyOffice；此前固定渲染
+            EditorPage 导致 routeFor 回退 UUID 直链时 txt/md/drawio 全进 OnlyOffice。 */}
+        <Route path="/edit/:fileId" element={<RequireAuth bare><EditDispatchPage /></RequireAuth>} />
         {/* draw.io 图表编辑页（集成启用时由文件行「图表」按钮进入，iframe embed）。 */}
         <Route path="/drawio/:fileId" element={<RequireAuth bare><DrawioPage /></RequireAuth>} />
         {/* Excalidraw 白板编辑页（.excalidraw 文件行「白板」按钮进入；
@@ -856,6 +903,8 @@ export default function App() {
         <Route path="/code/:fileId" element={<RequireAuth bare><TextEditorPage kind="text" /></RequireAuth>} />
         {/* .dfdoc 富文本文档（Tiptap JSON）：编辑/查看同编辑器，独立窗口。 */}
         <Route path="/dfdoc/:fileId" element={<RequireAuth bare><DfdocEditorPage /></RequireAuth>} />
+        {/* AI 创作空间：文件快速访问 + AI 对话/智能体任务聚合（AI 启用）。 */}
+        <Route path="/studio" element={<RequireAuth><StudioPage /></RequireAuth>} />
         <Route path="/admin" element={<Navigate to="/admin/overview" replace />} />
         <Route path="/admin/:section" element={<RequireAuth><AdminPage /></RequireAuth>} />
         {/* 回收站已弹窗化（文件页工具栏按钮，见 TrashModal），整页路由删除；

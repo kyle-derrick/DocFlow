@@ -318,6 +318,39 @@ export function summarizeBatchResults(results: BatchItemResult[]): string {
   return `${okCount} 项成功，${failures.length} 项失败（${codes}）`
 }
 
+// ---------- 富文本评论 ----------
+export interface DocumentComment {
+  id: string
+  file_id: string
+  version_id: string
+  parent_id: string | null
+  anchor_from: number
+  anchor_to: number
+  quote: string
+  body: string
+  author_id: string
+  status: 'open' | 'resolved'
+  created_at: string
+  updated_at: string
+}
+
+export async function listDocumentComments(fileId: string): Promise<DocumentComment[]> {
+  const result = await api<{ comments: DocumentComment[] }>(`/api/v1/files/${fileId}/comments`)
+  return result.comments
+}
+export function createDocumentComment(fileId: string, data: { version_id: string; anchor_from: number; anchor_to: number; quote: string; body: string }): Promise<DocumentComment> {
+  return api<DocumentComment>(`/api/v1/files/${fileId}/comments`, jsonInit('POST', data))
+}
+export function replyDocumentComment(id: string, body: string): Promise<DocumentComment> {
+  return api<DocumentComment>(`/api/v1/comments/${id}/replies`, jsonInit('POST', { body }))
+}
+export function updateDocumentComment(id: string, data: { body?: string; status?: 'open' | 'resolved' }): Promise<DocumentComment> {
+  return api<DocumentComment>(`/api/v1/comments/${id}`, jsonInit('PATCH', data))
+}
+export async function deleteDocumentComment(id: string): Promise<void> {
+  await api(`/api/v1/comments/${id}`, { method: 'DELETE' })
+}
+
 // ---------- 文件版本 ----------
 
 export type VersionStatus = 'created' | 'scanning' | 'available' | 'quarantined' | 'failed' | 'deleting'
@@ -507,6 +540,13 @@ export async function updateToken(id: string, body: { name?: string; scopes?: st
 export async function revokeToken(id: string): Promise<void> {
   await api(`/api/v1/tokens/${id}`, { method: 'DELETE' })
 }
+
+// ---------- WebDAV ----------
+export interface WebDAVToken { id: string; name: string; token_hash?: string; last_used_at: string | null; expires_at: string | null; created_at: string; revoked_at?: string | null }
+export interface CreatedWebDAVToken extends WebDAVToken { token: string }
+export async function listWebDAVTokens(): Promise<WebDAVToken[]> { return api<WebDAVToken[]>('/api/v1/webdav/tokens') }
+export async function createWebDAVToken(name: string, expiresInDays: number): Promise<CreatedWebDAVToken> { return api<CreatedWebDAVToken>('/api/v1/webdav/tokens', jsonInit('POST', { name, expires_in_days: expiresInDays })) }
+export async function revokeWebDAVToken(id: string): Promise<void> { await api(`/api/v1/webdav/tokens/${id}`, { method: 'DELETE' }) }
 
 // ---------- 两步验证（TOTP） ----------
 
@@ -754,6 +794,16 @@ export async function searchFiles(q: string, limit?: number): Promise<SearchResu
 export async function createFolder(name: string, parentId: string | null): Promise<FileItem> {
   return api<FileItem>('/api/v1/folders', jsonInit('POST', { name, parent_id: parentId ?? '' }))
 }
+
+export interface DirectorySnapshotEntry { relative_path: string; node_type: 'file' | 'folder'; name: string; source_file_id?: string; source_version_id?: string; content_sha256?: string; size: number; mime_type: string }
+export interface DirectorySnapshot { id: string; root_id: string; space_id: string; name: string; creator_id: string; created_at: string; entries?: DirectorySnapshotEntry[] }
+export interface SnapshotDiff { added: string[]; removed: string[]; changed: string[]; unchanged: string[] }
+export interface SnapshotRestoreResult { restored: string[]; conflicts: string[]; skipped: string[] }
+export async function createDirectorySnapshot(folderId: string, name = ''): Promise<DirectorySnapshot> { return api<DirectorySnapshot>(`/api/v1/folders/${folderId}/snapshots`, jsonInit('POST', { name })) }
+export async function listDirectorySnapshots(folderId: string): Promise<DirectorySnapshot[]> { const d = await api<{ snapshots: DirectorySnapshot[] }>(`/api/v1/folders/${folderId}/snapshots`); return d.snapshots ?? [] }
+export async function getDirectorySnapshot(id: string): Promise<DirectorySnapshot> { return api<DirectorySnapshot>(`/api/v1/snapshots/${id}`) }
+export async function diffDirectorySnapshot(folderId: string, snapshotId: string): Promise<SnapshotDiff> { return api<SnapshotDiff>(`/api/v1/folders/${folderId}/diff?snapshot_id=${encodeURIComponent(snapshotId)}`) }
+export async function restoreDirectorySnapshot(id: string): Promise<SnapshotRestoreResult> { return api<SnapshotRestoreResult>(`/api/v1/snapshots/${id}/restore`, { method: 'POST' }) }
 
 export type OfficeTemplateKind = 'word' | 'spreadsheet' | 'presentation'
 
@@ -2023,6 +2073,29 @@ export async function adminGetStats(): Promise<AdminStats> {
   return api<AdminStats>('/api/v1/admin/stats')
 }
 
+// ---------- admin 启动级环境变量（只读分组展示，GET /admin/settings/env） ----------
+
+/** 启动级环境变量项（sensitive=true 时 value 已由服务端脱敏，仅回显掩码）。 */
+export interface EnvItem {
+  key: string
+  value: string
+  sensitive: boolean
+  note?: string
+}
+
+/** 启动级环境变量分组（响应 data.groups；组名如「服务与网络」「存储」）。 */
+export interface EnvGroup {
+  name: string
+  items: EnvItem[]
+}
+
+/** 启动级环境变量分组只读展示（脱敏）。后端未升级该端点时 404，由调用方
+ * 降级为占位提示，不阻塞页面。 */
+export async function getAdminEnv(): Promise<EnvGroup[]> {
+  const data = await api<{ groups: EnvGroup[] }>('/api/v1/admin/settings/env')
+  return data.groups ?? []
+}
+
 // ---------- admin 空间管理（GET /admin/spaces、PATCH/DELETE /admin/spaces/:id） ----------
 
 /** admin 空间列表条目：空间基础字段 + owner 用户名 + 成员数 + 存储用量。 */
@@ -2689,4 +2762,632 @@ export async function adminAddGroupMember(id: string, userId: string): Promise<G
 /** 移除组成员。 */
 export async function adminRemoveGroupMember(id: string, userId: string): Promise<void> {
   await api(`/api/v1/admin/groups/${id}/members/${userId}`, { method: 'DELETE' })
+}
+
+// ---------- AI 能力第一版（多 Provider 对话 / 摘要 / 管理端设置与用量） ----------
+
+/** AI 对话消息（role: system/user/assistant）。 */
+export interface AIMessage {
+  role: 'system' | 'user' | 'assistant'
+  content: string
+}
+
+/** AI 回答引用的来源文件（RAG-lite / 文件上下文）。 */
+export interface AISource {
+  file_id: string
+  name: string
+  url: string
+}
+
+/** AI 能力可用性（GET /ai/status）：false 时全站 AI 入口隐藏。 */
+export async function fetchAIStatus(): Promise<boolean> {
+  try {
+    const data = await api<{ enabled: boolean }>('/api/v1/ai/status')
+    return data.enabled === true
+  } catch {
+    return false
+  }
+}
+
+/** AI 对话补全用量。 */
+export interface AIUsage {
+  prompt_tokens: number
+  completion_tokens: number
+  duration_ms: number
+}
+
+/** AI 对话请求（/ai/chat）。 */
+export interface AIChatOptions {
+  providerId?: string
+  /** 可选模型指定：须归属启用 Provider 且具备 chat 能力，未传用默认。 */
+  model?: { providerId?: string; modelId?: string }
+  messages: AIMessage[]
+  stream?: boolean
+  /** RAG-lite：检索增强问题（携带时以 query 为最终提问，messages 为历史）。 */
+  ragQuery?: string
+  /** 拼入上下文的文件。 */
+  fileIds?: string[]
+  /** 联网搜索：回答引用最新网络来源（后端未配置搜索时静默忽略，无副作用）。 */
+  web_search?: boolean
+  /** 深度思考：模型支持推理时先输出推理过程（后端/模型不支持时静默忽略）。 */
+  think?: boolean
+  /** MCP 工具：允许调用平台配置的外部 MCP 服务器工具（平台未配置时静默忽略）。 */
+  use_mcp?: boolean
+  /** 长期记忆注入：取本人最近 20 条手动记忆拼入 system 上下文（无记忆静默跳过）。 */
+  include_memory?: boolean
+  /** 我的文件（RAG）：回答时检索引用本人可见文档拼入上下文（后端就绪前
+   *  透传该字段，未支持时由后端忽略，无副作用）。 */
+  include_docs?: boolean
+  /** 平台文件工具（df_*）：AI 可列目录/读文件/写文件(版本保护)/建目录/
+   *  搜索，仅限用户有权限的空间（默认 true=注入）。 */
+  use_files?: boolean
+  /** 工作目录 folderID（df_* 相对路径解析基准；空回落默认空间根）。 */
+  work_root?: string
+}
+
+/** SSE tool 事件条目：外部 MCP 工具执行前下发一次（label=「服务名 / 工具名」）。 */
+export interface AIToolCall {
+  type: 'tool'
+  label: string
+  server?: string
+  tool?: string
+}
+
+/** AI 对话流式回调集合。 */
+export interface AIChatStreamHandlers {
+  onMeta?: (meta: { provider_id: string; provider_name: string; model: string }) => void
+  onSources?: (sources: AISource[]) => void
+  onDelta?: (text: string) => void
+  onDone?: (usage: AIUsage) => void
+  /** 外部工具（MCP）执行前逐次回调（顺序保留；渲染层追加「工具调用」展示）。 */
+  onTool?: (tool: AIToolCall) => void
+}
+
+/**
+ * AI 对话补全：stream=true（缺省）解析 SSE 流（event: meta/sources/delta/
+ * done/error）逐段回调；stream=false 返回完整结果。会话过期自动 refresh 重放。
+ * signal 触发 abort 时读取流抛 AbortError（「停止生成」语义，非错误）。
+ */
+export async function aiChat(opts: AIChatOptions, handlers: AIChatStreamHandlers = {}, signal?: AbortSignal): Promise<{ content: string; sources: AISource[]; providerName: string; usage: AIUsage | null }> {
+  const stream = opts.stream !== false
+  const body: Record<string, unknown> = {
+    providerId: opts.providerId,
+    messages: opts.messages,
+    stream,
+  }
+  if (opts.model) body.model = { providerId: opts.model.providerId ?? '', modelId: opts.model.modelId ?? '' }
+  if (opts.web_search !== undefined) body.web_search = opts.web_search
+  if (opts.think !== undefined) body.think = opts.think
+  if (opts.use_mcp !== undefined) body.use_mcp = opts.use_mcp
+  if (opts.include_memory !== undefined) body.include_memory = opts.include_memory
+  if (opts.include_docs !== undefined) body.include_docs = opts.include_docs
+  if (opts.use_files !== undefined) body.use_files = opts.use_files
+  if (opts.work_root) body.work_root = opts.work_root
+  if (opts.ragQuery !== undefined || opts.fileIds !== undefined) {
+    body.context = { query: opts.ragQuery ?? '', fileIds: opts.fileIds ?? [] }
+  }
+  const init = withCSRF(jsonInit('POST', body))
+  if (signal) init.signal = signal
+  const res = await authFetch('/api/v1/ai/chat', init)
+  if (!res.ok) {
+    const data = (await res.json().catch(() => null)) as { error?: string; code?: string } | null
+    throw new ApiError(res.status, data?.error || `AI 请求失败（${res.status}）`, data?.code)
+  }
+  if (!stream) {
+    const data = (await res.json()) as { content: string; sources?: AISource[]; provider_name?: string; usage?: AIUsage }
+    handlers.onSources?.(data.sources ?? [])
+    handlers.onDone?.(data.usage ?? { prompt_tokens: 0, completion_tokens: 0, duration_ms: 0 })
+    return { content: data.content, sources: data.sources ?? [], providerName: data.provider_name ?? '', usage: data.usage ?? null }
+  }
+  // SSE 解析：按空行分块，块内 event:/data: 行配对。
+  const reader = res.body?.getReader()
+  if (!reader) throw new ApiError(502, 'AI 响应流不可用')
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let content = ''
+  let sources: AISource[] = []
+  let usage: AIUsage | null = null
+  let providerName = ''
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    for (;;) {
+      const idx = buffer.indexOf('\n\n')
+      if (idx < 0) break
+      const block = buffer.slice(0, idx)
+      buffer = buffer.slice(idx + 2)
+      let name = ''
+      let data = ''
+      for (const line of block.split('\n')) {
+        if (line.startsWith('event: ')) name = line.slice(7).trim()
+        else if (line.startsWith('data: ')) data = line.slice(6)
+      }
+      if (!name) continue
+      let payload: Record<string, unknown> = {}
+      try { payload = JSON.parse(data) as Record<string, unknown> } catch { continue }
+      if (name === 'meta') {
+        providerName = String(payload.provider_name ?? '')
+        handlers.onMeta?.(payload as unknown as { provider_id: string; provider_name: string; model: string })
+      } else if (name === 'sources') {
+        const list = Array.isArray(payload.sources) ? (payload.sources as AISource[]) : []
+        sources = list
+        handlers.onSources?.(list)
+      } else if (name === 'tool') {
+        // 外部工具（MCP）执行前下发一次：label 为「服务名 / 工具名」展示文本。
+        const call: AIToolCall = {
+          type: 'tool',
+          label: String(payload.label ?? ''),
+          server: payload.server === undefined ? undefined : String(payload.server),
+          tool: payload.tool === undefined ? undefined : String(payload.tool),
+        }
+        if (call.label) handlers.onTool?.(call)
+      } else if (name === 'delta') {
+        const text = String(payload.text ?? '')
+        content += text
+        handlers.onDelta?.(text)
+      } else if (name === 'done') {
+        usage = (payload.usage as AIUsage) ?? null
+        handlers.onDone?.(usage ?? { prompt_tokens: 0, completion_tokens: 0, duration_ms: 0 })
+        // 事件流结束：主动关闭读取——部分反向代理在 keep-alive 下不立即
+        // 向浏览器发 EOF，read() 会挂起导致调用方一直处于「生成中」。
+        await reader.cancel()
+        return { content, sources, providerName, usage }
+      } else if (name === 'error') {
+        await reader.cancel()
+        throw new ApiError(502, String(payload.error ?? 'AI 请求失败'), String(payload.code ?? ''))
+      }
+    }
+  }
+  return { content, sources, providerName, usage }
+}
+
+/** AI 文件摘要（全类型抽取；非流式）。 */
+export async function aiSummarizeFile(fileId: string): Promise<{ summary: string; providerName: string; model: string }> {
+  const data = await api<{ summary: string; provider_name: string; model: string }>('/api/v1/ai/summarize', jsonInit('POST', { fileId, stream: false }))
+  return { summary: data.summary, providerName: data.provider_name, model: data.model }
+}
+
+/** AI 文件摘要（流式；onDelta 逐段回调；signal 用于「停止生成」，abort 抛 AbortError）。 */
+export async function aiSummarizeFileStream(fileId: string, onDelta: (text: string) => void, signal?: AbortSignal): Promise<string> {
+  const init = withCSRF(jsonInit('POST', { fileId, stream: true }))
+  if (signal) init.signal = signal
+  const res = await authFetch('/api/v1/ai/summarize', init)
+  if (!res.ok) {
+    const data = (await res.json().catch(() => null)) as { error?: string; code?: string } | null
+    throw new ApiError(res.status, data?.error || `AI 摘要失败（${res.status}）`, data?.code)
+  }
+  const reader = res.body?.getReader()
+  if (!reader) throw new ApiError(502, 'AI 响应流不可用')
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let summary = ''
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    for (;;) {
+      const idx = buffer.indexOf('\n\n')
+      if (idx < 0) break
+      const block = buffer.slice(0, idx)
+      buffer = buffer.slice(idx + 2)
+      let name = ''
+      let data = ''
+      for (const line of block.split('\n')) {
+        if (line.startsWith('event: ')) name = line.slice(7).trim()
+        else if (line.startsWith('data: ')) data = line.slice(6)
+      }
+      if (!name) continue
+      let payload: Record<string, unknown> = {}
+      try { payload = JSON.parse(data) as Record<string, unknown> } catch { continue }
+      if (name === 'delta') {
+        const text = String(payload.text ?? '')
+        summary += text
+        onDelta(text)
+      } else if (name === 'done' && typeof payload.summary === 'string') {
+        if (!summary) summary = payload.summary
+        // 事件流结束：主动关闭读取（同 aiChat——防反代 keep-alive 不发
+        // EOF 导致调用方一直「生成中」）。
+        await reader.cancel()
+        return summary
+      } else if (name === 'error') {
+        await reader.cancel()
+        throw new ApiError(502, String(payload.error ?? 'AI 摘要失败'), String(payload.code ?? ''))
+      }
+    }
+  }
+  return summary
+}
+
+// ---------- 管理端：AI 设置 ----------
+
+/** 模型能力勾选：对话/向量(embedding)/视觉图片/重排序/推理思考。 */
+export interface AIModelCapabilities {
+  chat: boolean
+  embedding: boolean
+  vision: boolean
+  rerank: boolean
+  /** 推理思考（think 参数）；旧管理面板表单未产出该字段，可选。 */
+  reasoning?: boolean
+}
+
+/** Provider 下的模型条目。 */
+export interface AIModelItem {
+  id: string
+  label?: string
+  capabilities: AIModelCapabilities
+}
+
+/** 场景默认模型引用（chat/summary/edit/embedding）。 */
+export interface AIModelRef {
+  provider_id: string
+  model_id: string
+}
+
+/** 管理端 AI Provider 视图（api_key 永不回显）。 */
+export interface AIProviderView {
+  id: string
+  name: string
+  kind: 'openai_compatible' | 'anthropic' | 'mock' | string
+  base_url: string
+  model: string
+  /** 生效模型列表（旧配置无 models 时后端按 base_url+model 合成单模型）。 */
+  models: AIModelItem[]
+  enabled: boolean
+  api_key_configured: boolean
+  is_env: boolean
+  /** Provider 级每用户每分钟限额（0=全局兜底）。 */
+  requests_per_min: number
+  /** Provider 级每用户每日限额（0=不限）。 */
+  daily_quota: number
+}
+
+/** 管理端 AI 设置全集。 */
+export interface AIRAGSettings {
+  mode: 'keyword' | 'hybrid'
+  vector_enabled: boolean
+  qdrant_url: string
+  collection_prefix: string
+  /** embedding 目标：'mock' | Provider ID | 旧值 'openai_compatible'。 */
+  embedding_provider: string
+  embedding_model: string
+  /** rerank 目标（Provider ID + 模型 ID；空 = 不重排）。 */
+  rerank_provider?: string
+  rerank_model?: string
+  top_k: number
+  chunk_size: number
+  chunk_overlap: number
+}
+
+/** 平台人设条目（管理员维护的 system 提示模板，非敏感明文）。 */
+export interface AIPlatformPersona {
+  id: string
+  name: string
+  system_prompt: string
+}
+
+export interface AISettingsData {
+  enabled: boolean
+  rag: AIRAGSettings
+  providers: AIProviderView[]
+  default_provider: string
+  default_models: Record<string, AIModelRef>
+  temperature: number
+  max_tokens: number
+  per_user_per_min: number
+  /** 平台人设（明文回显；PUT 未带 = 保持现值，空数组 = 清空）。 */
+  personas?: AIPlatformPersona[]
+  /** 图片 OCR（GET/PUT /admin/settings/ai 响应字段；旧后端缺省）。 */
+  ocr?: AIOCRSettings
+  env: { enabled: boolean; base_url: string; model: string }
+}
+
+/** PUT 载荷的 Provider 条目（api_key 留空 = 保持现值）。 */
+export interface AIProviderInput {
+  id: string
+  name: string
+  kind: string
+  base_url?: string
+  api_key?: string
+  model?: string
+  models?: AIModelItem[]
+  enabled: boolean
+  requests_per_min?: number
+  daily_quota?: number
+}
+
+/** 读取 AI 运行时配置（密钥掩码）。 */
+export async function getAISettings(): Promise<AISettingsData> {
+  return api<AISettingsData>('/api/v1/admin/settings/ai')
+}
+
+/** 保存 AI 运行时配置（整体覆盖；enabled 缺省 = 保持现值；personas 缺省 = 保持现值）。 */
+export async function putAISettings(input: {
+  enabled?: boolean
+  providers: AIProviderInput[]
+  default_provider: string
+  default_models: Record<string, AIModelRef>
+  temperature: number
+  max_tokens: number
+  per_user_per_min: number
+  rag: AIRAGSettings
+  personas?: AIPlatformPersona[]
+  ocr?: AIOCRSettings
+}): Promise<AISettingsData> {
+  return api<AISettingsData>('/api/v1/admin/settings/ai', jsonInit('PUT', input))
+}
+
+/** GET /ai/models 的可用模型（登录即可；绝不包含 api_key）。 */
+export interface AIModelsData {
+  providers: { id: string; name: string; kind: string; models: AIModelItem[] }[]
+  default_models: Record<string, AIModelRef>
+  /** 平台人设（登录用户可见，含 system_prompt——非敏感，供人设下拉注入）。 */
+  personas?: AIPlatformPersona[]
+}
+
+/** 可用模型列表（启用 Provider 的模型 + 场景默认；AI 关闭时 404 抛错）。 */
+export async function getAIModels(): Promise<AIModelsData> {
+  return api<AIModelsData>('/api/v1/ai/models')
+}
+
+/** Provider 连接测试（失败也 resolve 为 ok=false）。 */
+export async function testAIProvider(providerId: string): Promise<{ ok: boolean; latency_ms?: number; error?: string }> {
+  return api<{ ok: boolean; latency_ms?: number; error?: string }>('/api/v1/admin/settings/ai/test', jsonInit('POST', { providerId }))
+}
+
+export async function testAIRAG(): Promise<{ ok: boolean; message?: string; error?: string }> {
+  return api('/api/v1/admin/settings/ai/rag/test', jsonInit('POST', {}))
+}
+
+// ---------- 平台 MCP 工具服务（管理员 /admin/settings/ai/mcp；登录侧 /ai/mcp） ----------
+
+/** 管理端 MCP 服务视图（auth_header 永不回显，仅报 configured）。 */
+export interface AIMCPAdminView {
+  id: string
+  name: string
+  /** Streamable HTTP 端点（如 http://host/mcp）。 */
+  url: string
+  enabled: boolean
+  auth_header_configured: boolean
+}
+
+/** MCP 服务 PUT 条目（整块保存，≤8 条；auth_header 留空 = 保持现值）。 */
+export interface AIMCPInput {
+  id: string
+  name: string
+  url: string
+  auth_header?: string
+  enabled: boolean
+}
+
+/** 平台 MCP 服务列表（管理员）。 */
+export async function getAIMCPAdmin(): Promise<AIMCPAdminView[]> {
+  const data = await api<{ services: AIMCPAdminView[] }>('/api/v1/admin/settings/ai/mcp')
+  return data.services ?? []
+}
+
+/** 整块保存平台 MCP 服务（≤8 条；返回保存后视图）。 */
+export async function putAIMCPAdmin(services: AIMCPInput[]): Promise<AIMCPAdminView[]> {
+  const data = await api<{ services: AIMCPAdminView[] }>('/api/v1/admin/settings/ai/mcp', jsonInit('PUT', { services }))
+  return data.services ?? []
+}
+
+/** 登录侧启用的 MCP 服务（GET /ai/mcp；空数组 = 平台无 MCP，对话开关隐藏）。 */
+export async function getAIMCPServices(): Promise<{ id: string; name: string }[]> {
+  const data = await api<{ services: { id: string; name: string }[] }>('/api/v1/ai/mcp')
+  return data.services ?? []
+}
+
+/** MCP 服务连通性测试结果（HTTP 恒 200；ok=false 时 error 给出原因）。 */
+export interface AIMCPTestResult {
+  ok: boolean
+  tools: number
+  names: string[]
+  latency_ms: number
+  error?: string
+}
+
+/** 测试 MCP 服务连通性（POST {url, auth_header?}；返回工具数/名称/延迟）。 */
+export async function testAIMCP(url: string, authHeader?: string): Promise<AIMCPTestResult> {
+  const body: { url: string; auth_header?: string } = { url }
+  if (authHeader && authHeader.trim()) body.auth_header = authHeader.trim()
+  return api<AIMCPTestResult>('/api/v1/admin/settings/ai/mcp/test', jsonInit('POST', body))
+}
+
+/** 重建 RAG 向量索引（遍历文件重投索引任务；spaceID 缺省 = 全部空间）。 */
+export async function reindexAIRAG(spaceID?: string): Promise<{ queued: number }> {
+  return api<{ queued: number }>('/api/v1/admin/settings/ai/reindex', jsonInit('POST', spaceID ? { space_id: spaceID } : {}))
+}
+
+/** AI 用量聚合行。 */
+export interface AIUsageRow {
+  user_id: string
+  username: string
+  provider_id: string
+  model: string
+  calls: number
+  prompt_tokens: number
+  completion_tokens: number
+  total_tokens: number
+  avg_duration_ms: number
+}
+
+/** AI 用量统计（日期过滤，YYYY-MM-DD；可空）。 */
+export interface AgentTask { id: string; user_id: string; space_id: string; root_folder_id: string; snapshot_id: string; image: string; status: 'queued'|'running'|'succeeded'|'failed'|'cancelled'|'rolled_back'; prompt: string; started_at?: string; finished_at?: string; error?: string; created_at: string }
+export interface AgentLog { id: number; task_id: string; stream: string; content: string; created_at: string }
+export async function getAgentSettings(): Promise<Record<string, unknown>> { return api<Record<string, unknown>>('/api/v1/admin/settings/agent') }
+export async function putAgentSettings(input: Record<string, unknown>): Promise<Record<string, unknown>> { return api<Record<string, unknown>>('/api/v1/admin/settings/agent', jsonInit('PUT', input)) }
+export async function listAgentTasks(): Promise<AgentTask[]> { const d=await api<{tasks:AgentTask[]}>('/api/v1/agent-tasks'); return d.tasks ?? [] }
+export async function getAgentTask(id:string): Promise<{task:AgentTask;logs:AgentLog[];dry_run:boolean}> { return api(`/api/v1/agent-tasks/${id}`) }
+export async function cancelAgentTask(id:string): Promise<void> { await api(`/api/v1/agent-tasks/${id}/cancel`, {method:'POST'}) }
+export async function rollbackAgentTask(id:string): Promise<void> { await api(`/api/v1/agent-tasks/${id}/rollback`, {method:'POST'}) }
+
+export async function getAIUsage(from?: string, to?: string): Promise<{ rows: AIUsageRow[]; total: { calls: number; tokens: number } }> {
+  const params = new URLSearchParams()
+  if (from) params.set('from', from)
+  if (to) params.set('to', to)
+  const q = params.toString()
+  return api<{ rows: AIUsageRow[]; total: { calls: number; tokens: number } }>(`/api/v1/admin/ai/usage${q ? `?${q}` : ''}`)
+}
+
+// ---------- 个人 AI 配置（双轨制：/ai/personal-settings，本人维度） ----------
+
+/** 个人 Provider 的模型条目（capabilities 与平台同构，含 reasoning）。 */
+export interface AIPersonalModel {
+  id: string
+  label?: string
+  capabilities: AIModelCapabilities
+}
+
+/** 个人 Provider 载荷（PUT 用；api_key 留空 = 保持现值）。 */
+export interface AIPersonalProviderInput {
+  id: string
+  name: string
+  kind: 'openai_compatible' | 'anthropic'
+  base_url: string
+  api_key?: string
+  models: AIPersonalModel[]
+}
+
+/** 个人 Provider 的掩码视图（GET 用；api_key 永不回显，仅报 configured）。 */
+export interface AIPersonalProviderView {
+  id: string
+  name: string
+  kind: 'openai_compatible' | 'anthropic'
+  base_url: string
+  api_key_configured: boolean
+  models: AIPersonalModel[]
+}
+
+/** 个人场景默认模型引用（provider_id/model_id 须指向个人池）。 */
+export interface AIPersonalModelRef {
+  provider_id: string
+  model_id: string
+}
+
+/** 个人 AI 人设（system 提示模板，≤4000 字符）。 */
+export interface AIPersonalPersona {
+  id: string
+  name: string
+  system_prompt: string
+}
+
+/** 个人 AI 配置掩码视图（GET/PUT 响应的 prefs 载荷）。 */
+export interface AIPersonalPrefsView {
+  providers: AIPersonalProviderView[]
+  default_models?: Record<string, AIPersonalModelRef>
+  personas?: AIPersonalPersona[]
+  prefer_personal: boolean
+  /** 自动记忆：AI 自动从对话中提取长期偏好（缺省 false=关）。 */
+  memory_auto?: boolean
+}
+
+/** 个人 AI 配置 PUT 载荷（整块替换）。 */
+export interface AIPersonalPrefsInput {
+  providers: AIPersonalProviderInput[]
+  default_models?: Record<string, AIPersonalModelRef>
+  personas?: AIPersonalPersona[]
+  prefer_personal: boolean
+  /** 自动记忆：AI 自动从对话中提取长期偏好（缺省 false=关）。 */
+  memory_auto?: boolean
+}
+
+/** 读取个人 AI 配置（掩码回显；未配置返回空结构）。 */
+export async function getAIPersonalSettings(): Promise<AIPersonalPrefsView> {
+  const data = await api<{ prefs: AIPersonalPrefsView }>('/api/v1/ai/personal-settings')
+  return data.prefs
+}
+
+/** 保存个人 AI 配置（整块替换；provider api_key 留空 = 继承现值）。 */
+export async function putAIPersonalSettings(input: AIPersonalPrefsInput): Promise<AIPersonalPrefsView> {
+  const data = await api<{ prefs: AIPersonalPrefsView }>('/api/v1/ai/personal-settings', jsonInit('PUT', input))
+  return data.prefs
+}
+
+// ---------- 用户长期记忆（/ai/memory，本人维度、仅手动维护） ----------
+
+/** 一条长期记忆（content ≤2000 字符；kind=manual，auto 为预留值）。 */
+export interface AIMemoryItem {
+  id: string
+  kind: string
+  content: string
+  created_at: string
+}
+
+/** 记忆列表（最新在前，≤200 条）。 */
+export async function listAIMemory(): Promise<AIMemoryItem[]> {
+  const data = await api<{ memories: AIMemoryItem[] }>('/api/v1/ai/memory')
+  return data.memories ?? []
+}
+
+/** 新增一条手动记忆（≤2000 字符；服务端拒绝空/超长）。 */
+export async function createAIMemory(content: string): Promise<AIMemoryItem> {
+  const data = await api<{ memory: AIMemoryItem }>('/api/v1/ai/memory', jsonInit('POST', { content }))
+  return data.memory
+}
+
+/** 删除本人一条记忆（不存在/非本人 404）。 */
+export async function deleteAIMemory(id: string): Promise<void> {
+  await api(`/api/v1/ai/memory/${id}`, { method: 'DELETE' })
+}
+
+// ---------- 平台 AI 设置扩展（OCR / 平台人设 / 技能模板 / 记忆编辑） ----------
+
+/** 图片 OCR 设置（GET/PUT /admin/settings/ai 的 ocr 块）。 */
+export interface AIOCRSettings {
+  enabled: boolean
+  provider_id: string
+  model_id: string
+  max_image_bytes: number
+}
+
+/** 平台人设定义（管理员整块读替；id ≤64 唯一、name ≤64、system_prompt ≤4000）。 */
+export interface AIPersonaDef {
+  id: string
+  name: string
+  system_prompt: string
+}
+
+/** 技能模板定义（快捷指令；prompt 占位符 {selection}=编辑器选区、{file}=当前文件名）。 */
+export interface AISkillDef {
+  id: string
+  name: string
+  description?: string
+  prompt: string
+}
+
+/** 平台人设列表（管理员整块读）。 */
+export async function getAIPersonas(): Promise<AIPersonaDef[]> {
+  const data = await api<{ personas: AIPersonaDef[] }>('/api/v1/admin/settings/ai/personas')
+  return data.personas ?? []
+}
+
+/** 整块保存平台人设（PUT {personas}；返回保存后列表）。 */
+export async function putAIPersonas(personas: AIPersonaDef[]): Promise<AIPersonaDef[]> {
+  const data = await api<{ personas: AIPersonaDef[] }>('/api/v1/admin/settings/ai/personas', jsonInit('PUT', { personas }))
+  return data.personas
+}
+
+/** 技能模板列表（管理员整块读）。 */
+export async function getAISkills(): Promise<AISkillDef[]> {
+  const data = await api<{ skills: AISkillDef[] }>('/api/v1/admin/settings/ai/skills')
+  return data.skills ?? []
+}
+
+/** 整块保存技能模板（PUT {skills}；返回保存后列表）。 */
+export async function putAISkills(skills: AISkillDef[]): Promise<AISkillDef[]> {
+  const data = await api<{ skills: AISkillDef[] }>('/api/v1/admin/settings/ai/skills', jsonInit('PUT', { skills }))
+  return data.skills
+}
+
+/** 登录侧平台技能列表（GET /ai/skills；对话输入框「技能模板」按钮消费）。 */
+export async function listPlatformSkills(): Promise<AISkillDef[]> {
+  const data = await api<{ skills: AISkillDef[] }>('/api/v1/ai/skills')
+  return data.skills ?? []
+}
+
+/** 编辑本人一条记忆（PUT /ai/memory/:id {content}；原地更新，时间戳不变语义由后端定）。 */
+export async function updateAIMemory(id: string, content: string): Promise<AIMemoryItem> {
+  const data = await api<{ memory: AIMemoryItem }>(`/api/v1/ai/memory/${id}`, jsonInit('PUT', { content }))
+  return data.memory
 }
