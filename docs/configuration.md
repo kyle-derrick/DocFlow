@@ -249,6 +249,7 @@ Agent 的行为开关（镜像白名单、资源上限、AI 调用等）全部�
 | `agent.allow_ai` | （新增） | 即时 | 允许容器经 IPC socket 调用平台 AI：backend 与容器共享 `DOCFLOW_AGENT_IPC_DIR` 目录下的 Unix socket，容器保持断网（`network_mode=none`）也能使用平台 AI 能力 |
 | `agent.ai_max_calls` | `40`（新增） | 即时 | 每任务 AI 调用次数上限，超出后任务内 AI 调用被拒绝 |
 | `agent.sync_mode` | （新增） | 即时 | 产物同步方式：`git`（以 git 变更识别产物，按 `.gitignore` 过滤）\| `scan`（全量扫描工作区 + 内置忽略规则，如 `node_modules` 等） |
+| `agent.harness` | （新增） | 即时 | 沙箱执行引擎：`auto`（默认，按平台默认 Provider 协议自动路由：Anthropic → Claude Code，OpenAI 兼容 → pi）\| `claude-code` \| `pi` \| `builtin`（内置轻量 runner 兜底）。官方镜像 `docflow/agent` 内置双 CLI，CLI 不可用或未配 AI 令牌时自动回落 builtin |
 
 ### 系统设置（平台管理 → 系统设置）
 
