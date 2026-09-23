@@ -28,14 +28,15 @@ func newAIOffService() *ai.Service {
 	})
 }
 
-// TestAgentEnabledSemantics agentEnabled 判定：未配置默认 true（受 AI
-// 总开关约束）；AI 总开关关闭 / aiSvc 未注入 / 显式 false → false。
+// TestAgentEnabledSemantics agentEnabled 判定：未配置默认 false（Docker
+// 沙箱为进阶可选，需管理员显式开启；受 AI 总开关约束）；AI 总开关
+// 关闭 / aiSvc 未注入 / 显式 false → false。
 func TestAgentEnabledSemantics(t *testing.T) {
 	on := newAIv1Service(100)
-	// AI 开 + agent.enabled 未配置（回退定义默认 true）→ true。
+	// AI 开 + agent.enabled 未配置（回退定义默认 false）→ false。
 	h := &Handler{aiSvc: on, settings: &fakeSettingsService{}}
-	if !h.agentEnabled() {
-		t.Fatal("agent should default to enabled when agent.enabled is unconfigured")
+	if h.agentEnabled() {
+		t.Fatal("agent should default to disabled when agent.enabled is unconfigured")
 	}
 	// AI 总开关显式关闭 → Agent 一并不可用。
 	if (&Handler{aiSvc: newAIOffService(), settings: &fakeSettingsService{}}).agentEnabled() {
@@ -125,14 +126,14 @@ func TestAIStatusCapabilityFlags(t *testing.T) {
 		{ID: "s1", Name: "工具站", URL: "http://a/mcp", Enabled: true},
 	}}
 	assert("full", get(newAIv1Service(100), full), map[string]bool{
-		"enabled": true, "agent": true, "web_search": true, "mcp": true, "rag": true,
+		"enabled": true, "agent": false, "web_search": true, "mcp": true, "rag": true,
 	})
 	// AI 开 + search 未配 + 仅停用 MCP 条目 → web_search/mcp false。
 	empty := &fakeAIStatusSettings{fakeSettingsService: &fakeSettingsService{}, aiCfg: settings.DefaultAIConfig(), mcpServices: []settings.AIMCPServiceDef{
 		{ID: "s2", Name: "停用", URL: "http://b/mcp", Enabled: false},
 	}}
 	assert("no-search/mcp", get(newAIv1Service(100), empty), map[string]bool{
-		"enabled": true, "agent": true, "web_search": false, "mcp": false, "rag": true,
+		"enabled": true, "agent": false, "web_search": false, "mcp": false, "rag": true,
 	})
 	// AI 总开关关 → enabled/agent/rag 均 false。
 	offCfg := settings.DefaultAIConfig()
