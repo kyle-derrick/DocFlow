@@ -988,7 +988,7 @@ var Definitions = []Definition{
 	{Key: KeySpaceMaxPerUser, Type: TypeInt, Default: int64(20), Min: intPtr(1), Max: intPtr(1000), Effect: EffectImmediate, Description: "每用户空间数上限（owner 维度计数，含默认空间）：超出后创建空间返回 413"},
 	{Key: KeyWebDAVEnabled, Type: TypeBool, Default: false, Effect: EffectImmediate, Description: "启用 WebDAV 文件访问"},
 	{Key: KeyCollabEnabled, Type: TypeBool, Default: true, Effect: EffectImmediate, Description: "启用富文本实时协作（/api/v1/collab/{fileId}/ws 协作房间；关闭时端点返回 404 且不创建房间）"},
-	{Key: KeyAgentEnabled, Type: TypeBool, Default: true, Effect: EffectImmediate, Description: "启用 Docker Agent 创作舱（默认开启；AI 总开关关闭时 Agent 一并不可用）"},
+	{Key: KeyAgentEnabled, Type: TypeBool, Default: false, Effect: EffectImmediate, Description: "Docker 沙箱（进阶）：默认关闭，需管理员显式开启（开启后 AI 创作空间可选 Docker 沙箱引擎）"},
 	{Key: KeyAgentRuntime, Type: TypeString, Default: "docker", Effect: EffectRestart, Description: "Agent runtime（仅 docker）"},
 	{Key: KeyAgentAllowedImages, Type: TypeString, Default: "", Effect: EffectImmediate, Description: "允许的 Agent 镜像，逗号分隔"},
 	{Key: KeyAgentMaxConcurrent, Type: TypeInt, Default: int64(1), Min: intPtr(1), Max: intPtr(100), Effect: EffectImmediate, Description: "Agent 最大并发任务数"},

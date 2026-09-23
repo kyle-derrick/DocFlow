@@ -103,8 +103,8 @@ export default function AgentPanel({ onError, onNotice }: { onError: (m: string)
       <h3>{zh ? 'Docker Agent 创作舱' : 'Docker Agent studio'}</h3>
       <div className="setting-desc muted">
         {zh
-          ? '安全边界：关闭时 API 不可用且不启动容器；任务会先创建目录快照；Agent 产物必须经过差异预览和用户确认后才会写回平台，Docker runtime 按需启用。'
-          : 'Security boundary: API disabled and no containers when off; tasks snapshot the directory first; agent outputs are written back only after diff preview and user confirmation.'}
+          ? '默认关闭，开启后 AI 创作空间可选 Docker 沙箱引擎。安全边界：关闭时 API 不可用且不启动容器；任务会先创建目录快照；Agent 产物必须经过差异预览和用户确认后才会写回平台，Docker runtime 按需启用。'
+          : 'Off by default; when enabled, AI Studio can pick the Docker sandbox engine. Security boundary: API disabled and no containers when off; tasks snapshot the directory first; agent outputs are written back only after diff preview and user confirmation.'}
       </div>
       {/* Agent 总开关（原有字段，读写通道照旧）。 */}
       <div className="setting-row">
