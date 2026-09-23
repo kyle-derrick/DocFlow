@@ -176,11 +176,24 @@ export default function DfdocEditorPage({
     return { text: ed.getText(), hasSelection: false }
   }
 
-  /** AI 输出（markdown）→ 富文本 HTML：marked 解析（GFM 默认开启，表格/
-   * 删除线等可用），随后 insertContent 按 Tiptap schema 将 HTML 解析为
-   * 富文本节点——标题/列表/表格/代码块/加粗斜体链接等标准 markdown
-   * 全部映射为富文本样式，而非追加 markdown 纯文本。 */
-  const aiMarkdownToHTML = (output: string): string => marked.parse(output, { async: false })
+  /** 剥掉模型给整段回复包上的单一外层围栏（```markdown / ```md / 裸 ```）：
+   * 仅当首行是围栏起始、尾行是围栏闭合且信息串为 markdown 类（或空）时剥壳
+   *（正文内含的其余围栏不受影响；```js 等代码围栏不剥，保留代码块语义）——
+   * 否则 marked 会把整段回复渲染成一个代码块，文档里看到的就是“原始
+   * markdown 文本”（AI 重构输出样式不对的根因之一）。 */
+  function stripOuterMarkdownFence(raw: string): string {
+    const t = raw.trim()
+    const m = /^```(?:[Mm]arkdown|[Mm]d)?[ \t]*\n([\s\S]*?)\n?```[ \t]*$/.exec(t)
+    return m ? m[1] : t
+  }
+
+  /** AI 输出（markdown）→ 富文本 HTML：marked 解析（GFM：表格/删除线等；
+   * breaks：段内单换行渲染为换行，更贴近对话式输出的排版预期），随后
+   * insertContent 按 Tiptap schema 将 HTML 解析为富文本节点——标题/列表/
+   * 表格/代码块/加粗斜体链接等标准 markdown 全部映射为富文本样式，而非
+   * 追加 markdown 纯文本。 */
+  const aiMarkdownToHTML = (output: string): string =>
+    marked.parse(stripOuterMarkdownFence(output), { async: false, gfm: true, breaks: true })
 
   /** 结果落盘：insert = 选区末尾/光标处插入；replace = 替换选区（无选区时
    * 整篇替换——自动应用前 aiEnsureSaved 已保存基线版本，可经面板

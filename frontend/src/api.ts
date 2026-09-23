@@ -3001,14 +3001,25 @@ export async function aiSummarizeFileStream(fileId: string, onDelta: (text: stri
 
 // ---------- 管理端：AI 设置 ----------
 
-/** 模型能力勾选：对话/向量(embedding)/视觉图片/重排序/推理思考。 */
+/** 模型类型（互斥单选，Cherry Studio 语义）：一个模型只属一类。 */
+export type AIModelKind = 'chat' | 'embedding' | 'rerank' | 'image'
+
+/**
+ * 模型类型 + 能力并集：类型互斥单选（kind），能力可多选勾选
+ * （reasoning/vision/audio/video）。后端写出双形态（同时携带旧
+ * chat/embedding/rerank 布尔向后兼容）；PUT 载荷只填 kind+能力即可，
+ * 旧形态读入由后端自动映射 kind。
+ */
 export interface AIModelCapabilities {
-  chat: boolean
-  embedding: boolean
+  kind: AIModelKind
+  reasoning: boolean
   vision: boolean
-  rerank: boolean
-  /** 推理思考（think 参数）；旧管理面板表单未产出该字段，可选。 */
-  reasoning?: boolean
+  audio: boolean
+  video: boolean
+  /** 旧布尔兼容形态（后端派生写出；前端载荷无需填写）。 */
+  chat?: boolean
+  embedding?: boolean
+  rerank?: boolean
 }
 
 /** Provider 下的模型条目。 */
@@ -3115,6 +3126,29 @@ export async function putAISettings(input: {
   ocr?: AIOCRSettings
 }): Promise<AISettingsData> {
   return api<AISettingsData>('/api/v1/admin/settings/ai', jsonInit('PUT', input))
+}
+
+/** 模型能力自动识别结果（models.dev 元数据；found:false = 未收录/上游不可用）。 */
+export interface AIModelLookupResult {
+  found: boolean
+  kind?: AIModelKind
+  reasoning?: boolean
+  vision?: boolean
+  audio?: boolean
+  video?: boolean
+  display_name?: string
+}
+
+/**
+ * 模型能力自动识别（models.dev 元数据目录，Cherry Studio 同源）：按模型
+ * id 宽松匹配返回类型（互斥单选）与能力并集。登录侧别名端点——管理端
+ * 与个人池模型编辑共用；未命中/网络失败 found:false（调用方静默回退手动
+ * 选择）。provider 可传 Provider 名（优先目录内匹配）或平台 kind。
+ */
+export async function lookupAIModel(model: string, provider?: string): Promise<AIModelLookupResult> {
+  const q = new URLSearchParams({ model })
+  if (provider) q.set('provider', provider)
+  return api<AIModelLookupResult>(`/api/v1/ai/models/lookup?${q.toString()}`)
 }
 
 /** GET /ai/models 的可用模型（登录即可；绝不包含 api_key）。 */

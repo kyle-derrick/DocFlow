@@ -24,7 +24,6 @@ import {
   OpenWithPrefs,
   SessionItem,
   SettingItem,
-  SettingType,
   SettingValue,
   SmtpSettingsView,
   TotpSetup,
@@ -85,6 +84,7 @@ import {
   viewMethodLabel,
 } from '../openers'
 import { formatQuota, formatTime, Modal } from '../components/FileBrowser'
+import QuotaInput from '../components/QuotaInput'
 import AIPersonalPanel from '../components/settings/AIPersonalPanel'
 import { useAIEnabled } from '../aiFeature'
 import { THEME_ACCENTS, ThemeAccent, ThemeMode, ThemePreference, THEME_EVENT, loadTheme, saveTheme } from '../theme'
@@ -2037,31 +2037,64 @@ export function MailPanel({ onNotice, onError }: { onNotice: (m: string) => void
   )
 }
 
-/** 设置键前缀 → 分组标题（v2.3 补 audit/space；未知前缀回退原样）。
- * v2.7（反馈 14）：分组标题中英双语，随界面语言切换；补齐 ai/webdav/
- * collab/agent 前缀（此前这些分组直接裸显前缀 key）。 */
-const groupTitles: Record<string, { zh: string; en: string }> = {
-  ai: { zh: 'AI 检索与联网搜索', en: 'AI retrieval & web search' },
-  site: { zh: '站点', en: 'Site' },
-  upload: { zh: '上传', en: 'Upload' },
-  share: { zh: '分享', en: 'Share' },
-  retention: { zh: '保留策略', en: 'Retention' },
-  security: { zh: '安全与限流', en: 'Security & rate limits' },
-  batch: { zh: '批量操作', en: 'Batch operations' },
-  folder: { zh: '目录', en: 'Folders' },
-  backup: { zh: '备份', en: 'Backup' },
-  audit: { zh: '审计', en: 'Audit' },
-  space: { zh: '空间', en: 'Spaces' },
-  webdav: { zh: 'WebDAV', en: 'WebDAV' },
-  collab: { zh: '实时协作', en: 'Realtime collaboration' },
-  agent: { zh: 'AI 创作舱（Agent）', en: 'AI agent studio' },
+/**
+ * 系统设置分组（v3 表单化）：每组一张折叠卡片，组内逐项控件化编辑，
+ * 「保存本组」批量提交组内已修改键（PUT /admin/settings/:key 逐键循环，
+ * 无后端改动）。归组说明：audit.* 并入「保留与清理」（同为保留期/清理
+ * 窗口语义）、folder.* 并入「批量与目录」（同为操作规模上限）；collab.*
+ * 键数 < 3，不单设管理 tag，以独立「实时协作」分组卡片留在本面板
+ *（单一编辑入口原则，与 security/webdav 收敛方式一致）。
+ */
+const SYSTEM_SETTING_GROUPS: Array<{ id: string; prefixes: string[]; title: { zh: string; en: string } }> = [
+  { id: 'upload', prefixes: ['upload'], title: { zh: '上传', en: 'Upload' } },
+  { id: 'share', prefixes: ['share'], title: { zh: '分享', en: 'Share' } },
+  { id: 'retention', prefixes: ['retention', 'audit'], title: { zh: '保留与清理', en: 'Retention & cleanup' } },
+  { id: 'batch', prefixes: ['batch', 'folder'], title: { zh: '批量与目录', en: 'Batch & folders' } },
+  { id: 'backup', prefixes: ['backup'], title: { zh: '备份', en: 'Backup' } },
+  { id: 'space', prefixes: ['space'], title: { zh: '空间', en: 'Spaces' } },
+  { id: 'collab', prefixes: ['collab'], title: { zh: '实时协作', en: 'Collaboration' } },
+]
+
+/** int 键取值范围（镜像后端 settings.Definitions 的 Min/Max——SettingView
+ * 不下发范围，前端自带以渲染 InputNumber 的 min/max 并在组保存前本地
+ * 校验；未收录的 int 键不设范围，仍由后端最终校验）。 */
+const INT_RANGES: Record<string, { min: number; max: number }> = {
+  'upload.max_versions_per_file': { min: 1, max: 1000 },
+  'upload.version_retention_days': { min: 0, max: 3650 },
+  'upload.max_file_size': { min: 1, max: 1 << 40 },
+  'upload.default_quota': { min: 1, max: 1 << 50 },
+  'upload.max_concurrent_uploads_per_user': { min: 1, max: 100 },
+  'share.default_expiry_hours': { min: 1, max: 8760 },
+  'retention.trash_days': { min: 1, max: 3650 },
+  'retention.access_events_days': { min: 1, max: 3650 },
+  'batch.max_items': { min: 1, max: 1000 },
+  'folder.max_depth': { min: 1, max: 1000 },
+  'backup.retention_days': { min: 1, max: 3650 },
+  'audit.retention_days': { min: 0, max: 3650 },
+  'space.default_quota': { min: 0, max: 1 << 50 },
+  'space.max_quota': { min: 0, max: 1 << 50 },
+  'space.max_per_user': { min: 1, max: 1000 },
 }
 
-/** 值类型徽章文案（typeText，随界面语言切换）。 */
-const typeText: Record<SettingType, { zh: string; en: string }> = {
-  bool: { zh: '布尔', en: 'Boolean' },
-  int: { zh: '整数', en: 'Integer' },
-  string: { zh: '文本', en: 'Text' },
+/** int 键展示单位（InputNumber 的 addonAfter，随界面语言切换；仅装饰，
+ * 不参与取值）。 */
+const INT_UNITS: Record<string, { zh: string; en: string }> = {
+  'upload.version_retention_days': { zh: '天', en: 'days' },
+  'share.default_expiry_hours': { zh: '小时', en: 'hours' },
+  'retention.trash_days': { zh: '天', en: 'days' },
+  'retention.access_events_days': { zh: '天', en: 'days' },
+  'backup.retention_days': { zh: '天', en: 'days' },
+  'audit.retention_days': { zh: '天', en: 'days' },
+}
+
+/** string 枚举键选项（按后端 Definitions 描述的合法取值渲染 Select；
+ * 未收录的 string 键渲染普通 Input）。security.scan_quarantine_policy
+ * 当前属「安全与访问」面板（隐藏前缀），保留映射以备前缀调整时复用。 */
+const ENUM_OPTIONS: Record<string, Array<{ value: string; label: string }>> = {
+  'security.scan_quarantine_policy': [
+    { value: 'quarantine', label: 'quarantine（隔离，可经管理端处置）' },
+    { value: 'reject', label: 'reject（直接拒绝上传）' },
+  ],
 }
 
 /** 设置生效方式徽章文案（effect 字段，随界面语言切换）。 */
@@ -2159,34 +2192,45 @@ export const SETTING_KEY_META: Record<string, { zh: string; en: string; dzh: str
 }
 
 /**
- * 系统设置面板（v2.3 自管理页迁入，仅 admin）：system_settings 内置键的
- * 通用入口，按前缀分组（分组标题中文化）、key 直显 + 中文名 + 说明，值按
- * 类型渲染（bool 开关直开直关 / int 数字 / string 文本），行内编辑保存；
- * 顶部搜索框按 key/中文名/描述过滤，分组可折叠。
- * v2.9 去重：ai.* / agent.* / security.* / webdav.* 不在此展示（分属
- * 「AI 设置」「AI 创作舱」「安全与访问」面板，见 HIDDEN_SETTING_PREFIXES），
- * 面板顶部以 notice 指引对应位置。
+ * 系统设置面板（v3 表单化重构，仅 admin）：system_settings 系统类内置键的
+ * 分组表单入口——按 SYSTEM_SETTING_GROUPS 渲染折叠卡片，每项中文名 + 一句
+ * 说明 + 按类型控件化（bool→Switch / int→InputNumber（min/max 按后端定义）
+ * 或配额数值+单位选择器 / string 枚举→Select / 普通 string→Input），组内
+ * 「保存本组」批量 PUT 已修改键（逐键循环，不改后端）、「重置」回退草稿；
+ * 顶部搜索按 key / 中文名 / 说明过滤（过滤时分组自动展开），每项保留
+ * effect 徽章（立即生效 / 需重启）。
+ * ai.* / agent.* / security.* / webdav.* 不在此展示（分属「AI 设置」「AI
+ * 创作舱」「安全与访问」面板，见 HIDDEN_SETTING_PREFIXES），面板顶部以
+ * notice 指引对应位置。
  */
 export function SystemSettingsPanel({ onError, onNotice }: { onError: (msg: string) => void; onNotice: (msg: string) => void }) {
-  // v2.7（反馈 14）：名称/说明/分组标题随界面语言切换（SETTING_KEY_META）。
   const locale = useLocale()
   const zh = locale === 'zh-CN'
   const [result, setResult] = useState<AdminSettingsResult | null>(null)
   const [loading, setLoading] = useState(true)
   const [forbidden, setForbidden] = useState(false)
-  // 行内编辑状态：当前编辑键 + 草稿（bool 直接存布尔，int/string 存字符串）。
-  const [editingKey, setEditingKey] = useState<string | null>(null)
-  const [draft, setDraft] = useState<string | boolean>('')
-  const [savingKey, setSavingKey] = useState<string | null>(null)
-  const [rowError, setRowError] = useState('')
-  // 搜索框过滤键 + 分组折叠状态（prefix → 折叠；过滤时自动展开）。
+  // 组表单草稿（key → 当前编辑值；null = 数值被清空等待补填）。
+  const [drafts, setDrafts] = useState<Record<string, SettingValue | null>>({})
+  // 正在保存的分组 id（null = 无保存进行中）与分组级错误文案。
+  const [savingGroup, setSavingGroup] = useState<string | null>(null)
+  const [groupErrors, setGroupErrors] = useState<Record<string, string>>({})
+  // 搜索框过滤键 + 分组折叠状态（组 id → 折叠；过滤时自动展开）。
   const [settingsQuery, setSettingsQuery] = useState('')
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
+
+  /** 载入响应并重置草稿（保存成功后的刷新也走这里，拿回归一化值）。 */
+  const applyResult = (r: AdminSettingsResult) => {
+    setResult(r)
+    const next: Record<string, SettingValue | null> = {}
+    for (const item of r.settings) next[item.key] = item.value
+    setDrafts(next)
+    setGroupErrors({})
+  }
 
   const load = async () => {
     setLoading(true)
     try {
-      setResult(await adminGetSettings())
+      applyResult(await adminGetSettings())
       setForbidden(false)
       onError('')
     } catch (err) {
@@ -2216,81 +2260,142 @@ export function SystemSettingsPanel({ onError, onNotice }: { onError: (msg: stri
     return meta ? (zh ? meta.dzh : meta.den) : fallback
   }
 
-  /** 按键前缀分组（保持 Definitions 输出顺序），支持按 key/名称/说明过滤
-   *（双语名称均参与匹配，中英文界面过滤行为一致）；ai、agent、security、
-   * webdav 四类前缀已分属专属面板，在此渲染层排除（见 HIDDEN_SETTING_PREFIXES）。 */
+  /** 分组（SYSTEM_SETTING_GROUPS 顺序，组内保持 Definitions 输出顺序）：
+   * 隐藏前缀排除 + 搜索过滤（key / 双语名称 / 说明，中英文界面行为一致）。 */
   const settingGroups = useMemo(() => {
     const needle = settingsQuery.trim().toLowerCase()
-    const map = new Map<string, SettingItem[]>()
-    for (const item of settings) {
-      if (HIDDEN_SETTING_PREFIXES.has(item.key.split('.')[0])) continue
+    const visible = settings.filter((item) => {
+      if (HIDDEN_SETTING_PREFIXES.has(item.key.split('.')[0])) return false
+      if (needle === '') return true
       const meta = SETTING_KEY_META[item.key]
-      if (needle !== '') {
-        const haystack = meta
-          ? `${item.key} ${meta.zh} ${meta.en} ${meta.dzh} ${meta.den}`.toLowerCase()
-          : `${item.key} ${item.description}`.toLowerCase()
-        if (!haystack.includes(needle)) continue
-      }
-      const prefix = item.key.split('.')[0]
-      const list = map.get(prefix) ?? []
-      list.push(item)
-      map.set(prefix, list)
-    }
-    return Array.from(map.entries())
+      const haystack = meta
+        ? `${item.key} ${meta.zh} ${meta.en} ${meta.dzh} ${meta.den}`.toLowerCase()
+        : `${item.key} ${item.description}`.toLowerCase()
+      return haystack.includes(needle)
+    })
+    return SYSTEM_SETTING_GROUPS
+      .map((group) => ({ group, items: visible.filter((it) => group.prefixes.includes(it.key.split('.')[0])) }))
+      .filter((entry) => entry.items.length > 0)
   }, [settings, settingsQuery])
 
-  /** bool 设置行直开直关（不进编辑态）：切换即保存并刷新列表。 */
-  const toggleBool = async (item: SettingItem) => {
-    if (savingKey !== null) return
-    setRowError('')
-    setSavingKey(item.key)
+  /** 组内是否有未保存修改（草稿 ≠ 服务端当前值）。 */
+  const groupDirty = (items: SettingItem[]) =>
+    items.some((it) => drafts[it.key] !== undefined && drafts[it.key] !== it.value)
+
+  /** 组保存：逐键 PUT 已修改项（int 空值 / 超范围先在本地拦截，后端兜底）。 */
+  const saveGroup = async (groupId: string, items: SettingItem[], title: string) => {
+    if (savingGroup !== null) return
+    const changed = items.filter((it) => drafts[it.key] !== undefined && drafts[it.key] !== it.value)
+    if (changed.length === 0) return
+    for (const it of changed) {
+      const label = keyLabel(it.key) || it.key
+      if (it.type === 'int') {
+        const n = drafts[it.key]
+        if (typeof n !== 'number' || !Number.isInteger(n)) {
+          setGroupErrors((prev) => ({ ...prev, [groupId]: zh ? `「${label}」须填写整数` : `"${label}" requires an integer` }))
+          return
+        }
+        const range = INT_RANGES[it.key]
+        if (range && (n < range.min || n > range.max)) {
+          setGroupErrors((prev) => ({ ...prev, [groupId]: zh ? `「${label}」须在 ${range.min} ~ ${range.max} 之间` : `"${label}" must be between ${range.min} and ${range.max}` }))
+          return
+        }
+      }
+    }
+    setSavingGroup(groupId)
+    setGroupErrors((prev) => ({ ...prev, [groupId]: '' }))
     try {
-      const normalized = await adminPutSetting(item.key, !item.value)
-      onNotice(zh ? `已保存 ${item.key}（当前值：${normalized ? '开启' : '关闭'}）` : `Saved ${item.key} (now ${normalized ? 'on' : 'off'})`)
-      const refreshed = await adminGetSettings()
-      setResult(refreshed)
+      for (const it of changed) {
+        await adminPutSetting(it.key, drafts[it.key] as SettingValue)
+      }
+      onNotice(zh ? `已保存「${title}」（${changed.length} 项）` : `Saved "${title}" (${changed.length} item${changed.length > 1 ? 's' : ''})`)
+      try {
+        applyResult(await adminGetSettings())
+      } catch {
+        // 列表刷新失败不打断（草稿保持已提交值展示）
+      }
     } catch (err) {
-      if (err instanceof ApiError && err.status === 403) setRowError(zh ? '无权限' : 'Forbidden')
-      else setRowError(err instanceof Error ? err.message : (zh ? '保存失败' : 'Save failed'))
+      const message =
+        err instanceof ApiError && err.status === 403 ? (zh ? '无权限' : 'Forbidden')
+          : err instanceof ApiError && err.status === 400 ? (zh ? '取值超出允许范围' : 'Value out of allowed range')
+            : err instanceof Error ? err.message
+              : (zh ? '保存失败' : 'Save failed')
+      setGroupErrors((prev) => ({ ...prev, [groupId]: message }))
     } finally {
-      setSavingKey(null)
+      setSavingGroup(null)
     }
   }
 
-  const handleSave = async (e: FormEvent, item: SettingItem) => {
-    e.preventDefault()
-    if (editingKey !== item.key) return
-    setRowError('')
-    let value: SettingValue
+  /** 组重置：把组内草稿回退为服务端当前值。 */
+  const resetGroup = (items: SettingItem[]) => {
+    setDrafts((prev) => {
+      const next = { ...prev }
+      for (const it of items) next[it.key] = it.value
+      return next
+    })
+  }
+
+  /** 按类型渲染单项控件（草稿受控，切换/输入即改草稿，随「保存本组」提交）。 */
+  const renderControl = (item: SettingItem) => {
+    const draft = drafts[item.key]
     if (item.type === 'bool') {
-      value = Boolean(draft)
-    } else if (item.type === 'int') {
-      const parsed = Number(draft)
-      if (draft === '' || !Number.isInteger(parsed)) {
-        setRowError(zh ? '请输入整数' : 'Enter an integer')
-        return
-      }
-      value = parsed
-    } else {
-      value = String(draft).trim()
+      return (
+        <span className="setting-bool" title={zh ? '切换后须经「保存本组」提交' : 'Toggle takes effect via "Save group"'}>
+          <Switch
+            size="small"
+            checked={Boolean(draft)}
+            onChange={(v) => setDrafts((prev) => ({ ...prev, [item.key]: v }))}
+          />
+          <span>{draft ? (zh ? '开启' : 'On') : (zh ? '关闭' : 'Off')}</span>
+        </span>
+      )
     }
-    setSavingKey(item.key)
-    try {
-      const normalized = await adminPutSetting(item.key, value)
-      setEditingKey(null)
-      onNotice(zh ? `已保存 ${item.key}（当前值：${String(normalized)}）` : `Saved ${item.key} (value: ${String(normalized)})`)
-      try {
-        setResult(await adminGetSettings())
-      } catch {
-        // 列表刷新失败不打断，保留本地已保存状态
+    if (item.type === 'int') {
+      // 配额/字节量键：数值 + 单位选择器（1024 进制；0 = 不限——下限为 1 的
+      // 键选「不限」会被本地范围校验拦截）。
+      if (QUOTA_BYTE_KEYS.has(item.key)) {
+        return (
+          <QuotaInput
+            value={typeof draft === 'number' ? draft : 0}
+            onChange={(bytes) => setDrafts((prev) => ({ ...prev, [item.key]: bytes }))}
+          />
+        )
       }
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 403) setRowError(zh ? '无权限' : 'Forbidden')
-      else if (err instanceof ApiError && err.status === 400) setRowError(zh ? '取值超出允许范围' : 'Value out of allowed range')
-      else setRowError(err instanceof Error ? err.message : (zh ? '保存失败' : 'Save failed'))
-    } finally {
-      setSavingKey(null)
+      const range = INT_RANGES[item.key]
+      const unit = INT_UNITS[item.key]
+      return (
+        <InputNumber
+          min={range?.min}
+          max={range?.max}
+          step={1}
+          precision={0}
+          style={{ width: 200 }}
+          value={typeof draft === 'number' ? draft : null}
+          onChange={(v) => setDrafts((prev) => ({ ...prev, [item.key]: v ?? null }))}
+          addonAfter={unit ? (zh ? unit.zh : unit.en) : undefined}
+        />
+      )
     }
+    const options = ENUM_OPTIONS[item.key]
+    if (options) {
+      return (
+        <Select
+          style={{ width: 260 }}
+          value={typeof draft === 'string' ? draft : String(draft ?? '')}
+          onChange={(v) => setDrafts((prev) => ({ ...prev, [item.key]: v }))}
+          options={options}
+        />
+      )
+    }
+    return (
+      <Input
+        allowClear
+        style={{ width: 280 }}
+        value={typeof draft === 'string' ? draft : String(draft ?? '')}
+        onChange={(e) => setDrafts((prev) => ({ ...prev, [item.key]: e.target.value }))}
+        placeholder={item.key === 'upload.blocked_extensions' ? (zh ? '如 exe,bat,sh（空 = 不拦截）' : 'e.g. exe,bat,sh (empty = allow all)') : undefined}
+      />
+    )
   }
 
   if (forbidden) {
@@ -2317,14 +2422,14 @@ export function SystemSettingsPanel({ onError, onNotice }: { onError: (msg: stri
         />
         <form className="team-create-row" style={{ marginBottom: 0 }} onSubmit={(e) => e.preventDefault()}>
           <label className="field" style={{ flex: 1 }}>
-            <span>{zh ? '过滤设置键（按 key / 名称 / 说明匹配；过滤时分组自动展开）' : 'Filter setting keys (by key / name / description; groups auto-expand while filtering)'}</span>
+            <span>{zh ? '过滤设置项（按中文名 / key / 说明匹配；过滤时分组自动展开）' : 'Filter settings (by name / key / description; groups auto-expand while filtering)'}</span>
             <Input
               allowClear
               autoCapitalize="none"
               spellCheck={false}
               value={settingsQuery}
               onChange={(e) => setSettingsQuery(e.target.value)}
-              placeholder={zh ? '如：upload、space.max_quota 或“配额”' : 'e.g. upload, space.max_quota or "quota"'}
+              placeholder={zh ? '如：上传、配额 或 upload' : 'e.g. upload, quota or "upload"'}
             />
           </label>
           {settingsQuery && (
@@ -2336,119 +2441,72 @@ export function SystemSettingsPanel({ onError, onNotice }: { onError: (msg: stri
       {loading && <div className="hint">{zh ? '加载中…' : 'Loading…'}</div>}
       {!loading && settingGroups.length === 0 && <div className="empty">{zh ? '没有匹配的设置项' : 'No matching settings'}</div>}
 
-      {settingGroups.map(([prefix, items]) => {
+      {settingGroups.map(({ group, items }) => {
         const searching = settingsQuery.trim() !== ''
-        const isCollapsed = !searching && collapsed[prefix]
-        const groupTitle = groupTitles[prefix]
+        const isCollapsed = !searching && collapsed[group.id]
+        const title = zh ? group.title.zh : group.title.en
+        const dirty = groupDirty(items)
+        const saving = savingGroup === group.id
         return (
-          <div key={prefix} className="panel setting-group">
+          <div key={group.id} className="panel setting-group">
             <h3 style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <Button
                 type="text"
                 size="small"
                 title={isCollapsed ? (zh ? '展开分组' : 'Expand group') : (zh ? '折叠分组' : 'Collapse group')}
-                onClick={() => setCollapsed((prev) => ({ ...prev, [prefix]: !isCollapsed }))}
+                onClick={() => setCollapsed((prev) => ({ ...prev, [group.id]: !isCollapsed }))}
               >
                 {isCollapsed ? '▸' : '▾'}
               </Button>
-              {groupTitle ? (zh ? groupTitle.zh : groupTitle.en) : prefix}
+              {title}
               <span className="setting-meta muted">{zh ? `（${items.length} 项）` : `(${items.length})`}</span>
+              {dirty && !saving && <span className="badge">{zh ? '有未保存修改' : 'Unsaved changes'}</span>}
             </h3>
-            {!isCollapsed && items.map((item) => {
-              const editing = editingKey === item.key
-              const label = keyLabel(item.key)
-              return (
-                <div key={item.key} className="setting-row">
-                  <div className="setting-main">
-                    <div className="setting-key">
-                      {label && <span>{label}</span>}
-                      <code className="setting-key-code" title={item.key}>{item.key}</code>
-                      {item.effect && (
-                        <span className="badge" style={{ marginLeft: 8 }} title={zh ? '变更生效方式' : 'How changes take effect'}>
-                          {(() => {
-                            const text = effectText[item.effect]
-                            return text ? (zh ? text.zh : text.en) : item.effect
-                          })()}
-                        </span>
-                      )}
+            {!isCollapsed && (
+              <form onSubmit={(e) => { e.preventDefault(); void saveGroup(group.id, items, title) }}>
+                {items.map((item) => {
+                  const label = keyLabel(item.key)
+                  return (
+                    <div key={item.key} className="setting-row">
+                      <div className="setting-main">
+                        {/* 中文名为主标识（悬浮提示原 key），不再裸显 key 行。 */}
+                        <div className="setting-key" title={item.key}>
+                          {label || item.key}
+                          {item.effect && (
+                            <span className="badge" style={{ marginLeft: 8 }} title={zh ? '变更生效方式' : 'How changes take effect'}>
+                              {(() => {
+                                const text = effectText[item.effect]
+                                return text ? (zh ? text.zh : text.en) : item.effect
+                              })()}
+                            </span>
+                          )}
+                        </div>
+                        <div className="setting-desc muted">{keyDesc(item.key, item.description)}</div>
+                        <div className="setting-meta muted">
+                          {zh ? '默认值' : 'Default'} {QUOTA_BYTE_KEYS.has(item.key) ? formatQuota(Number(item.default)) : String(item.default)}
+                          {item.updated_at && ` · ${zh ? '更新于' : 'updated'} ${formatTime(item.updated_at)}`}
+                        </div>
+                      </div>
+                      <div className="setting-control">{renderControl(item)}</div>
                     </div>
-                    <div className="setting-desc muted">{keyDesc(item.key, item.description)}</div>
-                    <div className="setting-meta muted">
-                      {zh ? '类型' : 'Type'} {(() => { const t = typeText[item.type]; return t ? (zh ? t.zh : t.en) : item.type })()}
-                      {' · '}{zh ? '默认值' : 'Default'} {QUOTA_BYTE_KEYS.has(item.key) ? formatQuota(Number(item.default)) : String(item.default)}
-                      {item.updated_at && ` · ${zh ? '更新于' : 'updated'} ${formatTime(item.updated_at)}`}
-                    </div>
-                  </div>
-                  <div className="setting-control">
-                    {editing ? (
-                      <form className="setting-edit" onSubmit={(e) => void handleSave(e, item)}>
-                        {item.type === 'bool' ? (
-                          <span className="setting-bool">
-                            <Switch size="small" checked={Boolean(draft)} onChange={(v) => setDraft(v)} />
-                            <span>{draft ? (zh ? '开启' : 'On') : (zh ? '关闭' : 'Off')}</span>
-                          </span>
-                        ) : item.type === 'int' ? (
-                          <InputNumber
-                            step={1}
-                            autoFocus
-                            value={draft === '' ? null : Number(draft)}
-                            onChange={(v) => setDraft(v === null || v === undefined ? '' : String(v))}
-                          />
-                        ) : (
-                          <Input
-                            autoFocus
-                            style={{ width: 220 }}
-                            value={String(draft)}
-                            onChange={(e) => setDraft(e.target.value)}
-                          />
-                        )}
-                        <Button
-                          type="primary"
-                          size="small"
-                          htmlType="submit"
-                          disabled={savingKey !== null || (item.type === 'string' && String(draft).trim() === '')}
-                          loading={savingKey === item.key}
-                        >
-                          {zh ? '保存' : 'Save'}
-                        </Button>
-                        <Button
-                          size="small"
-                          disabled={savingKey !== null}
-                          onClick={() => { setEditingKey(null); setRowError('') }}
-                        >
-                          {zh ? '取消' : 'Cancel'}
-                        </Button>
-                      </form>
-                    ) : item.type === 'bool' ? (
-                      <span className="setting-bool" title={zh ? 'bool 行直开直关：切换后立即保存' : 'Boolean rows save immediately on toggle'}>
-                        <Switch
-                          size="small"
-                          checked={Boolean(item.value)}
-                          loading={savingKey === item.key}
-                          onChange={() => void toggleBool(item)}
-                        />
-                        <span>{savingKey === item.key ? (zh ? '保存中…' : 'Saving…') : item.value ? (zh ? '开启' : 'On') : (zh ? '关闭' : 'Off')}</span>
-                      </span>
-                    ) : (
-                      <>
-                        {/* 字节量设置键（配额/大小上限，v2.6）：值显示人类可读
-                            大小（formatQuota 口径），title 悬浮原始字节数；编辑
-                            仍输入原始整数（字节）。 */}
-                        <span className="setting-value-mono" title={QUOTA_BYTE_KEYS.has(item.key) ? (zh ? `${String(item.value)} 字节` : `${String(item.value)} bytes`) : undefined}>
-                          {QUOTA_BYTE_KEYS.has(item.key) ? formatQuota(Number(item.value)) : String(item.value)}
-                        </span>
-                        <Button size="small" onClick={() => {
-                          setEditingKey(item.key)
-                          setDraft(item.type === 'bool' ? Boolean(item.value) : String(item.value))
-                          setRowError('')
-                        }}>{zh ? '编辑' : 'Edit'}</Button>
-                      </>
-                    )}
-                  </div>
-                  {editing && rowError && <div className="error-text setting-row-error">{rowError}</div>}
+                  )
+                })}
+                <div className="modal-actions" style={{ marginTop: 4 }}>
+                  <Button disabled={savingGroup !== null || !dirty} onClick={() => resetGroup(items)}>
+                    {zh ? '重置' : 'Reset'}
+                  </Button>
+                  <Button
+                    type="primary"
+                    htmlType="submit"
+                    loading={saving}
+                    disabled={!dirty || (savingGroup !== null && !saving)}
+                  >
+                    {saving ? (zh ? '保存中…' : 'Saving…') : (zh ? '保存本组' : 'Save group')}
+                  </Button>
                 </div>
-              )
-            })}
+                {groupErrors[group.id] && <div className="error-text" style={{ marginTop: 4 }}>{groupErrors[group.id]}</div>}
+              </form>
+            )}
           </div>
         )
       })}

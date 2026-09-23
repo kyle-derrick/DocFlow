@@ -119,8 +119,10 @@ import {
 // xmind/mermaid/md/网页/文本等），保证弹窗与新窗口打开渲染一致。
 // v2.7 弹窗内编辑：FileEditorDispatch 同口径的编辑分发（各编辑页组件复用）。
 import { FileViewerDispatch, FileEditorDispatch } from '../pages/ViewerPage'
-// 查看弹窗 AI 摘要（AI 能力第一版，全类型）。
-import { AISummaryInline, AISummaryDialog } from './AISummary'
+// 查看弹窗右键菜单「AI 摘要」弹窗（AI 能力第一版）+ 悬浮 AI 助理
+//（对话/摘要，替代原标题行内嵌的 AI 摘要按钮行）。
+import { AISummaryDialog } from './AISummary'
+import ViewerAIWidget from './ViewerAIWidget'
 import { useAIEnabled } from '../aiFeature'
 
 /** 文件浏览视图模式（设计 6.3.7）：list = 现有表格，grid = 卡片网格。 */
@@ -453,13 +455,6 @@ export function promptViaModal(
 }
 
 // ---- 全局上传任务（v2.6 提升到模块级 store，切页面/切空间不丢；见 uploadTasks.ts） ----
-
-/**
- * 树导航步进点击标记：FolderTreeNav 双击导航经 DOM click 逐段点击目录行，
- * 网页目录行的用户点击语义是「网页预览弹窗」——程序化导航点击时由包装器
- * 置位本标记，使该次点击表现为「进入目录」（见 openItem）。
- */
-export const treeNavClick = { armed: false }
 
 /** 批量错误码 → 中文提示（与后端 openapi BatchResultItem.error_code 对应）。 */
 export const batchErrorText: Record<string, string> = {
@@ -913,6 +908,8 @@ export default function FileBrowser({
   // 复用各编辑页组件）；previewFullscreen = 最大化（视口级尺寸）。
   const [previewEdit, setPreviewEdit] = useState(false)
   const [previewFullscreen, setPreviewFullscreen] = useState(false)
+  // 悬浮 AI 助理「保存为新版本」后的查看器重挂 key（重新拉取预览内容）。
+  const [previewReloadKey, setPreviewReloadKey] = useState(0)
 
   // ---- 全局上传任务（v2.6 顶部栏「传输」入口 + 模块级 store，见 uploadTasks.ts） ----
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -1133,6 +1130,16 @@ export default function FileBrowser({
       alive = false
     }
   }, [])
+
+  /** 按路径 resolve 用的命名空间：注入的 ns（空间视图）；默认空间不传
+   * ns（个人文件端点后端缺省），但 resolve 需要 space/:id——从挂载时拉取
+   * 的空间列表取默认空间 ID 兜底（修复：默认空间下网页目录单击因
+   * folderSegmentsOf 拿不到 ns 而静默无反应）。 */
+  const resolveNs = useMemo<FileBrowserProps['ns']>(() => {
+    if (ns) return ns
+    const def = pickerAllSpaces.find((s) => s.is_default)
+    return def ? { type: 'space', scope: def.id } : undefined
+  }, [ns, pickerAllSpaces])
 
   const pickerSpaces = useMemo<PickerSpace[]>(() => {
     const zh = locale === 'zh-CN'
@@ -1530,21 +1537,22 @@ export default function FileBrowser({
 
   // ---- 目录「作为网页打开」（resolve 目录下 index.html → raw_url / 新窗口） ----
 
-  /** 目录在命名空间内的路径段（面包屑拼当前目录路径，含空间视图）；检索模式返回 null。 */
+  /** 目录在命名空间内的路径段（面包屑拼当前目录路径，含空间视图与默认
+   * 空间 resolveNs 兜底）；检索模式返回 null。 */
   const folderSegmentsOf = (item: FileItem): string[] | null => {
-    if (!ns || searchMode) return null
+    if (!resolveNs || searchMode) return null
     return [...pathSegmentsOf(crumbs), item.name]
   }
 
   /** 解析网页目录入口（index.html，回退 index.htm）的 raw_url；不存在返回 null。 */
   const resolveWebFolderUrl = async (segments: string[]): Promise<string | null> => {
-    if (!ns) return null
+    if (!resolveNs) return null
     try {
-      return (await resolvePath(ns.type, ns.scope, [...segments, 'index.html'].join('/'), { mode: 'view' })).raw_url
+      return (await resolvePath(resolveNs.type, resolveNs.scope, [...segments, 'index.html'].join('/'), { mode: 'view' })).raw_url
     } catch {
       // index.html 不存在：尝试 index.htm。
       try {
-        return (await resolvePath(ns.type, ns.scope, [...segments, 'index.htm'].join('/'), { mode: 'view' })).raw_url
+        return (await resolvePath(resolveNs.type, resolveNs.scope, [...segments, 'index.htm'].join('/'), { mode: 'view' })).raw_url
       } catch {
         return null
       }
@@ -1554,7 +1562,7 @@ export default function FileBrowser({
   /** 菜单「作为网页打开（新窗口）」：resolve 校验入口存在后打开独立查看页。 */
   const openAsWebsite = async (item: FileItem) => {
     const segments = folderSegmentsOf(item)
-    if (!ns || !segments) return
+    if (!resolveNs || !segments) return
     setError('')
     const url = await resolveWebFolderUrl(segments)
     if (!url) {
@@ -1562,7 +1570,7 @@ export default function FileBrowser({
       return
     }
     const encoded = encodePathSegments(segments)
-    openEditorWindow(`/view/by-path/${ns.type}/${encodeURIComponent(ns.scope)}/${encoded}/`)
+    openEditorWindow(`/view/by-path/${resolveNs.type}/${encodeURIComponent(resolveNs.scope)}/${encoded}/`)
   }
 
   /**
@@ -1587,6 +1595,8 @@ export default function FileBrowser({
     setPreviewTarget(item)
     setPreviewPathOverride(null)
     setWebPreviewUrl(url)
+    setPreviewEdit(false)
+    setPreviewFullscreen(false)
   }
 
   // ---- zip 解包为目录树（父目录下以 zip 名建目录，部分成功语义） ----
@@ -2086,11 +2096,6 @@ export default function FileBrowser({
     if (item.type === 'folder') {
       if (searchMode) return
       if (isWebFolder(item)) {
-        // 树导航的程序化步进点击（treeNavClick.armed）走「进入」而非预览。
-        if (treeNavClick.armed) {
-          openFolder(item)
-          return
-        }
         void openWebFolderPreview(item, !item.has_index_web)
         return
       }
@@ -2167,6 +2172,16 @@ export default function FileBrowser({
               : (locale === 'zh-CN' ? '编辑' : 'Edit')}
           </Button>
         )}
+        {/* 悬浮 AI 助理（对话/摘要/修改保存新版本；AI 未启用时组件自隐藏）。
+            与独立查看页同组件，替代原标题行内嵌的 AI 摘要按钮行。 */}
+        {!previewEdit && (
+          <ViewerAIWidget
+            key={item.id}
+            fileId={item.id}
+            fileName={item.name}
+            onSaved={() => setPreviewReloadKey((k) => k + 1)}
+          />
+        )}
         <Dropdown.Button
           size="small"
           menu={menuOf(viewOptions)}
@@ -2186,8 +2201,6 @@ export default function FileBrowser({
             {locale === 'zh-CN' ? '新窗口编辑' : 'Edit in new window'}
           </Dropdown.Button>
         )}
-        {/* AI 摘要（AI 开启时渲染）：与「新窗口查看/编辑」同一按钮行。 */}
-        {!previewEdit && item.type === 'file' && <AISummaryInline fileId={item.id} />}
       </>
     )
   }
@@ -2261,7 +2274,7 @@ export default function FileBrowser({
           ? (zh ? '打包中…' : 'Zipping…')
           : (zh ? '下载为 ZIP' : 'Download as ZIP'),
       })
-      if (ns && !searchMode && item.has_index_web) {
+      if (resolveNs && !searchMode && item.has_index_web) {
         entries.push({ key: 'preview-web', label: zh ? '网页预览（弹窗）' : 'Preview as website' })
         entries.push({ key: 'open-web', label: zh ? '作为网页打开' : 'Open as website' })
       }
@@ -3346,6 +3359,7 @@ export default function FileBrowser({
               <FileEditorDispatch fileId={previewTarget.id} name={previewTarget.name} />
             ) : (
               <FileViewerDispatch
+                key={previewReloadKey}
                 fileId={previewTarget.id}
                 name={previewTarget.name}
                 resolveRawUrl={async () => {

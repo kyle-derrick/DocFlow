@@ -653,6 +653,9 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	// 列表（含能力勾选，绝不回显 api_key）。
 	api.GET("/ai/status", h.aiStatus)
 	api.GET("/ai/models", h.aiModels)
+	// 模型能力自动识别（models.dev 元数据；登录侧别名——个人池模型编辑
+	// 复用，公开目录无敏感信息；管理端契约路径 /admin/settings/ai/models/lookup）。
+	api.GET("/ai/models/lookup", h.aiModelLookup)
 	// 个人 AI 配置（双轨制：本人维度 providers/默认模型/人设/技能/
 	// prefer_personal；api_key 掩码回显、PUT 留空继承）。
 	api.GET("/ai/personal-settings", h.getAIPersonalSettings)
@@ -797,6 +800,9 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	admin.PUT("/settings/ai", h.putAISettings)
 	admin.POST("/settings/ai/test", h.testAIProvider)
 	admin.POST("/settings/ai/rag/test", h.testAIRAG)
+	// 模型能力自动识别（models.dev 元数据，5s 超时 + 10 分钟内存缓存；
+	// 未命中/网络失败 found:false——前端静默回退手动选择）。
+	admin.GET("/settings/ai/models/lookup", h.aiModelLookup)
 	// 重建索引：切换 embedding Provider/模型后重建派生 collection 的向量
 	// 索引（分批重投 task:search-index，返回入队数；请求体可选 space_id）。
 	admin.POST("/settings/ai/reindex", h.adminPostAIReindex)

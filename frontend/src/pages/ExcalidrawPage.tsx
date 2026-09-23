@@ -24,8 +24,7 @@ import type { AIQuickCommand } from '../components/AIEditChat'
 import { closeEditorWithFallback, safeReturnTo } from '../editorNavigation'
 import { MessageKey, formatMessage, t, useLocale } from '../i18n'
 import { useColorMode } from '../theme'
-import { openAIAssistant, setAIContextFile } from '../components/AIAssistant'
-import { useAIEnabled } from '../aiFeature'
+import { setAIContextFile } from '../components/AIAssistant'
 
 // 懒加载编辑器组件：包入口为 CJS（Vite 构建期 interop），动态 import 使
 // 其独立成 chunk，仅在进入本页时加载。
@@ -86,7 +85,6 @@ export default function ExcalidrawPage({
   const viewMode = routeMode === 'view' || searchParams.get('mode') === 'view'
   const returnTo = safeReturnTo(searchParams.get('returnTo'))
   const locale = useLocale()
-  const aiEnabled = useAIEnabled()
   const navigate = useNavigate()
   const { modal: antdModal } = AntdApp.useApp()
   const msg = (key: MessageKey) => t(locale, key)
@@ -372,9 +370,9 @@ export default function ExcalidrawPage({
         )}
         {saving && <span className="badge uploading">{msg('saving')}</span>}
         <span className="editor-head-actions">
-            {aiEnabled && <Button size="small" onClick={() => openAIAssistant(file ? { fileId: file.id, fileName: file.name } : undefined)}>{locale === 'zh-CN' ? 'AI 助手' : 'AI Assistant'}</Button>}
-            {/* AI 对话（applyKind=excalidraw-mermaid）：可修改模式下 AI 生成
-                mermaid 自动转换为白板图形插入画布（版本保护可撤销）。 */}
+            {/* AI 统一入口：完整 AIEditChat 右侧面板（applyKind=
+                excalidraw-mermaid）：可修改模式下 AI 生成 mermaid 自动转换
+                为白板图形插入画布（版本保护可撤销）。 */}
             <AIEditChatButton open={aiChatOpen} onToggle={() => setAiChatOpen((v) => !v)} onQuick={openAiChatWith} kind="excalidraw-mermaid" disabled={saving || !initial} />
             <Button size="small" disabled={saving || !initial} loading={saving} onClick={() => void save(false)}>
               {msg('save')}

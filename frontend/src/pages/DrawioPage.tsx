@@ -23,11 +23,11 @@ import {
   uploadFileVersion,
 } from '../api'
 import DrawioViewer from '../components/DrawioViewer'
-import AIDrawio from '../components/AIDrawio'
 import { EditorLoadError } from '../components/EditorLoadError'
 import type { AIEditTarget } from '../components/AIEdit'
 import AIEditChat, { AIEditChatButton } from '../components/AIEditChat'
 import type { AIQuickCommand } from '../components/AIEditChat'
+import { useAIEnabled } from '../aiFeature'
 import { useLocale } from '../i18n'
 import { useColorMode } from '../theme'
 import { closeEditorWithFallback, safeReturnTo } from '../editorNavigation'
@@ -78,6 +78,7 @@ export default function DrawioPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
   const viewMode = mode === 'view' || searchParams.get('mode') === 'view'
   const returnTo = safeReturnTo(searchParams.get('returnTo'))
   const locale = useLocale()
+  const aiOn = useAIEnabled()
   const navigate = useNavigate()
   // 只读渲染跟随站点明暗主题与界面语言（zh-CN → drawio 中文资源）。
   const colorMode = useColorMode()
@@ -200,6 +201,9 @@ export default function DrawioPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
       }
       if (msg.event === 'save' || msg.event === 'export') {
         if (msg.xml) {
+          // 跟踪最新 XML（save/export 均为编辑器当前内容——AI 应用后的
+          // export 回包在此同步，保证后续 AI 轮次的 XML 上下文不陈旧）。
+          xmlRef.current = msg.xml
           window.clearTimeout(autosaveTimerRef.current)
           const pending = saveDiagram(msg.xml)
           savePromiseRef.current = pending
@@ -348,13 +352,22 @@ export default function DrawioPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
         <h2 className="editor-title">{file?.name ?? '加载中…'}</h2>
         {versionNo !== undefined && <span className="badge current">当前版本 v{versionNo}</span>}
         {saving && <span className="badge uploading">保存中…</span>}
-        {/* AI 生成（AI 能力第一版）：自然语言 → mermaid → 预览/复制/存 .mmd。 */}
-        <AIDrawio fileId={fileId} />
-        {/* AI 对话（applyKind=drawio-xml）：可修改模式下 AI 生成完整 drawio
-            XML 自动替换画布并落新版本（版本保护可撤销）。 */}
+        {/* AI 统一入口：完整 AIEditChat 右侧面板（applyKind=drawio-xml，可
+            修改模式下 AI 生成完整 drawio XML 自动替换画布并落新版本、版本
+            保护可撤销）。原「AI 生成」mermaid 小弹窗（AIDrawio）已下线。 */}
         <AIEditChatButton open={aiChatOpen} onToggle={() => setAiChatOpen((v) => !v)} onQuick={openAiChatWith} kind="drawio-xml" disabled={loading || !!frameError} />
         {!viewMode && <span className="muted drawio-save-hint">Ctrl+S 保存（不退出）</span>}
       </div>}
+
+      {/* 官方 draw.io MCP 说明（编辑态）：平台 MCP 服务可添加官方 draw.io
+          MCP，在 AI 对话中经工具直接生成/预览图表。 */}
+      {!viewMode && !frameError && aiOn && (
+        <div className="muted drawio-mcp-hint">
+          {locale === 'zh-CN'
+            ? '提示：平台 MCP 服务可添加官方 draw.io MCP（https://mcp.draw.io/mcp）在对话中生成/预览图表'
+            : 'Tip: platform MCP services can add the official draw.io MCP (https://mcp.draw.io/mcp) to generate/preview diagrams in chat'}
+        </div>
+      )}
 
       {!viewMode && notice && !frameError && <div className="banner ok editor-hint">{notice}</div>}
       {error && !frameError && <div className="banner error">{error}</div>}

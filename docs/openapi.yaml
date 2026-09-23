@@ -4670,12 +4670,16 @@ paths:
                               label: { type: string }
                               capabilities:
                                 type: object
+                                description: 类型互斥单选 + 能力并集（Cherry Studio 语义）；写出双形态（kind + 旧 chat/embedding/rerank 布尔向后兼容）
                                 properties:
-                                  chat: { type: boolean }
-                                  embedding: { type: boolean }
-                                  vision: { type: boolean }
-                                  rerank: { type: boolean }
+                                  kind: { type: string, enum: [chat, embedding, rerank, image], description: 模型类型（互斥单选；读取旧对象时自动映射） }
                                   reasoning: { type: boolean, description: 支持推理思考（think 参数） }
+                                  vision: { type: boolean }
+                                  audio: { type: boolean }
+                                  video: { type: boolean }
+                                  chat: { type: boolean, description: 旧布尔兼容形态（= kind==="chat"，由服务端派生写出） }
+                                  embedding: { type: boolean, description: 旧布尔兼容形态（= kind==="embedding"） }
+                                  rerank: { type: boolean, description: 旧布尔兼容形态（= kind==="rerank"） }
                   default_models:
                     type: object
                     description: 场景默认模型（provider_id+model_id）
@@ -4741,12 +4745,16 @@ paths:
                                   label: { type: string }
                                   capabilities:
                                     type: object
+                                    description: 类型互斥单选 + 能力并集（同平台语义；读取旧对象自动映射 kind）
                                     properties:
-                                      chat: { type: boolean }
-                                      embedding: { type: boolean }
-                                      vision: { type: boolean }
-                                      rerank: { type: boolean }
+                                      kind: { type: string, enum: [chat, embedding, rerank, image] }
                                       reasoning: { type: boolean }
+                                      vision: { type: boolean }
+                                      audio: { type: boolean }
+                                      video: { type: boolean }
+                                      chat: { type: boolean, description: 旧布尔兼容形态（服务端派生） }
+                                      embedding: { type: boolean, description: 旧布尔兼容形态（服务端派生） }
+                                      rerank: { type: boolean, description: 旧布尔兼容形态（服务端派生） }
                       default_models:
                         type: object
                         description: 个人场景默认模型（provider_id+model_id 须指向个人池）
@@ -4810,12 +4818,16 @@ paths:
                             label: { type: string }
                             capabilities:
                               type: object
+                              description: 类型互斥单选 + 能力并集（同平台语义；读取旧对象自动映射 kind）
                               properties:
-                                chat: { type: boolean }
-                                embedding: { type: boolean }
-                                vision: { type: boolean }
-                                rerank: { type: boolean }
+                                kind: { type: string, enum: [chat, embedding, rerank, image] }
                                 reasoning: { type: boolean }
+                                vision: { type: boolean }
+                                audio: { type: boolean }
+                                video: { type: boolean }
+                                chat: { type: boolean, description: 旧布尔兼容形态（服务端派生） }
+                                embedding: { type: boolean, description: 旧布尔兼容形态（服务端派生） }
+                                rerank: { type: boolean, description: 旧布尔兼容形态（服务端派生） }
                 default_models:
                   type: object
                   additionalProperties:
@@ -5226,11 +5238,16 @@ paths:
                               label: { type: string }
                               capabilities:
                                 type: object
+                                description: 类型互斥单选 + 能力并集（Cherry Studio 语义）；写出双形态（kind + 旧 chat/embedding/rerank 布尔向后兼容），读取旧对象自动映射 kind
                                 properties:
-                                  chat: { type: boolean }
-                                  embedding: { type: boolean }
+                                  kind: { type: string, enum: [chat, embedding, rerank, image], description: 模型类型（互斥单选，默认 chat） }
+                                  reasoning: { type: boolean }
                                   vision: { type: boolean }
-                                  rerank: { type: boolean }
+                                  audio: { type: boolean }
+                                  video: { type: boolean }
+                                  chat: { type: boolean, description: 旧布尔兼容形态（= kind==="chat"，由服务端派生写出） }
+                                  embedding: { type: boolean, description: 旧布尔兼容形态（= kind==="embedding"） }
+                                  rerank: { type: boolean, description: 旧布尔兼容形态（= kind==="rerank"） }
                         enabled: { type: boolean }
                         api_key_configured: { type: boolean }
                         is_env: { type: boolean }
@@ -5321,6 +5338,65 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/settings/ai/models/lookup:
+    get:
+      tags: [admin, AI]
+      operationId: adminAIModelLookup
+      summary: 模型能力自动识别（models.dev 元数据）
+      description: >-
+        按模型 id 查询开源模型元数据目录 https://models.dev/api.json（Cherry
+        Studio 同源），返回类型（互斥单选 chat/embedding/rerank/image）与
+        能力并集（reasoning/vision/audio/video）。大小写与 -_.:/ 等分隔符
+        宽松匹配；provider 参数传目录名（如 deepseek）时优先在该目录内
+        匹配，传平台 kind（openai_compatible 等）或任意不匹配值时回落
+        全局索引。上游 5s 超时、内存缓存 10 分钟（失败保留旧快照降级）；
+        未命中/网络失败一律 200 found:false（前端静默回退手动选择）。不
+        依赖 AI 总开关——正在配置 Provider（AI 尚未启用）时即可用。登录
+        侧别名 GET /ai/models/lookup（个人池模型编辑复用，公开元数据无
+        敏感信息）。
+      parameters:
+        - { name: model, in: query, required: true, schema: { type: string }, description: 模型 id（宽松匹配） }
+        - { name: provider, in: query, required: false, schema: { type: string }, description: Provider 名或 kind（优先目录内匹配） }
+      responses:
+        '200':
+          description: 识别结果（found:false = 未收录/上游不可用）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  found: { type: boolean }
+                  kind: { type: string, enum: [chat, embedding, rerank, image] }
+                  reasoning: { type: boolean }
+                  vision: { type: boolean }
+                  audio: { type: boolean }
+                  video: { type: boolean }
+                  display_name: { type: string, description: 目录收录的展示名（命中时返回） }
+                  provider: { type: string, description: 命中条目所属目录 slug（命中时返回） }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /ai/models/lookup:
+    get:
+      tags: [AI]
+      operationId: aiModelLookup
+      summary: 模型能力自动识别（登录侧别名，同 /admin/settings/ai/models/lookup）
+      description: >-
+        与 GET /admin/settings/ai/models/lookup 同一实现（登录即可，供个人
+        池模型编辑的「自动识别」使用；models.dev 为公开元数据目录）。
+      parameters:
+        - { name: model, in: query, required: true, schema: { type: string } }
+        - { name: provider, in: query, required: false, schema: { type: string } }
+      responses:
+        '200':
+          description: 识别结果（found:false = 未收录/上游不可用）
+          content:
+            application/json:
+              schema: { type: object }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
 
   /admin/settings/ai/personas:
     get:

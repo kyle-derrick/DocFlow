@@ -1,9 +1,10 @@
 // 管理后台「AI 设置」面板（多模型 Provider 体系）：
 // - Provider 卡片列表（名称/类型/模型列表/限流/状态/密钥配置）+ 新建/编辑/
 //   复制（深拷贝改名）/删除弹窗（类型 Select：OpenAI 兼容 / Anthropic /
-//   Mock 预设；每个 Provider 维护 models[{id,label,capabilities}] 能力勾选
-//   ——对话/向量/视觉图片/重排序，及 Provider 级限流 requests_per_min /
-//   daily_quota）；
+//   Mock 预设；每个 Provider 维护 models[{id,label,capabilities}]——类型
+//   互斥单选（对话/嵌入/重排/图像，Cherry Studio 语义）+ 能力并集多选
+//   （推理/视觉/音频/视频），每行「识别」与粘贴回车添加均经 models.dev
+//   目录自动预填，及 Provider 级限流 requests_per_min / daily_quota）；
 // - 默认项：场景默认模型（chat/summary/edit/embedding，下拉只列具备对应
 //   能力的模型；summary/edit 可回落 chat）/ 温度 / max_tokens / 全局兜底
 //   限流（PUT 整体保存）；
@@ -14,9 +15,10 @@
 //   读替，列表 + Modal 编辑（快捷指令 prompt 支持 {selection}/{file} 占位符）；
 // - 用量统计表（ai_usage 按用户聚合，日期过滤）。
 import { useEffect, useState } from 'react'
-import { App as AntdApp, Button, Card, Checkbox, Input, InputNumber, Select, Switch, Table, Tag, Tooltip } from 'antd'
+import { App as AntdApp, Button, Card, Checkbox, Input, InputNumber, Radio, Select, Switch, Table, Tag, Tooltip } from 'antd'
 import { QuestionCircleOutlined } from '@ant-design/icons'
-import { Copy, Plus, Pencil, Trash2, Zap } from 'lucide-react'
+import { Copy, GripVertical, Image, MessageSquare, Network, Pencil, Plus, Sparkles, Trash2, Zap } from 'lucide-react'
+import type { LucideIcon } from 'lucide-react'
 import {
   AIMCPAdminView,
   AIMCPInput,
@@ -25,6 +27,7 @@ import {
   AIPersonaDef,
   AIModelCapabilities,
   AIModelItem,
+  AIModelKind,
   AIModelRef,
   AIProviderInput,
   AIProviderView,
@@ -37,6 +40,7 @@ import {
   getAISettings,
   getAISkills,
   getAIUsage,
+  lookupAIModel,
   putAIMCPAdmin,
   putAIPersonas,
   putAISettings,
@@ -57,15 +61,41 @@ const KIND_PRESETS: Record<string, { label: string; baseURL: string; model: stri
   mock: { label: 'Mock（内置演示，无需 Key）', baseURL: '', model: 'mock-echo' },
 }
 
-/** 能力项定义（勾选标签 + AIModelCapabilities 字段）。 */
-const CAPABILITY_FIELDS: { key: keyof AIModelCapabilities; zh: string; en: string }[] = [
-  { key: 'chat', zh: '对话', en: 'Chat' },
-  { key: 'embedding', zh: '向量', en: 'Embedding' },
-  { key: 'vision', zh: '视觉图片', en: 'Vision' },
-  { key: 'rerank', zh: '重排序', en: 'Rerank' },
+/** 模型类型定义（互斥单选，Cherry Studio 语义：一个模型只属一类）。 */
+const MODEL_KIND_OPTIONS: { value: AIModelKind; zh: string; en: string; icon: LucideIcon }[] = [
+  { value: 'chat', zh: '对话', en: 'Chat', icon: MessageSquare },
+  { value: 'embedding', zh: '嵌入', en: 'Embedding', icon: Network },
+  { value: 'rerank', zh: '重排', en: 'Rerank', icon: GripVertical },
+  { value: 'image', zh: '图像', en: 'Image', icon: Image },
 ]
 
-const emptyCaps = (): AIModelCapabilities => ({ chat: false, embedding: false, vision: false, rerank: false })
+/** 能力项定义（可多选勾选的并集）：推理/视觉/音频/视频。 */
+const CAPABILITY_FIELDS: { key: 'reasoning' | 'vision' | 'audio' | 'video'; zh: string; en: string }[] = [
+  { key: 'reasoning', zh: '推理', en: 'Reasoning' },
+  { key: 'vision', zh: '视觉', en: 'Vision' },
+  { key: 'audio', zh: '音频', en: 'Audio' },
+  { key: 'video', zh: '视频', en: 'Video' },
+]
+
+const emptyCaps = (): AIModelCapabilities => ({ kind: 'chat', reasoning: false, vision: false, audio: false, video: false })
+
+/** caps 宽松归一（旧后端可能仍回旧布尔形态：kind 缺省按 chat 布尔推导）。 */
+const normalizeCaps = (raw?: AIModelCapabilities | null): AIModelCapabilities => {
+  const c = raw ?? emptyCaps()
+  const kind = (c.kind ?? (c.embedding ? 'embedding' : c.rerank ? 'rerank' : 'chat')) as AIModelKind
+  return { kind, reasoning: !!c.reasoning, vision: !!c.vision, audio: !!c.audio, video: !!c.video }
+}
+
+/** 类型文本（展示/识别提示共用）。 */
+const kindText = (kind: AIModelKind | undefined, zh: boolean): string => {
+  const opt = MODEL_KIND_OPTIONS.find((k) => k.value === kind)
+  if (!opt) return kind ?? ''
+  return zh ? opt.zh : opt.en
+}
+
+/** 类型+能力描述（自动识别成功提示，如「对话+推理」）。 */
+const capsSummary = (caps: AIModelCapabilities, zh: boolean): string =>
+  [kindText(caps.kind, zh), ...CAPABILITY_FIELDS.filter((c) => caps[c.key]).map((c) => (zh ? c.zh : c.en))].join('+')
 
 /** 编辑中的模型行。 */
 interface ModelForm {
@@ -94,7 +124,7 @@ const formFromView = (p: AIProviderView): ProviderForm => ({
   kind: p.kind,
   base_url: p.base_url,
   api_key: '',
-  models: (p.models ?? []).map((m) => ({ id: m.id, label: m.label ?? '', caps: { ...(m.capabilities ?? emptyCaps()) } })),
+  models: (p.models ?? []).map((m) => ({ id: m.id, label: m.label ?? '', caps: normalizeCaps(m.capabilities) })),
   enabled: p.enabled,
   requestsPerMin: p.requests_per_min ?? 0,
   dailyQuota: p.daily_quota ?? 0,
@@ -192,6 +222,9 @@ export default function AISettingsPanel({
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [editing, setEditing] = useState<ProviderForm | null>(null)
+  // 模型自动识别（按行 loading，idx 键）与「粘贴回车添加」输入草稿。
+  const [modelDetecting, setModelDetecting] = useState<Record<number, boolean>>({})
+  const [newModelInput, setNewModelInput] = useState('')
   const [tests, setTests] = useState<Record<string, TestState>>({})
   const [ragTest, setRagTest] = useState<TestState | null>(null)
   // 默认项（独立受控，保存时与 providers 一并 PUT）。
@@ -361,6 +394,46 @@ export default function AISettingsPanel({
     onNotice(zh ? `已复制为「${clone.name}」；API Key 不随复制，请编辑副本重新填写` : `Copied as "${clone.name}"; re-enter the API key on the copy`)
   }
 
+  /** 自动识别单行模型（models.dev 目录）：命中自动填类型+能力并提示
+   *  「已识别：对话+推理」；未收录/网络失败提示手动选择（静默降级）。 */
+  const detectModel = async (idx: number, modelID: string) => {
+    const id = modelID.trim()
+    if (!id) {
+      onError(zh ? '请先填写模型 ID' : 'Enter the model ID first')
+      return
+    }
+    setModelDetecting((prev) => ({ ...prev, [idx]: true }))
+    try {
+      const r = await lookupAIModel(id, editing?.kind)
+      if (r.found && r.kind) {
+        const caps: AIModelCapabilities = { kind: r.kind, reasoning: !!r.reasoning, vision: !!r.vision, audio: !!r.audio, video: !!r.video }
+        setEditing((prev) => (prev ? { ...prev, models: prev.models.map((m, i) => (i === idx ? { ...m, caps } : m)) } : prev))
+        onNotice(zh ? `已识别：${capsSummary(caps, true)}${r.display_name ? `（${r.display_name}）` : ''}` : `Recognized: ${capsSummary(caps, false)}${r.display_name ? ` (${r.display_name})` : ''}`)
+      } else {
+        onNotice(zh ? `「${id}」未收录，请手动选择类型与能力` : `"${id}" not in the catalog; pick type & capabilities manually`)
+      }
+    } catch {
+      onNotice(zh ? `「${id}」未收录，请手动选择类型与能力` : `"${id}" not recognized; pick type & capabilities manually`)
+    } finally {
+      setModelDetecting((prev) => ({ ...prev, [idx]: false }))
+    }
+  }
+
+  /** 粘贴模型 ID 回车添加：加入列表后立即自动识别一次。 */
+  const addModelWithDetect = async () => {
+    if (!editing) return
+    const id = newModelInput.trim()
+    if (!id) return
+    if (editing.models.some((m) => m.id.trim() === id)) {
+      onError(zh ? `模型 ${id} 已存在` : `Model ${id} already exists`)
+      return
+    }
+    const idx = editing.models.length
+    setEditing({ ...editing, models: [...editing.models, { id, label: '', caps: emptyCaps() }] })
+    setNewModelInput('')
+    await detectModel(idx, id)
+  }
+
   const applyEdit = async () => {
     if (!editing) return
     if (!editing.id.trim() || !editing.name.trim()) {
@@ -379,7 +452,7 @@ export default function AISettingsPanel({
       return
     }
     const next = editableProviders().filter((p) => p.id !== editing.id)
-    const primary = models.find((m) => m.capabilities.chat)?.id ?? models[0]?.id ?? ''
+    const primary = models.find((m) => (m.capabilities.kind ?? 'chat') === 'chat')?.id ?? models[0]?.id ?? ''
     const entry: AIProviderInput = {
       id: editing.id.trim(),
       name: editing.name.trim(),
@@ -594,13 +667,15 @@ export default function AISettingsPanel({
 
   const kindLabel = (kind: string): string => KIND_PRESETS[kind]?.label.split('（')[0] ?? kind
 
-  /** 场景/能力模型下拉选项：从启用 Provider 的生效模型中筛选能力。 */
+  /** 场景/能力模型下拉选项：类型按 kind 互斥筛选（对话/向量/重排场景）；
+   *  vision（图片 OCR）为能力勾选——kind=chat 且勾选视觉能力的模型。 */
   const capabilityOptions = (cap: 'chat' | 'embedding' | 'rerank' | 'vision') => {
     const out: { value: string; label: string }[] = []
     for (const p of data?.providers ?? []) {
       if (!p.enabled) continue
       for (const m of p.models ?? []) {
-        if (m.capabilities?.[cap]) out.push({ value: `${p.id}::${m.id}`, label: `${p.name} / ${m.label || m.id}` })
+        const nc = normalizeCaps(m.capabilities)
+        if (cap === 'vision' ? nc.vision : nc.kind === cap) out.push({ value: `${p.id}::${m.id}`, label: `${p.name} / ${m.label || m.id}` })
       }
     }
     return out
@@ -638,7 +713,7 @@ export default function AISettingsPanel({
         <Button size="small" type="primary" onClick={() => setEditing({
           id: `p${Date.now().toString(36)}`, name: '', kind: 'openai_compatible',
           base_url: KIND_PRESETS.openai_compatible.baseURL, api_key: '',
-          models: [{ id: KIND_PRESETS.openai_compatible.model, label: '', caps: { ...emptyCaps(), chat: true } }],
+          models: [{ id: KIND_PRESETS.openai_compatible.model, label: '', caps: emptyCaps() }],
           enabled: true, requestsPerMin: 0, dailyQuota: 0, isNew: true,
         })}>
           <Plus size={13} strokeWidth={2} aria-hidden="true" />
@@ -672,12 +747,16 @@ export default function AISettingsPanel({
                   {p.id} · {p.base_url || '—'} · {t(locale, 'adminAIAPIKey')}：{p.api_key_configured ? t(locale, 'adminAIKeyConfigured') : t(locale, 'adminAIKeyNotConfigured')}
                 </div>
                 <div className="muted">
-                  {(p.models ?? []).map((m) => (
-                    <Tag key={m.id} style={{ marginTop: 4 }}>
-                      {m.label || m.id}
-                      {CAPABILITY_FIELDS.filter((c) => m.capabilities?.[c.key]).map((c) => ` ${zh ? c.zh : c.en}`).join('')}
-                    </Tag>
-                  ))}
+                  {(p.models ?? []).map((m) => {
+                    const nc = normalizeCaps(m.capabilities)
+                    return (
+                      <Tag key={m.id} style={{ marginTop: 4 }} color={nc.kind === 'chat' ? undefined : 'geekblue'}>
+                        {m.label || m.id}
+                        {` ${kindText(nc.kind, zh)}`}
+                        {CAPABILITY_FIELDS.filter((c) => nc[c.key]).map((c) => `+${zh ? c.zh : c.en}`).join('')}
+                      </Tag>
+                    )
+                  })}
                 </div>
                 {tests[p.id] && <div className={`ai-test-result ${tests[p.id].ok ? 'ok-text' : 'error-text'}`}>{tests[p.id].message}</div>}
               </div>
@@ -1128,7 +1207,7 @@ export default function AISettingsPanel({
                   const preset = KIND_PRESETS[kind]
                   setEditing({
                     ...editing, kind, base_url: preset?.baseURL ?? '',
-                    models: preset ? [{ id: preset.model, label: '', caps: { ...emptyCaps(), chat: true } }] : editing.models,
+                    models: preset ? [{ id: preset.model, label: '', caps: emptyCaps() }] : editing.models,
                   })
                 }}
                 options={Object.entries(KIND_PRESETS).map(([value, p]) => ({ value, label: p.label }))}
@@ -1152,18 +1231,35 @@ export default function AISettingsPanel({
             )}
             <div className="field">
               <span>
-                {zh ? '模型列表（ID + 能力勾选：对话/向量/视觉图片/重排序）' : 'Models (ID + capabilities)'}
-                <Tooltip title={zh ? '每个 Provider 可配置多个模型；能力勾选决定模型可被哪些场景选择：对话=chat 补全，向量=embedding 索引/检索，视觉图片=图片理解，重排序=检索结果重排。' : 'Capability flags determine which scenarios may pick each model: chat / embedding / vision / rerank.'}>
+                {zh ? '模型列表（类型互斥单选 + 能力多选；✨ 自动识别按 models.dev 目录预填）' : 'Models (exclusive type radio + capability checkboxes; auto-detect via models.dev)'}
+                <Tooltip title={zh ? '类型四选一（对话/嵌入/重排/图像，一个模型只属一类）；能力可多选（推理/视觉/音频/视频）。「识别」按模型 ID 查询 models.dev 开源目录自动预填；未收录时手动选择。' : 'Exclusive model type (chat/embedding/rerank/image); capabilities are a union (reasoning/vision/audio/video). Detect queries the models.dev catalog to prefill; pick manually when not listed.'}>
                   <QuestionCircleOutlined style={{ marginLeft: 4, color: '#888' }} />
                 </Tooltip>
               </span>
               <div className="ai-model-rows">
                 {editing.models.map((m, idx) => (
                   <div className="ai-model-row" key={idx} style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', marginBottom: 8 }}>
-                    <Input style={{ width: 180 }} placeholder={zh ? '模型 ID（如 gpt-4o-mini）' : 'Model ID'} value={m.id}
+                    <Input style={{ width: 200 }} placeholder={zh ? '模型 ID（如 gpt-4o-mini）' : 'Model ID'} value={m.id}
+                      onPressEnter={() => void detectModel(idx, m.id)}
                       onChange={(e) => setEditing({ ...editing, models: editing.models.map((x, i) => (i === idx ? { ...x, id: e.target.value } : x)) })} />
                     <Input style={{ width: 140 }} placeholder={zh ? '显示名（可选）' : 'Label (optional)'} value={m.label}
                       onChange={(e) => setEditing({ ...editing, models: editing.models.map((x, i) => (i === idx ? { ...x, label: e.target.value } : x)) })} />
+                    <Tooltip title={zh ? '自动识别类型与能力（models.dev）' : 'Auto-detect type & capabilities (models.dev)'}>
+                      <Button size="small" loading={!!modelDetecting[idx]} onClick={() => void detectModel(idx, m.id)}>
+                        <Sparkles size={13} strokeWidth={2} aria-hidden="true" />
+                        <span>{zh ? '识别' : 'Detect'}</span>
+                      </Button>
+                    </Tooltip>
+                    <Radio.Group
+                      size="small"
+                      optionType="button"
+                      value={m.caps.kind}
+                      onChange={(e) => setEditing({ ...editing, models: editing.models.map((x, i) => (i === idx ? { ...x, caps: { ...x.caps, kind: e.target.value as AIModelKind } } : x)) })}
+                      options={MODEL_KIND_OPTIONS.map((k) => {
+                        const KindIcon = k.icon
+                        return { value: k.value, label: (<span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><KindIcon size={12} strokeWidth={2} aria-hidden="true" />{zh ? k.zh : k.en}</span>) }
+                      })}
+                    />
                     {CAPABILITY_FIELDS.map((c) => (
                       <Checkbox key={c.key} checked={m.caps[c.key]}
                         onChange={(e) => setEditing({ ...editing, models: editing.models.map((x, i) => (i === idx ? { ...x, caps: { ...x.caps, [c.key]: e.target.checked } } : x)) })}>
@@ -1175,10 +1271,20 @@ export default function AISettingsPanel({
                     </Button>
                   </div>
                 ))}
-                <Button size="small" onClick={() => setEditing({ ...editing, models: [...editing.models, { id: '', label: '', caps: { ...emptyCaps(), chat: true } }] })}>
-                  <Plus size={13} strokeWidth={2} aria-hidden="true" />
-                  <span>{zh ? '添加模型' : 'Add model'}</span>
-                </Button>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                  <Input
+                    style={{ width: 280 }}
+                    placeholder={zh ? '粘贴模型 ID，回车添加并自动识别' : 'Paste a model ID and press Enter'}
+                    value={newModelInput}
+                    allowClear
+                    onChange={(e) => setNewModelInput(e.target.value)}
+                    onPressEnter={() => void addModelWithDetect()}
+                  />
+                  <Button size="small" onClick={() => void addModelWithDetect()}>
+                    <Plus size={13} strokeWidth={2} aria-hidden="true" />
+                    <span>{zh ? '添加模型' : 'Add model'}</span>
+                  </Button>
+                </div>
               </div>
             </div>
             <label className="field">

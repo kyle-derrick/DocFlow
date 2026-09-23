@@ -25,8 +25,7 @@ import {
 } from '../api'
 import { useLocale } from '../i18n'
 import { useColorMode } from '../theme'
-import { openAIAssistant, setAIContextFile } from '../components/AIAssistant'
-import { useAIEnabled } from '../aiFeature'
+import { setAIContextFile } from '../components/AIAssistant'
 import { EditorLoadError } from '../components/EditorLoadError'
 import AIEditChat, { AIEditChatButton } from '../components/AIEditChat'
 import type { AIQuickCommand } from '../components/AIEditChat'
@@ -96,7 +95,6 @@ export default function EditorPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
   const viewMode = mode === 'view' || searchParams.get('mode') === 'view'
   const locale = useLocale()
   const colorMode = useColorMode()
-  const aiEnabled = useAIEnabled()
 
   const [file, setFile] = useState<FileWithVersion | null>(null)
   const [loading, setLoading] = useState(true)
@@ -352,9 +350,9 @@ export default function EditorPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
         <Button type="text" size="small" onClick={exitWithConfirm}>← 返回</Button>
         <h2 className="editor-title">{file?.name ?? '加载中…'}</h2>
         {versionNo !== undefined && <span className="badge current">当前版本 v{versionNo}</span>}
-        {aiEnabled && <Button size="small" onClick={() => openAIAssistant(file ? { fileId: file.id, fileName: file.name } : undefined)}>AI 助手</Button>}
-        {/* AI 对话（仅对话模式）：开源版 OnlyOffice 无内容修改 API，不提供
-            「可修改」切换；文档文本上下文经 convertMarkdown 转换端点获取。 */}
+        {/* AI 统一入口：完整 AIEditChat 右侧面板（仅对话模式）：开源版
+            OnlyOffice 无内容修改 API，不提供「可修改」切换；文档文本上下文
+            经 convertMarkdown 转换端点获取。 */}
         <AIEditChatButton open={aiChatOpen} onToggle={() => setAiChatOpen((v) => !v)} onQuick={openAiChatWith} kind="chat" disabled={loading} />
         <Button size="small" onClick={() => void refreshVersion('版本已刷新')}>刷新版本</Button>
         {/* 保存并退出（v2.6）：触发 DS 立即保存 + 返回文件页。 */}

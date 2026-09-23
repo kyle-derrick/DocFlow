@@ -346,15 +346,125 @@ const (
 	AIKindMock             = "mock"
 )
 
-// AIModelCapabilities 为模型能力勾选：对话（chat 补全）/向量（embedding）/
-// 视觉图片（vision）/重排序（rerank）/推理思考（reasoning——/ai/chat 与
-// /ai/summarize 的 think 参数仅对勾选了 reasoning 的模型生效）。
+// AIModelKind 为模型类型（互斥单选，Cherry Studio 语义）：一个模型只属
+// 一类——chat 对话补全 / embedding 向量 / rerank 重排 / image 图像生成。
+const (
+	AIModelKindChat      = "chat"
+	AIModelKindEmbedding = "embedding"
+	AIModelKindRerank    = "rerank"
+	AIModelKindImage     = "image"
+)
+
+// ValidAIModelKind 报告 s 是否为合法模型类型。
+func ValidAIModelKind(s string) bool {
+	switch s {
+	case AIModelKindChat, AIModelKindEmbedding, AIModelKindRerank, AIModelKindImage:
+		return true
+	}
+	return false
+}
+
+// AIModelCapabilities 为模型类型+能力并集（Cherry Studio 语义）：
+//   - 类型互斥单选：Kind 取 chat/embedding/rerank/image（空 = 按
+//     NormalizeAIModelKind 规则推导，默认 chat）；
+//   - 能力可并集勾选：推理思考（reasoning——/ai/chat 与 /ai/summarize
+//     的 think 参数仅对勾选了 reasoning 的模型生效）/视觉（vision）/
+//     音频（audio）/视频（video）。
+//
+// JSON 双形态兼容：读取时遇旧对象（无 kind、有 chat/embedding/rerank
+// 布尔）自动映射 kind（chat→chat；embedding→embedding；rerank→rerank；
+// 多 true 按优先 chat>embedding>rerank；全 false 默认 chat——旧数据
+// vision-only 模型归一为 chat+vision 能力）；写出时同时写 kind 与旧布尔
+// （chat: kind==="chat" 等），已部署旧前端按旧布尔过滤不受影响。存量
+// providers 配置 jsonb 读入即迁移，无需 migration。
+//
+// Chat/Embedding/Rerank 旧布尔保留为内存派生态：JSON 反序列化后与 Kind
+// 恒一致；复合字面量构造（如 {Chat: true}）时 Kind 为空，序列化前由
+// NormalizeAIModelKind/MarshalJSON 按同一优先级推导，直接读旧布尔的
+// 既有调用方（PrimaryModel/ResolveDefaultModel 等）两种构造路径下均正确。
 type AIModelCapabilities struct {
+	Kind      string `json:"kind"`
+	Reasoning bool   `json:"reasoning"`
+	Vision    bool   `json:"vision"`
+	Audio     bool   `json:"audio"`
+	Video     bool   `json:"video"`
+	// Chat/Embedding/Rerank 为旧布尔兼容形态（Marshal 时由 Kind 派生写出；
+	// Unmarshal 时 kind 缺失/非法则反向推导 Kind）。
 	Chat      bool `json:"chat"`
 	Embedding bool `json:"embedding"`
-	Vision    bool `json:"vision"`
 	Rerank    bool `json:"rerank"`
-	Reasoning bool `json:"reasoning"`
+}
+
+// NormalizeAIModelKind 归一模型类型并同步派生旧布尔：Kind 合法时以 Kind
+// 为权威；Kind 空/非法时按旧布尔推导（优先 chat>embedding>rerank，全
+// false 默认 chat）。归一后 Kind 与 Chat/Embedding/Rerank 恒一致。
+func (c *AIModelCapabilities) NormalizeAIModelKind() {
+	kind := strings.TrimSpace(c.Kind)
+	if !ValidAIModelKind(kind) {
+		kind = ""
+		switch {
+		case c.Chat:
+			kind = AIModelKindChat
+		case c.Embedding:
+			kind = AIModelKindEmbedding
+		case c.Rerank:
+			kind = AIModelKindRerank
+		default:
+			kind = AIModelKindChat
+		}
+	}
+	c.Kind = kind
+	c.Chat = kind == AIModelKindChat
+	c.Embedding = kind == AIModelKindEmbedding
+	c.Rerank = kind == AIModelKindRerank
+}
+
+// MarshalJSON 写出双形态：kind+能力并集在前，旧布尔由 kind 派生（向后
+// 兼容已部署前端）；Kind 为空时按 NormalizeAIModelKind 同规则推导。
+func (c AIModelCapabilities) MarshalJSON() ([]byte, error) {
+	norm := c
+	norm.NormalizeAIModelKind()
+	return json.Marshal(struct {
+		Kind      string `json:"kind"`
+		Reasoning bool   `json:"reasoning"`
+		Vision    bool   `json:"vision"`
+		Audio     bool   `json:"audio"`
+		Video     bool   `json:"video"`
+		Chat      bool   `json:"chat"`
+		Embedding bool   `json:"embedding"`
+		Rerank    bool   `json:"rerank"`
+	}{
+		Kind: norm.Kind, Reasoning: norm.Reasoning, Vision: norm.Vision,
+		Audio: norm.Audio, Video: norm.Video,
+		Chat: norm.Chat, Embedding: norm.Embedding, Rerank: norm.Rerank,
+	})
+}
+
+// UnmarshalJSON 读入兼容双形态：kind 存在且合法时为权威（旧布尔由 kind
+// 派生，忽略载荷旧布尔）；否则按旧布尔映射 kind（多 true 优先
+// chat>embedding>rerank，全 false 默认 chat）。
+func (c *AIModelCapabilities) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Kind      string `json:"kind"`
+		Reasoning bool   `json:"reasoning"`
+		Vision    bool   `json:"vision"`
+		Audio     bool   `json:"audio"`
+		Video     bool   `json:"video"`
+		Chat      bool   `json:"chat"`
+		Embedding bool   `json:"embedding"`
+		Rerank    bool   `json:"rerank"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	out := AIModelCapabilities{
+		Kind: raw.Kind, Reasoning: raw.Reasoning, Vision: raw.Vision,
+		Audio: raw.Audio, Video: raw.Video,
+		Chat: raw.Chat, Embedding: raw.Embedding, Rerank: raw.Rerank,
+	}
+	out.NormalizeAIModelKind()
+	*c = out
+	return nil
 }
 
 // AIModel 为 Provider 下的一个模型条目（ai.providers[].models 元素）。
@@ -625,6 +735,9 @@ func ValidateAIProvider(p AIProvider) error {
 	for _, m := range p.Models {
 		if strings.TrimSpace(m.ID) == "" {
 			return fmt.Errorf("%w: provider %q model id is required", ErrInvalidValue, p.ID)
+		}
+		if k := strings.TrimSpace(m.Capabilities.Kind); k != "" && !ValidAIModelKind(k) {
+			return fmt.Errorf("%w: provider %q model %q capabilities.kind must be chat/embedding/rerank/image", ErrInvalidValue, p.ID, m.ID)
 		}
 		if seenModel[m.ID] {
 			return fmt.Errorf("%w: provider %q duplicate model id %q", ErrInvalidValue, p.ID, m.ID)

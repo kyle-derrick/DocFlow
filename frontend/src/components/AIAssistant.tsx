@@ -226,12 +226,14 @@ function normalizeAIModel(entry: unknown): AIModelOption | null {
 
 /** 拉取可选模型列表（失败返回空数组；成功后按会话缓存；同时缓存
  *  default_models.chat 供选择器默认选中）。
- *  仅保留对话模型：/ai/models 模型条目的 capabilities 实际为对象
- *  {chat,embedding,vision,rerank,reasoning}（布尔勾选，见后端
- *  internal/http/ai.go aiModels → settings.AIModelCapabilities）——
- *  chat!==true 的条目（embedding/rerank/vision-only 等）在此过滤，
- *  对话选择器（助手/编辑页）不再出现；capabilities 缺失（旧后端/字符串
- *  条目）无法判定时宽松保留。 */
+ *  仅保留对话模型：/ai/models 模型条目的 capabilities 为类型+能力并集
+ *  对象（kind 互斥单选 chat/embedding/rerank/image + reasoning/vision/
+ *  audio/video 能力，后端另派生写出旧 chat/embedding/rerank 布尔——见
+ *  internal/settings/settings.go AIModelCapabilities 双形态兼容）。kind
+ *  存在时 chat = kind==='chat'；仅旧布尔形态（已部署旧后端）回退读
+ *  chat 布尔；chat!==true 的条目（embedding/rerank/image 等）在此过滤，
+ *  对话选择器（助手/编辑页）不再出现；capabilities 缺失（字符串条目）
+ *  无法判定时宽松保留。 */
 function modelChatCapable(raw: unknown): boolean | null {
   if (Array.isArray(raw)) {
     if (raw.length === 0) return null
@@ -239,6 +241,7 @@ function modelChatCapable(raw: unknown): boolean | null {
   }
   if (raw && typeof raw === 'object') {
     const o = raw as Record<string, unknown>
+    if (typeof o.kind === 'string' && o.kind) return o.kind === 'chat'
     if ('chat' in o) return o.chat === true
     return Object.keys(o).length > 0 ? false : null
   }

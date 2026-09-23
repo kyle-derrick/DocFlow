@@ -891,10 +891,33 @@ export default function StudioPage() {
     setProjects((p) => [...p, proj])
     setPid(proj.id)
   }
-  const deleteProject = (id: string) => {
+  // 删除项目：清理该项目的任务追踪，并异步作废其未决 Agent 任务
+  //（discard 后平台回收任务工作区与临时导出，容器产物即「删除 Docker
+  // 空间数据」的落地语义；已 apply/done 的历史记录一并弃置）。空间内
+  // 文件不受影响。
+  const deleteProject = async (id: string) => {
+    const proj = projects.find((p) => p.id === id)
     setProjects((p) => p.filter((x) => x.id !== id))
     if (pid === id) setPid('')
     message.success('项目已删除（不影响云端文件）')
+    if (proj) {
+      const ids = taskIds[id] ?? []
+      if (ids.length > 0) {
+        setTaskIds((prev) => {
+          const next = { ...prev }
+          delete next[id]
+          return next
+        })
+        // 逐个弃置（失败静默——任务可能已终态/已清理）。
+        for (const tid of ids) {
+          try {
+            await cancelAgentTask(tid).catch(() => undefined)
+            await discardAgentTask(tid)
+          } catch { /* 已终态 */ }
+        }
+        void refreshTasks()
+      }
+    }
   }
 
   const onTaskCreated = (taskId: string) => {

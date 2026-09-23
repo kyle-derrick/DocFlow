@@ -3758,7 +3758,9 @@ kbd {
 }
 
 /* 工具栏：分组横排，小屏自动换行；sticky 吸顶（独立窗口编辑页内滚动时
-   工具栏常驻可视区）。按钮为 antd Button（type=text + .rich-text-tbtn）。 */
+   工具栏常驻可视区）。按钮为 antd Button（type=text + .rich-text-tbtn）。
+   显式靠左（flex-start）：协作状态胶囊（首位）与工具组始终从行首排布，
+   防止任何后续样式把整行推右（用户反馈「工具栏靠右对齐」）。 */
 .rich-text-toolbar {
   position: sticky;
   top: 0;
@@ -3766,6 +3768,7 @@ kbd {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-start;
   gap: 6px;
   padding: 8px 10px;
   border-bottom: 1px solid var(--border);
@@ -3834,6 +3837,19 @@ kbd {
 
 .rich-text-wrap.readonly .rich-text-content {
   padding: 0;
+}
+
+/* 富文本编辑页头部操作行（[AI 对话][保存]）靠左：原 .editor-head-actions
+   的 margin-left:auto + .text-editor-head 的 space-between 把整组按钮推到
+   行尾，页面顶部工具行呈「靠右对齐」观感（用户反馈，与 DrawioPage/
+   EditorPage 头部左排一致）。仅作用富文本页（:has(.rich-text-wrap) 锚定，
+   md/文本编辑页按钮多、保持原布局）。 */
+.text-editor-page:has(.rich-text-wrap) .text-editor-head {
+  justify-content: flex-start;
+}
+
+.text-editor-page:has(.rich-text-wrap) .text-editor-head .editor-head-actions {
+  margin-left: 0;
 }
 
 /* 协作状态胶囊：位于工具栏首位、紧跟工具组（紧凑排布，行尾自然留白）；
@@ -5508,6 +5524,11 @@ kbd {
 .rich-text-editor-host {
   display: flex;
   flex-direction: column;
+  /* flex:1 补链（高度修复）：host 此前无 flex-grow，.rich-text-wrap（定高）
+     内为内容高——.rich-text-editor-body 的 flex:1 与 .rich-text-content 的
+     min-height:100% 均以 host 为基准，host 不长则编辑/只读内容区被压缩
+     （弹窗内 .dfrt 查看内容仅 ~103px/658px）。 */
+  flex: 1;
   min-height: 0;
 }
 
@@ -5726,6 +5747,15 @@ kbd {
 .drawio-save-hint {
   font-size: 12px;
   white-space: nowrap;
+}
+
+/* drawio 编辑页官方 MCP 说明行（编辑面板顶部一行，AI 对话 + 平台 MCP
+   服务提示；随 AI 总开关显隐）。 */
+.drawio-mcp-hint {
+  font-size: 12px;
+  margin: -2px 0 6px;
+  flex-shrink: 0;
+  word-break: break-all;
 }
 
 /* ---- 项16：全站过渡（180ms fade/slide，克制口径） ---- */
