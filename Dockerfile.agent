@@ -1,0 +1,24 @@
+# DocFlow Agent 镜像：Docker 创作舱的默认执行镜像（agent.DefaultImage）。
+#
+# 基础 node:20-alpine + git/bash/curl 工具链；agent-runner/（纯 Node 无依赖）
+# 为 ENTRYPOINT：
+#   1. 读 DOCFLOW_PROMPT_FILE（平台注入 prompt）；
+#   2. workspace 内打 git 基线（git init + 默认 .gitignore + baseline 提交）；
+#   3. DOCFLOW_AI_TOKEN 存在时进入 AI 工具循环——经 unix socket
+#      DOCFLOW_AI_SOCK 调平台 AI（POST /chat，Bearer 任务令牌；容器
+#      NetworkMode=none 断网仍可用），按协议逐轮执行 shell 命令；缺失时
+#      降级为仅执行 prompt 中的 ```run 代码块；
+#   4. 收尾 git add -A && git status --porcelain 解析 A/M/D，写
+#      /workspace/.docflow-changes.json 供平台侧 git 式产物同步。
+#
+# 构建：make build-agent（= docker build -f Dockerfile.agent -t docflow/agent:1.0.0 .）
+#
+# 基础镜像取 node:22-alpine（与前端构建同一本地镜像，避免额外外网拉取）；
+# apk 源切换清华镜像（国内网络 docker.io/alpine CDN 不可达时仍可装包）。
+FROM node:22-alpine
+RUN sed -i 's#https://dl-cdn.alpinelinux.org#https://mirrors.tuna.tsinghua.edu.cn#g' /etc/apk/repositories \
+    && apk add --no-cache git bash curl
+COPY agent-runner/ /app/
+ENV DOCFLOW_PROMPT_FILE=/run/docflow/prompt DOCFLOW_WORKSPACE=/workspace
+WORKDIR /workspace
+ENTRYPOINT ["node", "/app/runner.mjs"]

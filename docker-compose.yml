@@ -33,7 +33,9 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-    image: docflow/caddy:1.0.0
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org/}
+    image: docflow/caddy:${DOCFLOW_IMAGE_TAG:-1.0.0}
     restart: unless-stopped
     ports:
       - "80:80"
@@ -75,8 +77,8 @@ services:
       context: .
       args:
         # 国内网络构建加速（.env 里 GOPROXY=https://goproxy.cn）。
-        GOPROXY: ${GOPROXY:-}
-    image: docflow/backend:1.0.0
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+    image: docflow/backend:${DOCFLOW_IMAGE_TAG:-1.0.0}
     restart: unless-stopped
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgres://docflow:change-me@postgres:5432/docflow?sslmode=disable}
@@ -196,6 +198,20 @@ services:
       AI_BASE_URL: ${AI_BASE_URL:-https://api.openai.com/v1}
       AI_API_KEY: ${AI_API_KEY:-}
       AI_MODEL: ${AI_MODEL:-gpt-4o-mini}
+      AI_RAG_MODE: ${AI_RAG_MODE:-keyword}
+      AI_RAG_VECTOR_ENABLED: ${AI_RAG_VECTOR_ENABLED:-false}
+      AI_RAG_QDRANT_URL: ${AI_RAG_QDRANT_URL:-http://qdrant:6333}
+      AI_RAG_COLLECTION_PREFIX: ${AI_RAG_COLLECTION_PREFIX:-docflow_}
+      AI_RAG_EMBEDDING_PROVIDER: ${AI_RAG_EMBEDDING_PROVIDER:-mock}
+      AI_RAG_EMBEDDING_MODEL: ${AI_RAG_EMBEDDING_MODEL:-text-embedding-3-small}
+      AI_RAG_TOP_K: ${AI_RAG_TOP_K:-8}
+      AI_RAG_CHUNK_SIZE: ${AI_RAG_CHUNK_SIZE:-1000}
+      AI_RAG_CHUNK_OVERLAP: ${AI_RAG_CHUNK_OVERLAP:-100}
+      # Agent 容器平台 AI IPC socket 目录（agentsock.go；backend 在此监听
+      # ai.sock，agent 容器经下方 docflow-agent-ipc 卷只读共享 /run/docflow-ai
+      # ——NetworkMode=none 断网容器仍可调平台 AI）。agent.allow_ai=false
+      # 时平台不签发令牌，容器内无 AI 能力（runner 降级），socket 保持监听。
+      DOCFLOW_AGENT_IPC_DIR: /run/docflow-ipc
     expose:
       - "8080"
     healthcheck:
@@ -206,6 +222,9 @@ services:
     volumes:
       - backend_storage:/data/storage
       - tls_certs:/data/tls
+      # Agent AI IPC socket 共享卷（可写；agent 容器由 backend 经 Docker
+      # Engine API 创建并以 :ro 挂载到 /run/docflow-ai）。
+      - docflow-agent-ipc:/run/docflow-ipc
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -214,7 +233,11 @@ services:
     profiles: ["minimal", "full", "antivirus"]
 
   migrate:
-    image: docflow/backend:1.0.0
+    build:
+      context: .
+      args:
+        GOPROXY: ${GOPROXY:-}
+    image: docflow/backend:${DOCFLOW_IMAGE_TAG:-1.0.0}
     restart: "no"
     # 镜像 ENTRYPOINT 为 /docflow，须用 entrypoint 覆盖（command 只覆盖 CMD）。
     entrypoint: ["/migrate"]
@@ -229,7 +252,11 @@ services:
   # 首次部署引导管理员（幂等：已存在则跳过）。在 migrate 之后运行一次；
   # 生产务必在 .env 覆盖 SEED_ADMIN_EMAIL/PASSWORD 并在首次登录后改密。
   seed:
-    image: docflow/backend:1.0.0
+    build:
+      context: .
+      args:
+        GOPROXY: ${GOPROXY:-}
+    image: docflow/backend:${DOCFLOW_IMAGE_TAG:-1.0.0}
     restart: "no"
     entrypoint: ["/seed"]
     environment:
@@ -366,6 +393,44 @@ services:
     volumes:
       - meili_data:/meili_data
     profiles: ["search"]
+  qdrant:
+    image: qdrant/qdrant:v1.12.5
+    profiles: ["ai-vector"]
+    expose:
+      - "6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    # qdrant 官方镜像不含 curl/wget，用 bash 内置 /dev/tcp 做 TCP 探测
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  # SearXNG 元搜索引擎（ai-search profile，可与 full/antivirus 叠加）：
+  # AI 联网搜索（/ai/chat 的 web_search）的自托管后端，接入成熟方案不自研
+  # 爬虫。对应管理端联动：/admin/settings/ai 设 ai.search.provider=searxng、
+  # ai.search.searxng_url=http://searxng:8080。注意 SearXNG 出于安全默认
+  # 只开放 html 输出，JSON API（format=json）需在 settings.yml 的
+  # search.formats 中显式启用——本服务要求挂载
+  # ./deploy/searxng/settings.yml（内容两行即可，见下方注释），文件缺失时
+  # 容器以默认配置启动、web_search 将 403 降级（不阻断对话）。
+  # 端口仅 compose 内网（不映射宿主 8080）。
+  searxng:
+    image: searxng/searxng:latest
+    restart: unless-stopped
+    expose:
+      - "8080"
+    volumes:
+      # 最小 settings.yml（部署时创建该文件）：
+      #   use_default_settings: true
+      #   server:
+      #     secret_key: "<随机 32+ 字符>"
+      #   search:
+      #     formats:
+      #       - html
+      #       - json
+      - ./deploy/searxng/settings.yml:/etc/searxng/settings.yml:ro
+    profiles: ["ai-search"]
   #
   # 如需其他 S3 兼容对象存储（STORAGE_DRIVER=s3），可参考以下示例自行启用
   #（本仓库默认 MinIO，见上方 storage profile；SeaweedFS 等亦可，需自建 bucket）：
@@ -378,6 +443,11 @@ services:
 volumes:
   postgres_data:
   backend_storage:
+  # Agent AI IPC socket 共享卷：backend 可写（监听 ai.sock），backend 创建
+  # 的 agent 容器只读挂载到 /run/docflow-ai。name 钉死实际卷名（不带
+  # compose 项目前缀），backend 才能用固定名 docflow-agent-ipc 挂到同一卷。
+  docflow-agent-ipc:
+    name: docflow-agent-ipc
   clamav_data:
   caddy_data:
   caddy_config:
@@ -388,3 +458,4 @@ volumes:
   onlyoffice_logs:
   minio_data:
   meili_data:
+  qdrant_data:

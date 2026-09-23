@@ -14,7 +14,10 @@ FROM alpine:3.20
 RUN adduser -D -H app \
 	# named volume 首挂载以镜像目录属主初始化：存储目录必须归 app，
 	# 否则 /ready 的 storage 写探针失败（root 属主只读）。
-	&& mkdir -p /data/storage && chown app:app /data/storage
+	# /run/docflow-ipc 同理——backend 以 app 运行，需在该目录创建
+	# Agent AI IPC socket（ai.sock，见 internal/http/agentsock.go）。
+	&& mkdir -p /data/storage /run/docflow-ipc \
+	&& chown app:app /data/storage /run/docflow-ipc
 USER app
 COPY --from=build /out/docflow /docflow
 COPY --from=build /out/migrate /migrate
