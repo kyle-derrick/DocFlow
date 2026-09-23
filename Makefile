@@ -1,4 +1,4 @@
-.PHONY: run test fmt seed migrate e2e build-frontend build-agent validate-compose deploy deploy-minimal deploy-full up-minimal up-full down backup backup-verify backup-windows backup-windows-verify
+.PHONY: run test fmt seed migrate e2e build-frontend sync-frontend build-agent validate-compose deploy deploy-minimal deploy-full up-minimal up-full down backup backup-verify backup-windows backup-windows-verify
 
 run:
 	go run ./cmd/server
@@ -38,6 +38,15 @@ e2e:
 # 见 frontend/Dockerfile；即 docker compose 中 caddy 服务所用的镜像）。
 build-frontend:
 	docker compose build caddy
+
+# 前端热更新（不重建镜像）：vite 构建产物直接同步进运行中的 caddy 容器。
+# 注意目标目录必须是 /srv/frontend（deploy/Caddyfile 的 root；曾误拷
+# /srv/docflow 导致用户长期看到旧版——勿再犯）。assets 先清再拷，防旧
+# hash 堆积；同步后 index.html(no-cache) 引用新 entry，刷新即新版。
+sync-frontend:
+	cd frontend && npm run build
+	docker exec docflow-caddy-1 sh -c "rm -rf /srv/frontend/assets"
+	docker cp frontend/dist/. docflow-caddy-1:/srv/frontend/
 
 # 构建 Agent 镜像（Dockerfile.agent：node:20-alpine + git/bash + agent-runner
 # 驱动；即 agent.DefaultImage 的 docflow/agent:1.0.0，Docker 创作舱默认镜像，
