@@ -82,6 +82,10 @@ const (
 	ActionSpaceGroupAdd    = "space.group.add"
 	ActionSpaceGroupUpdate = "space.group.update"
 	ActionSpaceGroupRemove = "space.group.remove"
+	// AI 对话（AI 能力第一版）：POST /ai/chat 完成后记一次（成功/失败均记，
+	// metadata 带 provider/model/stream/rag；摘要与 MCP 工具复用同一
+	// ChatService，仅 /ai/chat 端点直审）。
+	ActionAIChat = "ai.chat"
 )
 
 // resource_type 常量。
@@ -108,6 +112,8 @@ const (
 	ResourceGroup = "group"
 	// ResourceSpace 为空间（spaces 行，统一空间模型审计）。
 	ResourceSpace = "space"
+	// ResourceAI 为 AI 能力（ai.chat 对话审计）。
+	ResourceAI = "ai"
 )
 
 // status 常量。
