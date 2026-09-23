@@ -40,7 +40,7 @@ type VersionDetail struct {
 // 生产实现为 gormVersionsRepo（在事务内执行，文件行 FOR UPDATE 锁串行化版本号分配）；
 // 测试可用内存实现验证引用计数与保留策略语义（模式同 trashRepo）。
 type versionsRepo interface {
-	// GetFileForUpdate 锁定并返回未删除的 type='file' 行；不存在返回 ErrNotFound。
+	// GetFileForUpdate 锁定并返回未删除的文件行（type='file'）；不存在返回 ErrNotFound。
 	GetFileForUpdate(id uuid.UUID) (File, error)
 	// GetBlobBySHA 按 sha256 返回 blob（不限状态，供复活判定）；不存在返回 ErrNotFound。
 	GetBlobBySHA(sha256 string) (ObjectBlob, error)
@@ -84,6 +84,17 @@ func deleteVersionLogic(r versionsRepo, fileID, versionID uuid.UUID) (FileVersio
 	}
 	if f.CurrentVersionID != nil && *f.CurrentVersionID == versionID {
 		return FileVersion{}, ErrCurrentVersion
+	}
+	if refs, ok := r.(interface {
+		SnapshotVersionRefs(uuid.UUID) (int64, error)
+	}); ok {
+		count, err := refs.SnapshotVersionRefs(versionID)
+		if err != nil {
+			return FileVersion{}, err
+		}
+		if count > 0 {
+			return FileVersion{}, ErrSnapshotConflict
+		}
 	}
 	if err := r.DeleteVersion(versionID); err != nil {
 		return FileVersion{}, err
@@ -203,6 +214,17 @@ func pruneVersionsLogic(r versionsRepo, fileID uuid.UUID, keep int, keepNewerTha
 		if f.CurrentVersionID != nil && v.ID == *f.CurrentVersionID {
 			continue // 回滚后 current 可能落在保留窗口外：永不裁剪
 		}
+		if refs, ok := r.(interface {
+			SnapshotVersionRefs(uuid.UUID) (int64, error)
+		}); ok {
+			snapshotRef, err := refs.SnapshotVersionRefs(v.ID)
+			if err != nil {
+				return pruned, err
+			}
+			if snapshotRef > 0 {
+				continue
+			} // 快照引用的版本不可裁剪
+		}
 		if !keepNewerThan.IsZero() && v.CreatedAt.After(keepNewerThan) {
 			continue // 保留时间窗内（createdAt > now-retentionDays）的版本
 		}
@@ -301,6 +323,12 @@ func (g *gormVersionsRepo) DeleteVersion(id uuid.UUID) error {
 func (g *gormVersionsRepo) DecrementBlobRef(id uuid.UUID) error {
 	return g.tx.Model(&ObjectBlob{}).Where("id = ?", id).
 		UpdateColumn("ref_count", gorm.Expr("GREATEST(ref_count - 1, 0)")).Error
+}
+
+func (g *gormVersionsRepo) SnapshotVersionRefs(id uuid.UUID) (int64, error) {
+	var count int64
+	err := g.tx.Model(&DirectorySnapshotEntry{}).Where("source_version_id = ?", id).Count(&count).Error
+	return count, err
 }
 
 func (g *gormVersionsRepo) MarkBlobDeletingIfZero(id uuid.UUID) (bool, error) {
