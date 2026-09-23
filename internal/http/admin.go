@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"github.com/docflow/docflow/internal/audit"
 	"github.com/docflow/docflow/internal/auth"
 	"github.com/docflow/docflow/internal/backup"
+	"github.com/docflow/docflow/internal/files"
 	"github.com/docflow/docflow/internal/group"
 	"github.com/docflow/docflow/internal/mail"
 	"github.com/docflow/docflow/internal/metrics"
@@ -29,10 +31,24 @@ type settingsService interface {
 	// GetInt 为 int 键的热读取（batch.max_items 等请求路径消费方使用）；
 	// *settings.Store 天然满足。
 	GetInt(key string) (int, error)
+	// GetBool 为 bool 键的热读取（collab.enabled 等请求路径消费方使用）；
+	// *settings.Store 天然满足。
+	GetBool(key string) (bool, error)
 	// SMTPOverrides / SetSMTP 为 SMTP 运行时配置（system_settings 的 smtp.*
 	// 键；GET/PUT /admin/settings/smtp 专用，不经通用键值端点）。
 	SMTPOverrides() (settings.SMTPOverride, error)
 	SetSMTP(in settings.SMTPSettings, env settings.SMTPSettings, actor uuid.UUID) (settings.SMTPSettings, error)
+	// AIOverrides / SetAI 为 AI 运行时配置（system_settings 的 ai.* 键；
+	// GET/PUT /admin/settings/ai 专用，密钥只写不读）。
+	AIOverrides() (settings.AIConfig, bool, error)
+	SetAI(in settings.AIConfig, env settings.AIConfig, actor uuid.UUID) (settings.AIConfig, error)
+	// AIPersonas / SetAIPersonas / AISkills / SetAISkills 为平台人设与
+	// 技能模板（system_settings 的 ai.personas / ai.skills 键；登录侧
+	// GET /ai/personas|/ai/skills 与管理端专用端点消费）。
+	AIPersonas() ([]settings.AIPersonaDef, error)
+	SetAIPersonas(list []settings.AIPersonaDef, actor uuid.UUID) ([]settings.AIPersonaDef, error)
+	AISkills() ([]settings.AISkillDef, error)
+	SetAISkills(list []settings.AISkillDef, actor uuid.UUID) ([]settings.AISkillDef, error)
 }
 type statsSource interface{ Stats() (AdminStats, error) }
 type AdminStats struct {
@@ -488,4 +504,96 @@ func (h *Handler) adminStats(c *gin.Context) {
 		return
 	}
 	c.JSON(200, s)
+}
+
+// ---------- 重建索引（RAG embedding 热切换后重建新 collection） ----------
+
+// reindexLister 为重建索引端点提供分批文件 ID 拉取（游标分页；生产为
+// gorm 直查 gormReindexLister，接口化便于单测注入内存实现，模式同
+// versionReader）。
+type reindexLister interface {
+	// ReindexFileIDs 返回 id 大于 after 的前 limit 个未软删、有当前版本
+	// 的文件 ID（按 id 升序）；spaceID 非 nil 时限定空间。
+	ReindexFileIDs(after uuid.UUID, limit int, spaceID *uuid.UUID) ([]uuid.UUID, error)
+}
+
+type gormReindexLister struct{ db *gorm.DB }
+
+// NewReindexLister 构造生产实现（files 表直查，游标分页避免大库一次性载入）。
+func NewReindexLister(db *gorm.DB) reindexLister { return &gormReindexLister{db: db} }
+
+func (l *gormReindexLister) ReindexFileIDs(after uuid.UUID, limit int, spaceID *uuid.UUID) ([]uuid.UUID, error) {
+	q := l.db.Model(&files.File{}).
+		Where("deleted_at IS NULL AND type = ? AND current_version_id IS NOT NULL AND id > ?", "file", after).
+		Order("id").Limit(limit)
+	if spaceID != nil {
+		q = q.Where("space_id = ?", *spaceID)
+	}
+	var ids []uuid.UUID
+	if err := q.Pluck("id", &ids).Error; err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+// SetReindexLister 注入重建索引的文件列表源（幂等）；nil 不覆盖。未注入
+// 时 POST /admin/settings/ai/reindex 返回 503（生产恒注入）。
+func (h *Handler) SetReindexLister(l reindexLister) {
+	if l != nil {
+		h.reindex = l
+	}
+}
+
+// reindexBatchSize 每批拉取的文件数（游标分页）。
+const reindexBatchSize = 500
+
+// adminPostAIReindex POST /api/v1/admin/settings/ai/reindex {space_id?}：
+// 遍历全部（或指定空间的）未软删、有当前版本的文件，分批重投
+// task:search-index。返回 {queued:n}。切换 embedding 模型后用它重建新库
+// （派生 collection 随 provider+model 变化，旧库数据保留）。两种队列驱动
+// 的 EnqueueSearchIndex 均为异步入队（inprocess 亦在新 goroutine 执行，
+// 不阻塞 HTTP 响应）；索引构建幂等（整行覆盖），端点可安全重复调用。
+func (h *Handler) adminPostAIReindex(c *gin.Context) {
+	if h.tasks == nil || h.reindex == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "search reindex is not configured"})
+		return
+	}
+	var req struct {
+		SpaceID *uuid.UUID `json:"space_id"`
+	}
+	// 请求体可选（空 body / {} = 全量空间）；空 body 表现为 io.EOF。
+	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	queued := 0
+	after := uuid.Nil
+	for {
+		ids, err := h.reindex.ReindexFileIDs(after, reindexBatchSize, req.SpaceID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to list files for reindex", "queued": queued})
+			return
+		}
+		for _, id := range ids {
+			if err := h.tasks.EnqueueSearchIndex(id); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "unable to enqueue search-index", "queued": queued})
+				return
+			}
+			queued++
+		}
+		if len(ids) < reindexBatchSize {
+			break
+		}
+		after = ids[len(ids)-1]
+	}
+	if h.audit != nil {
+		actor := userID(c)
+		var spaceID any
+		if req.SpaceID != nil {
+			spaceID = req.SpaceID.String()
+		}
+		metadata, _ := json.Marshal(map[string]any{"queued": queued, "space_id": spaceID})
+		_ = h.audit.Record(audit.Entry{UserID: &actor, Action: "ai.reindex", ResourceType: audit.ResourceAI, ResourceID: "settings/ai/reindex", Status: audit.StatusSuccess, Metadata: string(metadata)})
+	}
+	c.JSON(http.StatusOK, gin.H{"queued": queued})
 }

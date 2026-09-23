@@ -110,6 +110,101 @@ tags:
       图表文件即普通 .drawio 文件
 
 paths:
+  /folders/{id}/agent-tasks:
+    post:
+      summary: 创建 Agent 创作任务（Agent 关闭时 404）
+      parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
+      requestBody: {required: true, content: {application/json: {schema: {type: object}}}}
+      responses: {'201': {description: Created}}
+  /agent-tasks:
+    get:
+      summary: 列出当前用户 Agent 任务
+      responses: {'200': {description: OK}}
+  /agent-tasks/{id}:
+    get:
+      summary: Agent 任务详情及日志
+      parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
+      responses: {'200': {description: OK}}
+  /agent-tasks/{id}/diff:
+    get:
+      summary: 获取 Agent workspace 产物差异（仅元数据）
+      parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
+      responses: {'200': {description: OK}}
+  /agent-tasks/{id}/logs:
+    get:
+      summary: 获取 Agent 任务日志
+      parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
+      responses: {'200': {description: OK}}
+  /agent-tasks/{id}/cancel:
+    post:
+      summary: 取消 Agent 任务
+      parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
+      responses: {'200': {description: OK}}
+  /agent-tasks/{id}/apply:
+    post:
+      summary: 预留安全写回入口（当前拒绝写回）
+      parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
+      responses: {'409': {description: Writeback disabled}}
+  /agent-tasks/{id}/discard:
+    post:
+      summary: 放弃并清理 Agent workspace 产物
+      parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
+      responses: {'200': {description: OK}}
+  /agent-tasks/{id}/rollback:
+    post:
+      summary: 按任务快照回滚
+      parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
+      responses: {'200': {description: OK}}
+  /admin/settings/agent:
+    get:
+      summary: Agent 配置状态
+      responses: {'200': {description: OK}}
+    put:
+      summary: 更新 Agent 配置（密钥不入库）
+      requestBody: {required: true, content: {application/json: {schema: {type: object}}}}
+      responses: {'200': {description: OK}}
+  /admin/settings/env:
+    get:
+      summary: 启动级环境变量只读总览（敏感值脱敏）
+      security: [{bearerAuth: []}]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  groups:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name: {type: string}
+                        items:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              key: {type: string}
+                              value: {type: string}
+                              note: {type: string}
+                              sensitive: {type: boolean}
+  /webdav/tokens:
+    get:
+      summary: 列出当前用户 WebDAV 令牌
+      security: [{bearerAuth: []}]
+      responses: {"200": {description: OK}}
+    post:
+      summary: 创建 WebDAV 令牌（明文仅返回一次）
+      security: [{bearerAuth: []}]
+      responses: {"201": {description: Created}}
+  /webdav/tokens/{id}:
+    delete:
+      summary: 撤销 WebDAV 令牌
+      security: [{bearerAuth: []}]
+      parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
+      responses: {"204": {description: Revoked}}
   /auth/login:
     post:
       tags: [Auth]
@@ -740,6 +835,36 @@ paths:
       responses:
         '101': {description: WebSocket upgrade}
         '401': {description: 未授权}
+  /collab/{fileId}/ws:
+    get:
+      tags: [Files]
+      operationId: collabFileRoom
+      summary: 富文本实时协作房间（WebSocket）
+      description: >-
+        ProseMirror prosemirror-collab 协作端点（服务端权威排序）。认证与
+        /ws/notifications 一致（Sec-WebSocket-Protocol: "bearer, <JWT>"）；
+        升级前校验目标文件存在且当前用户具备编辑（写）权限。JSON 信封
+        协议：客户端 {type:"join",name,color} / {type:"steps",steps,
+        clientID,version} / {type:"presence",selection:{anchor,head}} /
+        {type:"ping"}；服务器 {type:"init",version,participants} /
+        {type:"steps",version,steps,clientIDs} / {type:"presence",connId,
+        userId,name,color,selection,leader} / {type:"leave",connId} /
+        {type:"error",message}。房间版本为收到的 steps 总数（单调递增）；
+        steps 广播发给全员（含发送者，客户端按 clientID 忽略自己的）；
+        单条消息上限 1MB（超限断开）；多实例部署为每实例内存房间。
+        系统设置 collab.enabled=false 时本端点 404 且不创建房间。
+      parameters:
+        - name: fileId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '101': {description: WebSocket upgrade}
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': {description: 未授权}
+        '403': {description: Origin 不允许或无编辑权限}
+        '404': {description: 文件不存在或协作已禁用（collab.enabled=false）}
+        '503': {description: 协作服务未装配}
   /notifications:
     get:
       tags: [Notifications]
@@ -2034,6 +2159,68 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+
+  /files/{id}/comments:
+    get:
+      tags: [Files]
+      summary: 列出富文本文档评论及回复（需文件读权限）
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: 评论列表 }
+    post:
+      tags: [Files]
+      summary: 为当前版本选区创建评论（需文件写权限）
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version_id, anchor_from, anchor_to, body]
+              properties:
+                version_id: { type: string, format: uuid }
+                anchor_from: { type: integer }
+                anchor_to: { type: integer }
+                quote: { type: string }
+                body: { type: string, maxLength: 4000 }
+      responses:
+        '201': { description: 创建的评论 }
+  /comments/{id}/replies:
+    post:
+      tags: [Files]
+      summary: 回复评论（需文件写权限）
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [body], properties: { body: { type: string, maxLength: 4000 } } }
+      responses:
+        '201': { description: 创建的回复 }
+  /comments/{id}:
+    patch:
+      tags: [Files]
+      summary: 修改本人评论正文或解决状态（文件写权限）
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { body: { type: string, maxLength: 4000 }, status: { type: string, enum: [open, resolved] } } }
+      responses:
+        '200': { description: 更新后的评论 }
+    delete:
+      tags: [Files]
+      summary: 删除本人评论或回复（需文件写权限）
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204': { description: 删除成功 }
 
   /files/{id}/versions:
     get:
@@ -4019,6 +4206,54 @@ paths:
         '409': { $ref: '#/components/responses/Conflict' }
         '429': { $ref: '#/components/responses/RateLimited' }
 
+  /folders/{id}/snapshots:
+    post:
+      tags: [Files]
+      operationId: createDirectorySnapshot
+      summary: 创建目录快照
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { name: { type: string } } }
+      responses:
+        '201': { description: 快照与条目 }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    get:
+      tags: [Files]
+      operationId: listDirectorySnapshots
+      summary: 列出目录快照
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200': { description: 快照列表 }
+  /folders/{id}/diff:
+    get:
+      tags: [Files]
+      operationId: diffDirectorySnapshot
+      summary: 比较快照与当前目录树
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: snapshot_id, in: query, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: 增加、移除、变更、未变路径 }
+  /snapshots/{id}:
+    get:
+      tags: [Files]
+      operationId: getDirectorySnapshot
+      summary: 查看目录快照及条目
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200': { description: 快照详情 }
+  /snapshots/{id}/restore:
+    post:
+      tags: [Files]
+      operationId: restoreDirectorySnapshot
+      summary: 只恢复快照已有且仍存在的文件版本指针
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        '200': { description: 恢复、跳过和冲突路径 }
+        '409': { $ref: '#/components/responses/Conflict' }
+
   /folders/{id}/acl:
     get:
       tags: [Spaces]
@@ -4213,6 +4448,1274 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
         '503':
           description: AI 摘要未启用（code=AI_DISABLED）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /ai/chat:
+    post:
+      tags: [AI]
+      operationId: aiChat
+      summary: AI 对话补全（SSE 流式）
+      description: >-
+        多 Provider 对话（system_settings 的 ai.providers 运行时配置，管理端
+        CRUD）：openai_compatible（POST {base}/chat/completions，SSE 透传
+        delta，不支持流式时自动回退非流式，网络错误/5xx 重试 1 次）、
+        anthropic（{base}/v1/messages）、mock（内置演示 Provider）。PAT 须
+        ai:chat scope；每用户限流按所选 Provider 的 requests_per_min 执行
+        （未配置回落全局 ai.per_user_per_min，默认 20/min），Provider 级
+        daily_quota 可选日限额，超限 429。
+        stream=true（缺省）返回 text/event-stream：event: meta（provider
+        元信息；web_search 生效时附 sources:[{title,url}] 或失败标注
+        search_failed:true）→ sources（检索增强来源，可选）→ tool
+        （use_mcp 外部 MCP 工具与 use_files 内置平台文件工具的执行前
+        进度事件，可选，多次）→ delta（增量
+        文本，多次）→ done（用量）；错误经 event: error。stream=false 返回
+        JSON（web_search 生效时附 web_sources/search_failed 可选字段）。
+        请求体 context.query 触发检索增强（RAG-lite：全文检索 top-k 按当前
+        用户权限过滤，来源带 /view/{id} 链接）；context.fileIds 把指定文件
+        抽取文本（office/pdf/drawio/excalidraw/dfdoc/文本，单文件 8000 字符）
+        拼入上下文。可选 think=true 开启推理思考（仅所选模型勾选
+        capabilities.reasoning 时透传 Provider：openai_compatible 加
+        reasoning_effort=medium；anthropic 加 thinking budget_tokens=2048
+        并按需抬高 max_tokens；模型不支持时静默忽略）。可选 web_search=true
+        开启联网搜索（须管理端配置 ai.search.provider=searxng/tavily，
+        未配置静默跳过；查询取最后一条 user 消息截 400 字，结果注入 system
+        上下文；与 context.query 的 RAG 模式互斥）。AI 未启用（ai.enabled=
+        false 或无可用 Provider）时 404；指定的 Provider 不存在 400；上游
+        失败 502。请求完成记 ai.chat 审计（成功/失败均记，metadata 含
+        provider/model/stream/rag/think/web_search）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [messages]
+              properties:
+                providerId: { type: string, description: 指定 Provider（缺省默认） }
+                model:
+                  type: object
+                  description: >-
+                    可选模型指定（providerId+modelId，均可只填一项）：须归属
+                    启用中的 Provider 且具备 chat 能力，否则 400
+                    AI_MODEL_NOT_ALLOWED；未传用场景默认 chat 模型。
+                  properties:
+                    providerId: { type: string }
+                    modelId: { type: string }
+                stream: { type: boolean, default: true, description: true=SSE 流式 }
+                think:
+                  type: boolean
+                  default: false
+                  description: >-
+                    开启推理思考：仅所选模型 capabilities.reasoning=true 时
+                    向 Provider 透传（openai_compatible: reasoning_effort=
+                    medium；anthropic: thinking budget_tokens=2048）；模型不
+                    支持时静默忽略（不报错）。
+                web_search:
+                  type: boolean
+                  default: false
+                  description: >-
+                    开启联网搜索增强（须管理端配置 ai.search.provider，未配置
+                    静默跳过）：查询取最后一条 user 消息（截 400 字），搜索
+                    结果注入 system 上下文；失败静默降级（meta 标注
+                    search_failed）。与 context.query 的 RAG 模式互斥。
+                use_mcp:
+                  type: boolean
+                  default: false
+                  description: >-
+                    开启外部 MCP 工具循环（须管理端配置启用中的 MCP 服务
+                    ai.mcp，未配置/全部失败时静默按普通对话继续）：聚合
+                    各服务工具供模型调用，模型请求工具时执行并把结果回喂
+                    继续补全（上限 5 轮）。每次工具执行前经 SSE event: tool
+                    下发 {"type":"tool","label":"<服务名> / <工具名>",
+                    "server":"<服务ID>","tool":"<工具名>"}。与 web_search
+                    可同开（互不干扰）；与 context.query 的 RAG 模式互斥。
+                use_files:
+                  type: boolean
+                  default: true
+                  description: >-
+                    开启内置平台文件工具（默认 true，用户至少有一个空间即
+                    可用；显式 false 关闭）：AI 可调用平台文件工具在工作
+                    目录（用户默认空间根）内读写文件——df_list_dir（列目录，
+                    50 条截断）/df_read_file（读文本，PDF/office/drawio 等
+                    自动抽取，24000 字符截断）/df_write_file（创建或覆盖
+                    文本文件，扩展名白名单、≤2MB，覆盖自动保留历史版本）/
+                    df_mkdir（多级建目录）/df_search（全文搜索 top 8）；不
+                    提供删除/移动。每次执行经 SSE event: tool 下发（server
+                    固定 docflow）并写 ai.tool 审计；文件依赖未装配/无空间
+                    时静默跳过。与 use_mcp 可同开（合并进同一工具循环）；
+                    与 context.query 的 RAG 模式互斥。
+                include_docs:
+                  type: boolean
+                  default: false
+                  description: >-
+                    开启「我的文件」检索：以最后一条 user 消息为查询检索
+                    本人可见文档（关键词/混合按平台 RAG 配置，rerank 生效），
+                    命中片段注入 system 上下文，来源经 sources 事件/字段
+                    回传；检索失败或无命中静默跳过。与 context.query 的
+                    RAG 模式互斥（RAG 已有知识库语义）。
+                work_root:
+                  type: string
+                  format: uuid
+                  description: >-
+                    工作目录 folderID（可选）：use_files 平台文件工具相对
+                    路径的解析基准（AI 在该目录内读写文件）；空/非法回落
+                    用户默认空间根。
+                messages:
+                  type: array
+                  items:
+                    type: object
+                    required: [role, content]
+                    properties:
+                      role: { type: string, enum: [system, user, assistant] }
+                      content: { type: string }
+                context:
+                  type: object
+                  properties:
+                    query: { type: string, description: 检索增强（RAG-lite）问题 }
+                    fileIds:
+                      type: array
+                      items: { type: string, format: uuid }
+                      description: 拼入上下文的文件
+      responses:
+        '200':
+          description: SSE 流（stream=true）或 JSON 结果（stream=false）
+          content:
+            text/event-stream:
+              schema:
+                type: object
+                description: SSE 事件流（meta/sources/delta/done/error）
+            application/json:
+              schema:
+                type: object
+                properties:
+                  content: { type: string }
+                  sources:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        file_id: { type: string, format: uuid }
+                        name: { type: string }
+                        url: { type: string }
+                  provider_id: { type: string }
+                  provider_name: { type: string }
+                  model: { type: string }
+                  usage:
+                    type: object
+                    properties:
+                      prompt_tokens: { type: integer }
+                      completion_tokens: { type: integer }
+                      duration_ms: { type: integer }
+        '400':
+          description: 请求非法 / Provider 不存在（AI_PROVIDER_NOT_FOUND）/ 模型越权（AI_MODEL_NOT_ALLOWED）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: AI 未启用（ai.enabled=false 或无可用 Provider，全站入口隐藏）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '502':
+          description: 上游请求失败（stream=false 时）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: AI 服务未装配（code=AI_DISABLED）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /ai/models:
+    get:
+      tags: [AI]
+      operationId: aiModels
+      summary: 可用模型列表（登录即可，非管理员）
+      description: >-
+        返回启用 Provider 的可用模型（含能力勾选 chat/embedding/vision/
+        rerank/reasoning——reasoning 标记模型支持推理思考，前端据此判断
+        think 参数是否默认开启）与场景默认模型（default_models：chat/
+        summary/edit，运行时 summary/edit 无效回落 chat）。绝不返回
+        api_key/base_url 等密钥类信息；AI 未启用时 404（与 /ai/chat 同语义）。
+      responses:
+        '200':
+          description: 模型列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  providers:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
+                        kind: { type: string, enum: [openai_compatible, anthropic, mock] }
+                        personal:
+                          type: boolean
+                          description: 个人池条目标记（双轨制；true 时该 Provider 为用户自备，名带「（个人）」后缀）
+                        models:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              id: { type: string }
+                              label: { type: string }
+                              capabilities:
+                                type: object
+                                properties:
+                                  chat: { type: boolean }
+                                  embedding: { type: boolean }
+                                  vision: { type: boolean }
+                                  rerank: { type: boolean }
+                                  reasoning: { type: boolean, description: 支持推理思考（think 参数） }
+                  default_models:
+                    type: object
+                    description: 场景默认模型（provider_id+model_id）
+                    additionalProperties:
+                      type: object
+                      properties:
+                        provider_id: { type: string }
+                        model_id: { type: string }
+                  personas:
+                    type: array
+                    description: 平台人设（ai.personas 键，管理员维护；非敏感明文——含 system_prompt，供前端人设下拉注入）
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
+                        system_prompt: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: AI 未启用
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /ai/personal-settings:
+    get:
+      tags: [AI]
+      operationId: getAIPersonalSettings
+      summary: 个人 AI 配置（双轨制：本人维度，掩码回显）
+      description: >-
+        读取当前用户的个人 AI 配置（user_ai_prefs，migration 049）：providers
+        （≤8，kind 仅 openai_compatible/anthropic）/default_models
+        （chat/summary/edit/embedding）/personas（≤20）/prefer_personal。
+        api_key 任何读路径不回显：Provider 仅报 api_key_configured 布尔。
+        未配置时返回空结构（providers=[]）。
+      responses:
+        '200':
+          description: 掩码视图的个人配置
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  prefs:
+                    type: object
+                    properties:
+                      providers:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id: { type: string }
+                            name: { type: string }
+                            kind: { type: string, enum: [openai_compatible, anthropic] }
+                            base_url: { type: string }
+                            api_key_configured: { type: boolean, description: 已配置密钥（明文永不回显） }
+                            models:
+                              type: array
+                              items:
+                                type: object
+                                properties:
+                                  id: { type: string }
+                                  label: { type: string }
+                                  capabilities:
+                                    type: object
+                                    properties:
+                                      chat: { type: boolean }
+                                      embedding: { type: boolean }
+                                      vision: { type: boolean }
+                                      rerank: { type: boolean }
+                                      reasoning: { type: boolean }
+                      default_models:
+                        type: object
+                        description: 个人场景默认模型（provider_id+model_id 须指向个人池）
+                        additionalProperties:
+                          type: object
+                          properties:
+                            provider_id: { type: string }
+                            model_id: { type: string }
+                      personas:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id: { type: string }
+                            name: { type: string }
+                            system_prompt: { type: string, description: ≤4000 字符 }
+                      prefer_personal:
+                        type: boolean
+                        description: 未显式指定模型时个人场景默认优先于平台默认
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503':
+          description: 个人配置存储未装配
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    put:
+      tags: [AI]
+      operationId: putAIPersonalSettings
+      summary: 保存个人 AI 配置（整块替换）
+      description: >-
+        整块替换本人个人 AI 配置（user_ai_prefs）。provider 的 api_key 留空 =
+        继承现值（按 Provider ID 服务端合并，不覆盖为空串）；校验失败 400
+        （code=INVALID_AI_PREFS，error 含字段定位：providers 上限 8 / kind 仅
+        openai_compatible/anthropic / base_url 须绝对 http(s) / models 上限
+        20 且 id 唯一 / default_models 键限 chat/summary/edit/embedding 且引用
+        须指向个人池对应能力模型 / personas 上限 20 且 system_prompt ≤4000
+        字符）。成功返回掩码视图（api_key 不回显）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                providers:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      id: { type: string }
+                      name: { type: string }
+                      kind: { type: string, enum: [openai_compatible, anthropic] }
+                      base_url: { type: string }
+                      api_key: { type: string, description: 留空 = 保持现值；任何读路径不回显 }
+                      models:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id: { type: string }
+                            label: { type: string }
+                            capabilities:
+                              type: object
+                              properties:
+                                chat: { type: boolean }
+                                embedding: { type: boolean }
+                                vision: { type: boolean }
+                                rerank: { type: boolean }
+                                reasoning: { type: boolean }
+                default_models:
+                  type: object
+                  additionalProperties:
+                    type: object
+                    properties:
+                      provider_id: { type: string }
+                      model_id: { type: string }
+                personas:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      id: { type: string }
+                      name: { type: string }
+                      system_prompt: { type: string }
+                prefer_personal: { type: boolean }
+      responses:
+        '200':
+          description: 保存后的掩码视图（结构同 GET）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  prefs:
+                    type: object
+                    description: 掩码视图（api_key_configured 替代明文）
+        '400':
+          description: 载荷非法（INVALID_AI_PREFS，error 含字段定位）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503':
+          description: 个人配置存储未装配
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /ai/personas:
+    get:
+      tags: [AI]
+      operationId: aiPersonasList
+      summary: 平台人设列表（登录可用）
+      description: >-
+        读取平台人设（system_settings 的 ai.personas 键，管理员维护、
+        热读取）：[{id,name,system_prompt}]，非敏感明文。空配置/读取失败
+        返回空数组（配置数据 best-effort，不随 AI 总开关 404）。
+      responses:
+        '200':
+          description: 平台人设数组
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  personas:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
+                        system_prompt: { type: string, description: ≤4000 字符 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /ai/skills:
+    get:
+      tags: [AI]
+      operationId: aiSkillsList
+      summary: 平台技能模板列表（登录可用）
+      description: >-
+        读取平台技能/快捷指令模板（ai.skills 键）：[{id,name,description,
+        prompt}]，prompt 支持 {selection}/{file} 占位符（前端替换）。
+        语义同 /ai/personas（空配置返回空数组）。
+      responses:
+        '200':
+          description: 平台技能数组
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  skills:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
+                        description: { type: string }
+                        prompt: { type: string, description: "≤4000 字符，支持 {selection}/{file} 占位符" }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /ai/mcp:
+    get:
+      tags: [AI]
+      operationId: aiMCPList
+      summary: 启用中的外部 MCP 服务列表（登录可用）
+      description: >-
+        读取平台配置的外部 MCP 服务器（system_settings 的 ai.mcp 键，管理
+        员维护、热读取）中启用项的 [{id,name}]——前端 use_mcp 开关展示
+        用。不泄露 url/auth_header；空配置/读取失败返回空数组（配置数据
+        best-effort，不随 AI 总开关 404）。
+      responses:
+        '200':
+          description: 启用中的 MCP 服务
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  services:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /ai/memory:
+    get:
+      tags: [AI]
+      operationId: aiMemoryList
+      summary: 本人长期记忆列表（手动维护）
+      description: >-
+        读取当前用户的长期记忆（ai_memory 表，migration 050，本人维度；
+        仅手动维护——自动提取 v1 不做）：最新在前，≤200 条。
+      responses:
+        '200':
+          description: 记忆列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  memories:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string, format: uuid }
+                        kind: { type: string, enum: [manual, auto], description: auto 为预留值（API 拒绝写入） }
+                        content: { type: string, description: ≤2000 字符 }
+                        created_at: { type: string, format: date-time }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503':
+          description: 记忆存储未装配
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    post:
+      tags: [AI]
+      operationId: aiMemoryCreate
+      summary: 新增一条手动记忆
+      description: >-
+        新增本人记忆（kind 缺省 manual；auto 为预留值，API 拒绝）。
+        content 去空白后非空且 ≤2000 字符。/ai/chat 的 include_memory=true
+        时取最近 20 条拼入 system 上下文。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content: { type: string, description: ≤2000 字符 }
+                kind: { type: string, enum: [manual] }
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  memory:
+                    type: object
+                    properties:
+                      id: { type: string, format: uuid }
+                      kind: { type: string }
+                      content: { type: string }
+                      created_at: { type: string, format: date-time }
+        '400':
+          description: 载荷非法（code=INVALID_AI_MEMORY）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503':
+          description: 记忆存储未装配
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /ai/memory/{id}:
+    delete:
+      tags: [AI]
+      operationId: aiMemoryDelete
+      summary: 删除本人一条记忆
+      description: 删除本人记忆；不存在/非本人 404（不区分，避免越权探测）。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: 已删除 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503':
+          description: 记忆存储未装配
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    put:
+      tags: [AI]
+      operationId: aiMemoryUpdate
+      summary: 编辑本人一条记忆
+      description: >-
+        编辑本人记忆的 content（kind 不变）；校验同新增（去空白后非空
+        且 ≤2000 字符）。不存在/非本人 404（不区分，避免越权探测——
+        语义同 DELETE）。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content: { type: string, description: ≤2000 字符 }
+      responses:
+        '200':
+          description: 已更新（回显该条记忆）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  memory:
+                    type: object
+                    properties:
+                      id: { type: string, format: uuid }
+                      kind: { type: string }
+                      content: { type: string }
+                      created_at: { type: string, format: date-time }
+        '400':
+          description: 载荷非法（code=INVALID_AI_MEMORY）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503':
+          description: 记忆存储未装配
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /ai/status:
+    get:
+      tags: [AI]
+      operationId: aiStatus
+      summary: AI 能力可用性（前端入口显隐）
+      description: >-
+        登录用户读取 AI 能力标志对象：enabled 为总开关（ai.enabled 显式
+        false 关闭 + 存在启用中的 Provider，system_settings 的 ai.providers
+        与 env AI_* 兜底）；agent 为 Agent 创作舱（agent.enabled 未配置
+        默认 true，AI 总开关关闭时连带 false）；web_search 为联网搜索
+        （管理端配置 ai.search.provider 非空）；mcp 为外部 MCP 工具
+        （ai.mcp 存在启用中的服务，读取失败容错 false）；rag 为知识库问答
+        （引用文件基于关键词检索，AI 开即可用，= enabled）。前端据
+        enabled=false 隐藏全站 AI 入口，各能力标志驱动对应入口显隐。
+        本端点不随开关 404（否则无法区分「关闭」与「未部署」），无
+        scope 要求（仅暴露布尔值）。
+      responses:
+        '200':
+          description: AI 能力标志
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [enabled, agent, web_search, mcp, rag]
+                properties:
+                  enabled: { type: boolean }
+                  agent:
+                    type: boolean
+                    description: Agent 创作舱可用（agent.enabled 默认 true；AI 总开关关闭时 false）
+                  web_search:
+                    type: boolean
+                    description: 联网搜索已配置（ai.search.provider 非空）
+                  mcp:
+                    type: boolean
+                    description: 存在启用中的外部 MCP 服务（ai.mcp）
+                  rag:
+                    type: boolean
+                    description: 知识库问答可用（= enabled）
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /ai/summarize:
+    post:
+      tags: [AI]
+      operationId: aiSummarize
+      summary: 文件 AI 摘要（全类型抽取）
+      description: >-
+        抽取文件当前版本内容（md/txt/源码直读；.dfdoc Tiptap JSON 遍历；
+        drawio mxGraphModel value；excalidraw elements.text；docx/xlsx/pptx
+        纯 Go 解析 zip+XML；pdf 简单字体流解析）后交 ChatService 生成摘要；
+        不支持全文抽取的二进制类型按「标题+元信息+描述」占位如实标注。
+        PAT 须 ai:chat scope；每用户限流同 /ai/chat。stream=true 时 SSE
+        输出（delta/done）；缺省 JSON。文件不存在 404。可选 think=true
+        开启推理思考（仅摘要场景默认模型勾选 capabilities.reasoning 时
+        向 Provider 透传，模型不支持时静默忽略）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [fileId]
+              properties:
+                fileId: { type: string, format: uuid }
+                stream: { type: boolean, default: false }
+                think:
+                  type: boolean
+                  default: false
+                  description: 开启推理思考（模型须 capabilities.reasoning；不支持时静默忽略）
+      responses:
+        '200':
+          description: 摘要结果
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [summary]
+                properties:
+                  summary: { type: string }
+                  provider_id: { type: string }
+                  provider_name: { type: string }
+                  model: { type: string }
+                  usage:
+                    type: object
+                    properties:
+                      prompt_tokens: { type: integer }
+                      completion_tokens: { type: integer }
+                      duration_ms: { type: integer }
+            text/event-stream:
+              schema: { type: object, description: SSE 事件流（meta/delta/done） }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '502':
+          description: 上游请求失败
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: AI 服务未装配（code=AI_DISABLED）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /admin/settings/ai:
+    get:
+      tags: [admin, AI]
+      operationId: getAISettings
+      summary: AI 运行时配置（Provider 列表，密钥掩码）
+      description: >-
+        读取生效配置：system_settings 的 ai.* 入库覆盖 → env（AI_*）回退。
+        Provider 的 api_key 永不回显，仅报 api_key_configured；env 合成的
+        Provider（id=env）标 is_env=true。enabled 为生效总开关（ai.enabled
+        显式 false 关闭；否则有启用中的 Provider 即启用）。
+      responses:
+        '200':
+          description: 生效配置
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  enabled: { type: boolean, description: 生效总开关（前端入口/网关 404 依据） }
+                  providers:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
+                        kind: { type: string, enum: [openai_compatible, anthropic, mock] }
+                        base_url: { type: string }
+                        model: { type: string, description: 主模型（models 非空时自动同步为首个 chat 能力模型） }
+                        models:
+                          type: array
+                          description: 生效模型列表（旧配置无 models 时按 base_url+model 合成单模型）
+                          items:
+                            type: object
+                            properties:
+                              id: { type: string }
+                              label: { type: string }
+                              capabilities:
+                                type: object
+                                properties:
+                                  chat: { type: boolean }
+                                  embedding: { type: boolean }
+                                  vision: { type: boolean }
+                                  rerank: { type: boolean }
+                        enabled: { type: boolean }
+                        api_key_configured: { type: boolean }
+                        is_env: { type: boolean }
+                        requests_per_min: { type: integer, description: Provider 级每用户每分钟限额（0=全局兜底） }
+                        daily_quota: { type: integer, description: Provider 级每用户每日限额（0=不限） }
+                  default_provider: { type: string }
+                  default_models:
+                    type: object
+                    description: 场景默认模型（chat/summary/edit/embedding；summary/edit 无效时运行时回落 chat）
+                    additionalProperties:
+                      type: object
+                      properties:
+                        provider_id: { type: string }
+                        model_id: { type: string }
+                  temperature: { type: number }
+                  max_tokens: { type: integer }
+                  per_user_per_min: { type: integer }
+                  personas:
+                    type: array
+                    description: 平台人设（ai.personas 键，非敏感明文回显）
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
+                        system_prompt: { type: string, description: ≤4000 字符 }
+                  env:
+                    type: object
+                    properties:
+                      enabled: { type: boolean }
+                      base_url: { type: string }
+                      model: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    put:
+      tags: [admin, AI]
+      operationId: putAISettings
+      summary: 保存 AI 运行时配置
+      description: >-
+        整体保存 providers 与默认项：Provider 的 api_key 留空 = 保持现值
+        （只写不读）；kind 取 openai_compatible/anthropic/mock，非 mock 须
+        绝对 http(s) base_url 与 model；ID 唯一、default_provider 须存在、
+        temperature 0-2、max_tokens 1-128000、per_user_per_min 0-10000。
+        enabled（总开关）载荷缺省 = 保持现值；personas 载荷缺省 = 保持现值
+        （非 nil 含空数组 = 整块替换，校验同 /admin/settings/ai/personas）。
+        校验失败 400 INVALID_AI_SETTINGS；成功写 settings.update 审计（密钥打码）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled: { type: boolean, description: 总开关（缺省 = 保持现值） }
+                providers:
+                  type: array
+                  items:
+                    type: object
+                    required: [id, name, kind]
+                    properties:
+                      id: { type: string }
+                      name: { type: string }
+                      kind: { type: string, enum: [openai_compatible, anthropic, mock] }
+                      base_url: { type: string }
+                      api_key: { type: string, description: 留空 = 保持现值 }
+                      model: { type: string }
+                      enabled: { type: boolean }
+                default_provider: { type: string }
+                temperature: { type: number }
+                max_tokens: { type: integer }
+                per_user_per_min: { type: integer }
+                personas:
+                  type: array
+                  description: 平台人设整块替换（缺省 = 保持现值；空数组 = 清空）
+                  items:
+                    type: object
+                    required: [id, name]
+                    properties:
+                      id: { type: string, description: 1..64 字符，唯一 }
+                      name: { type: string, description: 1..64 字符 }
+                      system_prompt: { type: string, description: ≤4000 字符 }
+      responses:
+        '200':
+          description: 合并后的生效配置（同 GET 响应结构）
+          content:
+            application/json:
+              schema: { type: object }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/settings/ai/personas:
+    get:
+      tags: [admin, AI]
+      operationId: adminGetAIPersonas
+      summary: 平台人设列表（管理端，同 /ai/personas）
+      description: 读取平台人设（ai.personas 键）；语义与登录侧 GET /ai/personas 一致。
+      responses:
+        '200':
+          description: 平台人设数组
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  personas:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
+                        system_prompt: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    put:
+      tags: [admin, AI]
+      operationId: adminPutAIPersonas
+      summary: 整块替换平台人设
+      description: >-
+        整块替换平台人设（ai.personas 键，EffectImmediate 热生效）：
+        ≤50 条、id 去空白后 1..64 且唯一、name 1..64、system_prompt ≤4000
+        字符；校验失败 400 INVALID_AI_PERSONAS。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [personas]
+              properties:
+                personas:
+                  type: array
+                  items:
+                    type: object
+                    required: [id, name]
+                    properties:
+                      id: { type: string, description: 1..64 字符，唯一 }
+                      name: { type: string, description: 1..64 字符 }
+                      system_prompt: { type: string, description: ≤4000 字符 }
+      responses:
+        '200':
+          description: 归一化后的平台人设
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  personas:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
+                        system_prompt: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/settings/ai/skills:
+    get:
+      tags: [admin, AI]
+      operationId: adminGetAISkills
+      summary: 平台技能模板列表（管理端，同 /ai/skills）
+      description: 读取平台技能模板（ai.skills 键）；语义与登录侧 GET /ai/skills 一致。
+      responses:
+        '200':
+          description: 平台技能数组
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  skills:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
+                        description: { type: string }
+                        prompt: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    put:
+      tags: [admin, AI]
+      operationId: adminPutAISkills
+      summary: 整块替换平台技能模板
+      description: >-
+        整块替换平台技能模板（ai.skills 键）：≤50 条、id 唯一、name
+        1..64、description ≤200、prompt ≤4000 字符；校验失败 400
+        INVALID_AI_SKILLS。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [skills]
+              properties:
+                skills:
+                  type: array
+                  items:
+                    type: object
+                    required: [id, name, prompt]
+                    properties:
+                      id: { type: string, description: 1..64 字符，唯一 }
+                      name: { type: string, description: 1..64 字符 }
+                      description: { type: string, description: ≤200 字符 }
+                      prompt: { type: string, description: "≤4000 字符，支持 {selection}/{file} 占位符" }
+      responses:
+        '200':
+          description: 归一化后的平台技能
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  skills:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
+                        description: { type: string }
+                        prompt: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/settings/ai/mcp:
+    get:
+      tags: [admin, AI]
+      operationId: adminGetAIMCPServices
+      summary: 外部 MCP 服务列表（管理端）
+      description: >-
+        读取平台配置的外部 MCP 服务器（ai.mcp 键）：[{id,name,url,enabled,
+        auth_header_configured}]。auth_header 为密钥（只写不读），仅回显
+        configured 布尔，绝不回显明文（同 search.tavily 掩码模式）。
+      responses:
+        '200':
+          description: MCP 服务列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  services:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
+                        url: { type: string, description: Streamable HTTP 端点（绝对 http(s) 地址） }
+                        enabled: { type: boolean }
+                        auth_header_configured: { type: boolean }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    put:
+      tags: [admin, AI]
+      operationId: adminPutAIMCPServices
+      summary: 整块替换外部 MCP 服务列表
+      description: >-
+        整块替换 ai.mcp 键（EffectImmediate 热生效）：≤8 条、id 去空白后
+        1..64 且唯一、name 1..64、url 为绝对 http(s) 地址且 ≤500 字符、
+        auth_header ≤1000（形如 "Authorization: Bearer <token>"）。auth_header
+        留空 = 按 ID 继承现值（密钥只写不读）；校验失败 400 INVALID_AI_MCP。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [services]
+              properties:
+                services:
+                  type: array
+                  items:
+                    type: object
+                    required: [id, name, url]
+                    properties:
+                      id: { type: string, description: 1..64 字符，唯一 }
+                      name: { type: string, description: 1..64 字符 }
+                      url: { type: string, description: 绝对 http(s) 地址，≤500 字符 }
+                      enabled: { type: boolean }
+                      auth_header: { type: string, description: '"Header-Name: value" 形式；留空 = 继承现值' }
+      responses:
+        '200':
+          description: 归一化后的 MCP 服务列表（同 GET 响应结构）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  services:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
+                        url: { type: string }
+                        enabled: { type: boolean }
+                        auth_header_configured: { type: boolean }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/settings/ai/mcp/test:
+    post:
+      tags: [admin, AI]
+      operationId: adminTestAIMCP
+      summary: 外部 MCP 服务连接测试
+      description: >-
+        用请求给定的 url/auth_header 实测 MCP 服务器连通性（支持测试未
+        保存的草稿配置）：initialize + tools/list，返回工具总数、前 10
+        个工具名与往返延迟。10s 超时；连接失败也返回 200，ok=false 携带
+        中文错误详情。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url: { type: string, description: Streamable HTTP 端点（绝对 http(s) 地址） }
+                auth_header: { type: string, description: '"Header-Name: value" 形式，可选' }
+      responses:
+        '200':
+          description: 测试结果（连接失败也返回 200，ok=false 携带错误）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  tools: { type: integer, description: 工具总数 }
+                  names:
+                    type: array
+                    items: { type: string }
+                    description: 前 10 个工具名
+                  latency_ms: { type: integer }
+                  error: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/settings/ai/test:
+    post:
+      tags: [admin, AI]
+      operationId: testAIProvider
+      summary: AI Provider 连接测试
+      description: 向指定 Provider 发送一条 ping 消息，返回往返延迟与错误详情（ok=false 时 error/code 字段）。30s 超时。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [providerId]
+              properties:
+                providerId: { type: string }
+      responses:
+        '200':
+          description: 测试结果（连接失败也返回 200，ok=false 携带错误）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  latency_ms: { type: integer }
+                  error: { type: string }
+                  code: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/settings/ai/rag/test:
+    post:
+      tags: [admin, AI]
+      operationId: testAIRAG
+      summary: 测试已保存的 Embedding 与 Qdrant 配置
+      responses:
+        '200':
+          description: 测试结果（失败时 ok=false 和 error）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  message: { type: string }
+                  error: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/settings/ai/reindex:
+    post:
+      tags: [admin, AI]
+      operationId: adminPostAIReindex
+      summary: 重建全文与向量索引（切换 embedding 模型后使用）
+      description: >-
+        遍历全部（或指定空间的）未软删且有当前版本的文件，按 500 一批游标
+        分页重投 task:search-index，返回入队数 {queued}。RAG embedding 切换
+        Provider/模型后派生 collection 随之变化（同 provider+model 同库、切
+        模型即换库，旧库数据保留），调用本端点重建新库。索引构建幂等，可
+        安全重复调用；inprocess/redis 两种队列驱动均为异步入队。
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                space_id: { type: string, format: uuid, description: 限定空间（缺省 = 全部空间） }
+      responses:
+        '200':
+          description: 已入队
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  queued: { type: integer, description: 已重投 task:search-index 的文件数 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '503':
+          description: 队列入队器或文件列表源未装配
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /admin/ai/usage:
+    get:
+      tags: [admin, AI]
+      operationId: adminAIUsage
+      summary: AI 用量统计（按用户聚合）
+      description: ai_usage 表按用户+Provider+模型聚合的统计（调用次数/tokens/平均耗时），日期过滤 from/to（YYYY-MM-DD，含 to 当天），limit 缺省 100。
+      parameters:
+        - name: from
+          in: query
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          schema: { type: string, format: date }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 100 }
+      responses:
+        '200':
+          description: 聚合结果
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rows:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        user_id: { type: string, format: uuid }
+                        username: { type: string }
+                        provider_id: { type: string }
+                        model: { type: string }
+                        calls: { type: integer }
+                        prompt_tokens: { type: integer }
+                        completion_tokens: { type: integer }
+                        total_tokens: { type: integer }
+                        avg_duration_ms: { type: integer }
+                  total:
+                    type: object
+                    properties:
+                      calls: { type: integer }
+                      tokens: { type: integer }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '503':
+          description: 用量统计未装配
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }

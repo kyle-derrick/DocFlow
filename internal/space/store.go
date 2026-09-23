@@ -129,12 +129,15 @@ func roleLevelSQL(column string) string {
 	          WHEN 'member_share' THEN 2 WHEN 'member' THEN 1 WHEN 'guest' THEN 0 ELSE -1 END`
 }
 
+// ListForUser 列出用户可见空间（直接成员 ∪ 用户组命中）。表别名 s 为
+// visibleSpacesSQL 的关联引用所需（GORM Find 默认 FROM "spaces" 无别名，
+// 缺别名时 PostgreSQL 报 missing FROM-clause entry for table "s"）。
 func (s *GormStore) ListForUser(userID uuid.UUID) ([]Space, error) {
 	var out []Space
 	cond, args := visibleSpacesSQL(userID)
-	err := s.db.
-		Where("deleted_at IS NULL AND ("+cond+")", args...).
-		Order("is_default DESC, created_at DESC, id").Find(&out).Error
+	err := s.db.Table("spaces AS s").
+		Where("s.deleted_at IS NULL AND ("+cond+")", args...).
+		Order("s.is_default DESC, s.created_at DESC, s.id").Find(&out).Error
 	return out, err
 }
 

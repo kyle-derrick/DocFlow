@@ -22,6 +22,7 @@ import (
 	"github.com/docflow/docflow/internal/audit"
 	"github.com/docflow/docflow/internal/auth"
 	"github.com/docflow/docflow/internal/caddytls"
+	"github.com/docflow/docflow/internal/collab"
 	"github.com/docflow/docflow/internal/config"
 	"github.com/docflow/docflow/internal/contenturl"
 	"github.com/docflow/docflow/internal/files"
@@ -301,6 +302,19 @@ func main() {
 	}
 	searchStore := search.NewStore(searchRepo)
 	searchIndexer := search.NewIndexer(searchStore, db, storage)
+	// Vector RAG：embedding Provider/模型热切换（免重启）。AI 启用即装配
+	// Qdrant 单例客户端（构造不建连接），embedding 与 collection 派生名
+	// 每次索引/检索时按当前热配置解析（见下方 resolveVectors）；RAGMode/
+	// vector_enabled 的门槛判断保留在使用时——未启用向量路径则零 Qdrant
+	// 请求（与旧行为一致）。collection 按 provider+model 派生：切模型即
+	// 换库（旧库保留），切换后用 POST /admin/settings/ai/reindex 重建。
+	var vectorClient *ai.QdrantClient
+	if cfg.AIEnabled && cfg.RAGQdrantURL != "" {
+		vectorClient = ai.NewQdrantClient(cfg.RAGQdrantURL, cfg.RAGCollectionPrefix+"global", 10*time.Second)
+		log.Printf("vector RAG armed for hot config (qdrant=%s; embedding resolved per request)", cfg.RAGQdrantURL)
+	} else {
+		log.Print("vector RAG disabled; using keyword retrieval")
+	}
 	completeUpload := tasks.CompleteUploadHandler(uploadService, auditStore)
 	extractWebpkg := tasks.ExtractWebpkgHandler(webpkgService)
 	searchIndex := tasks.SearchIndexHandler(searchIndexer)
@@ -496,11 +510,17 @@ func main() {
 		log.Fatal(err)
 	}
 	handler := httpapi.NewHandler(service, userStore, fileStore, shareService, spaceService, uploadService, storage, cfg.CookieSecure, cfg.CookieDomain, cfg.RefreshTokenTTL)
+	handler.SetCommentsDB(db)
 	handler.SetReadinessChecker(readiness.New(sqlDB, cfg, storage))
 	handler.SetAuditRecorder(auditStore)
 	handler.SetAuditQuerySource(auditStore)
 	handler.SetRealtimeHub(realtimeHub, cfg.AllowedOrigins, cfg.Environment)
 	handler.SetWSSecret(cfg.JWTSecret)
+	// 富文本实时协作房间（internal/collab）：每实例内存房间（Manager），
+	// WS 端点 /api/v1/collab/:fileId/ws 复用上方 JWT 子协议认证，加入前
+	// 经 files 的 ValidateReplaceTarget 校验目标文件写权限；总开关为
+	// system_settings 的 collab.enabled（默认启用，热读取）。
+	handler.SetCollabManager(collab.NewManager())
 	handler.SetBackupDir(cfg.BackupDir)
 	// 标签与收藏：Tag CRUD / 文件打去标签 / is_starred / 列表过滤
 	//（文件读授权复用 fileStore.Get 的 authorizeFileAccess 语义）。
@@ -515,6 +535,123 @@ func main() {
 	if cfg.AIEnabled {
 		log.Printf("ai summary enabled (base=%s model=%s)", cfg.AIBaseURL, cfg.AIModel)
 	}
+	// AI 能力第一版（多 Provider ChatService）：system_settings 的 ai.* 键
+	//（管理端 CRUD）为运行时配置，env（AI_*）合成 id=env 的兜底 Provider；
+	// 每次请求热读取（DB 覆盖 → env 回退）。用量记录 ai_usage（migration
+	// 044），管理面板按用户聚合。
+	aiEnvBaseline := settings.DefaultAIConfig()
+	aiEnvBaseline.RAG = settings.AIRAGConfig{Mode: cfg.RAGMode, VectorEnabled: cfg.RAGVectorEnabled, QdrantURL: cfg.RAGQdrantURL, CollectionPrefix: cfg.RAGCollectionPrefix, EmbeddingProvider: cfg.RAGEmbeddingProvider, EmbeddingModel: cfg.RAGEmbeddingModel, TopK: cfg.RAGTopK, ChunkSize: cfg.RAGChunkSize, ChunkOverlap: cfg.RAGChunkOverlap}
+	if cfg.AIEnabled {
+		aiEnvBaseline.Providers = []settings.AIProvider{{
+			ID: "env", Name: "Env (AI_*)", Kind: settings.AIKindOpenAICompatible,
+			BaseURL: cfg.AIBaseURL, APIKey: cfg.AIAPIKey, Model: cfg.AIModel, Enabled: true,
+		}}
+		aiEnvBaseline.DefaultProvider = "env"
+	}
+	aiUsageStore := ai.NewUsageStore(db)
+	aiService := ai.NewService(func() (settings.AIConfig, error) {
+		effective := aiEnvBaseline
+		if ov, _, err := settingsStore.AIOverrides(); err == nil {
+			effective.Enabled = ov.Enabled // 总开关（ai.enabled；nil = 自动判定）
+			if len(ov.Providers) > 0 {
+				effective.Providers = ov.Providers
+			}
+			if ov.DefaultProvider != "" {
+				effective.DefaultProvider = ov.DefaultProvider
+			}
+			effective.Temperature = ov.Temperature
+			effective.MaxTokens = ov.MaxTokens
+			effective.PerUserPerMin = ov.PerUserPerMin
+			if ov.RAG.Mode != "" {
+				effective.RAG = ov.RAG
+			}
+			// OCR 为整体 JSON 块（同 RAG 块语义）：载荷未带（零值）保持
+			// env 基线（默认关闭）；带块即热生效（AIOverrides 已钳制
+			// max_image_bytes）。
+			if ov.OCR != (settings.AIOCRConfig{}) {
+				effective.OCR = ov.OCR
+			}
+		}
+		return effective, nil
+	})
+	aiService.SetUsageStore(aiUsageStore)
+	aiService.SetSearcher(searchStore)
+	// 外部 MCP 工具（ai.mcp 键热读取）：use_mcp 对话经工具循环调用外部
+	// MCP 服务器；未装配/读取失败时静默降级为普通对话。
+	aiService.SetMCPReader(func() []settings.AIMCPServiceDef {
+		list, _ := settingsStore.AIMCPServices()
+		return list
+	})
+	if vectorClient != nil {
+		ragEffective := func() settings.AIRAGConfig {
+			effective := aiEnvBaseline.RAG
+			if ov, _, err := settingsStore.AIOverrides(); err == nil && ov.RAG.Mode != "" {
+				effective = ov.RAG
+			}
+			return effective
+		}
+		// 向量路径热解析（索引与检索共用）：RAG mode/开关未启用 →
+		// ErrVectorDisabled（索引安静跳过、检索降级关键词，零 Qdrant
+		// 连接）；启用 → ResolveEmbedding 按当前 Provider/模型派生
+		// collection，取 Qdrant 单例的 Scope 视图（同配置同库、切模型
+		// 即换库）。
+		resolveVectors := func() (ai.EmbeddingProvider, ai.VectorStore, error) {
+			rag := ragEffective()
+			if rag.Mode != "hybrid" || !rag.VectorEnabled {
+				return nil, nil, ai.ErrVectorDisabled
+			}
+			embedding, collection, err := aiService.ResolveEmbedding()
+			if err != nil {
+				return nil, nil, err
+			}
+			return embedding, vectorClient.Scope(collection), nil
+		}
+		searchIndexer.SetVectorIndexer(&ai.VectorIndexer{Resolve: resolveVectors, ChunkSize: cfg.RAGChunkSize, Overlap: cfg.RAGChunkOverlap})
+		hybrid := &ai.HybridRetriever{Keyword: searchStore, Resolve: resolveVectors, CurrentVersion: func(id uuid.UUID) (uuid.UUID, error) {
+			var f files.File
+			if err := db.Select("current_version_id").Where("id = ? AND deleted_at IS NULL", id).First(&f).Error; err != nil {
+				return uuid.Nil, err
+			}
+			if f.CurrentVersionID == nil {
+				return uuid.Nil, nil
+			}
+			return *f.CurrentVersionID, nil
+		}}
+		aiService.SetHybridRetriever(hybrid, ragEffective)
+	}
+	handler.SetAIService(aiService, aiEnvBaseline, aiUsageStore)
+	// Agent 容器平台 AI IPC 网关（agentsock.go）：任务创建时签发一次性
+	// 令牌，断网容器（NetworkMode=none）经 unix socket POST /chat 回调
+	// 平台默认对话模型（零值 ChatRequest：禁用工具/联网/记忆/思考）；
+	// 用量按任务归属用户记账（ForUser）。
+	agentAI := httpapi.NewAgentAIGateway(func(ctx context.Context, user uuid.UUID, system string, messages []ai.Message, maxTokens int) (string, string, error) {
+		res, err := aiService.ForUser(user).Chat(ctx, ai.ChatRequest{System: system, Messages: messages, MaxTokens: maxTokens}, nil)
+		if err != nil {
+			return "", "", err
+		}
+		return res.Content, res.ProviderID + "/" + res.Model, nil
+	})
+	agentAI.SetAuditRecorder(auditStore)
+	handler.SetAgentAI(agentAI)
+	// socket 服务：/run/docflow-ipc/ai.sock（DOCFLOW_AGENT_IPC_DIR 可配，
+	// compose 经 named volume docflow-agent-ipc 与 agent 容器共享）。
+	// 监听失败（如本机开发无 /run 权限）仅告警降级：agent 任务照常运行，
+	// 容器内无 AI 能力（runner 降级为执行 prompt 中的 ```run 块）。
+	if stopIPC, ipcErr := httpapi.StartAgentIPCServer(ctx, os.Getenv("DOCFLOW_AGENT_IPC_DIR"), agentAI.Handler()); ipcErr != nil {
+		log.Printf("agent ai ipc socket disabled: %v", ipcErr)
+	} else {
+		defer stopIPC()
+		ipcDir := os.Getenv("DOCFLOW_AGENT_IPC_DIR")
+		if ipcDir == "" {
+			ipcDir = httpapi.AgentAIIPCDefaultDir
+		}
+		log.Printf("agent ai ipc socket listening on %s/%s (POST /chat)", ipcDir, httpapi.AgentAISockName)
+	}
+	// 图片 OCR 自动入索引：aiService 读 blob 需要存储读取器；把它挂到
+	// 索引器（*ai.Service 满足 search.OCRExtractor，编译期保证），OCR
+	// 未开启时 ExtractImageText 安静返回空、索引行为不变。
+	aiService.SetStorageReader(storage)
+	searchIndexer.SetOCR(aiService)
 	// 站内通知：列表/已读/未读数与通知偏好端点（本人维度）。
 	handler.SetNotifications(notifyService)
 	// Webhook 通知渠道端点（本人维度）：注册/列举/启停/删除。
@@ -523,6 +660,11 @@ func main() {
 	handler.SetTaskEnqueuer(enqueuer)
 	// 管理端：系统设置（system_settings）、基础统计与 admin 角色查询。
 	handler.SetSettingsService(settingsStore)
+	handler.SetAgentDB(db)
+	// 重建索引端点（POST /admin/settings/ai/reindex）的文件列表源
+	//（files 表游标分页直查；切换 embedding 模型后重建新 collection 用）。
+	handler.SetReindexLister(httpapi.NewReindexLister(db))
+	handler.SetWebDAV(auth.NewWebDAVStore(db))
 	handler.SetStatsSource(httpapi.NewAdminStats(db))
 	handler.SetRoleLookup(userStore)
 	// 用户组管理（migration 035）：组 CRUD 与成员维护（仅 admin 路由组）。

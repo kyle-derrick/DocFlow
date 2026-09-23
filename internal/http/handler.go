@@ -7,11 +7,14 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/docflow/docflow/internal/ai"
 	"github.com/docflow/docflow/internal/audit"
 	"github.com/docflow/docflow/internal/auth"
 	"github.com/docflow/docflow/internal/caddytls"
+	"github.com/docflow/docflow/internal/collab"
 	"github.com/docflow/docflow/internal/contenturl"
 	"github.com/docflow/docflow/internal/files"
 	"github.com/docflow/docflow/internal/group"
@@ -23,6 +26,7 @@ import (
 	"github.com/docflow/docflow/internal/oidc"
 	"github.com/docflow/docflow/internal/onlyoffice"
 	"github.com/docflow/docflow/internal/realtime"
+	"github.com/docflow/docflow/internal/settings"
 	"github.com/docflow/docflow/internal/share"
 	"github.com/docflow/docflow/internal/space"
 	"github.com/docflow/docflow/internal/tagging"
@@ -172,7 +176,11 @@ type Handler struct {
 	// tasks 为后台任务队列入队器（SetTaskEnqueuer 注入）：tus PATCH 写满后
 	// 的后台补完经其派发（inprocess 与原内联 goroutine 行为一致；redis 时
 	// 由任意实例 worker 处理）。nil 时回退进程内 goroutine（tusAutocomplete）。
+	// 重建索引端点（POST /admin/settings/ai/reindex）复用同一入队器。
 	tasks tasks.Enqueuer
+	// reindex 为重建索引端点的文件列表源（SetReindexLister 注入）：files
+	// 表游标分页直查的生产实现；未注入时该端点返回 503（生产恒注入）。
+	reindex reindexLister
 	// tags 为标签服务（SetTagging 注入）：标签 CRUD 与文件打/去标签；
 	// 未注入时 tags 端点返回 503（生产恒注入，契约测试注入内存实现）。
 	tags *tagging.Service
@@ -187,6 +195,11 @@ type Handler struct {
 	notifications  *notify.Service
 	realtime       *realtime.Hub
 	allowedOrigins []string
+	// collab 为富文本实时协作房间管理器（SetCollabManager 注入）；collabFiles
+	// 为加入房间的写权限判定源（ValidateReplaceTarget 写权限链）。未注入时
+	// /api/v1/collab/:fileId/ws 返回 503（生产恒注入）。
+	collab      *collab.Manager
+	collabFiles collabFileAuthorizer
 	// emailChangeAccount 为换绑邮箱链路的账号读写源（SetEmailChange 注入，
 	// 生产为 *auth.UserStore）；emailChangeCodes 为验证码存储。任一未注入
 	// 时换绑邮箱端点返回 503（契约测试不注入）。
@@ -218,6 +231,16 @@ type Handler struct {
 	// aiFiles 为 AI 摘要所需的文件读取源（NewHandler 以 *files.Store 装配，
 	// 接口化便于单测注入内存实现）。
 	aiFiles aiFileSource
+	// aiSvc 为 AI 能力第一版服务（SetAIService 注入）：POST /ai/chat（SSE）、
+	// POST /ai/summarize 与 MCP 工具共用；未注入时相关端点 503。
+	aiSvc *ai.Service
+	// aiEnv 为 AI env 基线（AI_* 合成的 env Provider），SetAIService 注入。
+	aiEnv settings.AIConfig
+	// aiUsageStore 为 AI 用量聚合源（SetAIService 注入）；GET /admin/ai/usage。
+	aiUsageStore *ai.UsageStore
+	// aiLimiter 为 AI 端点的每用户限流器（热读取 Provider 级
+	// requests_per_min/daily_quota，全局 ai.per_user_per_min 兜底）。
+	aiLimiter *dynamicRateLimiter
 	// csrfStrict 控制 refresh/logout 同源严格校验（C10，CSRF_STRICT 默认
 	// true）：true 时缺失 Origin/Referer 一律 403，见 csrf.go。
 	csrfStrict bool
@@ -250,6 +273,26 @@ type Handler struct {
 	// openWith 为「默认打开方式」偏好存取（NewHandler 以 *auth.UserStore
 	// 装配，接口化便于单测注入内存实现）；未注入时端点返回 503。
 	openWith openWithStore
+	// aiPrefs 为用户个人 AI 配置存取（user_ai_prefs，双轨制；NewHandler 以
+	// *auth.UserStore 装配，接口化便于单测注入内存实现）；未注入时个人
+	// 配置端点 503、AI 解析链仅平台池。
+	aiPrefs aiPrefsStore
+	// aiMemory 为用户 AI 记忆存取（ai_memory 表，migration 050，本人维度；
+	// NewHandler 以 *auth.UserStore 装配，接口化便于单测注入内存实现）；
+	// 未注入时 /ai/memory 端点 503、chat 的 include_memory 静默跳过。
+	aiMemory      aiMemoryStore
+	webdav        *davHandler
+	webdavTokens  *auth.WebDAVStore
+	commentsDB    *gorm.DB
+	agentDB       *gorm.DB
+	agentSem      chan struct{}
+	agentSemMu    sync.Mutex
+	agentCancelMu sync.Mutex
+	agentCancels  map[uuid.UUID]context.CancelFunc
+	// agentAI 为 Agent 容器 IPC 调平台 AI 的网关（SetAgentAI 注入，main
+	// 装配并启动 unix socket server）；nil 时任务不签发 AI 令牌（容器
+	// 内无 AI 能力，agent-runner 降级为仅执行 prompt 中的 ```run 块）。
+	agentAI *AgentAIGateway
 }
 
 func NewHandler(authService *auth.Service, users *auth.UserStore, fileStore *files.Store, shares *share.Service, spaces *space.Service, uploads *upload.Service, storage upload.Storage, cookieSecure bool, cookieDomain string, refreshTokenTTL time.Duration) *Handler {
@@ -259,6 +302,8 @@ func NewHandler(authService *auth.Service, users *auth.UserStore, fileStore *fil
 	}
 	if users != nil {
 		h.openWith = users
+		h.aiPrefs = users
+		h.aiMemory = users
 	}
 	return h
 }
@@ -266,6 +311,29 @@ func NewHandler(authService *auth.Service, users *auth.UserStore, fileStore *fil
 // SetCSRFStrict 控制 refresh/logout 的同源严格校验（CSRF_STRICT，幂等；
 // 默认 true）。非浏览器客户端（curl）无法携带 Origin 时需显式置 false。
 func (h *Handler) SetCSRFStrict(strict bool) { h.csrfStrict = strict }
+func (h *Handler) webdavEnabled() bool {
+	if h.settings == nil {
+		return false
+	}
+	v, err := h.settings.GetAll()
+	if err != nil {
+		return false
+	}
+	for _, s := range v {
+		if s.Key == "webdav.enabled" {
+			b, ok := s.Value.(bool)
+			return ok && b
+		}
+	}
+	return false
+}
+
+func (h *Handler) SetWebDAV(store *auth.WebDAVStore) {
+	if store != nil {
+		h.webdavTokens = store
+		h.webdav = &davHandler{h: h, tokens: store, base: "/webdav", enabledFn: func() bool { return h.webdavEnabled() }}
+	}
+}
 
 // SetLoginLockout 注入 C9 登录失败锁定策略（LOGIN_MAX_RETRIES /
 // LOGIN_LOCK_MINUTES；maxRetries<1 或 lockFor<=0 时忽略，保持默认）。
@@ -295,6 +363,14 @@ func (h *Handler) SetRealtimeHub(hub *realtime.Hub, origins []string, environmen
 }
 func (h *Handler) SetWSSecret(secret string) { h.wsSecret = secret }
 func (h *Handler) SetBackupDir(dir string)   { h.backupDir = strings.TrimSpace(dir) }
+
+// SetAgentAI 注入 Agent 容器平台 AI IPC 网关（幂等；nil 保持未装配）。
+// 网关的 unix socket server 由 main 经 StartAgentIPCServer 启动。
+func (h *Handler) SetAgentAI(gw *AgentAIGateway) {
+	if gw != nil {
+		h.agentAI = gw
+	}
+}
 
 // SetAccessSalt 注入公开访问事件 IP 哈希的静态盐（ACCESS_SALT；缺省由
 // config 从 JWT secret 派生）。空值时回退固定占位盐（仅测试场景）。
@@ -347,6 +423,21 @@ func (h *Handler) SetAI(svc aiSummarizer) {
 	}
 }
 
+// SetAIService 注入 AI 能力第一版服务（幂等）：svc 为多 Provider ChatService
+// （POST /ai/chat SSE / POST /ai/summarize / 管理端设置与连接测试）；
+// envBase 为 AI_* env 合成的基线 Provider；usageStore 可为 nil（跳过统计）。
+func (h *Handler) SetAIService(svc *ai.Service, envBase settings.AIConfig, usageStore *ai.UsageStore) {
+	if svc == nil {
+		return
+	}
+	h.aiSvc = svc
+	h.aiEnv = envBase
+	h.aiUsageStore = usageStore
+	if h.aiLimiter == nil {
+		h.aiLimiter = newDynamicRateLimiter()
+	}
+}
+
 // SetInvites 注入邀请制注册服务与邮件通道（幂等）；publicBaseURL 用于拼接
 // 邀请/重置邮件中的绝对链接（空则输出相对路径）。mailer 为 nil 时回退
 // Noop（仅日志输出链接）。未注入 invites 时邀请管理与注册/重置端点 503。
@@ -372,6 +463,10 @@ func (h *Handler) publicLink(path string) string {
 }
 
 func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRateLimit, publicRateLimit int) {
+	if h.webdav != nil {
+		r.Any("/webdav", gin.WrapH(h.webdav))
+		r.Any("/webdav/*path", gin.WrapH(h.webdav))
+	}
 	// Prometheus HTTP 指标中间件：全局挂载（须先于任何路由注册），
 	// route 标签取 gin 路由模板，未匹配路由（404）归一为 unknown。
 	r.Use(metrics.GinMiddleware())
@@ -462,10 +557,17 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	api.GET("/tokens", h.listTokens)
 	api.PATCH("/tokens/:id", h.updateToken)
 	api.DELETE("/tokens/:id", h.revokeToken)
+	api.GET("/webdav/tokens", h.webdavTokensList)
+	api.POST("/webdav/tokens", h.webdavTokenCreate)
+	api.DELETE("/webdav/tokens/:id", h.webdavTokenRevoke)
 	// 站内通知与通知偏好（本人维度）：列表分页（created_at 游标）+未读数、
 	// 单条已读、全部已读、各事件类型开关与更新。
 	api.GET("/notifications", h.listNotifications)
 	r.GET("/api/v1/ws/notifications", h.wsNotifications)
+	// 富文本实时协作房间（ProseMirror prosemirror-collab）：认证/升级与
+	// /ws/notifications 一致（JWT 子协议），房间管理见 internal/collab；
+	// 写权限校验（ValidateReplaceTarget）与 collab.enabled 开关见 collab.go。
+	r.GET("/api/v1/collab/:fileId/ws", h.wsCollab)
 	api.POST("/notifications/:id/read", h.markNotificationRead)
 	api.POST("/notifications/read-all", h.markAllNotificationsRead)
 	api.GET("/notification-preferences", h.listNotificationPreferences)
@@ -485,10 +587,29 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	// 个人仪表盘概览统计（admin 附加全局统计，见 dashboard.go）。
 	api.GET("/dashboard", h.dashboardStats)
 	api.POST("/folders", h.createFolder)
+	api.POST("/folders/:id/agent-tasks", auth.RequireScope("files:write"), h.createAgentTask)
+	api.GET("/agent-tasks", h.listAgentTasks)
+	api.GET("/agent-tasks/:id", h.getAgentTask)
+	api.GET("/agent-tasks/:id/diff", h.getAgentTaskDiff)
+	api.GET("/agent-tasks/:id/logs", h.listAgentTaskLogs)
+	api.POST("/agent-tasks/:id/cancel", h.cancelAgentTask)
+	api.POST("/agent-tasks/:id/apply", auth.RequireScope("files:write"), h.applyAgentTask)
+	api.POST("/agent-tasks/:id/discard", h.discardAgentTask)
+	api.POST("/agent-tasks/:id/rollback", auth.RequireScope("files:write"), h.rollbackAgentTask)
+	api.POST("/folders/:id/snapshots", h.createSnapshot)
+	api.GET("/folders/:id/snapshots", h.listSnapshots)
+	api.GET("/folders/:id/diff", h.diffSnapshot)
+	api.GET("/snapshots/:id", h.getSnapshot)
+	api.POST("/snapshots/:id/restore", h.restoreSnapshot)
 	// 路径级 ACL（设计 6.5.3/6.5.4 最小落地）：团队空间目录的条目查看与
 	// 整体替换（仅团队 owner / 系统 admin；个人空间 400；PUT 记审计 acl.update）。
 	api.GET("/folders/:id/acl", h.getFolderACL)
 	api.PUT("/folders/:id/acl", h.replaceFolderACL)
+	api.GET("/files/:id/comments", auth.RequireScope("files:read"), h.listComments)
+	api.POST("/files/:id/comments", auth.RequireScope("files:write"), h.createComment)
+	api.POST("/comments/:id/replies", auth.RequireScope("files:write"), h.replyComment)
+	api.PATCH("/comments/:id", auth.RequireScope("files:write"), h.patchComment)
+	api.DELETE("/comments/:id", auth.RequireScope("files:write"), h.deleteComment)
 	api.GET("/files/:id", h.getFile)
 	api.PATCH("/files/:id", h.renameFile)
 	api.DELETE("/files/:id", h.deleteFile)
@@ -501,6 +622,34 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	// AI 摘要（OpenAI 兼容 /chat/completions）：读权限 + 文本类 + 当前版本
 	// available；高频端点不记审计；AI 禁用时 503 AI_DISABLED。
 	api.POST("/files/:id/ai/summary", h.fileAISummary)
+	// AI 能力第一版：多 Provider 对话（SSE 流式，scope ai:chat，每用户
+	// 限流按所选 Provider 的 requests_per_min/daily_quota 执行、全局
+	// ai.per_user_per_min 兜底——限流在 handler 内感知请求体的 Provider）
+	// 与全类型文件摘要（office/pdf/drawio/excalidraw/dfdoc/文本）；未启用
+	//（ai.enabled=false 或无可用 Provider）时 chat/summarize/models 404。
+	// status 恒可用（前端 AI 入口显隐）；models 为登录用户可读的可用模型
+	// 列表（含能力勾选，绝不回显 api_key）。
+	api.GET("/ai/status", h.aiStatus)
+	api.GET("/ai/models", h.aiModels)
+	// 个人 AI 配置（双轨制：本人维度 providers/默认模型/人设/技能/
+	// prefer_personal；api_key 掩码回显、PUT 留空继承）。
+	api.GET("/ai/personal-settings", h.getAIPersonalSettings)
+	api.PUT("/ai/personal-settings", h.putAIPersonalSettings)
+	// 平台人设/技能模板（ai.personas / ai.skills，管理员维护、登录可读；
+	// 配置数据不随 AI 总开关 404——前端人设下拉/技能弹层恒可拉取）。
+	api.GET("/ai/personas", h.aiPersonasList)
+	api.GET("/ai/skills", h.aiSkillsList)
+	// 外部 MCP 服务器（ai.mcp，管理员维护、登录可读启用项 id/name——
+	// 不泄 URL/凭据；对话入口 use_mcp 开关展示用）。
+	api.GET("/ai/mcp", h.aiMCPList)
+	// 用户 AI 记忆（ai_memory，本人维度、仅手动维护；include_memory 开启
+	// 时 chat 取最近 20 条拼入 system 上下文）。
+	api.GET("/ai/memory", h.aiMemoryList)
+	api.POST("/ai/memory", h.aiMemoryCreate)
+	api.DELETE("/ai/memory/:id", h.aiMemoryDelete)
+	api.PUT("/ai/memory/:id", h.aiMemoryUpdate)
+	api.POST("/ai/chat", auth.RequireScope(auth.ScopeAIChat), h.aiChat)
+	api.POST("/ai/summarize", auth.RequireScope(auth.ScopeAIChat), h.aiSummarize)
 	// 文件版本管理：版本列表与 current_version 回滚（新版本经上传链路 file_id 写入）。
 	api.GET("/files/:id/versions", h.listFileVersions)
 	api.GET("/files/:id/versions/:versionId/content", h.fileVersionContent)
@@ -615,6 +764,34 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	admin.PUT("/settings/smtp", h.putSMTPSettings)
 	// 测试邮件：用当前生效配置向指定邮箱投递一封测试邮件（错误详情回传）。
 	admin.POST("/settings/smtp/test", h.testSMTPSettings)
+	// AI 运行时配置（system_settings 的 ai.* 键）：多 Provider CRUD（密钥
+	// 只写不读，留空保持）、默认 Provider/温度/max_tokens/每用户限流，
+	// 连接测试（发一条 ping 返回延迟/错误）与用量统计（按用户聚合）。
+	admin.GET("/settings/agent", h.agentConfig)
+	admin.PUT("/settings/agent", h.putAgentConfig)
+	// 启动级环境变量只读总览（配置总览页；敏感值脱敏）。
+	admin.GET("/settings/env", h.adminGetEnv)
+	admin.GET("/settings/ai", h.getAISettings)
+	admin.PUT("/settings/ai", h.putAISettings)
+	admin.POST("/settings/ai/test", h.testAIProvider)
+	admin.POST("/settings/ai/rag/test", h.testAIRAG)
+	// 重建索引：切换 embedding Provider/模型后重建派生 collection 的向量
+	// 索引（分批重投 task:search-index，返回入队数；请求体可选 space_id）。
+	admin.POST("/settings/ai/reindex", h.adminPostAIReindex)
+	// 平台人设/技能模板（system_settings 的 ai.personas / ai.skills 键）：
+	// 登录侧 GET /ai/personas|/ai/skills 读取；管理端整块读替（校验见
+	// settings 包：≤50 条、id 唯一、name ≤64、prompt ≤4000）。
+	admin.GET("/settings/ai/personas", h.aiPersonasList)
+	admin.PUT("/settings/ai/personas", h.adminPutAIPersonas)
+	admin.GET("/settings/ai/skills", h.aiSkillsList)
+	admin.PUT("/settings/ai/skills", h.adminPutAISkills)
+	// 外部 MCP 服务器（system_settings 的 ai.mcp 键）：登录侧 GET /ai/mcp
+	// 读启用项；管理端整块读替（auth_header 只写不读、留空继承，回显
+	// configured 布尔；校验见 settings 包：≤8 条、id 唯一、url http(s)）。
+	admin.GET("/settings/ai/mcp", h.adminGetAIMCPServices)
+	admin.PUT("/settings/ai/mcp", h.adminPutAIMCPServices)
+	admin.POST("/settings/ai/mcp/test", h.adminTestAIMCP)
+	admin.GET("/ai/usage", h.adminAIUsage)
 	// HTTPS 运行时切换（热下发 Caddy admin API）：GET 恒注册（未托管时
 	// managed=false 供页面降级展示）；PUT 未托管时 503；POST /tls/cert
 	// 上传自定义证书（custom 模式，multipart cert+key）。
@@ -1190,6 +1367,10 @@ func (h *Handler) fileError(c *gin.Context, err error) bool {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "code": "FOLDER_DEPTH_LIMIT"})
 	case errors.Is(err, files.ErrConflict):
 		c.JSON(http.StatusConflict, gin.H{"error": "name conflict"})
+	case errors.Is(err, files.ErrSnapshotConflict):
+		c.JSON(http.StatusConflict, gin.H{"error": "version referenced by snapshot", "code": "SNAPSHOT_VERSION_PROTECTED"})
+	case errors.Is(err, files.ErrSnapshotNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": "snapshot not found"})
 	case errors.Is(err, files.ErrForbidden):
 		// 团队文件写/删/恢复越权（CanWrite/CanDelete 判定，含自定义角色）。
 		c.JSON(http.StatusForbidden, gin.H{"error": "no permission for this operation"})

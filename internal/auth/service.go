@@ -55,7 +55,10 @@ var (
 	ErrInvalidTokenScopes = errors.New("invalid token scopes")
 )
 
-var AllowedPATScopes = map[string]bool{"files:read": true, "files:write": true}
+// ScopeAIChat 为 AI 对话/摘要/MCP AI 工具的 PAT scope（AI 能力第一版）。
+const ScopeAIChat = "ai:chat"
+
+var AllowedPATScopes = map[string]bool{"files:read": true, "files:write": true, ScopeAIChat: true}
 
 // SessionInfo 为创建会话时记录的请求环境（sessions.ip/user_agent，审计用途）。
 type SessionInfo struct {

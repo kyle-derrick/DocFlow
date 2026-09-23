@@ -21,6 +21,13 @@ type fakeSettingsService struct {
 	// intKeys / intErr 支撑 GetInt（batch.max_items 热读取路径的测试）。
 	intKeys map[string]int
 	intErr  map[string]error
+	// boolKeys / boolErr 支撑 GetBool（collab.enabled 热读取路径的测试）；
+	// 未显式配置的键回退内置定义默认值（与 *settings.Store 行为一致）。
+	boolKeys map[string]bool
+	boolErr  map[string]error
+	// personas / skills 支撑平台人设/技能端点的测试（可配置读写内存）。
+	personas []settings.AIPersonaDef
+	skills   []settings.AISkillDef
 }
 
 func (f *fakeSettingsService) GetAll() ([]settings.SettingView, error) { return f.views, nil }
@@ -40,6 +47,26 @@ func (f *fakeSettingsService) GetInt(key string) (int, error) {
 	return f.intKeys[key], nil
 }
 
+// GetBool 补齐 settingsService 接口：显式配置优先，否则回退内置定义的
+// 默认值（如 collab.enabled 缺省 true）。
+func (f *fakeSettingsService) GetBool(key string) (bool, error) {
+	if err, ok := f.boolErr[key]; ok {
+		return false, err
+	}
+	if v, ok := f.boolKeys[key]; ok {
+		return v, nil
+	}
+	d, err := settings.DefinitionByKey(key)
+	if err != nil {
+		return false, err
+	}
+	b, ok := d.Default.(bool)
+	if !ok {
+		return false, errors.New("settings key is not bool")
+	}
+	return b, nil
+}
+
 // SMTPOverrides 补齐 settingsService 接口（SMTP 运行时覆盖；测试场景恒空）。
 func (f *fakeSettingsService) SMTPOverrides() (settings.SMTPOverride, error) {
 	return settings.SMTPOverride{}, nil
@@ -47,6 +74,47 @@ func (f *fakeSettingsService) SMTPOverrides() (settings.SMTPOverride, error) {
 
 // SetSMTP 补齐 settingsService 接口（SMTP 运行时保存；测试场景原样返回）。
 func (f *fakeSettingsService) SetSMTP(in, env settings.SMTPSettings, actor uuid.UUID) (settings.SMTPSettings, error) {
+	return in, nil
+}
+
+// AIOverrides 补齐 settingsService 接口（AI 运行时覆盖；测试场景恒默认）。
+func (f *fakeSettingsService) AIOverrides() (settings.AIConfig, bool, error) {
+	return settings.DefaultAIConfig(), false, nil
+}
+
+// personas/skills 支撑平台人设/技能端点的测试（可配置读写内存）。
+func (f *fakeSettingsService) AIPersonas() ([]settings.AIPersonaDef, error) {
+	if f.personas == nil {
+		return []settings.AIPersonaDef{}, nil
+	}
+	return f.personas, nil
+}
+
+func (f *fakeSettingsService) SetAIPersonas(list []settings.AIPersonaDef, _ uuid.UUID) ([]settings.AIPersonaDef, error) {
+	if err := settings.ValidateAIPersonas(list); err != nil {
+		return nil, err
+	}
+	f.personas = list
+	return list, nil
+}
+
+func (f *fakeSettingsService) AISkills() ([]settings.AISkillDef, error) {
+	if f.skills == nil {
+		return []settings.AISkillDef{}, nil
+	}
+	return f.skills, nil
+}
+
+func (f *fakeSettingsService) SetAISkills(list []settings.AISkillDef, _ uuid.UUID) ([]settings.AISkillDef, error) {
+	if err := settings.ValidateAISkills(list); err != nil {
+		return nil, err
+	}
+	f.skills = list
+	return list, nil
+}
+
+// SetAI 补齐 settingsService 接口（AI 运行时保存；测试场景原样返回）。
+func (f *fakeSettingsService) SetAI(in, env settings.AIConfig, actor uuid.UUID) (settings.AIConfig, error) {
 	return in, nil
 }
 

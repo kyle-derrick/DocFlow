@@ -122,6 +122,59 @@ func (s *Store) isWithin(candidate, ancestor uuid.UUID) (bool, error) {
 // 整个请求失败（返回错误，HTTP 层映射 404/403）。
 // 跨空间移动继承目标空间（space_id 更新）并校验目标空间配额（超限
 // SPACE_QUOTA_EXCEEDED）。
+// MoveRename atomically moves one item and assigns its destination name. All authorization,
+// cycle, depth, quota, and conflict checks happen before the single transaction update.
+func (s *Store) MoveRename(user, id, target uuid.UUID, name string) (File, error) {
+	t, err := authorizeParentFolder(s, user, target, s.spaceWriter, s.acl)
+	if err != nil {
+		return File{}, err
+	}
+	n, err := NormalizeName(name)
+	if err != nil {
+		return File{}, err
+	}
+	var f File
+	if err = s.db.Where("id = ? AND deleted_at IS NULL", id).First(&f).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return File{}, ErrNotFound
+		}
+		return File{}, err
+	}
+	if err = moveItemDecision(f, t); err != nil {
+		return File{}, err
+	}
+	if inside, e := s.isWithin(t.ID, f.ID); e != nil {
+		return File{}, e
+	} else if inside {
+		return File{}, ErrMoveTarget
+	}
+	if err = s.authorizeBatchWrite(f, user); err != nil {
+		return File{}, err
+	}
+	if err = authorizeFileWrite(f, user, s.spaceWriter, s.acl); err != nil {
+		return File{}, err
+	}
+	var conflict int64
+	if err = s.db.Model(&File{}).Where("parent_id = ? AND lower(name) = lower(?) AND deleted_at IS NULL AND id <> ?", t.ID, n, id).Count(&conflict).Error; err != nil {
+		return File{}, err
+	}
+	if conflict > 0 {
+		return File{}, ErrConflict
+	}
+	result := s.db.Model(&File{}).Where("id = ? AND deleted_at IS NULL", id).Updates(map[string]any{"parent_id": t.ID, "space_id": t.SpaceID, "name": n})
+	if result.Error != nil {
+		if strings.Contains(strings.ToLower(result.Error.Error()), "unique") {
+			return File{}, ErrConflict
+		}
+		return File{}, result.Error
+	}
+	if result.RowsAffected != 1 {
+		return File{}, ErrNotFound
+	}
+	f.ParentID, f.SpaceID, f.Name = &t.ID, t.SpaceID, n
+	return f, nil
+}
+
 func (s *Store) BatchMove(user uuid.UUID, ids []uuid.UUID, target uuid.UUID) ([]BatchItemResult, error) {
 	t, err := authorizeParentFolder(s, user, target, s.spaceWriter, s.acl)
 	if err != nil {

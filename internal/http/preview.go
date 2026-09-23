@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"mime"
 	"net/http"
+	"path/filepath"
 	"strings"
 
 	"github.com/docflow/docflow/internal/files"
@@ -28,7 +29,8 @@ const (
 //   - 其余 image/*、application/pdf、text/plain、application/json 允许；
 //   - text/html、JS、可执行文件、压缩包等一律拒绝。
 func previewResponse(rawMime string) (contentType string, ok bool) {
-	mediaType, params, err := mime.ParseMediaType(strings.TrimSpace(rawMime))
+	rawMime = strings.TrimSpace(rawMime)
+	mediaType, params, err := mime.ParseMediaType(rawMime)
 	if err != nil {
 		return "", false
 	}
@@ -56,8 +58,38 @@ func previewResponse(rawMime string) (contentType string, ok bool) {
 // Content-Disposition: inline（RFC 5987）、X-Content-Type-Options: nosniff。
 // incrementView 在响应体写出前调用一次（可为 nil，表示计数已由调用方完成）；
 // 调用失败返回 500，不计入成功预览。
+func previewMimeForName(name, raw string) string {
+	if strings.TrimSpace(raw) != "" && !strings.EqualFold(strings.TrimSpace(raw), "application/octet-stream") {
+		return raw
+	}
+	ext := strings.ToLower(strings.TrimSpace(filepath.Ext(name)))
+	if detected := mime.TypeByExtension(ext); detected != "" {
+		return detected
+	}
+	switch ext {
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".gif":
+		return "image/gif"
+	case ".webp":
+		return "image/webp"
+	case ".bmp":
+		return "image/bmp"
+	case ".pdf":
+		return "application/pdf"
+	case ".json":
+		return "application/json"
+	case ".txt", ".md", ".csv":
+		return "text/plain"
+	default:
+		return raw
+	}
+}
+
 func (h *Handler) servePreviewBlob(c *gin.Context, name string, blob files.ObjectBlob, incrementView func() error) {
-	contentType, allowed := previewResponse(blob.MimeType)
+	contentType, allowed := previewResponse(previewMimeForName(name, blob.MimeType))
 	if !allowed {
 		c.JSON(http.StatusUnsupportedMediaType, gin.H{"error": "preview not supported"})
 		return
