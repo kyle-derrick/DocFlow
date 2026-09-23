@@ -1,7 +1,9 @@
 // 管理页（仅 admin 角色，v2.3 重分配）：概览 / 人员与组（合并：左组树 +
 // 右成员表 + 批量跨组移动/移出组/改角色/禁用 + 组 CRUD + 邀请记录弹窗）/
-// 空间（含「已解散」筛选与彻底删除）/ 审计日志（含保留期设置）/ 威胁防护
-//（隔离区 + 扫描 + 凭据状态）/ 备份。TLS / 邮件配置 / 系统设置已迁至
+// 空间（含「已解散」筛选与彻底删除；v3.1 归并：space.* 策略键自「系统
+// 设置」迁入本页顶部）/ 审计日志（含保留期设置，audit.* 唯一入口）/
+// 威胁防护（隔离区 + 扫描 + 凭据状态）/ 备份（v3.1 归并：backup.* 策略键
+// 自「系统设置」迁入本页顶部）。TLS / 邮件配置 / 系统设置已迁至
 // 「设置」页（admin 可见）；邀请管理并入「人员与组」右上角弹窗。
 import { FormEvent, Key, Suspense, lazy, useEffect, useMemo, useState } from 'react'
 import { NavLink, Navigate, useNavigate, useParams } from 'react-router-dom'
@@ -67,6 +69,9 @@ const ConfigOverviewPanel = lazy(() => import('../components/ConfigOverviewPanel
 const MailPanel = lazy(() => import('./SettingsPage').then((m) => ({ default: m.MailPanel })))
 const TlsPanel = lazy(() => import('./SettingsPage').then((m) => ({ default: m.TlsPanel })))
 const SystemSettingsPanel = lazy(() => import('./SettingsPage').then((m) => ({ default: m.SystemSettingsPanel })))
+// v3.1 归并：space.* / backup.* 键组卡片（迁入「空间」「备份」页，复用
+// 系统设置面板的控件化渲染），同样经 SettingsPage 命名导出懒加载。
+const SystemSettingKeysCard = lazy(() => import('./SettingsPage').then((m) => ({ default: m.SystemSettingKeysCard })))
 const SecurityPanel = lazy(() => import('../components/SecurityPanel'))
 
 /** 凭据状态卡的语义键 → 环境变量名展示（值绝不回显，仅展示配置状态）。 */
@@ -2358,10 +2363,22 @@ export default function AdminPage() {
       )}
 
       {section === 'spaces' && !loading && !forbidden && (
-        <SpacesPanel
-          onError={(m) => { setError(m); setNotice('') }}
-          onNotice={(m) => { setNotice(m); setError('') }}
-        />
+        <>
+          {/* v3.1 归并：space.*（新空间默认配额 / 配额上限 / 每用户空间数）
+              自「系统设置」迁入本页，与空间清单同处单一编辑入口。 */}
+          <Suspense fallback={<div className="hint">{msg('loading')}</div>}>
+            <SystemSettingKeysCard
+              prefixes={['space']}
+              title={{ zh: '空间策略（新空间默认值与上限）', en: 'Space policy (defaults & limits)' }}
+              onError={(m) => { setError(m); setNotice('') }}
+              onNotice={(m) => { setNotice(m); setError('') }}
+            />
+          </Suspense>
+          <SpacesPanel
+            onError={(m) => { setError(m); setNotice('') }}
+            onNotice={(m) => { setNotice(m); setError('') }}
+          />
+        </>
       )}
 
       {section === 'audit' && !loading && !forbidden && (
@@ -2371,7 +2388,21 @@ export default function AdminPage() {
           onSaveRetention={saveAuditRetention}
         />
       )}
-      {section === 'backup' && !loading && !forbidden && <BackupPanel onError={(m) => { setError(m); setNotice('') }} onNotice={(m) => { setNotice(m); setError('') }} />}
+      {section === 'backup' && !loading && !forbidden && (
+        <>
+          {/* v3.1 归并：backup.*（任务开关 / 保留天数 / 加密要求等）自
+             「系统设置」迁入本页，与备份状态同处单一编辑入口。 */}
+          <Suspense fallback={<div className="hint">{msg('loading')}</div>}>
+            <SystemSettingKeysCard
+              prefixes={['backup']}
+              title={{ zh: '备份策略', en: 'Backup policy' }}
+              onError={(m) => { setError(m); setNotice('') }}
+              onNotice={(m) => { setNotice(m); setError('') }}
+            />
+          </Suspense>
+          <BackupPanel onError={(m) => { setError(m); setNotice('') }} onNotice={(m) => { setNotice(m); setError('') }} />
+        </>
+      )}
       {section === 'threat' && !loading && !forbidden && <QuarantinePanel onError={(m) => { setError(m); setNotice('') }} onNotice={(m) => { setNotice(m); setError('') }} />}
       {section === 'threat' && !loading && !forbidden && <SecretsPanel secrets={secrets} />}
       {/* 平台设置拆分分区（v2.x）：各自独立 tag（面板自 SettingsPage 导出

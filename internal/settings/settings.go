@@ -396,19 +396,23 @@ type AIModelCapabilities struct {
 }
 
 // NormalizeAIModelKind 归一模型类型并同步派生旧布尔：Kind 合法时以 Kind
-// 为权威；Kind 空/非法时按旧布尔推导（优先 chat>embedding>rerank，全
-// false 默认 chat）。归一后 Kind 与 Chat/Embedding/Rerank 恒一致。
+// 为权威；Kind 空/非法时按旧布尔推导。旧数据推导优先级为
+// embedding > rerank > chat：旧 UI 的 chat 为默认勾选项（噪音），而
+// embedding/rerank 是用户主动勾选的专用类型，可信度高——典型场景
+// bge-m3 旧数据 {chat:true, embedding:true} 应归 embedding 而非 chat
+// （否则 default embedding model 校验误拒）。全 false 默认 chat。归一后
+// Kind 与 Chat/Embedding/Rerank 恒一致。
 func (c *AIModelCapabilities) NormalizeAIModelKind() {
 	kind := strings.TrimSpace(c.Kind)
 	if !ValidAIModelKind(kind) {
 		kind = ""
 		switch {
-		case c.Chat:
-			kind = AIModelKindChat
 		case c.Embedding:
 			kind = AIModelKindEmbedding
 		case c.Rerank:
 			kind = AIModelKindRerank
+		case c.Chat:
+			kind = AIModelKindChat
 		default:
 			kind = AIModelKindChat
 		}

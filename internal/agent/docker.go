@@ -90,6 +90,12 @@ func (d DockerRuntime) Run(ctx context.Context, req RuntimeRequest) (RuntimeResu
 	if req.Harness != "" && req.Harness != HarnessBuiltin {
 		env = append(env, "DOCFLOW_HARNESS="+req.Harness)
 	}
+	// 模型意图（任务创建时的 model 选择）：仅注入 env DOCFLOW_MODEL 记录
+	// 用户意图——网关两透传端点刻意不透传 Model（按平台默认对话目标替换
+	// 执行），runner 侧可据此展示/审计；空 = 未指定。
+	if req.Model != "" {
+		env = append(env, "DOCFLOW_MODEL="+req.Model)
+	}
 	create := map[string]any{
 		"Image": req.Image, "WorkingDir": "/workspace", "Env": env,
 		"User": "65534:65534", "NetworkDisabled": true, "AttachStdout": false, "AttachStderr": false,

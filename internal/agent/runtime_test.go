@@ -65,16 +65,16 @@ func (c *captureRuntime) Run(_ context.Context, req RuntimeRequest) (RuntimeResu
 	return RuntimeResult{DryRun: true}, nil
 }
 
-// TestExecutorPassesHarnessAndAIToken Executor 把 Harness/AIToken 原样
-// 透传进 RuntimeRequest（harness 终值链路的 Executor 一环）。
+// TestExecutorPassesHarnessAndAIToken Executor 把 Harness/Model/AIToken
+// 原样透传进 RuntimeRequest（harness 终值与模型意图链路的 Executor 一环）。
 func TestExecutorPassesHarnessAndAIToken(t *testing.T) {
 	rt := &captureRuntime{}
-	exec := Executor{Runtime: rt, MaxEntries: 10, MaxBytes: 1 << 20, AIToken: "tok-9", Harness: HarnessPi}
+	exec := Executor{Runtime: rt, MaxEntries: 10, MaxBytes: 1 << 20, AIToken: "tok-9", Harness: HarnessPi, Model: "m-9"}
 	if _, err := exec.Execute(context.Background(), "task-1", "docflow/agent:1.0.0", "p", nil); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
-	if rt.req.Harness != HarnessPi || rt.req.AIToken != "tok-9" || rt.req.TaskID != "task-1" {
-		t.Fatalf("runtime request = %+v, want harness=%q token=%q", rt.req, HarnessPi, "tok-9")
+	if rt.req.Harness != HarnessPi || rt.req.AIToken != "tok-9" || rt.req.TaskID != "task-1" || rt.req.Model != "m-9" {
+		t.Fatalf("runtime request = %+v, want harness=%q token=%q model=%q", rt.req, HarnessPi, "tok-9", "m-9")
 	}
 }
 

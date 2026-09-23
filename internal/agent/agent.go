@@ -199,10 +199,10 @@ type Task struct {
 	Error              string     `json:"error,omitempty"`
 	WorkspacePath      string     `json:"workspace_path,omitempty"`
 	WorkspaceExpiresAt *time.Time `json:"workspace_expires_at,omitempty"`
-	ApplyResultJSON    string     `json:"-" gorm:"column:apply_result_json"`
+	ApplyResultJSON    string     `json:"-" gorm:"column:apply_result_json;default:'[]'"`
 	ApplyDiffHash      string     `json:"apply_diff_hash,omitempty" gorm:"column:apply_diff_hash"`
 	AppliedAt          *time.Time `json:"applied_at,omitempty"`
-	DiffJSON           string     `json:"-" gorm:"column:diff_json"`
+	DiffJSON           string     `json:"-" gorm:"column:diff_json;default:'[]'"`
 	CreatedAt          time.Time  `json:"created_at"`
 }
 type Log struct {

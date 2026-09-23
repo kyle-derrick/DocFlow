@@ -6071,6 +6071,25 @@ kbd {
 }
 .ai-input-hint { font-size: 11px; user-select: none; }
 .ai-send-btn, .ai-stop-btn { flex-shrink: 0; }
+/* 选项行（输入框下方）：模型选择 / 模式 / 人设（左）+ 开关组与发送⇄停止
+   （右）；窄宽时自动换行（开关组整体靠右，放不下退居下一行右对齐）。 */
+.ai-input-opts {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  padding: 8px 2px 0;
+  min-width: 0;
+}
+.ai-input-opts-right {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px 8px;
+  min-width: 0;
+}
 /* 打字机光标（流式输出中）。 */
 .ai-caret::after {
   content: '▍';
@@ -6592,23 +6611,34 @@ kbd {
   cursor: pointer;
 }
 .ai-attach-chip button:hover { color: var(--danger); }
-/* 输入框左下工具组（回形针 + 输入提示）。 */
-.ai-input-tools { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
+/* 输入框左下工具组（引用 / 技能 / 工作目录 / 当前文档 / 智能体 / 记忆 /
+   清空 / 文件检索开关 + 输入提示；元素多时允许换行）。 */
+.ai-input-tools { display: inline-flex; align-items: center; gap: 4px; min-width: 0; flex-wrap: wrap; row-gap: 2px; }
 .ai-attach-btn.ant-btn { padding: 0 4px; color: var(--muted); }
 .ai-attach-btn.ant-btn:hover { color: var(--primary); }
 /* 引用文件弹层（最近访问 / 搜索，多选）。 */
 .ai-attach-pop { width: 292px; display: flex; flex-direction: column; gap: 8px; }
 .ai-attach-list { max-height: 236px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
-/* 工作目录按钮（df_* 文件工具基准；选中后内联显示目录名，title 全路径）；
-   跟随态（未手选且有文件页位置）内联显示「跟随：路径」并高亮。 */
-.ai-workdir-btn.ant-btn { gap: 3px; max-width: 148px; }
+/* 工作目录按钮（df_* 文件工具基准）：显示完整路径「空间名/目录/…」；
+   跟随态（未手选且有文件页位置）路径前加「跟随」Tag 并高亮。 */
+.ai-workdir-btn.ant-btn { gap: 4px; max-width: 224px; }
 .ai-workdir-btn .ai-workdir-name {
-  max-width: 104px;
+  max-width: 150px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.ai-workdir-btn .ai-workdir-name.ai-workdir-muted { color: var(--muted); }
 .ai-workdir-btn .ai-workdir-name.ai-workdir-follow { color: var(--primary); }
+.ai-workdir-tag {
+  flex-shrink: 0;
+  padding: 0 5px;
+  border: 1px solid var(--primary);
+  border-radius: 999px;
+  color: var(--primary);
+  font-size: 10px;
+  line-height: 16px;
+}
 .ai-workdir-default:disabled { cursor: not-allowed; opacity: 0.55; }
 .ai-workdir-default:disabled:hover { color: var(--muted); border-color: var(--border); }
 /* 工作目录弹层（空间 Select + 目录懒树 + 默认空间根选项）。 */
@@ -6643,17 +6673,36 @@ kbd {
 .ai-workdir-default:hover { color: var(--primary); border-color: var(--primary); }
 .ai-workdir-default.active { color: var(--primary); border-style: solid; }
 .ai-workdir-default > svg:last-child { margin-left: auto; flex-shrink: 0; }
-/* 抽屉头部右侧（会话下拉 + 固定按钮）。 */
+/* 抽屉头部右侧（会话列表 + 新建 + 固定按钮；关闭为 antd 自带 X）。 */
 .ai-drawer-extra { display: inline-flex; align-items: center; gap: 2px; }
-/* 会话下拉按钮（当前标题 + 下拉箭头；标题超长省略）。 */
-.ai-conv-btn.ant-btn { gap: 3px; max-width: 200px; }
-.ai-conv-btn .ai-conv-cur {
-  max-width: 128px;
+/* 抽屉头部左侧会话标题按钮（点击重命名；标题超长省略，hover 显铅笔）。 */
+.ai-title-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  min-width: 0;
+  padding: 2px 6px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.ai-title-btn:hover:not(:disabled) { background: var(--surface-2); }
+.ai-title-btn:disabled { cursor: default; }
+.ai-title-btn .ai-title-name {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12px;
 }
+.ai-title-btn > svg { flex-shrink: 0; color: var(--muted); opacity: 0; transition: opacity 0.15s; }
+.ai-title-btn:hover:not(:disabled) > svg { opacity: 1; }
+/* 会话列表按钮（纯图标；历史会话切换 / 重命名 / 删除）。 */
+.ai-conv-btn.ant-btn { padding: 0 4px; }
 /* 会话下拉弹层（新会话 + 历史列表 + 说明）。 */
 .ai-conv-pop { width: 264px; display: flex; flex-direction: column; gap: 8px; }
 .ai-conv-list { max-height: 264px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
@@ -6931,6 +6980,20 @@ kbd {
 .studio-badge-bad { background: rgba(220, 38, 38, 0.12); color: #dc2626; }
 .studio-badge-run { background: rgba(59, 130, 246, 0.14); color: #2563eb; }
 .studio-badge-wait { background: var(--surface-2); color: var(--muted); }
+/* 任务产物树文件行：动作标签（新增/修改/删除/忽略；apply 后显示「已在平台」）。 */
+.studio-art-tag {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+.studio-art-add { background: rgba(22, 163, 74, 0.14); color: #16a34a; }
+.studio-art-mod { background: rgba(59, 130, 246, 0.14); color: #2563eb; }
+.studio-art-del { background: rgba(220, 38, 38, 0.12); color: #dc2626; }
+.studio-art-ign { background: var(--surface-2); color: var(--muted); }
+.studio-art-size { flex-shrink: 0; color: var(--muted); font-size: 11px; }
 /* 中栏：会话 Tabs + 对话（ai-toolbar/ai-thread/ai-composer 复用全局样式）。 */
 .studio-chat {
   flex: 1;

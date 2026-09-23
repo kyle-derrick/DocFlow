@@ -55,7 +55,10 @@ type Tool struct {
 type Client struct {
 	URL        string
 	AuthHeader string // 形如 "Authorization: Bearer x"，按首个冒号拆分
-	HTTP       *http.Client
+	// Headers 为附加认证头集合（键 = header 名、值 = 凭据；个人 MCP 服务
+	// 的多认证头用）。与 AuthHeader 可并存；键为空或含非法字符的条目跳过。
+	Headers map[string]string
+	HTTP    *http.Client
 
 	mu        sync.Mutex
 	sessionID string // 响应头 MCP-Session-Id（可选）
@@ -200,6 +203,14 @@ func (c *Client) setHeaders(req *http.Request) {
 				req.Header.Set(n, strings.TrimSpace(value))
 			}
 		}
+	}
+	// 附加认证头（个人 MCP 多头）：键含冒号/换行或值为空的条目跳过。
+	for k, v := range c.Headers {
+		n := strings.TrimSpace(k)
+		if n == "" || strings.ContainsAny(n, ":\r\n") || strings.TrimSpace(v) == "" {
+			continue
+		}
+		req.Header.Set(n, strings.TrimSpace(v))
 	}
 	c.mu.Lock()
 	session := c.sessionID

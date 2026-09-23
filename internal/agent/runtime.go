@@ -33,6 +33,10 @@ type RuntimeRequest struct {
 	// builtin，见 agent.go 常量；DockerRuntime 对非空且非 builtin 值注入
 	// DOCFLOW_HARNESS，builtin/空走镜像默认 runner 不注入）。
 	Harness string
+	// Model 为任务创建时用户选择的模型意图（model_id）：网关两透传端点
+	// 刻意不透传 Model（按平台默认对话目标替换执行），DockerRuntime 仅
+	// 注入 env DOCFLOW_MODEL 记录意图供 runner/审计感知；空 = 未指定。
+	Model string
 }
 
 type RuntimeResult struct {
@@ -447,6 +451,9 @@ type Executor struct {
 	// Harness 为该任务的 Agent 执行引擎终值（见 agent.go 常量；随
 	// RuntimeRequest 下发）。
 	Harness string
+	// Model 为该任务的模型意图（model_id；随 RuntimeRequest 下发，仅
+	// 记录用户选择——实际执行模型由网关按平台默认替换）。
+	Model string
 	// SyncMode 产物同步模式（agent.sync_mode）：git（默认，优先消费
 	// runner 产出的 .docflow-changes.json）| scan（恒全量扫描）。
 	SyncMode string
@@ -484,7 +491,7 @@ func (e Executor) Execute(ctx context.Context, taskID, image, prompt string, ent
 	}
 	execCtx, cancel := context.WithTimeout(ctx, e.Timeout)
 	defer cancel()
-	result, err := e.Runtime.Run(execCtx, RuntimeRequest{TaskID: taskID, Image: image, Prompt: prompt, Workspace: workspace, AIToken: e.AIToken, Harness: e.Harness})
+	result, err := e.Runtime.Run(execCtx, RuntimeRequest{TaskID: taskID, Image: image, Prompt: prompt, Workspace: workspace, AIToken: e.AIToken, Harness: e.Harness, Model: e.Model})
 	if err != nil {
 		_ = os.RemoveAll(workspace)
 		return RuntimeResult{}, err

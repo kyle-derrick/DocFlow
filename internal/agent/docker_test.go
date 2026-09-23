@@ -57,7 +57,7 @@ func (r *recordingDockerTransport) lastCreate(t *testing.T) map[string]any {
 
 // runDockerWithFakeEngine 在临时 workspace 上跑一次 DockerRuntime（假
 // Engine），返回捕获的 create 载荷。
-func runDockerWithFakeEngine(t *testing.T, volume, token, harness string) map[string]any {
+func runDockerWithFakeEngine(t *testing.T, volume, token, harness, model string) map[string]any {
 	t.Helper()
 	transport := &recordingDockerTransport{}
 	workspace, err := os.MkdirTemp("", "docflow-agent-")
@@ -71,7 +71,7 @@ func runDockerWithFakeEngine(t *testing.T, volume, token, harness string) map[st
 		Client:   &http.Client{Transport: transport},
 		AIVolume: volume,
 	}
-	req := RuntimeRequest{TaskID: "t", Image: "docflow/agent:1.0.0", Prompt: "p", Workspace: workspace, AIToken: token, Harness: harness}
+	req := RuntimeRequest{TaskID: "t", Image: "docflow/agent:1.0.0", Prompt: "p", Workspace: workspace, AIToken: token, Harness: harness, Model: model}
 	if _, err := rt.Run(context.Background(), req); err != nil {
 		t.Fatalf("docker run against fake engine: %v", err)
 	}
@@ -93,24 +93,25 @@ func payloadStrings(t *testing.T, payload map[string]any, key string) []string {
 	return out
 }
 
+func envHas(env []string, v string) bool {
+	for _, e := range env {
+		if e == v {
+			return true
+		}
+	}
+	return false
+}
+
 // TestDockerRuntimeAIEnvInjection 令牌存在（agent.allow_ai=true 场景）：
 // 注入 DOCFLOW_AI_SOCK/DOCFLOW_AI_TOKEN、挂载 AI 卷（:ro），
 // NetworkMode 保持 none（断网容器经 unix socket 回调平台 AI）。
 func TestDockerRuntimeAIEnvInjection(t *testing.T) {
-	payload := runDockerWithFakeEngine(t, "docflow-agent-ipc", "tok-123", "")
+	payload := runDockerWithFakeEngine(t, "docflow-agent-ipc", "tok-123", "", "")
 	env := payloadStrings(t, payload, "Env")
-	has := func(v string) bool {
-		for _, e := range env {
-			if e == v {
-				return true
-			}
-		}
-		return false
-	}
-	if !has("DOCFLOW_AI_SOCK=/run/docflow-ai/ai.sock") || !has("DOCFLOW_AI_TOKEN=tok-123") {
+	if !envHas(env, "DOCFLOW_AI_SOCK=/run/docflow-ai/ai.sock") || !envHas(env, "DOCFLOW_AI_TOKEN=tok-123") {
 		t.Fatalf("AI env not injected: %v", env)
 	}
-	if !has("DOCFLOW_PROMPT_FILE=/run/docflow/prompt") || !has("DOCFLOW_WORKSPACE=/workspace") {
+	if !envHas(env, "DOCFLOW_PROMPT_FILE=/run/docflow/prompt") || !envHas(env, "DOCFLOW_WORKSPACE=/workspace") {
 		t.Fatalf("base env missing: %v", env)
 	}
 	host, ok := payload["HostConfig"].(map[string]any)
@@ -136,37 +137,46 @@ func TestDockerRuntimeAIEnvInjection(t *testing.T) {
 // claude-code/pi 注入 DOCFLOW_HARNESS（与 AI 令牌解耦——无令牌同样注入）；
 // builtin/空不注入（镜像默认 runner）。
 func TestDockerRuntimeHarnessEnvInjection(t *testing.T) {
-	has := func(env []string, v string) bool {
-		for _, e := range env {
-			if e == v {
-				return true
-			}
-		}
-		return false
-	}
 	// claude-code（有令牌）：注入 harness env。
-	payload := runDockerWithFakeEngine(t, "docflow-agent-ipc", "tok-123", HarnessClaudeCode)
+	payload := runDockerWithFakeEngine(t, "docflow-agent-ipc", "tok-123", HarnessClaudeCode, "")
 	env := payloadStrings(t, payload, "Env")
-	if !has(env, "DOCFLOW_HARNESS=claude-code") {
+	if !envHas(env, "DOCFLOW_HARNESS=claude-code") {
 		t.Fatalf("harness env not injected: %v", env)
 	}
 	// pi（无令牌）：注入与 AI 令牌解耦，仍注入。
-	payload = runDockerWithFakeEngine(t, "docflow-agent-ipc", "", HarnessPi)
+	payload = runDockerWithFakeEngine(t, "docflow-agent-ipc", "", HarnessPi, "")
 	env = payloadStrings(t, payload, "Env")
-	if !has(env, "DOCFLOW_HARNESS=pi") {
+	if !envHas(env, "DOCFLOW_HARNESS=pi") {
 		t.Fatalf("harness env must be injected without ai token: %v", env)
 	}
 	// builtin / 空：不注入。
 	for _, harness := range []string{HarnessBuiltin, ""} {
-		payload = runDockerWithFakeEngine(t, "docflow-agent-ipc", "tok-123", harness)
+		payload = runDockerWithFakeEngine(t, "docflow-agent-ipc", "tok-123", harness, "")
 		env = payloadStrings(t, payload, "Env")
 		for _, e := range env {
 			if strings.HasPrefix(e, "DOCFLOW_HARNESS=") {
 				t.Fatalf("harness %q must not be injected: %v", harness, env)
 			}
 		}
-		if !has(env, "DOCFLOW_PROMPT_FILE=/run/docflow/prompt") {
+		if !envHas(env, "DOCFLOW_PROMPT_FILE=/run/docflow/prompt") {
 			t.Fatalf("base env missing: %v", env)
+		}
+	}
+}
+
+// TestDockerRuntimeModelEnvInjection 模型意图注入（任务创建时的 model
+// 选择）：非空注入 env DOCFLOW_MODEL（与 harness/令牌均解耦）；空不注入
+// （未指定，实际执行模型由网关按平台默认替换）。
+func TestDockerRuntimeModelEnvInjection(t *testing.T) {
+	payload := runDockerWithFakeEngine(t, "docflow-agent-ipc", "", "", "deepseek-chat")
+	env := payloadStrings(t, payload, "Env")
+	if !envHas(env, "DOCFLOW_MODEL=deepseek-chat") {
+		t.Fatalf("model env not injected: %v", env)
+	}
+	payload = runDockerWithFakeEngine(t, "docflow-agent-ipc", "tok-123", "", "")
+	for _, e := range payloadStrings(t, payload, "Env") {
+		if strings.HasPrefix(e, "DOCFLOW_MODEL=") {
+			t.Fatalf("model env must not be injected when unset: %v", e)
 		}
 	}
 }
@@ -174,7 +184,7 @@ func TestDockerRuntimeHarnessEnvInjection(t *testing.T) {
 // TestDockerRuntimeNoTokenNoInjection 无令牌（agent.allow_ai=false 场景）：
 // 不注入 AI env、不挂 AI 卷；网络与基础 env 不变。
 func TestDockerRuntimeNoTokenNoInjection(t *testing.T) {
-	payload := runDockerWithFakeEngine(t, "docflow-agent-ipc", "", "")
+	payload := runDockerWithFakeEngine(t, "docflow-agent-ipc", "", "", "")
 	for _, e := range payloadStrings(t, payload, "Env") {
 		if strings.HasPrefix(e, "DOCFLOW_AI_") {
 			t.Fatalf("AI env must not be injected without token: %v", e)

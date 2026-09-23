@@ -2038,20 +2038,20 @@ export function MailPanel({ onNotice, onError }: { onNotice: (m: string) => void
 }
 
 /**
- * 系统设置分组（v3 表单化）：每组一张折叠卡片，组内逐项控件化编辑，
- * 「保存本组」批量提交组内已修改键（PUT /admin/settings/:key 逐键循环，
- * 无后端改动）。归组说明：audit.* 并入「保留与清理」（同为保留期/清理
- * 窗口语义）、folder.* 并入「批量与目录」（同为操作规模上限）；collab.*
- * 键数 < 3，不单设管理 tag，以独立「实时协作」分组卡片留在本面板
- *（单一编辑入口原则，与 security/webdav 收敛方式一致）。
+ * 系统设置分组（v3 表单化；v3.1 归并去重）：每组一张折叠卡片，组内逐项
+ * 控件化编辑，「保存本组」批量提交组内已修改键（PUT /admin/settings/:key
+ * 逐键循环，无后端改动）。归组说明：folder.* 并入「批量与目录」（同为
+ * 操作规模上限）；已有专属管理页的域不在此设组——audit.*（保留期）随
+ *「审计日志」页、backup.* 随「备份」页、space.* 随「空间」页管理（见
+ * HIDDEN_SETTING_PREFIXES 与导出的 SystemSettingKeysCard）；collab.* 键
+ * 数 < 3，不单设管理 tag，以独立「实时协作」分组卡片留在本面板（单一
+ * 编辑入口原则，与 security/webdav 收敛方式一致）。
  */
 const SYSTEM_SETTING_GROUPS: Array<{ id: string; prefixes: string[]; title: { zh: string; en: string } }> = [
   { id: 'upload', prefixes: ['upload'], title: { zh: '上传', en: 'Upload' } },
   { id: 'share', prefixes: ['share'], title: { zh: '分享', en: 'Share' } },
-  { id: 'retention', prefixes: ['retention', 'audit'], title: { zh: '保留与清理', en: 'Retention & cleanup' } },
+  { id: 'retention', prefixes: ['retention'], title: { zh: '保留与清理', en: 'Retention & cleanup' } },
   { id: 'batch', prefixes: ['batch', 'folder'], title: { zh: '批量与目录', en: 'Batch & folders' } },
-  { id: 'backup', prefixes: ['backup'], title: { zh: '备份', en: 'Backup' } },
-  { id: 'space', prefixes: ['space'], title: { zh: '空间', en: 'Spaces' } },
   { id: 'collab', prefixes: ['collab'], title: { zh: '实时协作', en: 'Collaboration' } },
 ]
 
@@ -2113,11 +2113,13 @@ const QUOTA_BYTE_KEYS = new Set([
   'agent.max_memory_bytes',
 ])
 
-/** 本面板不展示的键前缀（v2.9 反馈 9/10 去重）：ai.* 属「AI 设置」面板、
- * agent.* 属「AI 创作舱」面板、security.* 与 webdav.*（防爆破/限流/扫描
- * 策略/WebDAV 平台开关）属「安全与访问」面板——同一键保持单一编辑入口，
- * 避免双入口漂移；过滤在渲染层做（读取后 filter，仍一次拉全量）。 */
-const HIDDEN_SETTING_PREFIXES = new Set(['ai', 'agent', 'security', 'webdav'])
+/** 本面板不展示的键前缀（v2.9 反馈 9/10 去重，v3.1 归并扩充）：ai.* 属
+ *「AI 设置」面板、agent.* 属「AI 创作舱」面板、security.* 与 webdav.*
+ *（防爆破/限流/扫描策略/WebDAV 平台开关）属「安全与访问」面板；space.*
+ * 属平台管理「空间」页、backup.* 属「备份」页、audit.*（保留期）属
+ *「审计日志」页——同一键保持单一编辑入口，避免双入口漂移；过滤在渲染
+ * 层做（读取后 filter，仍一次拉全量）。 */
+const HIDDEN_SETTING_PREFIXES = new Set(['ai', 'agent', 'security', 'webdav', 'space', 'backup', 'audit'])
 
 /** 全部内置设置键的双语名称与简短说明（v2.7 反馈 14：此前仅部分键有
  * 中文名、其余裸显 key，且不随界面语言切换）。清单与后端 settings
@@ -2191,6 +2193,293 @@ export const SETTING_KEY_META: Record<string, { zh: string; en: string; dzh: str
   'agent.sync_mode': { zh: 'Agent 产物同步模式', en: 'Agent sync mode', dzh: 'git（按变更清单同步，推荐）或 scan（全量扫描）', den: 'git (change-list based, recommended) or scan (full scan)' },
 }
 
+/** 按键取当前语言的名称；未收录回退空串（行内仅显示原 key，不硬造）。
+ *（v3.1 抽出共享：SystemSettingsPanel 与迁入专属管理页的
+ * SystemSettingKeysCard 共用一套名称/说明/控件化渲染。） */
+function settingKeyLabel(key: string, zh: boolean): string {
+  const meta = SETTING_KEY_META[key]
+  return meta ? (zh ? meta.zh : meta.en) : ''
+}
+
+/** 按键取当前语言的简短说明；未收录回退后端 description。 */
+function settingKeyDesc(key: string, fallback: string, zh: boolean): string {
+  const meta = SETTING_KEY_META[key]
+  return meta ? (zh ? meta.dzh : meta.den) : fallback
+}
+
+/** 按类型渲染单项控件（bool→Switch / int→InputNumber（min/max 按后端定义）
+ * 或配额字节键→QuotaInput / string 枚举→Select / 普通 string→Input）；
+ * 草稿受控（setDraft 单键写入），切换/输入即改草稿，随「保存本组」提交。 */
+function renderSettingControl(
+  item: SettingItem,
+  draft: SettingValue | null | undefined,
+  setDraft: (v: SettingValue | null) => void,
+  zh: boolean,
+) {
+  if (item.type === 'bool') {
+    return (
+      <span className="setting-bool" title={zh ? '切换后须经「保存本组」提交' : 'Toggle takes effect via "Save group"'}>
+        <Switch
+          size="small"
+          checked={Boolean(draft)}
+          onChange={(v) => setDraft(v)}
+        />
+        <span>{draft ? (zh ? '开启' : 'On') : (zh ? '关闭' : 'Off')}</span>
+      </span>
+    )
+  }
+  if (item.type === 'int') {
+    // 配额/字节量键：数值 + 单位选择器（1024 进制；0 = 不限——下限为 1 的
+    // 键选「不限」会被本地范围校验拦截）。
+    if (QUOTA_BYTE_KEYS.has(item.key)) {
+      return (
+        <QuotaInput
+          value={typeof draft === 'number' ? draft : 0}
+          onChange={(bytes) => setDraft(bytes)}
+        />
+      )
+    }
+    const range = INT_RANGES[item.key]
+    const unit = INT_UNITS[item.key]
+    return (
+      <InputNumber
+        min={range?.min}
+        max={range?.max}
+        step={1}
+        precision={0}
+        style={{ width: 200 }}
+        value={typeof draft === 'number' ? draft : null}
+        onChange={(v) => setDraft(v ?? null)}
+        addonAfter={unit ? (zh ? unit.zh : unit.en) : undefined}
+      />
+    )
+  }
+  const options = ENUM_OPTIONS[item.key]
+  if (options) {
+    return (
+      <Select
+        style={{ width: 260 }}
+        value={typeof draft === 'string' ? draft : String(draft ?? '')}
+        onChange={(v) => setDraft(v)}
+        options={options}
+      />
+    )
+  }
+  return (
+    <Input
+      allowClear
+      style={{ width: 280 }}
+      value={typeof draft === 'string' ? draft : String(draft ?? '')}
+      onChange={(e) => setDraft(e.target.value)}
+      placeholder={item.key === 'upload.blocked_extensions' ? (zh ? '如 exe,bat,sh（空 = 不拦截）' : 'e.g. exe,bat,sh (empty = allow all)') : undefined}
+    />
+  )
+}
+
+/** 单项设置行：中文名（悬浮提示原 key）+ effect 徽章（立即生效/需重启）+
+ * 一句说明 + 默认值/更新时间 + 按类型控件。SystemSettingsPanel 的分组
+ * 卡片与 SystemSettingKeysCard（迁入专属管理页的键组）共用本行渲染。 */
+function SettingItemRow({
+  item,
+  draft,
+  setDraft,
+  zh,
+}: {
+  item: SettingItem
+  draft: SettingValue | null | undefined
+  setDraft: (v: SettingValue | null) => void
+  zh: boolean
+}) {
+  return (
+    <div className="setting-row">
+      <div className="setting-main">
+        {/* 中文名为主标识（悬浮提示原 key），不再裸显 key 行。 */}
+        <div className="setting-key" title={item.key}>
+          {settingKeyLabel(item.key, zh) || item.key}
+          {item.effect && (
+            <span className="badge" style={{ marginLeft: 8 }} title={zh ? '变更生效方式' : 'How changes take effect'}>
+              {(() => {
+                const text = effectText[item.effect]
+                return text ? (zh ? text.zh : text.en) : item.effect
+              })()}
+            </span>
+          )}
+        </div>
+        <div className="setting-desc muted">{settingKeyDesc(item.key, item.description, zh)}</div>
+        <div className="setting-meta muted">
+          {zh ? '默认值' : 'Default'} {QUOTA_BYTE_KEYS.has(item.key) ? formatQuota(Number(item.default)) : String(item.default)}
+          {item.updated_at && ` · ${zh ? '更新于' : 'updated'} ${formatTime(item.updated_at)}`}
+        </div>
+      </div>
+      <div className="setting-control">{renderSettingControl(item, draft, setDraft, zh)}</div>
+    </div>
+  )
+}
+
+/** 组保存共通逻辑（v3.1 抽出）：int 空值/超范围先在本地拦截（后端兜底），
+ * 再逐键 PUT 已修改项（无批量端点，不改后端）；失败抛 Error（message 为
+ * 组级文案，含 403/400 语义转译）。返回提交键数。 */
+async function saveSettingItems(
+  changed: SettingItem[],
+  drafts: Record<string, SettingValue | null>,
+  zh: boolean,
+): Promise<number> {
+  for (const it of changed) {
+    const label = settingKeyLabel(it.key, zh) || it.key
+    if (it.type === 'int') {
+      const n = drafts[it.key]
+      if (typeof n !== 'number' || !Number.isInteger(n)) {
+        throw new Error(zh ? `「${label}」须填写整数` : `"${label}" requires an integer`)
+      }
+      const range = INT_RANGES[it.key]
+      if (range && (n < range.min || n > range.max)) {
+        throw new Error(zh ? `「${label}」须在 ${range.min} ~ ${range.max} 之间` : `"${label}" must be between ${range.min} and ${range.max}`)
+      }
+    }
+  }
+  try {
+    for (const it of changed) {
+      await adminPutSetting(it.key, drafts[it.key] as SettingValue)
+    }
+  } catch (err) {
+    throw new Error(
+      err instanceof ApiError && err.status === 403 ? (zh ? '无权限' : 'Forbidden')
+        : err instanceof ApiError && err.status === 400 ? (zh ? '取值超出允许范围' : 'Value out of allowed range')
+          : err instanceof Error ? err.message
+            : (zh ? '保存失败' : 'Save failed'),
+    )
+  }
+  return changed.length
+}
+
+/**
+ * 迁入专属管理页的系统设置键组卡片（v3.1 归并，AdminPage 懒加载本导出）：
+ * 按前缀过滤 /admin/settings 输出渲染单组表单，复用 SystemSettingsPanel
+ * 的控件化代码模式与常量（SETTING_KEY_META 双语名 / effect 徽章 / 按类型
+ * 控件 /「保存本组」逐键 PUT 已修改项 +「重置」回退草稿）。当前用于平台
+ * 管理「空间」页（space.*）与「备份」页（backup.*）——这些键自系统设置
+ * 面板移除后在此保持单一编辑入口。
+ */
+export function SystemSettingKeysCard({
+  prefixes,
+  title,
+  onError,
+  onNotice,
+}: {
+  prefixes: string[]
+  title: { zh: string; en: string }
+  onError: (msg: string) => void
+  onNotice: (msg: string) => void
+}) {
+  const locale = useLocale()
+  const zh = locale === 'zh-CN'
+  const [items, setItems] = useState<SettingItem[]>([])
+  // 组表单草稿（key → 当前编辑值；null = 数值被清空等待补填）。
+  const [drafts, setDrafts] = useState<Record<string, SettingValue | null>>({})
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  /** 载入响应并重置草稿（保存成功后的刷新也走这里，拿回归一化值）。 */
+  const apply = (r: AdminSettingsResult) => {
+    const filtered = r.settings.filter((it) => prefixes.includes(it.key.split('.')[0]))
+    setItems(filtered)
+    const next: Record<string, SettingValue | null> = {}
+    for (const it of filtered) next[it.key] = it.value
+    setDrafts(next)
+    setError('')
+  }
+
+  const load = async () => {
+    setLoading(true)
+    try {
+      apply(await adminGetSettings())
+    } catch (err) {
+      onError(err instanceof Error ? err.message : (zh ? '系统设置加载失败' : 'Failed to load system settings'))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const cardTitle = zh ? title.zh : title.en
+  /** 组内是否有未保存修改（草稿 ≠ 服务端当前值）。 */
+  const dirty = items.some((it) => drafts[it.key] !== undefined && drafts[it.key] !== it.value)
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault()
+    if (saving) return
+    const changed = items.filter((it) => drafts[it.key] !== undefined && drafts[it.key] !== it.value)
+    if (changed.length === 0) return
+    setSaving(true)
+    try {
+      const saved = await saveSettingItems(changed, drafts, zh)
+      onNotice(zh ? `已保存「${cardTitle}」（${saved} 项）` : `Saved "${cardTitle}" (${saved} item${saved > 1 ? 's' : ''})`)
+      try {
+        apply(await adminGetSettings())
+      } catch {
+        // 列表刷新失败不打断（草稿保持已提交值展示）
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : (zh ? '保存失败' : 'Save failed'))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  /** 重置：把组内草稿回退为服务端当前值。 */
+  const reset = () => {
+    setDrafts((prev) => {
+      const next = { ...prev }
+      for (const it of items) next[it.key] = it.value
+      return next
+    })
+  }
+
+  if (loading) {
+    return (
+      <div className="panel setting-group">
+        <h3>{cardTitle}</h3>
+        <div className="hint">{zh ? '加载中…' : 'Loading…'}</div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="panel setting-group">
+      <h3 style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        {cardTitle}
+        <span className="setting-meta muted">{zh ? `（${items.length} 项）` : `(${items.length})`}</span>
+        {dirty && !saving && <span className="badge">{zh ? '有未保存修改' : 'Unsaved changes'}</span>}
+      </h3>
+      <form onSubmit={submit}>
+        {items.map((item) => (
+          <SettingItemRow
+            key={item.key}
+            item={item}
+            draft={drafts[item.key]}
+            setDraft={(v) => setDrafts((prev) => ({ ...prev, [item.key]: v }))}
+            zh={zh}
+          />
+        ))}
+        <div className="modal-actions" style={{ marginTop: 4 }}>
+          <Button disabled={saving || !dirty} onClick={reset}>
+            {zh ? '重置' : 'Reset'}
+          </Button>
+          <Button type="primary" htmlType="submit" loading={saving} disabled={!dirty}>
+            {saving ? (zh ? '保存中…' : 'Saving…') : (zh ? '保存本组' : 'Save group')}
+          </Button>
+        </div>
+        {error && <div className="error-text" style={{ marginTop: 4 }}>{error}</div>}
+      </form>
+    </div>
+  )
+}
+
 /**
  * 系统设置面板（v3 表单化重构，仅 admin）：system_settings 系统类内置键的
  * 分组表单入口——按 SYSTEM_SETTING_GROUPS 渲染折叠卡片，每项中文名 + 一句
@@ -2198,10 +2487,12 @@ export const SETTING_KEY_META: Record<string, { zh: string; en: string; dzh: str
  * 或配额数值+单位选择器 / string 枚举→Select / 普通 string→Input），组内
  * 「保存本组」批量 PUT 已修改键（逐键循环，不改后端）、「重置」回退草稿；
  * 顶部搜索按 key / 中文名 / 说明过滤（过滤时分组自动展开），每项保留
- * effect 徽章（立即生效 / 需重启）。
- * ai.* / agent.* / security.* / webdav.* 不在此展示（分属「AI 设置」「AI
- * 创作舱」「安全与访问」面板，见 HIDDEN_SETTING_PREFIXES），面板顶部以
- * notice 指引对应位置。
+ * effect 徽章（立即生效 / 需重启）。行渲染与保存逻辑经 SettingItemRow /
+ * saveSettingItems 与 SystemSettingKeysCard（迁入专属管理页的键组）共享。
+ * ai.* / agent.* / security.* / webdav.* / space.* / backup.* / audit.*
+ * 不在此展示（分属「AI 设置」「AI 创作舱」「安全与访问」与平台管理
+ *「空间」「备份」「审计日志」页，见 HIDDEN_SETTING_PREFIXES），面板顶部
+ * 以 notice 指引对应位置。
  */
 export function SystemSettingsPanel({ onError, onNotice }: { onError: (msg: string) => void; onNotice: (msg: string) => void }) {
   const locale = useLocale()
@@ -2248,18 +2539,6 @@ export function SystemSettingsPanel({ onError, onNotice }: { onError: (msg: stri
 
   const settings = result?.settings ?? []
 
-  /** 按键取当前语言的名称；未收录回退空串（行内仅显示原 key，不硬造）。 */
-  const keyLabel = (key: string) => {
-    const meta = SETTING_KEY_META[key]
-    return meta ? (zh ? meta.zh : meta.en) : ''
-  }
-
-  /** 按键取当前语言的简短说明；未收录回退后端 description。 */
-  const keyDesc = (key: string, fallback: string) => {
-    const meta = SETTING_KEY_META[key]
-    return meta ? (zh ? meta.dzh : meta.den) : fallback
-  }
-
   /** 分组（SYSTEM_SETTING_GROUPS 顺序，组内保持 Definitions 输出顺序）：
    * 隐藏前缀排除 + 搜索过滤（key / 双语名称 / 说明，中英文界面行为一致）。 */
   const settingGroups = useMemo(() => {
@@ -2282,45 +2561,24 @@ export function SystemSettingsPanel({ onError, onNotice }: { onError: (msg: stri
   const groupDirty = (items: SettingItem[]) =>
     items.some((it) => drafts[it.key] !== undefined && drafts[it.key] !== it.value)
 
-  /** 组保存：逐键 PUT 已修改项（int 空值 / 超范围先在本地拦截，后端兜底）。 */
+  /** 组保存：共通校验 + 逐键 PUT 已修改项（见 saveSettingItems；int 空值/
+   * 超范围先在本地拦截，后端兜底），错误经分组级文案展示。 */
   const saveGroup = async (groupId: string, items: SettingItem[], title: string) => {
     if (savingGroup !== null) return
     const changed = items.filter((it) => drafts[it.key] !== undefined && drafts[it.key] !== it.value)
     if (changed.length === 0) return
-    for (const it of changed) {
-      const label = keyLabel(it.key) || it.key
-      if (it.type === 'int') {
-        const n = drafts[it.key]
-        if (typeof n !== 'number' || !Number.isInteger(n)) {
-          setGroupErrors((prev) => ({ ...prev, [groupId]: zh ? `「${label}」须填写整数` : `"${label}" requires an integer` }))
-          return
-        }
-        const range = INT_RANGES[it.key]
-        if (range && (n < range.min || n > range.max)) {
-          setGroupErrors((prev) => ({ ...prev, [groupId]: zh ? `「${label}」须在 ${range.min} ~ ${range.max} 之间` : `"${label}" must be between ${range.min} and ${range.max}` }))
-          return
-        }
-      }
-    }
     setSavingGroup(groupId)
     setGroupErrors((prev) => ({ ...prev, [groupId]: '' }))
     try {
-      for (const it of changed) {
-        await adminPutSetting(it.key, drafts[it.key] as SettingValue)
-      }
-      onNotice(zh ? `已保存「${title}」（${changed.length} 项）` : `Saved "${title}" (${changed.length} item${changed.length > 1 ? 's' : ''})`)
+      const saved = await saveSettingItems(changed, drafts, zh)
+      onNotice(zh ? `已保存「${title}」（${saved} 项）` : `Saved "${title}" (${saved} item${saved > 1 ? 's' : ''})`)
       try {
         applyResult(await adminGetSettings())
       } catch {
         // 列表刷新失败不打断（草稿保持已提交值展示）
       }
     } catch (err) {
-      const message =
-        err instanceof ApiError && err.status === 403 ? (zh ? '无权限' : 'Forbidden')
-          : err instanceof ApiError && err.status === 400 ? (zh ? '取值超出允许范围' : 'Value out of allowed range')
-            : err instanceof Error ? err.message
-              : (zh ? '保存失败' : 'Save failed')
-      setGroupErrors((prev) => ({ ...prev, [groupId]: message }))
+      setGroupErrors((prev) => ({ ...prev, [groupId]: err instanceof Error ? err.message : (zh ? '保存失败' : 'Save failed') }))
     } finally {
       setSavingGroup(null)
     }
@@ -2333,69 +2591,6 @@ export function SystemSettingsPanel({ onError, onNotice }: { onError: (msg: stri
       for (const it of items) next[it.key] = it.value
       return next
     })
-  }
-
-  /** 按类型渲染单项控件（草稿受控，切换/输入即改草稿，随「保存本组」提交）。 */
-  const renderControl = (item: SettingItem) => {
-    const draft = drafts[item.key]
-    if (item.type === 'bool') {
-      return (
-        <span className="setting-bool" title={zh ? '切换后须经「保存本组」提交' : 'Toggle takes effect via "Save group"'}>
-          <Switch
-            size="small"
-            checked={Boolean(draft)}
-            onChange={(v) => setDrafts((prev) => ({ ...prev, [item.key]: v }))}
-          />
-          <span>{draft ? (zh ? '开启' : 'On') : (zh ? '关闭' : 'Off')}</span>
-        </span>
-      )
-    }
-    if (item.type === 'int') {
-      // 配额/字节量键：数值 + 单位选择器（1024 进制；0 = 不限——下限为 1 的
-      // 键选「不限」会被本地范围校验拦截）。
-      if (QUOTA_BYTE_KEYS.has(item.key)) {
-        return (
-          <QuotaInput
-            value={typeof draft === 'number' ? draft : 0}
-            onChange={(bytes) => setDrafts((prev) => ({ ...prev, [item.key]: bytes }))}
-          />
-        )
-      }
-      const range = INT_RANGES[item.key]
-      const unit = INT_UNITS[item.key]
-      return (
-        <InputNumber
-          min={range?.min}
-          max={range?.max}
-          step={1}
-          precision={0}
-          style={{ width: 200 }}
-          value={typeof draft === 'number' ? draft : null}
-          onChange={(v) => setDrafts((prev) => ({ ...prev, [item.key]: v ?? null }))}
-          addonAfter={unit ? (zh ? unit.zh : unit.en) : undefined}
-        />
-      )
-    }
-    const options = ENUM_OPTIONS[item.key]
-    if (options) {
-      return (
-        <Select
-          style={{ width: 260 }}
-          value={typeof draft === 'string' ? draft : String(draft ?? '')}
-          onChange={(v) => setDrafts((prev) => ({ ...prev, [item.key]: v }))}
-          options={options}
-        />
-      )
-    }
-    return (
-      <Input
-        allowClear
-        style={{ width: 280 }}
-        value={typeof draft === 'string' ? draft : String(draft ?? '')}
-        onChange={(e) => setDrafts((prev) => ({ ...prev, [item.key]: e.target.value }))}
-        placeholder={item.key === 'upload.blocked_extensions' ? (zh ? '如 exe,bat,sh（空 = 不拦截）' : 'e.g. exe,bat,sh (empty = allow all)') : undefined}
-      />
-    )
   }
 
   if (forbidden) {
@@ -2417,8 +2612,8 @@ export function SystemSettingsPanel({ onError, onNotice }: { onError: (msg: stri
           style={{ marginBottom: 12 }}
           message={zh ? '部分配置已移至对应面板（此处不再重复展示）' : 'Some settings live in their own panels (not listed here)'}
           description={zh
-            ? 'AI 检索与联网搜索（ai.*）请前往「AI 设置」；Agent 创作舱（agent.*）请前往「AI 创作舱」；登录防爆破、认证限流、扫描策略与 WebDAV 平台开关（security.* / webdav.*）请前往「安全与访问」。'
-            : 'AI retrieval & web search (ai.*) → "AI settings"; agent keys (agent.*) → "AI agent studio"; login anti-bruteforce, auth rate limit, scan policy and the WebDAV platform toggle (security.* / webdav.*) → "Security & access".'}
+            ? 'AI 检索与联网搜索（ai.*）请前往「AI 设置」；Agent 创作舱（agent.*）请前往「AI 创作舱」；登录防爆破、认证限流、扫描策略与 WebDAV 平台开关（security.* / webdav.*）请前往「安全与访问」；空间策略（space.*）请前往平台管理「空间」页；备份策略（backup.*）请前往「备份」页；审计日志保留期（audit.*）请前往「审计日志」页。'
+            : 'AI retrieval & web search (ai.*) → "AI settings"; agent keys (agent.*) → "AI agent studio"; login anti-bruteforce, auth rate limit, scan policy and the WebDAV platform toggle (security.* / webdav.*) → "Security & access"; space policy (space.*) → the "Spaces" admin page; backup policy (backup.*) → "Backup"; audit retention (audit.*) → "Audit log".'}
         />
         <form className="team-create-row" style={{ marginBottom: 0 }} onSubmit={(e) => e.preventDefault()}>
           <label className="field" style={{ flex: 1 }}>
@@ -2464,33 +2659,15 @@ export function SystemSettingsPanel({ onError, onNotice }: { onError: (msg: stri
             </h3>
             {!isCollapsed && (
               <form onSubmit={(e) => { e.preventDefault(); void saveGroup(group.id, items, title) }}>
-                {items.map((item) => {
-                  const label = keyLabel(item.key)
-                  return (
-                    <div key={item.key} className="setting-row">
-                      <div className="setting-main">
-                        {/* 中文名为主标识（悬浮提示原 key），不再裸显 key 行。 */}
-                        <div className="setting-key" title={item.key}>
-                          {label || item.key}
-                          {item.effect && (
-                            <span className="badge" style={{ marginLeft: 8 }} title={zh ? '变更生效方式' : 'How changes take effect'}>
-                              {(() => {
-                                const text = effectText[item.effect]
-                                return text ? (zh ? text.zh : text.en) : item.effect
-                              })()}
-                            </span>
-                          )}
-                        </div>
-                        <div className="setting-desc muted">{keyDesc(item.key, item.description)}</div>
-                        <div className="setting-meta muted">
-                          {zh ? '默认值' : 'Default'} {QUOTA_BYTE_KEYS.has(item.key) ? formatQuota(Number(item.default)) : String(item.default)}
-                          {item.updated_at && ` · ${zh ? '更新于' : 'updated'} ${formatTime(item.updated_at)}`}
-                        </div>
-                      </div>
-                      <div className="setting-control">{renderControl(item)}</div>
-                    </div>
-                  )
-                })}
+                {items.map((item) => (
+                  <SettingItemRow
+                    key={item.key}
+                    item={item}
+                    draft={drafts[item.key]}
+                    setDraft={(v) => setDrafts((prev) => ({ ...prev, [item.key]: v }))}
+                    zh={zh}
+                  />
+                ))}
                 <div className="modal-actions" style={{ marginTop: 4 }}>
                   <Button disabled={savingGroup !== null || !dirty} onClick={() => resetGroup(items)}>
                     {zh ? '重置' : 'Reset'}

@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -41,6 +42,17 @@ const (
 	AIPersonalMaxSkills = 50
 	// AIPersonalMaxSkillDescRunes 个人技能 description 长度上限。
 	AIPersonalMaxSkillDescRunes = 200
+	// AIPersonalMaxMCPServers 个人 MCP 服务条数上限（与平台 ai.mcp 一致）。
+	AIPersonalMaxMCPServers = 8
+	// AIPersonalMaxMCPHeaders 单个个人 MCP 服务的认证头条数上限。
+	AIPersonalMaxMCPHeaders = 8
+	// AIPersonalMaxMCPHeaderKeyRunes 认证头键（header 名）长度上限。
+	AIPersonalMaxMCPHeaderKeyRunes = 64
+	// AIPersonalMaxMCPHeaderValueRunes 认证头值长度上限（与平台
+	// auth_header 上限一致）。
+	AIPersonalMaxMCPHeaderValueRunes = 1000
+	// AIPersonalMaxMCPURLRunes 个人 MCP 服务 url 长度上限（同平台）。
+	AIPersonalMaxMCPURLRunes = 500
 )
 
 // ErrInvalidAIPrefs 表示个人 AI 配置非法（HTTP 400 语义；错误消息含具体
@@ -83,12 +95,26 @@ type AIPersonalPersona struct {
 
 // AIPersonalSkill 为用户自定义技能/快捷指令模板：prompt 支持占位符
 // {selection}（编辑器选区）/ {file}（当前文件名），由前端在填入输入框时
-// 替换（语义同平台 ai.skills）。
+// 替换（语义同平台 ai.skills）。技能不注入 system 提示——对话入口的
+// 「技能」弹层合并展示平台+个人技能，选中即把 prompt 填入输入框。
 type AIPersonalSkill struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
 	Prompt      string `json:"prompt"`
+}
+
+// AIPersonalMCPServer 为用户自备的外部 MCP 服务器条目（语义同平台
+// ai.mcp，仅本人维度）：对话开启 use_mcp 时与平台服务合并加载（个人服务
+// 恒视为启用）。AuthHeaders 为多个 HTTP 认证头（如 Authorization /
+// X-Api-Key），值语义同 providers 的 api_key：只在 PUT 请求携带（空值 =
+// 按 ID+键继承现值，合并在 HTTP 层完成），任何读路径均不回显（掩码视图
+// 仅报键名列表与 auth_headers_configured 布尔）。
+type AIPersonalMCPServer struct {
+	ID          string            `json:"id"`
+	Name        string            `json:"name"`
+	URL         string            `json:"url"`
+	AuthHeaders map[string]string `json:"auth_headers,omitempty"`
 }
 
 // AIPersonalPrefs 为用户个人 AI 配置全集（user_ai_prefs.prefs 的 JSON 结构）。
@@ -99,6 +125,7 @@ type AIPersonalPrefs struct {
 	DefaultModels  map[string]AIPersonalModelRef `json:"default_models,omitempty"`
 	Personas       []AIPersonalPersona           `json:"personas,omitempty"`
 	Skills         []AIPersonalSkill             `json:"skills,omitempty"`
+	MCPServers     []AIPersonalMCPServer         `json:"mcp_servers,omitempty"`
 	PreferPersonal bool                          `json:"prefer_personal"`
 	// MemoryAuto 开启「AI 记忆自动提取」（默认零值 false=关闭）：每轮对话
 	// 完成后由服务端后台提取长期偏好写入 ai_memory（kind=auto）。布尔非
@@ -250,7 +277,94 @@ func ValidateAIPersonalPrefs(p AIPersonalPrefs) error {
 			return fmt.Errorf("%w: %s.prompt 过长（≤%d 字符）", ErrInvalidAIPrefs, field, AIPersonalMaxPromptRunes)
 		}
 	}
+	// mcp_servers：≤8（id 唯一、url 绝对 http(s) ≤500、auth_headers ≤8 个
+	// 且键为合法 header 名、值非空 ≤1000——空值语义为「继承现值」，继承
+	// 合并后仍空即校验报错，调用方按定位提示补值）。
+	if len(p.MCPServers) > AIPersonalMaxMCPServers {
+		return fmt.Errorf("%w: mcp_servers 最多 %d 个", ErrInvalidAIPrefs, AIPersonalMaxMCPServers)
+	}
+	seenMCP := make(map[string]bool, len(p.MCPServers))
+	for i, svc := range p.MCPServers {
+		field := fmt.Sprintf("mcp_servers[%d]", i)
+		if !validAIPrefsID(svc.ID, 64) {
+			return fmt.Errorf("%w: %s.id 须为 1..64 位字母/数字/_-.: 字符", ErrInvalidAIPrefs, field)
+		}
+		if seenMCP[svc.ID] {
+			return fmt.Errorf("%w: %s.id %q 重复", ErrInvalidAIPrefs, field, svc.ID)
+		}
+		seenMCP[svc.ID] = true
+		if !validAIPrefsID(svc.Name, 100) {
+			return fmt.Errorf("%w: %s.name 须为 1..100 个字符", ErrInvalidAIPrefs, field)
+		}
+		if len([]rune(svc.URL)) > AIPersonalMaxMCPURLRunes {
+			return fmt.Errorf("%w: %s.url 过长（≤%d 字符）", ErrInvalidAIPrefs, field, AIPersonalMaxMCPURLRunes)
+		}
+		if u, err := url.Parse(strings.TrimSpace(svc.URL)); err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return fmt.Errorf("%w: %s.url 须为绝对 http(s) URL", ErrInvalidAIPrefs, field)
+		}
+		if len(svc.AuthHeaders) > AIPersonalMaxMCPHeaders {
+			return fmt.Errorf("%w: %s.auth_headers 最多 %d 个", ErrInvalidAIPrefs, field, AIPersonalMaxMCPHeaders)
+		}
+		for k, v := range svc.AuthHeaders {
+			if err := validAIPersonalMCPHeader(k, v); err != nil {
+				return fmt.Errorf("%w: %s.auth_headers.%s %v", ErrInvalidAIPrefs, field, k, err)
+			}
+		}
+	}
 	return nil
+}
+
+// validAIPersonalMCPHeader 校验单条认证头（键 = header 名，值 = 凭据）：
+// 键 trim 后 1..64 字符且不含冒号/换行（Header.Set 语义），值 trim 后非空
+// （空值语义为继承现值，继承合并后仍空在此报错）且 ≤1000 字符。
+func validAIPersonalMCPHeader(k, v string) error {
+	k = strings.TrimSpace(k)
+	if k == "" || len([]rune(k)) > AIPersonalMaxMCPHeaderKeyRunes {
+		return fmt.Errorf("键须为 1..%d 个字符", AIPersonalMaxMCPHeaderKeyRunes)
+	}
+	if strings.ContainsAny(k, ":\r\n") {
+		return fmt.Errorf("键 %q 不得包含冒号或换行", k)
+	}
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return fmt.Errorf("值不能为空（留空 = 继承现值，仅对已配置的键生效）")
+	}
+	if len([]rune(v)) > AIPersonalMaxMCPHeaderValueRunes {
+		return fmt.Errorf("值过长（≤%d 字符）", AIPersonalMaxMCPHeaderValueRunes)
+	}
+	return nil
+}
+
+// InheritAIPersonalMCPAuthHeaders 按 ID 继承认证头现值：in 中某服务的
+// auth_headers 键值为空 = 保持库中现值（PUT 掩码回读视图的天然形态）；
+// 库中无该服务的该键则保持空（交由校验报错提示补值）。in 为原地修改。
+func InheritAIPersonalMCPAuthHeaders(in, current []AIPersonalMCPServer) {
+	if len(in) == 0 || len(current) == 0 {
+		return
+	}
+	existing := make(map[string]map[string]string, len(current))
+	for _, svc := range current {
+		if len(svc.AuthHeaders) > 0 {
+			headers := make(map[string]string, len(svc.AuthHeaders))
+			for k, v := range svc.AuthHeaders {
+				headers[k] = v
+			}
+			existing[svc.ID] = headers
+		}
+	}
+	for i := range in {
+		headers := existing[in[i].ID]
+		if headers == nil || len(in[i].AuthHeaders) == 0 {
+			continue
+		}
+		for k, v := range in[i].AuthHeaders {
+			if strings.TrimSpace(v) == "" {
+				if old, ok := headers[k]; ok {
+					in[i].AuthHeaders[k] = old
+				}
+			}
+		}
+	}
 }
 
 // PersonalProviderByID 按 ID 查找个人 Provider。
@@ -288,12 +402,39 @@ type AIPersonalProviderView struct {
 	Models           []AIPersonalModel `json:"models"`
 }
 
+// AIPersonalMCPServerView 为个人 MCP 服务的掩码视图：认证头值绝不回显，
+// 仅报键名列表（AuthHeaders，供前端编辑时展示「已配置，留空保持」）与
+// auth_headers_configured 布尔。
+type AIPersonalMCPServerView struct {
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	URL         string   `json:"url"`
+	AuthHeaders []string `json:"auth_headers,omitempty"`
+	// AuthHeadersConfigured 为 true 表示已配置至少一个认证头。
+	AuthHeadersConfigured bool `json:"auth_headers_configured"`
+}
+
+// maskedAIPersonalMCPView 生成单条掩码视图（键名按字典序，回显稳定）。
+func maskedAIPersonalMCPView(svc AIPersonalMCPServer) AIPersonalMCPServerView {
+	view := AIPersonalMCPServerView{ID: svc.ID, Name: svc.Name, URL: svc.URL, AuthHeadersConfigured: len(svc.AuthHeaders) > 0}
+	if len(svc.AuthHeaders) > 0 {
+		keys := make([]string, 0, len(svc.AuthHeaders))
+		for k := range svc.AuthHeaders {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		view.AuthHeaders = keys
+	}
+	return view
+}
+
 // AIPersonalPrefsView 为 GET /ai/personal-settings 的响应载荷（掩码视图）。
 type AIPersonalPrefsView struct {
 	Providers      []AIPersonalProviderView      `json:"providers"`
 	DefaultModels  map[string]AIPersonalModelRef `json:"default_models,omitempty"`
 	Personas       []AIPersonalPersona           `json:"personas,omitempty"`
 	Skills         []AIPersonalSkill             `json:"skills,omitempty"`
+	MCPServers     []AIPersonalMCPServerView     `json:"mcp_servers,omitempty"`
 	PreferPersonal bool                          `json:"prefer_personal"`
 	// MemoryAuto 原样回显（非密钥，不受掩码逻辑触碰）。
 	MemoryAuto bool `json:"memory_auto,omitempty"`
@@ -322,6 +463,10 @@ func (p AIPersonalPrefs) Masked() AIPersonalPrefsView {
 	}
 	out.Personas = append(out.Personas, p.Personas...)
 	out.Skills = append(out.Skills, p.Skills...)
+	out.MCPServers = make([]AIPersonalMCPServerView, 0, len(p.MCPServers))
+	for _, svc := range p.MCPServers {
+		out.MCPServers = append(out.MCPServers, maskedAIPersonalMCPView(svc))
+	}
 	return out
 }
 

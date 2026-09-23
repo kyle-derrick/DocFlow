@@ -114,8 +114,40 @@ paths:
     post:
       summary: 创建 Agent 创作任务（Agent 关闭时 404）
       parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
-      requestBody: {required: true, content: {application/json: {schema: {type: object}}}}
-      responses: {'201': {description: Created}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [prompt]
+              properties:
+                prompt: {type: string, description: 任务提示词（前端可将联网/思考等开关以前缀写入）}
+                image: {type: string, description: 运行镜像（空 = 平台默认镜像）}
+                timeout_seconds: {type: integer, description: 超时秒数}
+                harness:
+                  type: string
+                  enum: [claude-code, pi, builtin]
+                  description: >-
+                    请求级执行引擎（项目创建时选择）：优先于平台 agent.harness
+                    配置；auto 不是请求级合法值——跟随平台请直接不传（400
+                    AGENT_HARNESS_INVALID）
+                model:
+                  description: >-
+                    请求级模型意图（默认模型/会话切换）：对齐 /ai/chat 的
+                    model 传法（{providerId,modelId} 对象；另接受
+                    provider_id/model_id 键或 "provider/model" 单字符串）。
+                    仅记录意图（容器 env DOCFLOW_MODEL + 任务日志）——
+                    网关透传端点按平台默认对话目标替换实际执行模型
+                  oneOf:
+                    - type: string
+                    - type: object
+                      properties:
+                        provider_id: {type: string}
+                        provider_id_cc: {type: string, description: providerId（camelCase 别名）}
+                        model_id: {type: string}
+                        model_id_cc: {type: string, description: modelId（camelCase 别名）}
+      responses: {'201': {description: Created}, '400': {description: 参数非法（prompt 缺失 / harness 非法 / model 过长）}}
   /agent-tasks:
     get:
       summary: 列出当前用户 Agent 任务
@@ -4866,6 +4898,239 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+
+  /ai/personal/skills:
+    get:
+      tags: [AI]
+      operationId: getAIPersonalSkills
+      summary: 个人技能列表（本人维度）
+      description: >-
+        读取当前用户的个人技能/快捷指令模板（user_ai_prefs 的 skills 子集，
+        ≤50 条）。技能不注入 system 提示——对话入口的「技能」弹层合并展示
+        平台+个人技能，选中把 prompt 填入输入框（占位符 {selection}=编辑器
+        选区、{file}=当前文件名由前端替换）。未配置返回空数组。
+      responses:
+        '200':
+          description: 个人技能数组
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  skills:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
+                        description: { type: string, description: ≤200 字符 }
+                        prompt: { type: string, description: "≤4000 字符，支持 {selection}/{file} 占位符" }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503':
+          description: 个人配置存储未装配
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    put:
+      tags: [AI]
+      operationId: putAIPersonalSkills
+      summary: 保存个人技能（整表替换）
+      description: >-
+        整表替换本人技能（≤50，id 1..64 唯一、name ≤100、description ≤200、
+        prompt ≤4000；校验失败 400 code=INVALID_AI_PREFS，error 含字段定位）。
+        其余子集（providers/personas/mcp_servers 等）原样保留。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [skills]
+              properties:
+                skills:
+                  type: array
+                  items:
+                    type: object
+                    required: [id, name, prompt]
+                    properties:
+                      id: { type: string }
+                      name: { type: string }
+                      description: { type: string }
+                      prompt: { type: string }
+      responses:
+        '200':
+          description: 保存后的技能数组（结构同 GET）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  skills:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
+                        description: { type: string }
+                        prompt: { type: string }
+        '400':
+          description: 载荷非法（INVALID_AI_PREFS，error 含字段定位）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503':
+          description: 个人配置存储未装配
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /ai/personal/mcp-servers:
+    get:
+      tags: [AI]
+      operationId: getAIPersonalMCPServers
+      summary: 个人 MCP 服务列表（本人维度，掩码回显）
+      description: >-
+        读取当前用户自备的外部 MCP 服务器（user_ai_prefs 的 mcp_servers 子
+        集，≤8 条）。auth_headers 值任何读路径不回显：仅回显键名列表与
+        auth_headers_configured 布尔。对话开启 use_mcp 时个人服务与平台服
+        务（ai.mcp）合并加载——仅本人对话生效。
+      responses:
+        '200':
+          description: 个人 MCP 服务掩码视图
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  servers:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
+                        url: { type: string, description: 绝对 http(s) 地址 ≤500 字符 }
+                        auth_headers:
+                          type: array
+                          description: 已配置认证头的键名列表（值永不回显，字典序）
+                          items: { type: string }
+                        auth_headers_configured: { type: boolean, description: 已配置至少一个认证头 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503':
+          description: 个人配置存储未装配
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    put:
+      tags: [AI]
+      operationId: putAIPersonalMCPServers
+      summary: 保存个人 MCP 服务（整表替换）
+      description: >-
+        整表替换本人 MCP 服务（≤8，id 1..64 唯一、name ≤100、url 绝对
+        http(s) ≤500、auth_headers ≤8 个且键为合法 header 名、值非空
+        ≤1000）。auth_headers 值留空 = 按 ID+键继承现值（掩码回读视图的
+        天然形态；库中无该键时空值校验报 400 提示补值）；显式空数组 =
+        整表清空。其余子集原样保留。校验失败 400 code=INVALID_AI_PREFS。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [servers]
+              properties:
+                servers:
+                  type: array
+                  items:
+                    type: object
+                    required: [id, name, url]
+                    properties:
+                      id: { type: string }
+                      name: { type: string }
+                      url: { type: string }
+                      auth_headers:
+                        type: object
+                        description: 认证头集合（键 = header 名，值 = 凭据；值留空 = 继承现值）
+                        additionalProperties: { type: string }
+      responses:
+        '200':
+          description: 保存后的掩码视图（结构同 GET，认证头值不回显）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  servers:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
+                        url: { type: string }
+                        auth_headers:
+                          type: array
+                          items: { type: string }
+                        auth_headers_configured: { type: boolean }
+        '400':
+          description: 载荷非法（INVALID_AI_PREFS，error 含字段定位）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503':
+          description: 个人配置存储未装配
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /ai/personal/mcp-servers/test:
+    post:
+      tags: [AI]
+      operationId: testAIPersonalMCP
+      summary: 测试个人 MCP 服务器连通性（支持草稿）
+      description: >-
+        用给定参数（支持测试未保存的草稿配置）实测 MCP 服务器连通性
+        （initialize + tools/list，与平台 /admin/settings/ai/mcp/test 共用
+        实现）：返回工具数与前若干工具名与往返延迟。HTTP 恒 200，连接失败
+        的信息在 body（ok=false + error，中文友好）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url: { type: string, description: 绝对 http(s) 地址 }
+                auth_headers:
+                  type: object
+                  description: 认证头集合（键 = header 名，值 = 凭据）
+                  additionalProperties: { type: string }
+      responses:
+        '200':
+          description: 连通性结果（失败信息在 body，HTTP 恒 200）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  tools: { type: integer }
+                  names:
+                    type: array
+                    items: { type: string }
+                  latency_ms: { type: integer }
+                  error: { type: string, description: ok=false 时的中文错误 }
+        '400':
+          description: url 缺失
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
 
   /ai/personas:
     get:

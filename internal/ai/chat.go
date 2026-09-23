@@ -86,9 +86,10 @@ type ChatRequest struct {
 	// thinking）；模型不支持时静默忽略（不报错）。
 	Think bool
 	// UseMCP 开启外部 MCP 工具循环（默认 false）：读取平台配置的启用
-	// MCP 服务（ai.mcp），聚合其工具供上游模型调用，模型请求工具时执行
-	// 并把结果回喂继续补全（上限 MCPToolMaxRounds 轮）。无可用服务/工具
-	// 时静默按普通对话继续。
+	// MCP 服务（ai.mcp）并合并当前用户自备的个人 MCP 服务（user_ai_prefs
+	// 的 mcp_servers，仅本人对话生效），聚合其工具供上游模型调用，模型
+	// 请求工具时执行并把结果回喂继续补全（上限 MCPToolMaxRounds 轮）。
+	// 无可用服务/工具时静默按普通对话继续。
 	UseMCP bool
 	// PlatformTools 为内置平台文件工具声明（use_files；HTTP 层注入
 	// PlatformTools() 全集）。与 UseMCP 可同开——两类工具合并进同一条
@@ -853,22 +854,52 @@ type mcpToolContext struct {
 	byFn map[string]mcpToolRef
 }
 
-// collectMCPTools 收集启用 MCP 服务的工具列表：单服务失败跳过并 log；
-// 无可用服务 / 全部失败 / 零工具返回 nil（调用方按普通对话继续）。
-func (s *Service) collectMCPTools(ctx context.Context) *mcpToolContext {
-	if s.mcpReader == nil {
-		return nil
+// mcpServiceEntry 为参与一次对话聚合的 MCP 服务（平台配置 + 个人自备合并
+// 后的统一形态）：def 与平台 ai.mcp 同构（个人条目恒 Enabled=true），
+// headers 为个人服务的多认证头集合（平台服务为空，走 def.AuthHeader）。
+type mcpServiceEntry struct {
+	def     settings.AIMCPServiceDef
+	headers map[string]string
+}
+
+// mcpServices 合并平台配置（mcpReader 热读取）与当前用户自备的个人 MCP
+// 服务（personal.MCPServers，仅本人对话生效；经 WithPersonalPrefs 挂载，
+// 未挂载即空）。个人服务恒视为启用；两池工具名归一化后重名由既有 dedup
+// 逻辑跳过。
+func (s *Service) mcpServices() []mcpServiceEntry {
+	var services []mcpServiceEntry
+	if s.mcpReader != nil {
+		for _, svc := range s.mcpReader() {
+			services = append(services, mcpServiceEntry{def: svc})
+		}
 	}
-	services := s.mcpReader()
+	for _, m := range s.personal.MCPServers {
+		if strings.TrimSpace(m.URL) == "" {
+			continue
+		}
+		services = append(services, mcpServiceEntry{
+			def:     settings.AIMCPServiceDef{ID: m.ID, Name: m.Name, URL: m.URL, Enabled: true},
+			headers: m.AuthHeaders,
+		})
+	}
+	return services
+}
+
+// collectMCPTools 收集启用 MCP 服务（平台 + 个人合并）的工具列表：单服务
+// 失败跳过并 log；无可用服务 / 全部失败 / 零工具返回 nil（调用方按普通
+// 对话继续）。
+func (s *Service) collectMCPTools(ctx context.Context) *mcpToolContext {
+	services := s.mcpServices()
 	if len(services) == 0 {
 		return nil
 	}
 	ts := &mcpToolContext{byFn: make(map[string]mcpToolRef)}
-	for _, svc := range services {
+	for _, entry := range services {
+		svc := entry.def
 		if !svc.Enabled || strings.TrimSpace(svc.URL) == "" {
 			continue
 		}
-		cli := &mcpclient.Client{URL: svc.URL, AuthHeader: svc.AuthHeader}
+		cli := &mcpclient.Client{URL: svc.URL, AuthHeader: svc.AuthHeader, Headers: entry.headers}
 		cctx, cancel := context.WithTimeout(ctx, mcpclient.RequestTimeout)
 		tools, err := cli.ListTools(cctx)
 		cancel()

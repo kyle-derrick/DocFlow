@@ -5,21 +5,31 @@
 // + 能力并集多选（推理/视觉/音频/视频），每行「识别」与粘贴回车添加均经
 // models.dev 目录自动预填——交互风格对齐 AISettingsPanel 但简化）/ 个人
 // 场景默认模型（chat/summary/edit，只列个人池对话模型，留空则用平台
-// 默认）/ 人设管理（名称 + system 提示 CRUD）。保存 = 整块 PUT（掩码
-// 回读，api_key 任何读路径不回显）。加载失败与未配置状态清晰提示。
+// 默认）/ 人设管理（名称 + system 提示 CRUD）/ 个人技能卡（/ai/personal/
+// skills 整表即时保存，对话「技能」弹层与平台合并展示）/ 个人 MCP 服务卡
+//（/ai/personal/mcp-servers 整表即时保存，认证头只写不读 + 测试连接；
+// use_mcp 开启后与平台服务合并可用）。主表单保存 = 整块 PUT（掩码回读，
+// api_key 任何读路径不回显）；技能与 MCP 为独立子集端点，不并入主保存。
+// 加载失败与未配置状态清晰提示。
 import { useEffect, useState } from 'react'
 import { Button, Input, Radio, Select, Switch } from 'antd'
-import { GripVertical, Image, MessageSquare, Network, Plus, Sparkles } from 'lucide-react'
+import { GripVertical, Image, MessageSquare, Network, Plus, Server, Sparkles, Trash2, Wrench } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import {
   AIPersonalModelRef,
   AIPersonalPrefsView,
   AIPersonalProviderInput,
+  AIPersonalSkill,
+  getAIPersonalMCPServers,
   getAIPersonalSettings,
+  getAIPersonalSkills,
   lookupAIModel,
+  putAIPersonalMCPServers,
   putAIPersonalSettings,
+  putAIPersonalSkills,
+  testAIPersonalMCP,
 } from '../../api'
-import type { AIModelCapabilities, AIModelKind } from '../../api'
+import type { AIMCPTestResult, AIModelCapabilities, AIModelKind } from '../../api'
 import { Modal } from '../FileBrowser'
 
 /** 个人 Provider 类型选项（无 mock：个人池无演示 Provider 语义）。 */
@@ -92,6 +102,30 @@ interface PersonaForm {
   system_prompt: string
 }
 
+/** 编辑中的个人技能表单态（即时整表保存，不并入主「保存」）。 */
+interface SkillForm {
+  id: string
+  name: string
+  description: string
+  prompt: string
+}
+
+/** 个人 MCP 服务编辑中的认证头行（value 空 = 保持已配置现值）。 */
+interface MCPHeaderDraft {
+  key: string
+  value: string
+}
+
+/** 编辑中的个人 MCP 服务表单态。 */
+interface MCPServerForm {
+  id: string
+  name: string
+  url: string
+  headers: MCPHeaderDraft[]
+  /** headers_configured 仅展示用（掩码视图回读）。 */
+  headers_configured: boolean
+}
+
 /** 生成不与现有集合冲突的短 id（provider/persona 共用）。 */
 function freshID(prefix: string, existing: Set<string>): string {
   for (let i = 1; i < 1000; i++) {
@@ -129,6 +163,16 @@ export default function AIPersonalPanel({ onError, onNotice }: { onError: (msg: 
   const [newModelInput, setNewModelInput] = useState('')
   // 人设编辑弹窗。
   const [personaEditing, setPersonaEditing] = useState<PersonaForm | null>(null)
+  // 个人技能（独立子集端点整表读写，不并入主「保存」）。
+  const [skills, setSkills] = useState<SkillForm[]>([])
+  const [skillEditing, setSkillEditing] = useState<SkillForm | null>(null)
+  const [skillsSaving, setSkillsSaving] = useState(false)
+  // 个人 MCP 服务（独立子集端点整表读写；认证头值掩码回读，留空保持）。
+  const [mcpServers, setMCPServers] = useState<MCPServerForm[]>([])
+  const [mcpEditing, setMCPEditing] = useState<MCPServerForm | null>(null)
+  const [mcpSaving, setMCPSaving] = useState(false)
+  const [mcpTesting, setMCPTesting] = useState(false)
+  const [mcpTestResult, setMCPTestResult] = useState<AIMCPTestResult | null>(null)
 
   const rebuild = (v: AIPersonalPrefsView) => {
     setProviders((v.providers ?? []).map((p) => ({
@@ -160,6 +204,142 @@ export default function AIPersonalPanel({ onError, onNotice }: { onError: (msg: 
 
   useEffect(() => {
     void load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // ---------- 个人技能（独立子集端点 /ai/personal/skills） ----------
+
+  /** 技能列表重建（GET/PUT 响应 → 本地表单态）。 */
+  const rebuildSkills = (list: AIPersonalSkill[]) => {
+    setSkills(list.map((s) => ({ id: s.id, name: s.name, description: s.description ?? '', prompt: s.prompt })))
+  }
+
+  const loadSkills = async () => {
+    try {
+      rebuildSkills(await getAIPersonalSkills())
+    } catch (err) {
+      onError(err instanceof Error ? err.message : '个人技能加载失败')
+    }
+  }
+
+  /** 整表保存技能（Modal 确定/删除即时生效，掩码无关——技能无密钥）。 */
+  const saveSkills = async (list: SkillForm[]) => {
+    if (skillsSaving) return
+    setSkillsSaving(true)
+    onError('')
+    try {
+      rebuildSkills(await putAIPersonalSkills(list.map((s) => ({
+        id: s.id.trim(), name: s.name.trim(),
+        description: s.description.trim() || undefined, prompt: s.prompt,
+      }))))
+      onNotice('个人技能已保存（即时生效）')
+      return true
+    } catch (err) {
+      onError(err instanceof Error ? err.message : '个人技能保存失败')
+      return false
+    } finally {
+      setSkillsSaving(false)
+    }
+  }
+
+  /** Modal 确定：写回本地列表并即时整表保存（成功才关弹窗）。 */
+  const commitSkill = async () => {
+    if (!skillEditing) return
+    const next = [...skills.filter((s) => s.id !== skillEditing.id), { ...skillEditing, id: skillEditing.id.trim(), name: skillEditing.name.trim() }]
+    if (await saveSkills(next)) setSkillEditing(null)
+  }
+
+  const removeSkill = async (id: string) => {
+    await saveSkills(skills.filter((s) => s.id !== id))
+  }
+
+  // ---------- 个人 MCP 服务（独立子集端点 /ai/personal/mcp-servers） ----------
+
+  /** MCP 服务列表重建（掩码视图 → 表单态；已配置头以空值行展示 = 留空保持）。 */
+  const rebuildMCPServers = (list: { id: string; name: string; url: string; auth_headers?: string[]; auth_headers_configured: boolean }[]) => {
+    setMCPServers(list.map((s) => ({
+      id: s.id, name: s.name, url: s.url,
+      headers: (s.auth_headers ?? []).map((key) => ({ key, value: '' })),
+      headers_configured: s.auth_headers_configured,
+    })))
+  }
+
+  const loadMCPServers = async () => {
+    try {
+      rebuildMCPServers(await getAIPersonalMCPServers())
+    } catch (err) {
+      onError(err instanceof Error ? err.message : '个人 MCP 服务加载失败')
+    }
+  }
+
+  /** 表单头行 → PUT 载荷（键为空的行丢弃；值留空 = 继承现值由服务端合并）。 */
+  const headersPayload = (form: MCPServerForm): Record<string, string> => {
+    const out: Record<string, string> = {}
+    for (const h of form.headers) {
+      const key = h.key.trim()
+      if (key) out[key] = h.value
+    }
+    return out
+  }
+
+  /** 整表保存 MCP 服务（Modal 确定/删除即时生效；成功以掩码响应重建）。 */
+  const saveMCPServers = async (list: MCPServerForm[]) => {
+    if (mcpSaving) return
+    setMCPSaving(true)
+    onError('')
+    try {
+      rebuildMCPServers(await putAIPersonalMCPServers(list.map((s) => ({
+        id: s.id.trim(), name: s.name.trim(), url: s.url.trim(),
+        auth_headers: headersPayload(s),
+      }))))
+      onNotice('个人 MCP 服务已保存（即时生效）')
+      return true
+    } catch (err) {
+      onError(err instanceof Error ? err.message : '个人 MCP 服务保存失败')
+      return false
+    } finally {
+      setMCPSaving(false)
+    }
+  }
+
+  const commitMCPServer = async () => {
+    if (!mcpEditing) return
+    const next = [...mcpServers.filter((s) => s.id !== mcpEditing.id), { ...mcpEditing, id: mcpEditing.id.trim(), name: mcpEditing.name.trim(), url: mcpEditing.url.trim() }]
+    if (await saveMCPServers(next)) {
+      setMCPEditing(null)
+      setMCPTestResult(null)
+    }
+  }
+
+  const removeMCPServer = async (id: string) => {
+    await saveMCPServers(mcpServers.filter((s) => s.id !== id))
+  }
+
+  /** 测试连接（用弹窗草稿：url + 已填值的认证头；留空头不参与测试）。 */
+  const testMCPDraft = async () => {
+    if (!mcpEditing) return
+    const url = mcpEditing.url.trim()
+    if (!url) {
+      onError('请先填写服务 URL')
+      return
+    }
+    setMCPTesting(true)
+    setMCPTestResult(null)
+    try {
+      const headers = headersPayload(mcpEditing)
+      for (const k of Object.keys(headers)) if (!headers[k]) delete headers[k]
+      setMCPTestResult(await testAIPersonalMCP(url, headers))
+    } catch (err) {
+      onError(err instanceof Error ? err.message : '测试连接失败')
+    } finally {
+      setMCPTesting(false)
+    }
+  }
+
+  // 首挂载：主配置 + 技能 + MCP 服务（独立子集）并行加载。
+  useEffect(() => {
+    void loadSkills()
+    void loadMCPServers()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -472,6 +652,77 @@ export default function AIPersonalPanel({ onError, onNotice }: { onError: (msg: 
         </Button>
       </div>
 
+      {/* 个人技能（/ai/personal/skills 整表读写，即时保存；对话「技能」弹层合并展示）。 */}
+      <div className="setting-key" style={{ marginTop: 16 }}>个人技能（{skills.length}/50）</div>
+      <div className="setting-desc muted" style={{ marginBottom: 8 }}>
+        自定义快捷指令模板（prompt 支持 {'{selection}'}=编辑器选区、{'{file}'}=当前文件名占位符），
+        在 AI 助手 / 编辑对话的技能按钮中选择使用，仅本人可见。
+      </div>
+      {skills.length === 0 ? (
+        <div className="empty">尚未创建个人技能。</div>
+      ) : (
+        skills.map((s) => (
+          <div key={s.id} className="setting-row">
+            <div className="setting-main">
+              <div className="setting-key">{s.name || s.id}</div>
+              <div className="setting-desc muted" title={s.prompt}>
+                {s.description || (s.prompt.length > 80 ? `${s.prompt.slice(0, 80)}…` : s.prompt) || '（空提示）'}
+              </div>
+            </div>
+            <div className="setting-control">
+              <Button size="small" onClick={() => setSkillEditing({ ...s })}>编辑</Button>
+              <Button size="small" danger disabled={skillsSaving} onClick={() => void removeSkill(s.id)}>删除</Button>
+            </div>
+          </div>
+        ))
+      )}
+      <div style={{ marginTop: 8 }}>
+        <Button disabled={skills.length >= 50} onClick={() => setSkillEditing({ id: freshID('skill-', new Set(skills.map((s) => s.id))), name: '', description: '', prompt: '' })}>
+          <Plus size={14} style={{ marginRight: 4, verticalAlign: -2 }} />添加技能
+        </Button>
+      </div>
+
+      {/* 个人 MCP 服务（/ai/personal/mcp-servers 整表读写，即时保存；use_mcp 与平台合并）。 */}
+      <div className="setting-key" style={{ marginTop: 16 }}>个人 MCP 服务（{mcpServers.length}/8）</div>
+      <div className="setting-desc muted" style={{ marginBottom: 8 }}>
+        自备外部 MCP 工具服务（Streamable HTTP 端点）：对话开启「MCP 工具」后，个人服务与平台服务合并可用（仅本人对话生效）；
+        认证头只写不读，保存后任何路径均不回显。
+      </div>
+      {mcpServers.length === 0 ? (
+        <div className="empty">尚未配置个人 MCP 服务。</div>
+      ) : (
+        mcpServers.map((s) => (
+          <div key={s.id} className="setting-row">
+            <div className="setting-main">
+              <div className="setting-key">
+                <Server size={13} strokeWidth={2} aria-hidden="true" style={{ verticalAlign: -2, marginRight: 4 }} />
+                {s.name || s.id}
+                <span className={`badge ${s.headers_configured ? 'available' : ''}`} style={{ marginLeft: 8 }}>
+                  {s.headers_configured ? `认证头已配置（${s.headers.length}）` : '无认证头'}
+                </span>
+              </div>
+              <div className="setting-meta muted" title={s.url}>{s.id} · {s.url}</div>
+              {s.headers.length > 0 && (
+                <div className="event-badges">
+                  {s.headers.map((h) => (
+                    <span key={h.key} className="badge" title={`${h.key}（值不回显）`}>{h.key}</span>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="setting-control">
+              <Button size="small" onClick={() => setMCPEditing({ ...s, headers: s.headers.map((h) => ({ ...h })) })}>编辑</Button>
+              <Button size="small" danger disabled={mcpSaving} onClick={() => void removeMCPServer(s.id)}>删除</Button>
+            </div>
+          </div>
+        ))
+      )}
+      <div style={{ marginTop: 8 }}>
+        <Button disabled={mcpServers.length >= 8} onClick={() => { setMCPTestResult(null); setMCPEditing({ id: freshID('my-mcp-', new Set(mcpServers.map((s) => s.id))), name: '', url: '', headers: [], headers_configured: false }) }}>
+          <Plus size={14} style={{ marginRight: 4, verticalAlign: -2 }} />添加 MCP 服务
+        </Button>
+      </div>
+
       {/* 保存：整块 PUT（掩码回读）。 */}
       <div className="modal-actions" style={{ marginTop: 16 }}>
         <Button disabled={saving} onClick={() => void load()}>重置</Button>
@@ -613,6 +864,106 @@ export default function AIPersonalPanel({ onError, onNotice }: { onError: (msg: 
             <div className="setting-control" style={{ marginTop: 8, justifyContent: 'flex-end' }}>
               <Button onClick={() => setPersonaEditing(null)}>取消</Button>
               <Button type="primary" htmlType="submit" disabled={!personaEditing.name.trim() || !personaEditing.id.trim()}>确定</Button>
+            </div>
+          </form>
+        </Modal>
+      )}
+
+      {/* 个人技能编辑弹窗（确定即整表保存）。 */}
+      {skillEditing && (
+        <Modal title={skills.some((s) => s.id === skillEditing.id) ? `编辑技能：${skillEditing.name || skillEditing.id}` : '添加个人技能'} onClose={() => setSkillEditing(null)}>
+          <form className="team-create-row ai-personal-form" onSubmit={(e) => { e.preventDefault(); void commitSkill() }}>
+            <label className="field">
+              <span>名称（1..100 字符）</span>
+              <Input autoFocus required maxLength={100} value={skillEditing.name} onChange={(e) => setSkillEditing({ ...skillEditing, name: e.target.value })} placeholder="如：润色选中文本" />
+            </label>
+            <label className="field">
+              <span>ID（1..64 位字母/数字/_-.:）</span>
+              <Input required maxLength={64} value={skillEditing.id} onChange={(e) => setSkillEditing({ ...skillEditing, id: e.target.value })} placeholder="如 polish" />
+            </label>
+            <label className="field">
+              <span>描述（可选，≤200 字符）</span>
+              <Input maxLength={200} value={skillEditing.description} onChange={(e) => setSkillEditing({ ...skillEditing, description: e.target.value })} placeholder="技能弹层里的补充说明" />
+            </label>
+            <label className="field">
+              <span>Prompt（≤4000 字符；{'{selection}'}=编辑器选区、{'{file}'}=当前文件名）</span>
+              <Input.TextArea
+                rows={6}
+                maxLength={4000}
+                value={skillEditing.prompt}
+                onChange={(e) => setSkillEditing({ ...skillEditing, prompt: e.target.value })}
+                placeholder="请将以下选中文本润色为……：{selection}"
+              />
+            </label>
+            <div className="setting-control" style={{ marginTop: 8, justifyContent: 'flex-end' }}>
+              <Button onClick={() => setSkillEditing(null)}>取消</Button>
+              <Button type="primary" htmlType="submit" loading={skillsSaving} disabled={!skillEditing.name.trim() || !skillEditing.id.trim()}>保存</Button>
+            </div>
+          </form>
+        </Modal>
+      )}
+
+      {/* 个人 MCP 服务编辑弹窗（确定即整表保存；测试连接用弹窗草稿）。 */}
+      {mcpEditing && (
+        <Modal title={mcpServers.some((s) => s.id === mcpEditing.id) ? `编辑 MCP 服务：${mcpEditing.name || mcpEditing.id}` : '添加个人 MCP 服务'} onClose={() => { setMCPEditing(null); setMCPTestResult(null) }}>
+          <form className="team-create-row ai-personal-form" onSubmit={(e) => { e.preventDefault(); void commitMCPServer() }}>
+            <label className="field">
+              <span>名称（1..100 字符）</span>
+              <Input autoFocus required maxLength={100} value={mcpEditing.name} onChange={(e) => setMCPEditing({ ...mcpEditing, name: e.target.value })} placeholder="如：我的工具站" />
+            </label>
+            <label className="field">
+              <span>ID（1..64 位字母/数字/_-.:）</span>
+              <Input required maxLength={64} value={mcpEditing.id} onChange={(e) => setMCPEditing({ ...mcpEditing, id: e.target.value })} placeholder="如 my-tools" />
+            </label>
+            <label className="field">
+              <span>URL（绝对 http/https，Streamable HTTP 端点，≤500 字符）</span>
+              <Input required maxLength={500} value={mcpEditing.url} onChange={(e) => { setMCPEditing({ ...mcpEditing, url: e.target.value }); setMCPTestResult(null) }} placeholder="https://mcp.example.com/mcp" />
+            </label>
+            <div className="field">
+              <span>认证头（≤8 个，键 = header 名；已配置的值不回显，留空保持现值）</span>
+              {mcpEditing.headers.map((h, i) => (
+                <div key={i} style={{ display: 'flex', gap: 8, marginBottom: 6, alignItems: 'center' }}>
+                  <Input
+                    required
+                    maxLength={64}
+                    style={{ flex: 1, minWidth: 140 }}
+                    value={h.key}
+                    onChange={(e) => setMCPEditing({ ...mcpEditing, headers: mcpEditing.headers.map((x, j) => (j === i ? { ...x, key: e.target.value } : x)) })}
+                    placeholder="Authorization"
+                  />
+                  <Input.Password
+                    style={{ flex: 2, minWidth: 180 }}
+                    value={h.value}
+                    onChange={(e) => setMCPEditing({ ...mcpEditing, headers: mcpEditing.headers.map((x, j) => (j === i ? { ...x, value: e.target.value } : x)) })}
+                    placeholder={h.value === '' && mcpEditing.headers_configured ? '已配置，留空保持现值' : 'Bearer …（值只写不读）'}
+                    autoComplete="new-password"
+                  />
+                  <Button size="small" danger aria-label="删除认证头" onClick={() => setMCPEditing({ ...mcpEditing, headers: mcpEditing.headers.filter((_, j) => j !== i) })}>
+                    <Trash2 size={13} strokeWidth={2} aria-hidden="true" />
+                  </Button>
+                </div>
+              ))}
+              <div>
+                <Button size="small" disabled={mcpEditing.headers.length >= 8} onClick={() => setMCPEditing({ ...mcpEditing, headers: [...mcpEditing.headers, { key: '', value: '' }] })}>
+                  <Plus size={13} strokeWidth={2} aria-hidden="true" style={{ verticalAlign: -2 }} />添加认证头
+                </Button>
+              </div>
+            </div>
+            {mcpTestResult && (
+              <div className={`banner ${mcpTestResult.ok ? 'ok' : 'error'}`} style={{ marginTop: 4 }}>
+                {mcpTestResult.ok
+                  ? `连接成功：${mcpTestResult.tools} 个工具（${mcpTestResult.names.join('、')}${mcpTestResult.tools > mcpTestResult.names.length ? ' 等' : ''}），延迟 ${mcpTestResult.latency_ms}ms`
+                  : `连接失败：${mcpTestResult.error ?? '未知错误'}`}
+              </div>
+            )}
+            <div className="setting-control" style={{ marginTop: 8, justifyContent: 'space-between' }}>
+              <Button loading={mcpTesting} onClick={() => void testMCPDraft()}>
+                <Wrench size={13} strokeWidth={2} aria-hidden="true" style={{ verticalAlign: -2 }} />测试连接
+              </Button>
+              <span style={{ display: 'inline-flex', gap: 8 }}>
+                <Button onClick={() => { setMCPEditing(null); setMCPTestResult(null) }}>取消</Button>
+                <Button type="primary" htmlType="submit" loading={mcpSaving} disabled={!mcpEditing.name.trim() || !mcpEditing.id.trim() || !mcpEditing.url.trim()}>保存</Button>
+              </span>
             </div>
           </form>
         </Modal>

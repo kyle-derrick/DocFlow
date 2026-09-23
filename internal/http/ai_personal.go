@@ -49,6 +49,8 @@ func (h *Handler) aiPersonalFor(c *gin.Context) (auth.AIPersonalPrefs, bool) {
 // loadAIPersonalPrefs 读取并解析指定用户的个人配置（best-effort：未注入
 // 存储 / 无记录 / 解析失败一律返回零值与 false——个人池故障不阻塞平台 AI
 // 链路）。已入库但校验不过的存量数据同样按无个人池处理（fail closed）。
+// 仅配置了技能/MCP 服务（无 Provider）同样视为有个人配置——技能弹层与
+// use_mcp 合并加载只依赖对应子集。
 func (h *Handler) loadAIPersonalPrefs(userID uuid.UUID) (auth.AIPersonalPrefs, bool) {
 	if h.aiPrefs == nil {
 		return auth.AIPersonalPrefs{}, false
@@ -61,7 +63,7 @@ func (h *Handler) loadAIPersonalPrefs(userID uuid.UUID) (auth.AIPersonalPrefs, b
 	if err := json.Unmarshal(raw, &prefs); err != nil {
 		return auth.AIPersonalPrefs{}, false
 	}
-	if len(prefs.Providers) == 0 {
+	if len(prefs.Providers) == 0 && len(prefs.Skills) == 0 && len(prefs.MCPServers) == 0 {
 		return auth.AIPersonalPrefs{}, false
 	}
 	return prefs, true
@@ -126,6 +128,18 @@ func (h *Handler) putAIPersonalSettings(c *gin.Context) {
 				in.Providers[i].APIKey = existing[in.Providers[i].ID]
 			}
 		}
+	}
+	// skills / mcp_servers 未携带（JSON 缺失或 null → nil）= 继承现值：
+	// 主表单（providers/默认模型/人设）不管理这两个子集，避免整块 PUT
+	// 误清空；显式空数组 = 整表清空（专用端点 PUT /ai/personal/skills|
+	// mcp-servers 的语义）。mcp_servers 携带时按 ID 继承认证头空值。
+	if in.Skills == nil {
+		in.Skills = current.Skills
+	}
+	if in.MCPServers == nil {
+		in.MCPServers = current.MCPServers
+	} else {
+		auth.InheritAIPersonalMCPAuthHeaders(in.MCPServers, current.MCPServers)
 	}
 	if err := auth.ValidateAIPersonalPrefs(in); err != nil {
 		status := http.StatusBadRequest

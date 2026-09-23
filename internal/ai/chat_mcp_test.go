@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/docflow/docflow/internal/auth"
 	"github.com/docflow/docflow/internal/settings"
 )
 
@@ -378,5 +379,114 @@ func TestMCPToolFnName(t *testing.T) {
 	// 非法 JSON schema 兜底为 object。
 	if got := fmt.Sprint(mcpToolSchema(json.RawMessage(`{bad`))); !strings.Contains(got, "map[type:object]") {
 		t.Fatalf("schema fallback = %v", got)
+	}
+}
+
+// fakeMCPAuthEcho 假 MCP 服务器（单工具 echo），记录收到的认证头（个人
+// MCP 多头透传断言用）。
+func fakeMCPAuthEcho(t *testing.T, gotAuth, gotKey *string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*gotAuth = r.Header.Get("Authorization")
+		*gotKey = r.Header.Get("X-Api-Key")
+		var req struct {
+			ID     *int   `json:"id"`
+			Method string `json:"method"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		w.Header().Set("Content-Type", "application/json")
+		respond := func(result any) {
+			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": *req.ID, "result": result})
+		}
+		switch req.Method {
+		case "initialize":
+			respond(map[string]any{"protocolVersion": "2025-03-26"})
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		case "tools/list":
+			respond(map[string]any{"tools": []map[string]any{{"name": "echo", "description": "回显", "inputSchema": map[string]any{"type": "object"}}}})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+}
+
+// TestMCPCollectPersonalMerged use_mcp 工具收集合并平台+个人服务：个人
+// 服务（WithPersonalPrefs 挂载，仅本人对话生效）与平台服务并存；个人服务
+// 多认证头透传；平台服务失败跳过不阻塞个人服务。
+func TestMCPCollectPersonalMerged(t *testing.T) {
+	var gotAuth, gotKey string
+	personal := fakeMCPAuthEcho(t, &gotAuth, &gotKey)
+	defer personal.Close()
+
+	svc := NewService(func() (settings.AIConfig, error) {
+		return settings.AIConfig{Providers: []settings.AIProvider{{ID: "o1", Name: "OpenAI", Kind: settings.AIKindOpenAICompatible, BaseURL: "http://127.0.0.1:1", Model: "gpt-test", Enabled: true}}, Temperature: 0.3, MaxTokens: 128}, nil
+	})
+	// 平台 reader：一个不可达服务（失败跳过）——仅剩个人服务的工具可用。
+	svc.SetMCPReader(mcpReaderOf(settings.AIMCPServiceDef{ID: "plat", Name: "平台坏站", URL: "http://127.0.0.1:1/mcp", Enabled: true}))
+	clone := svc.WithPersonalPrefs(auth.AIPersonalPrefs{
+		MCPServers: []auth.AIPersonalMCPServer{{
+			ID: "mine", Name: "我的工具站", URL: personal.URL,
+			AuthHeaders: map[string]string{"Authorization": "Bearer p-tok", "X-Api-Key": "p-key"},
+		}},
+	})
+	ts := clone.collectMCPTools(context.Background())
+	if ts == nil {
+		t.Fatal("应收集到个人服务的工具")
+	}
+	ref, ok := ts.byFn["mcp_mine_echo"]
+	if !ok {
+		t.Fatalf("缺个人工具 mcp_mine_echo: %v", ts.byFn)
+	}
+	if ref.service.ID != "mine" || ref.service.Name != "我的工具站" || !ref.service.Enabled {
+		t.Fatalf("个人服务定义异常: %+v", ref.service)
+	}
+	if gotAuth != "Bearer p-tok" || gotKey != "p-key" {
+		t.Fatalf("个人认证头未透传: Authorization=%q X-Api-Key=%q", gotAuth, gotKey)
+	}
+
+	// 未挂载个人配置（原始 svc）：仅平台坏站 → 零工具 nil（个人服务仅本
+	// 人对话生效的负向断言）。
+	if ts2 := svc.collectMCPTools(context.Background()); ts2 != nil {
+		t.Fatalf("未挂载个人配置不应出现个人工具: %v", ts2.byFn)
+	}
+}
+
+// TestChatMCPPlatformAndPersonalLoop 全链路：平台服务不可达跳过，个人
+// 服务工具进入对话工具循环并被调用（openai 双轮）。
+func TestChatMCPPlatformAndPersonalLoop(t *testing.T) {
+	var mcpCalls int32
+	personal := fakeMCPEcho(t, &mcpCalls)
+	defer personal.Close()
+	cap := &capturedBodies{}
+	up := fakeOpenAIToolLoop(t, cap, false)
+	defer up.Close()
+	svc := NewService(func() (settings.AIConfig, error) {
+		return settings.AIConfig{Providers: []settings.AIProvider{{ID: "o1", Name: "OpenAI", Kind: settings.AIKindOpenAICompatible, BaseURL: up.URL, Model: "gpt-test", Enabled: true}}, Temperature: 0.3, MaxTokens: 128}, nil
+	})
+	svc.SetMCPReader(mcpReaderOf(settings.AIMCPServiceDef{ID: "platbad", Name: "平台坏站", URL: "http://127.0.0.1:1/mcp", Enabled: true}))
+	clone := svc.WithPersonalPrefs(auth.AIPersonalPrefs{
+		// ID=test：fakeOpenAIToolLoop 固定请求 mcp_test_echo。
+		MCPServers: []auth.AIPersonalMCPServer{{ID: "test", Name: "我的服务", URL: personal.URL}},
+	})
+	var toolEvents []string
+	res, err := clone.Chat(context.Background(), ChatRequest{
+		Messages: []Message{{Role: "user", Content: "北京天气如何"}},
+		UseMCP:   true, Stream: true,
+		OnTool: func(serverID, serverName, toolName string) {
+			toolEvents = append(toolEvents, serverID+"|"+serverName+"|"+toolName)
+		},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if res.Content != "北京天气晴" {
+		t.Fatalf("content = %q", res.Content)
+	}
+	if len(toolEvents) != 1 || toolEvents[0] != "test|我的服务|echo" {
+		t.Fatalf("toolEvents = %v", toolEvents)
+	}
+	if atomic.LoadInt32(&mcpCalls) != 1 {
+		t.Fatalf("mcp calls = %d", mcpCalls)
 	}
 }

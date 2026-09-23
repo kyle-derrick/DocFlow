@@ -21,8 +21,9 @@ func mustUnmarshalCaps(t *testing.T, raw string) AIModelCapabilities {
 }
 
 // TestAIModelCapabilitiesLegacyMapping 旧对象（无 kind、有 chat/embedding/
-// rerank 布尔）读入自动映射 kind；多 true 按优先 chat>embedding>rerank；
-// 全 false（含 vision-only）默认 chat。
+// rerank 布尔）读入自动映射 kind；多 true 按优先 embedding>rerank>chat
+// （旧 UI chat 为默认勾选噪音，embedding/rerank 为主动勾选）；全 false
+// （含 vision-only）默认 chat。
 func TestAIModelCapabilitiesLegacyMapping(t *testing.T) {
 	cases := []struct {
 		name string
@@ -32,8 +33,11 @@ func TestAIModelCapabilitiesLegacyMapping(t *testing.T) {
 		{"chat only", `{"chat":true}`, AIModelKindChat},
 		{"embedding only", `{"embedding":true}`, AIModelKindEmbedding},
 		{"rerank only", `{"rerank":true}`, AIModelKindRerank},
-		// 多 true：chat > embedding > rerank 优先级。
-		{"chat beats embedding", `{"chat":true,"embedding":true,"rerank":true}`, AIModelKindChat},
+		// 多 true：embedding > rerank > chat 优先级（bge-m3 旧数据
+		// {chat:true,embedding:true} 必须归 embedding，否则 default
+		// embedding model 校验误拒）。
+		{"embedding beats chat", `{"chat":true,"embedding":true,"rerank":true}`, AIModelKindEmbedding},
+		{"rerank beats chat", `{"chat":true,"rerank":true}`, AIModelKindRerank},
 		{"embedding beats rerank", `{"embedding":true,"rerank":true}`, AIModelKindEmbedding},
 		// 全 false / 全缺省：默认 chat（旧 vision-only 归一 chat+vision 能力）。
 		{"all false defaults chat", `{"chat":false,"embedding":false,"rerank":false,"vision":true}`, AIModelKindChat},

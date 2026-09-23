@@ -54,11 +54,11 @@ import { Modal } from './FileBrowser'
 import { refreshAIFeature } from '../aiFeature'
 import { t, useLocale } from '../i18n'
 
-/** 类型预设模板（选中即回填 baseURL/默认单模型建议）。 */
+/** 类型预设模板（选中即回填 baseURL/默认单模型建议）。Mock 为内部测试
+ * 协议，不在管理 UI 暴露（存量 mock Provider 仍可运行，仅不可新建）。 */
 const KIND_PRESETS: Record<string, { label: string; baseURL: string; model: string }> = {
   openai_compatible: { label: 'OpenAI 兼容（OpenAI/DeepSeek/Qwen/Ollama/vLLM）', baseURL: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
   anthropic: { label: 'Anthropic（Claude）', baseURL: 'https://www.anthropic.com', model: 'claude-sonnet-4-20250514' },
-  mock: { label: 'Mock（内置演示，无需 Key）', baseURL: '', model: 'mock-echo' },
 }
 
 /** 模型类型定义（互斥单选，Cherry Studio 语义：一个模型只属一类）。 */
@@ -897,11 +897,10 @@ export default function AISettingsPanel({
               value={embeddingValue}
               disabled={readOnly}
               onChange={(v) => {
-                if (v === 'mock') { setRag({ ...rag, embedding_provider: 'mock' }); return }
                 const [provider_id, ...rest] = v.split('::')
                 setRag({ ...rag, embedding_provider: provider_id, embedding_model: rest.join('::') })
               }}
-              options={[{ value: 'mock', label: 'Mock（内置演示）' }, ...embeddingOptions]}
+              options={embeddingOptions}
               style={{ minWidth: 220 }}
             />
           </label>

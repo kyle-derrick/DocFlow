@@ -660,6 +660,15 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	// prefer_personal；api_key 掩码回显、PUT 留空继承）。
 	api.GET("/ai/personal-settings", h.getAIPersonalSettings)
 	api.PUT("/ai/personal-settings", h.putAIPersonalSettings)
+	// 个人技能 / 个人 MCP 服务（user_ai_prefs 的 skills / mcp_servers 子集
+	// 整表读写；技能供对话「技能」弹层合并展示，MCP 服务在 use_mcp 开启
+	// 时与平台服务合并加载——仅本人对话生效；auth_headers 掩码回显、PUT
+	// 留空继承；test 实测连通性（与平台 /admin/settings/ai/mcp/test 共用）。
+	api.GET("/ai/personal/skills", h.getAIPersonalSkills)
+	api.PUT("/ai/personal/skills", h.putAIPersonalSkills)
+	api.GET("/ai/personal/mcp-servers", h.getAIPersonalMCPServers)
+	api.PUT("/ai/personal/mcp-servers", h.putAIPersonalMCPServers)
+	api.POST("/ai/personal/mcp-servers/test", h.testAIPersonalMCP)
 	// 平台人设/技能模板（ai.personas / ai.skills，管理员维护、登录可读；
 	// 配置数据不随 AI 总开关 404——前端人设下拉/技能弹层恒可拉取）。
 	api.GET("/ai/personas", h.aiPersonasList)

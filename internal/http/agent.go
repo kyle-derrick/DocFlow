@@ -48,7 +48,7 @@ func (h *Handler) appendAgentLog(taskID uuid.UUID, stream, content string) {
 	h.agentDB.Table("agent_task_logs").Create(&agentLogRow{TaskID: taskID, Stream: stream, Content: content, CreatedAt: time.Now().UTC()})
 }
 
-func (h *Handler) executeAgentTask(taskID uuid.UUID, aiToken, harness string) {
+func (h *Handler) executeAgentTask(taskID uuid.UUID, aiToken, harness, model string) {
 	if h.agentDB == nil {
 		return
 	}
@@ -77,6 +77,11 @@ func (h *Handler) executeAgentTask(taskID uuid.UUID, aiToken, harness string) {
 		return
 	}
 	h.appendAgentLog(taskID, "system", "task started")
+	if model != "" {
+		// 模型意图审计记录（实际执行模型由网关按平台默认替换，见
+		// RuntimeRequest.Model 注释）。
+		h.appendAgentLog(taskID, "system", "model override: "+model)
+	}
 	cfg := agent.DefaultConfig()
 	if v, ok := h.agentSetting("agent.runtime").(string); ok && v != "" {
 		cfg.Runtime = v
@@ -142,7 +147,7 @@ func (h *Handler) executeAgentTask(taskID uuid.UUID, aiToken, harness string) {
 	if v, ok := h.agentSetting("agent.sync_mode").(string); ok && v != "" {
 		syncMode = v
 	}
-	exec := agent.Executor{Runtime: runtime, Timeout: time.Duration(cfg.DefaultTimeoutSeconds) * time.Second, MaxEntries: 10000, MaxBytes: 512 << 20, AIToken: aiToken, Harness: harness, SyncMode: syncMode}
+	exec := agent.Executor{Runtime: runtime, Timeout: time.Duration(cfg.DefaultTimeoutSeconds) * time.Second, MaxEntries: 10000, MaxBytes: 512 << 20, AIToken: aiToken, Harness: harness, Model: model, SyncMode: syncMode}
 	result, runErr := exec.Execute(ctx, task.ID.String(), task.Image, task.Prompt, entries)
 	if runErr != nil {
 		status := agent.StatusFailed
@@ -221,17 +226,19 @@ func splitAgentImages(raw string) []string {
 	return out
 }
 
-// resolveAgentHarness 在任务创建时解析 harness 终值（agent.harness）：
-// 配置显式值（非 auto/空）原样；auto/缺省按任务归属用户解析平台默认
-// 对话 Provider 的 kind 路由——与网关两透传端点的 kind 要求一致
-// （anthropic→claude-code 经 /v1/messages、openai 兼容→pi 经
-// /v1/chat/completions）；解析失败/其余 kind（含 mock）→builtin。
-func (h *Handler) resolveAgentHarness(user uuid.UUID) string {
+// resolveAgentHarness 在任务创建时解析 harness 终值：请求级 harness
+// （项目/会话在创建任务时显式选择的 claude-code/pi/builtin）优先于平台
+// 配置 agent.harness；请求未携带（空）时按既有规则解析——配置显式值
+// （非 auto/空）原样；auto/缺省按任务归属用户解析平台默认对话 Provider
+// 的 kind 路由——与网关两透传端点的 kind 要求一致（anthropic→claude-code
+// 经 /v1/messages、openai 兼容→pi 经 /v1/chat/completions）；解析失败/
+// 其余 kind（含 mock）→builtin。
+func (h *Handler) resolveAgentHarness(user uuid.UUID, requested string) string {
 	configured := ""
 	if v, ok := h.agentSetting("agent.harness").(string); ok {
 		configured = v
 	}
-	return agentHarnessTerminal(configured, func() (string, error) {
+	return agentTaskHarness(requested, configured, func() (string, error) {
 		if h.aiSvc == nil {
 			return "", errors.New("ai service is not configured")
 		}
@@ -241,6 +248,70 @@ func (h *Handler) resolveAgentHarness(user uuid.UUID) string {
 		}
 		return target.Provider.Kind, nil
 	})
+}
+
+// agentTaskHarness 为请求级/平台级 harness 优先级的纯函数（便于单测）：
+// 请求携带具体引擎（调用方已用 validAgentHarness 校验）时原样优先；空/
+// 未携带回落平台配置解析（agentHarnessTerminal）。
+func agentTaskHarness(requested, configured string, resolveKind func() (string, error)) string {
+	if r := strings.TrimSpace(requested); r != "" {
+		return r
+	}
+	return agentHarnessTerminal(configured, resolveKind)
+}
+
+// validAgentHarness 判定请求级 harness 是否为可接受的具体值：仅
+// claude-code/pi/builtin（空表示「跟随平台」由调用方在解析前区分；
+// auto 不是请求级合法值——跟随平台请直接不传）。
+func validAgentHarness(v string) bool {
+	switch strings.TrimSpace(v) {
+	case agent.HarnessClaudeCode, agent.HarnessPi, agent.HarnessBuiltin:
+		return true
+	}
+	return false
+}
+
+// agentTaskModelRef 为请求级模型意图（对齐 /ai/chat 的 model 传法：
+// {providerId,modelId} 对象；另接受 snake_case 键与 "provider/model"
+// 或裸 model 单字符串形态）。仅 model_id 进入容器 env DOCFLOW_MODEL
+// 记录意图——实际执行模型由网关按平台默认替换。
+type agentTaskModelRef struct{ ProviderID, ModelID string }
+
+// UnmarshalJSON 兼容三态：字符串（"provider/model" 或裸 model）、对象
+// （camelCase/snake_case 键）、null/空（= 未指定，零值）。
+func (m *agentTaskModelRef) UnmarshalJSON(b []byte) error {
+	var s string
+	if json.Unmarshal(b, &s) == nil {
+		s = strings.TrimSpace(s)
+		if i := strings.Index(s, "/"); i >= 0 {
+			m.ProviderID, m.ModelID = strings.TrimSpace(s[:i]), strings.TrimSpace(s[i+1:])
+		} else {
+			m.ModelID = s
+		}
+		return nil
+	}
+	var o struct {
+		ProviderIDCC string `json:"providerId"`
+		ProviderIDSN string `json:"provider_id"`
+		ModelIDCC    string `json:"modelId"`
+		ModelIDSN    string `json:"model_id"`
+		Model        string `json:"model"`
+	}
+	if err := json.Unmarshal(b, &o); err != nil {
+		return err
+	}
+	m.ProviderID = strings.TrimSpace(o.ProviderIDCC)
+	if m.ProviderID == "" {
+		m.ProviderID = strings.TrimSpace(o.ProviderIDSN)
+	}
+	m.ModelID = strings.TrimSpace(o.ModelIDCC)
+	if m.ModelID == "" {
+		m.ModelID = strings.TrimSpace(o.ModelIDSN)
+	}
+	if m.ModelID == "" {
+		m.ModelID = strings.TrimSpace(o.Model)
+	}
+	return nil
 }
 
 // agentHarnessTerminal 为 harness 终值解析的纯函数（便于单测）：显式值
@@ -337,10 +408,27 @@ func (h *Handler) createAgentTask(c *gin.Context) {
 	}
 	var req struct {
 		Prompt, Image string
-		Timeout       int `json:"timeout_seconds"`
+		Timeout       int               `json:"timeout_seconds"`
+		Harness       string            `json:"harness"`
+		Model         agentTaskModelRef `json:"model"`
 	}
 	if c.ShouldBindJSON(&req) != nil || strings.TrimSpace(req.Prompt) == "" {
 		c.JSON(400, gin.H{"error": "prompt is required"})
+		return
+	}
+	// 请求级 harness：仅接受具体引擎（claude-code/pi/builtin）；auto/未知
+	// 值 400——「跟随平台」请直接不传（空）。
+	requestedHarness := strings.TrimSpace(req.Harness)
+	if requestedHarness != "" && !validAgentHarness(requestedHarness) {
+		c.JSON(400, gin.H{"error": "harness must be claude-code, pi or builtin (omit to follow platform)", "code": "AGENT_HARNESS_INVALID"})
+		return
+	}
+	// 请求级模型意图：仅记录 model_id（env DOCFLOW_MODEL + 任务日志），
+	// 不做归属校验——实际执行模型由网关按平台默认替换（见
+	// agentTaskModelRef 注释）；长度防 env 膨胀。
+	modelIntent := req.Model.ModelID
+	if len(modelIntent) > 128 {
+		c.JSON(400, gin.H{"error": "model id is too long", "code": "AGENT_MODEL_INVALID"})
 		return
 	}
 	actor := userID(c)
@@ -387,10 +475,11 @@ func (h *Handler) createAgentTask(c *gin.Context) {
 			aiToken = h.agentAI.Register(task.ID, actor, limit)
 		}
 	}
-	// Agent 执行引擎终值（agent.harness）：创建任务时解析，经
+	// Agent 执行引擎终值：请求级 harness（项目创建时选择的引擎）优先，
+	// 未携带时按平台 agent.harness 配置解析（auto 路由等），经
 	// Executor→RuntimeRequest 注入容器 env DOCFLOW_HARNESS。
-	harness := h.resolveAgentHarness(actor)
-	go h.executeAgentTask(task.ID, aiToken, harness)
+	harness := h.resolveAgentHarness(actor, requestedHarness)
+	go h.executeAgentTask(task.ID, aiToken, harness, modelIntent)
 	h.recordAudit(c, audit.Entry{UserID: &actor, Action: "agent.task.create", ResourceType: audit.ResourceFolder, ResourceID: root.String()})
 	c.JSON(201, task)
 }

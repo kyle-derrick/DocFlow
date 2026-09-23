@@ -396,9 +396,8 @@ const aiMCPTestTimeout = 10 * time.Second
 const aiMCPTestNameLimit = 10
 
 // adminTestAIMCP POST /api/v1/admin/settings/ai/mcp/test {url, auth_header?}：
-// 用给定参数（支持测试未保存的草稿配置）实测 MCP 服务器连通性：initialize
-// + tools/list，返回工具数与前若干工具名与往返延迟。HTTP 恒 200，连接失败
-// 的信息在 body（ok=false + error，中文友好，来自 mcpclient）。
+// 用给定参数（支持测试未保存的草稿配置）实测 MCP 服务器连通性（共用实现
+// 见 aiMCPTestRespond；个人侧 /ai/personal/mcp-servers/test 同源）。
 func (h *Handler) adminTestAIMCP(c *gin.Context) {
 	var req struct {
 		URL        string `json:"url"`
@@ -408,7 +407,15 @@ func (h *Handler) adminTestAIMCP(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 		return
 	}
-	url := strings.TrimSpace(req.URL)
+	aiMCPTestRespond(c, req.URL, req.AuthHeader, nil)
+}
+
+// aiMCPTestRespond MCP 连通性实测的共用实现（平台单 auth_header 与个人
+// auth_headers 多头共用）：initialize + tools/list，返回工具数与前若干
+// 工具名与往返延迟。HTTP 恒 200，连接失败的信息在 body（ok=false +
+// error，中文友好，来自 mcpclient）。
+func aiMCPTestRespond(c *gin.Context, url, authHeader string, headers map[string]string) {
+	url = strings.TrimSpace(url)
 	if url == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "url is required"})
 		return
@@ -416,7 +423,7 @@ func (h *Handler) adminTestAIMCP(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), aiMCPTestTimeout)
 	defer cancel()
 	start := time.Now()
-	tools, err := (&mcpclient.Client{URL: url, AuthHeader: strings.TrimSpace(req.AuthHeader)}).ListTools(ctx)
+	tools, err := (&mcpclient.Client{URL: url, AuthHeader: strings.TrimSpace(authHeader), Headers: headers}).ListTools(ctx)
 	// 实测必然有耗时；本地环回可能整段 <1ms，下限取 1 保证延迟语义非零。
 	latency := max(int64(1), time.Since(start).Milliseconds())
 	if err != nil {

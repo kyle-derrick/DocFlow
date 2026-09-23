@@ -3306,11 +3306,39 @@ export interface AIPersonalPersona {
   system_prompt: string
 }
 
+/** 个人技能/快捷指令（prompt 占位符 {selection}=编辑器选区、{file}=当前文件名）。 */
+export interface AIPersonalSkill {
+  id: string
+  name: string
+  description?: string
+  prompt: string
+}
+
+/** 个人 MCP 服务 PUT 条目（auth_headers 值留空 = 继承现值）。 */
+export interface AIPersonalMCPServerInput {
+  id: string
+  name: string
+  url: string
+  auth_headers?: Record<string, string>
+}
+
+/** 个人 MCP 服务掩码视图（认证头值永不回显，仅键名列表 + configured）。 */
+export interface AIPersonalMCPServerView {
+  id: string
+  name: string
+  url: string
+  /** 已配置认证头的键名列表（字典序；值为空串的编辑草稿 = 留空保持现值）。 */
+  auth_headers?: string[]
+  auth_headers_configured: boolean
+}
+
 /** 个人 AI 配置掩码视图（GET/PUT 响应的 prefs 载荷）。 */
 export interface AIPersonalPrefsView {
   providers: AIPersonalProviderView[]
   default_models?: Record<string, AIPersonalModelRef>
   personas?: AIPersonalPersona[]
+  skills?: AIPersonalSkill[]
+  mcp_servers?: AIPersonalMCPServerView[]
   prefer_personal: boolean
   /** 自动记忆：AI 自动从对话中提取长期偏好（缺省 false=关）。 */
   memory_auto?: boolean
@@ -3336,6 +3364,65 @@ export async function getAIPersonalSettings(): Promise<AIPersonalPrefsView> {
 export async function putAIPersonalSettings(input: AIPersonalPrefsInput): Promise<AIPersonalPrefsView> {
   const data = await api<{ prefs: AIPersonalPrefsView }>('/api/v1/ai/personal-settings', jsonInit('PUT', input))
   return data.prefs
+}
+
+/** 个人技能列表（GET /ai/personal/skills；对话「技能」弹层与个人技能卡消费）。 */
+export async function getAIPersonalSkills(): Promise<AIPersonalSkill[]> {
+  const data = await api<{ skills: AIPersonalSkill[] }>('/api/v1/ai/personal/skills')
+  return data.skills ?? []
+}
+
+/** 整块保存个人技能（≤50；返回保存后列表，其余个人配置子集不受影响）。 */
+export async function putAIPersonalSkills(skills: AIPersonalSkill[]): Promise<AIPersonalSkill[]> {
+  const data = await api<{ skills: AIPersonalSkill[] }>('/api/v1/ai/personal/skills', jsonInit('PUT', { skills }))
+  return data.skills ?? []
+}
+
+/** 个人 MCP 服务列表（掩码视图；认证头值永不回显，仅键名列表）。 */
+export async function getAIPersonalMCPServers(): Promise<AIPersonalMCPServerView[]> {
+  const data = await api<{ servers: AIPersonalMCPServerView[] }>('/api/v1/ai/personal/mcp-servers')
+  return data.servers ?? []
+}
+
+/** 整块保存个人 MCP 服务（≤8；auth_headers 值留空 = 按 ID+键继承现值）。 */
+export async function putAIPersonalMCPServers(servers: AIPersonalMCPServerInput[]): Promise<AIPersonalMCPServerView[]> {
+  const data = await api<{ servers: AIPersonalMCPServerView[] }>('/api/v1/ai/personal/mcp-servers', jsonInit('PUT', { servers }))
+  return data.servers ?? []
+}
+
+/** 测试个人 MCP 服务连通性（POST {url, auth_headers?}；与平台测试同构，支持多头）。 */
+export async function testAIPersonalMCP(url: string, authHeaders?: Record<string, string>): Promise<AIMCPTestResult> {
+  const body: Record<string, unknown> = { url }
+  if (authHeaders && Object.keys(authHeaders).length > 0) body.auth_headers = authHeaders
+  return api<AIMCPTestResult>('/api/v1/ai/personal/mcp-servers/test', jsonInit('POST', body))
+}
+
+/** 对话技能弹层的分组数据（平台组 + 个人组；个人技能结构与平台同构）。 */
+export interface ChatSkillGroup {
+  key: 'platform' | 'personal'
+  skills: AISkillDef[]
+}
+
+/**
+ * 合并拉取对话技能分组（平台 ai.skills + 个人 skills，并行 best-effort：
+ * 任一失败降级为空组不影响另一组）。供 AIAssistant / AIEditChat 的技能
+ * 弹层数据源消费——个人技能映射为平台同构 AISkillDef（id 加 personal:
+ * 前缀防与平台重名）。
+ */
+export async function listChatSkillGroups(): Promise<ChatSkillGroup[]> {
+  const [platform, personal] = await Promise.all([
+    listPlatformSkills().catch(() => [] as AISkillDef[]),
+    getAIPersonalSkills().catch(() => [] as AIPersonalSkill[]),
+  ])
+  const groups: ChatSkillGroup[] = []
+  if (platform.length > 0) groups.push({ key: 'platform', skills: platform })
+  if (personal.length > 0) {
+    groups.push({
+      key: 'personal',
+      skills: personal.map((s) => ({ id: `personal:${s.id}`, name: s.name, description: s.description, prompt: s.prompt })),
+    })
+  }
+  return groups
 }
 
 // ---------- 用户长期记忆（/ai/memory，本人维度、仅手动维护） ----------
