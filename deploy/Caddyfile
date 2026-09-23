@@ -44,6 +44,11 @@
 		reverse_proxy backend:8080
 	}
 
+	# WebDAV 挂载（仅后端开关开启且令牌有效时可用）。
+	handle /webdav* {
+		reverse_proxy backend:8080
+	}
+
 	# REST API → Go 后端（backend 仅 compose 内网，无宿主端口映射）。
 	handle /api/* {
 		reverse_proxy backend:8080

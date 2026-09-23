@@ -2,6 +2,43 @@
 
 本项目的显著变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [1.2.0] - 2026-09-22
+
+AI 全功能体系：多 Provider 网关、RAG 混合检索、联网搜索与思考推理、MCP 双向、AI 创作空间；安全加固与源码一键部署。
+
+### AI Provider 体系
+- 多 Provider（平台管理 → AI 设置）：OpenAI 兼容（OpenAI / DeepSeek / Qwen / Ollama / vLLM）、Anthropic、Mock；每 Provider 多模型列表 + 能力勾选（对话 / 向量 / 视觉图片 / 重排序）
+- Provider 级限流（次/分钟、日配额）与全局兜底限流、温度 / max_tokens、按用户 / Provider / 模型聚合的用量统计、测试连接
+- 场景默认模型（对话 / 摘要 / 编辑器 / 向量，摘要与编辑器可回落对话默认）；ai.enabled 总开关：关闭后全站隐藏入口、AI 网关 404
+- 双轨制：个人自备 Provider（设置 → AI 个人配置，Key 掩码不回显、默认模型与人设、「优先使用我的模型」开关，命中个人池跳过平台限流）
+
+### RAG 检索与联网搜索
+- 关键词 / 混合（关键词 + 向量）检索模式；向量库 Qdrant 走 ai-vector profile
+- embedding 模型从 Provider 池勾选向量能力模型，热切换免重启（collection 按 provider + 模型派生，切换后管理端一键「重建向量索引」）
+- rerank 重排（Cohere / Jina 兼容 /rerank 协议，失败静默原序）；chunk / top-k / overlap 可配
+- 联网搜索：ai-search profile 启 SearXNG 或配置 Tavily Key；对话可开「联网」，来源以引用展示，8s 超时静默降级
+- 图片 OCR：索引管道自动调视觉模型提取图片文字，入全文 + 向量索引（单图上限 1-32MB 可配、热配置）
+
+### 对话体验
+- AI 助手 GPT 式抽屉（气泡 / 停止 / 建议 / 模型选择 / 图钉固定）；编辑页对话可直接修改文档（可修改|仅对话模式，自动应用前存版本、消息级撤销）
+- 三处对话（助手 / 编辑页 / 创作空间）共享联网·思考·MCP 开关；「思考」开关透传 openai reasoning_effort / anthropic thinking 参数
+- AI 记忆：手动增删改 + 自动提取长期偏好（个人开关、去重、上限 100 条）；对话注入最近 20 条（总量 6000 字符截断）
+- 人设与技能：平台人设（system 提示模板，全员可选）+ 个人人设；平台技能模板（快捷指令，{selection}/{file} 占位符，助手与编辑页对话可用）
+
+### MCP 双向
+- 作为客户端消费外部 MCP 服务器：平台管理配置 ≤8 个 Streamable HTTP 服务 + 鉴权头（支持测试连接）；对话「MCP 工具」开关，工具调用 ≤5 轮，SSE 流式展示工具调用
+- 自身作为 MCP Server 对外暴露文档工具（/mcp，21 个 df_* 工具，见 docs/mcp.md）
+
+### AI 创作空间
+- 顶部入口：项目绑定空间目录、多会话持久化、目录树 / 任务列表
+- Skill 创作模板：建站落地页 / 项目文档 / 接口文档 / 思维导图大纲 / PPT 大纲 / 数据报表
+- Agent 任务创建 → 轮询 → Diff 评审 → 应用 / 放弃 / 回滚
+
+### 安全与部署
+- 防爆破：登录与 WebDAV Basic 失败锁定（per 用户 + IP）
+- WebDAV 挂载 /webdav/{空间名}/{path} 与一次性令牌管理
+- 一键源码部署：make deploy-minimal / deploy-full（scripts/deploy.ps1）
+
 ## [1.1.1] - 2026-09-18
 
 编辑器升级 + 团队空间关键修复 + 残留清理。

@@ -1,4 +1,4 @@
-.PHONY: run test fmt seed migrate e2e build-frontend up-minimal up-full down backup backup-verify backup-windows backup-windows-verify
+.PHONY: run test fmt seed migrate e2e build-frontend build-agent validate-compose deploy deploy-minimal deploy-full up-minimal up-full down backup backup-verify backup-windows backup-windows-verify
 
 run:
 	go run ./cmd/server
@@ -39,14 +39,36 @@ e2e:
 build-frontend:
 	docker compose build caddy
 
+# 构建 Agent 镜像（Dockerfile.agent：node:20-alpine + git/bash + agent-runner
+# 驱动；即 agent.DefaultImage 的 docflow/agent:1.0.0，Docker 创作舱默认镜像，
+# up-minimal/up-full 与 deploy 流程自动依赖构建）。
+build-agent:
+	docker build -f Dockerfile.agent -t docflow/agent:1.0.0 .
+
+# Compose 配置校验（同时检查 DOCFLOW_IMAGE_TAG 可被解析）。
+validate-compose:
+	docker compose config --quiet
+
+# 从源码一键部署；首次运行会创建 .env 并提示补齐密钥，不覆盖已有 .env。
+# build-agent 先行：Agent 创作舱默认镜像 docflow/agent:1.0.0 随部署构建。
+deploy: build-agent
+	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deploy.ps1 -Profile minimal
+
+deploy-minimal: build-agent
+	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deploy.ps1 -Profile minimal
+
+deploy-full: build-agent
+	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deploy.ps1 -Profile full
+
 # 极简部署（caddy + backend + postgres，caddy 唯一宿主端口 80/443）。
-up-minimal:
+# build-agent 先行构建 Agent 创作舱默认镜像（见上方注释）。
+up-minimal: build-agent
 	docker compose --profile minimal up -d --build
 
 # 完整部署（minimal + redis + onlyoffice；draw.io 静态层已在 caddy 镜像内，
 # 无独立服务。注入 ONLYOFFICE 反代上游，否则 caddy 在该服务未运行时
 # 不解析主机名）。
-up-full:
+up-full: build-agent
 	ONLYOFFICE_UPSTREAM=onlyoffice:80 docker compose --profile full up -d --build
 
 # 叠加病毒扫描：docker compose --profile minimal --profile antivirus up -d
