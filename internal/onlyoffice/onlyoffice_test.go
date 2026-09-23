@@ -375,6 +375,7 @@ func TestEditConfigPermissionAndBlobUnavailable(t *testing.T) {
 	if _, err := s.NewEditConfig(uuid.New(), file.ID); !errors.Is(err, files.ErrNotFound) {
 		t.Fatalf("non-owner: err = %v, want files.ErrNotFound", err)
 	}
+	// 不可用 blob（隔离态）拒绝。
 	store.mu.Lock()
 	for id, blob := range store.blobs {
 		blob.Status = files.BlobStatusQuarantined
@@ -383,6 +384,33 @@ func TestEditConfigPermissionAndBlobUnavailable(t *testing.T) {
 	store.mu.Unlock()
 	if _, err := s.NewEditConfig(owner, file.ID); !errors.Is(err, files.ErrBlobUnavailable) {
 		t.Fatalf("quarantined blob: err = %v, want files.ErrBlobUnavailable", err)
+	}
+}
+
+// TestEditConfigRejectsUnsupportedFileType 验证 OnlyOffice 不支持的扩展
+// （如 .dfrt 富文本、.drawio）在生成配置前被 ErrInvalidFileType 拦截——
+// 此前会生成 fileType=dfrt 的配置，DocumentServer 报晦涩的
+// "document.fileType parameter is invalid"；Office/pdf/txt/无扩展名放行。
+func TestEditConfigRejectsUnsupportedFileType(t *testing.T) {
+	store := newFakeFileStore()
+	owner := uuid.New()
+	dfrt, _ := store.seedFile(owner, "文档.dfrt", "{}")
+	drawio, _ := store.seedFile(owner, "流程图.drawio", "<mxfile/>")
+	bare, _ := store.seedFile(owner, "README", "hi")
+	s := newTestService(store, newMemStorage(), nil, &fakeRecorder{}, nil)
+
+	if _, err := s.NewEditConfig(owner, dfrt.ID); !errors.Is(err, ErrInvalidFileType) {
+		t.Fatalf(".dfrt: err = %v, want ErrInvalidFileType", err)
+	}
+	if _, err := s.NewEditConfig(owner, drawio.ID); !errors.Is(err, ErrInvalidFileType) {
+		t.Fatalf(".drawio: err = %v, want ErrInvalidFileType", err)
+	}
+	// 无扩展名（documentFileMeta 回退 txt 口径）与白名单类型正常生成。
+	if _, err := s.NewEditConfig(owner, bare.ID); err != nil {
+		t.Fatalf("无扩展名应回退 txt 放行: %v", err)
+	}
+	if _, err := s.NewShareViewConfig(files.File{ID: dfrt.ID, Name: "文档.dfrt", Type: "file"}, files.FileVersion{}, SessionOptions{}); !errors.Is(err, ErrInvalidFileType) {
+		t.Fatalf("分享查看 .dfrt: err = %v, want ErrInvalidFileType", err)
 	}
 }
 
@@ -486,8 +514,8 @@ func TestResolveDownloadTokenMatrix(t *testing.T) {
 	if _, _, _, err := s.ResolveDownload(file.ID, version.ID.String(), forged); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("wrong key: err = %v, want ErrInvalidToken", err)
 	}
-	// 过期：时钟推进 6 分钟。
-	s.now = func() time.Time { return base.Add(6 * time.Minute) }
+	// 过期：时钟推进至下载 token 默认有效期之后。
+	s.now = func() time.Time { return base.Add(DefaultDownloadTokenTTL + time.Minute) }
 	if _, _, _, err := s.ResolveDownload(file.ID, version.ID.String(), token); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("expired: err = %v, want ErrInvalidToken", err)
 	}
@@ -588,6 +616,35 @@ func TestURLAllowedOrigins(t *testing.T) {
 	for _, u := range denied {
 		if s.urlAllowed(u) {
 			t.Errorf("urlAllowed(%q) = true, want false", u)
+		}
+	}
+}
+
+// TestPublicServerURLFor public URL 推导规则：未配置/本机回环（127.x、
+// localhost）→ 按请求 scheme+host 拼 /onlyoffice；显式外网域名原样；
+// host 为空回退 PublicServerURL()（PublicURL 优先，未配置回退 ServerURL）。
+func TestPublicServerURLFor(t *testing.T) {
+	newSvc := func(public string) *Service {
+		return New(Config{ServerURL: testServerURL, PublicURL: public, JWTSecret: testJWTSecret}, nil, nil, nil, nil)
+	}
+	cases := []struct {
+		name         string
+		publicURL    string
+		scheme, host string
+		want         string
+	}{
+		{"未配置按 Host 推导 http", "", "http", "docflow.example.com", "http://docflow.example.com/onlyoffice"},
+		{"未配置按 Host 推导 https", "", "https", "docflow.example.com:443", "https://docflow.example.com:443/onlyoffice"},
+		{"显式外网域名原样", "https://office.example.com/onlyoffice", "http", "docflow.example.com", "https://office.example.com/onlyoffice"},
+		{"显式 127.0.0.1 视为未配置", "http://127.0.0.1/onlyoffice", "https", "docflow.example.com", "https://docflow.example.com/onlyoffice"},
+		{"显式 localhost 视为未配置", "http://localhost/onlyoffice", "http", "10.0.0.8:8080", "http://10.0.0.8:8080/onlyoffice"},
+		{"非法 scheme 归一 http", "http://127.0.0.1/onlyoffice", "ftp", "h", "http://h/onlyoffice"},
+		{"host 空回退显式 PublicURL", "https://office.example.com/onlyoffice", "http", "", "https://office.example.com/onlyoffice"},
+		{"host 空且未配置回退 ServerURL", "", "http", "", testServerURL},
+	}
+	for _, tc := range cases {
+		if got := newSvc(tc.publicURL).PublicServerURLFor(tc.scheme, tc.host); got != tc.want {
+			t.Errorf("%s: PublicServerURLFor(%q, %q) = %q, want %q", tc.name, tc.scheme, tc.host, got, tc.want)
 		}
 	}
 }

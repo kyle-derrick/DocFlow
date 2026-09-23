@@ -55,6 +55,8 @@ type QueryOptions struct {
 	Q       string
 	TagID   *uuid.UUID
 	Starred *bool
+	// SpaceID 可选空间过滤（nil = 不过滤；ask_docs 的 space_id 参数）。
+	SpaceID *uuid.UUID
 	Limit   int
 }
 

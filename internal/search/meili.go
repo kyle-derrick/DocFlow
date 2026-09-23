@@ -182,7 +182,11 @@ func (m *MeiliRepo) QueryDocs(user uuid.UUID, opts QueryOptions) ([]Result, erro
 		return nil, err
 	}
 	filter := "owner_id = " + quote(user.String())
-	if len(spaces) > 0 {
+	if opts.SpaceID != nil {
+		filter = "space_id = " + quote(opts.SpaceID.String())
+		// 空间过滤蕴含成员语义：owner 命中但不在该空间的个人文件须排除，
+		// 故直接以 space_id 为准（个人空间本身也是一个 space）。
+	} else if len(spaces) > 0 {
 		ids := make([]string, 0, len(spaces))
 		for _, id := range spaces {
 			ids = append(ids, quote(id.String()))

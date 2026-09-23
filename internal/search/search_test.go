@@ -227,6 +227,27 @@ func TestQueryTagStarredFilterAndLimit(t *testing.T) {
 	}
 }
 
+// SpaceID 过滤（ask_docs 的 space_id 参数）：限定空间只返回该空间文件，
+// 非成员空间无结果（访问控制仍然生效），无空间归属的个人文件被排除。
+func TestQuerySpaceFilter(t *testing.T) {
+	f := newFixture()
+	// member 在 space1：限定 space1 检索 "plan" 命中 space-plan.md。
+	out, err := f.store.Query(f.member, QueryOptions{Q: "plan", SpaceID: &f.space1})
+	if err != nil || len(out) != 1 || out[0].Name != "space-plan.md" {
+		t.Fatalf("space filter hit: (%v, %v)", out, err)
+	}
+	// 限定 space2（member 非成员，访问控制排除 secret.md）：无结果。
+	out, err = f.store.Query(f.member, QueryOptions{Q: "plan", SpaceID: &f.space2})
+	if err != nil || len(out) != 0 {
+		t.Fatalf("space filter non-member: (%v, %v)", out, err)
+	}
+	// owner 的个人文件（无空间归属）在限定 space1 时不出现。
+	out, err = f.store.Query(f.owner, QueryOptions{Q: "report", SpaceID: &f.space1})
+	if err != nil || len(out) != 0 {
+		t.Fatalf("space filter excludes personal doc: (%v, %v)", out, err)
+	}
+}
+
 // 名称命中优先于内容命中（即使内容命中者更新时间更近）。
 func TestQueryNameHitRankedFirst(t *testing.T) {
 	repo := NewMemoryRepo()

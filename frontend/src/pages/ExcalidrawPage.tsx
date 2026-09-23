@@ -17,9 +17,15 @@ import { App as AntdApp, Button } from 'antd'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { FileWithVersion, fetchFileText, getFileMeta, uploadFileVersion } from '../api'
 import ExcalidrawViewer from '../components/ExcalidrawViewer'
+import { EditorLoadError, EditorLoadErrorBoundary } from '../components/EditorLoadError'
+import type { AIEditTarget } from '../components/AIEdit'
+import AIEditChat, { AIEditChatButton } from '../components/AIEditChat'
+import type { AIQuickCommand } from '../components/AIEditChat'
 import { closeEditorWithFallback, safeReturnTo } from '../editorNavigation'
 import { MessageKey, formatMessage, t, useLocale } from '../i18n'
 import { useColorMode } from '../theme'
+import { openAIAssistant, setAIContextFile } from '../components/AIAssistant'
+import { useAIEnabled } from '../aiFeature'
 
 // 懒加载编辑器组件：包入口为 CJS（Vite 构建期 interop），动态 import 使
 // 其独立成 chunk，仅在进入本页时加载。
@@ -33,6 +39,9 @@ type ExcalidrawChange = NonNullable<ComponentProps<typeof Excalidraw>['onChange'
 type SceneElements = Parameters<ExcalidrawChange>[0]
 type SceneAppState = Parameters<ExcalidrawChange>[1]
 type SceneFiles = Parameters<ExcalidrawChange>[2]
+// 同法推导命令式 API 实例类型（excalidrawAPI 回调首参：updateScene /
+// scrollToContent / getSceneElements / addFiles）。
+type ExcalidrawAPIInstance = Parameters<NonNullable<ComponentProps<typeof Excalidraw>['excalidrawAPI']>>[0]
 
 /** 编辑器内最新场景快照（onChange 更新，保存时序列化）。 */
 export interface SceneSnapshot {
@@ -77,6 +86,7 @@ export default function ExcalidrawPage({
   const viewMode = routeMode === 'view' || searchParams.get('mode') === 'view'
   const returnTo = safeReturnTo(searchParams.get('returnTo'))
   const locale = useLocale()
+  const aiEnabled = useAIEnabled()
   const navigate = useNavigate()
   const { modal: antdModal } = AntdApp.useApp()
   const msg = (key: MessageKey) => t(locale, key)
@@ -119,6 +129,13 @@ export default function ExcalidrawPage({
   // onChange 与之对比，相同则不置脏——挂载期编辑器可能多次同步触发
   // onChange（字体加载等），仅凭「首次回调」标记会误判为已修改。
   const initialJSONRef = useRef<string | null>(null)
+  // 命令式 API 实例（excalidrawAPI 回调登记；AI mermaid 转换插入用）。
+  const excalidrawAPIRef = useRef<ExcalidrawAPIInstance | null>(null)
+  // AI 对话面板（AIEditChat）展开态（收起不清空会话）与头部下拉快捷指令。
+  const [aiChatOpen, setAiChatOpen] = useState(false)
+  const [aiQuick, setAiQuick] = useState<AIQuickCommand | null>(null)
+  // 编辑器重挂 key（AI 撤销回退 reload 时强制重载 initialData）。
+  const [reloadKey, setReloadKey] = useState(0)
   // 「保存并退出」流程抑制 beforeunload（v2.7 根治）：保存成功后 closeEditor
   // 会 window.close()，若此刻仍挂着 dirty 的 beforeunload 监听，浏览器弹
   // 原生「离开页面？」——保存已成功却拦退出是误报。close 前置位本标记。
@@ -233,6 +250,101 @@ export default function ExcalidrawPage({
     }
   }
 
+  useEffect(() => {
+    if (file) setAIContextFile({ fileId: file.id, fileName: file.name })
+    return () => setAIContextFile(null)
+  }, [file])
+
+  // ---- 编辑器 AI（applyKind=excalidraw-mermaid）：AI 生成 mermaid → 官方
+  //      库 @excalidraw/mermaid-to-excalidraw 转换为白板图形元素追加画布 ----
+
+  /** 白板内容摘要（AI 上下文用）：白板无天然全文，取元素计数与各元素文本
+   * 标签（无文本用元素类型）按行拼接，截前 4000 字符——仅供 AI 理解画布
+   * 现状，不参与落盘。 */
+  const sceneSummary = (): string => {
+    const els = sceneRef.current?.elements ?? []
+    if (!els.length) return ''
+    const parts = [`${locale === 'zh-CN' ? '白板元素' : 'whiteboard elements'}: ${els.length}`]
+    for (const el of els) {
+      const raw = (el as { text?: unknown }).text
+      const label = typeof raw === 'string' ? raw.trim() : ''
+      parts.push(label || el.type)
+    }
+    return parts.join('\n').slice(0, 4000)
+  }
+
+  /** AI 上下文目标：白板无选区概念，恒全文（=摘要）。 */
+  const aiGetTarget = (): AIEditTarget => ({ hasSelection: false, text: sceneSummary() })
+
+  /** AI mermaid 自动应用（AIEditChat 已提取 mermaid 源码）：动态 import 官方
+   * 转换库（体积大，勿进主包）→ parseMermaidToExcalidraw → skeleton 经
+   * convertToExcalidrawElements 转正式元素 → 平移到现有内容下方 →
+   * updateScene 追加插入（不覆盖现有内容）→ scrollToContent 对焦 →
+   * onChange 链路自动置脏并走 8s 静置自动保存。
+   * 返回 string=失败原因（AIEditChat 显示 applyError，画布未被修改）。 */
+  const aiApply = async (_mode: 'insert' | 'replace', mermaid: string): Promise<string | void> => {
+    const api = excalidrawAPIRef.current
+    if (!api) return locale === 'zh-CN' ? '白板编辑器未就绪，未应用' : 'Whiteboard editor not ready; not applied'
+    try {
+      const [{ parseMermaidToExcalidraw }, { convertToExcalidrawElements }] = await Promise.all([
+        import('@excalidraw/mermaid-to-excalidraw'),
+        import('@excalidraw/excalidraw'),
+      ])
+      const { elements: skeletons, files } = await parseMermaidToExcalidraw(mermaid)
+      const converted = convertToExcalidrawElements(skeletons)
+      if (!converted.length) {
+        return locale === 'zh-CN' ? 'mermaid 未产生可插入的图形，画布未被修改' : 'The mermaid produced no shapes; the canvas was left unchanged'
+      }
+      const current = api.getSceneElements()
+      // 追加插入：平移到现有内容正下方（留 60px 间距）避免重叠。
+      const bottom = current.reduce((max, el) => Math.max(max, el.y + (el.height ?? 0)), 0)
+      const offset = current.length ? bottom + 60 : 0
+      const placed = offset ? converted.map((el) => ({ ...el, y: el.y + offset })) : converted
+      api.updateScene({ elements: [...current, ...placed] })
+      if (files && Object.keys(files).length > 0) api.addFiles(Object.values(files))
+      api.scrollToContent(placed)
+    } catch (err) {
+      // mermaid 语法错误等：不写文档，错误文案回 AIEditChat 显示。
+      const why = err instanceof Error ? err.message : String(err)
+      return (locale === 'zh-CN' ? 'mermaid 转换失败：' : 'Mermaid conversion failed: ') + why
+    }
+  }
+
+  /** 版本保护前置：应用前先保存当前场景为基线版本（照文本编辑页模式）。 */
+  const aiEnsureSaved = async (): Promise<{ versionId: string; version: number } | null> => {
+    try {
+      if (dirtyRef.current) {
+        await save(false, true)
+        if (dirtyRef.current) return null
+      }
+      const meta = await getFileMeta(fileId)
+      return meta.current_version
+        ? { versionId: meta.current_version.id, version: meta.current_version.version }
+        : null
+    } catch {
+      return null
+    }
+  }
+
+  /** 撤销回退后刷新画布：重新拉取文件内容，重挂编辑器（key 递增强制
+   * initialData 重载），重置脏基线。 */
+  const aiReload = async (): Promise<void> => {
+    const text = await fetchFileText(fileId)
+    const scene = parseScene(text)
+    sceneRef.current = scene
+    initialJSONRef.current = null
+    dirtyRef.current = false
+    setInitial(scene)
+    setReloadKey((k) => k + 1)
+    setNotice('')
+  }
+
+  /** 头部下拉快捷指令：打开面板并透传给 AIEditChat 自动执行。 */
+  const openAiChatWith = (cmd: AIQuickCommand) => {
+    setAiChatOpen(true)
+    setAiQuick(cmd)
+  }
+
   // 未保存兜底提示：有改动且尚未成功保存前拦截误关；「保存并退出」流程
   //（closingRef）不拦——保存已完成，window.close() 不再触发原生弹窗。
   useEffect(() => {
@@ -260,6 +372,10 @@ export default function ExcalidrawPage({
         )}
         {saving && <span className="badge uploading">{msg('saving')}</span>}
         <span className="editor-head-actions">
+            {aiEnabled && <Button size="small" onClick={() => openAIAssistant(file ? { fileId: file.id, fileName: file.name } : undefined)}>{locale === 'zh-CN' ? 'AI 助手' : 'AI Assistant'}</Button>}
+            {/* AI 对话（applyKind=excalidraw-mermaid）：可修改模式下 AI 生成
+                mermaid 自动转换为白板图形插入画布（版本保护可撤销）。 */}
+            <AIEditChatButton open={aiChatOpen} onToggle={() => setAiChatOpen((v) => !v)} onQuick={openAiChatWith} kind="excalidraw-mermaid" disabled={saving || !initial} />
             <Button size="small" disabled={saving || !initial} loading={saving} onClick={() => void save(false)}>
               {msg('save')}
             </Button>
@@ -281,15 +397,61 @@ export default function ExcalidrawPage({
           title={file?.name ?? '白板'}
         />
       ) : (
-        <div className="editor-shell excalidraw-shell">
-          <Suspense fallback={<div className="excalidraw-loading">{msg('whiteboardLoading')}</div>}>
-            <Excalidraw
-              langCode={locale === 'zh-CN' ? 'zh-CN' : 'en'}
-              theme={mode}
-              initialData={{ elements: initial.elements, appState: initial.appState, files: initial.files, scrollToContent: true }}
-              onChange={handleChange}
-            />
-          </Suspense>
+        <div className="editor-with-ai">
+          <div className="editor-shell excalidraw-shell">
+          {/* 错误边界（v2.7 反馈 8）：excalidraw 编辑器为 1MB+ 懒加载
+              chunk，静态资源拉取失败（网络中断/反向代理未放行 assets）时
+              React.lazy 会向上抛异常——无边界即白屏。fail 时渲染页面级
+              错误卡（资源地址 + 排查提示），替代白屏。 */}
+          <EditorLoadErrorBoundary
+            renderError={() => (
+              <EditorLoadError
+                message={locale === 'zh-CN' ? '白板编辑器（excalidraw）资源加载失败' : 'Failed to load the whiteboard editor (excalidraw) resources'}
+                resourceLabel={locale === 'zh-CN' ? '静态资源站点' : 'Static assets origin'}
+                resourceUrl={window.location.origin}
+                hints={locale === 'zh-CN' ? [
+                  '白板编辑器组件按需加载（独立 chunk），加载失败通常为网络中断或反向代理未正确放行 /assets 静态资源。',
+                  '请检查反向代理配置（assets 目录转发与 gzip）与浏览器网络面板中的失败请求，然后刷新重试。',
+                ] : [
+                  'The whiteboard editor is loaded on demand as a separate chunk; failure usually means a network interruption or a reverse proxy not forwarding /assets correctly.',
+                  'Check your reverse-proxy configuration (assets forwarding) and the failed request in the browser network panel, then reload.',
+                ]}
+                onRetry={() => window.location.reload()}
+                retryText={locale === 'zh-CN' ? '刷新重试' : 'Reload'}
+              />
+            )}
+          >
+            <Suspense fallback={<div className="excalidraw-loading">{msg('whiteboardLoading')}</div>}>
+              {/* key=reloadKey：AI 撤销回退后强制重挂重载 initialData；
+                  excalidrawAPI：登记命令式实例（AI mermaid 转换插入用）。 */}
+              <Excalidraw
+                key={reloadKey}
+                langCode={locale === 'zh-CN' ? 'zh-CN' : 'en'}
+                theme={mode}
+                initialData={{ elements: initial.elements, appState: initial.appState, files: initial.files, scrollToContent: true }}
+                onChange={handleChange}
+                excalidrawAPI={(api) => {
+                  excalidrawAPIRef.current = api
+                }}
+              />
+            </Suspense>
+          </EditorLoadErrorBoundary>
+          </div>
+          {/* AI 对话式创作面板（mermaid → 白板图形；应用前 aiEnsureSaved 保存
+              基线版本，撤销回退后 aiReload 重载画布）。 */}
+          <AIEditChat
+            open={aiChatOpen}
+            onClose={() => setAiChatOpen(false)}
+            getTarget={aiGetTarget}
+            getAllText={sceneSummary}
+            onApply={aiApply}
+            fileId={fileId}
+            ensureSaved={aiEnsureSaved}
+            reload={aiReload}
+            quickCommand={aiQuick}
+            onQuickConsumed={() => setAiQuick(null)}
+            applyKind="excalidraw-mermaid"
+          />
         </div>
       ))}
     </div>

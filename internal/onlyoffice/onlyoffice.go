@@ -185,6 +185,39 @@ func (s *Service) PublicServerURL() string {
 	return s.cfg.ServerURL
 }
 
+// isLoopbackURL 判断 URL 的 host 是否本机回环（127.x/localhost/::1）——
+// env 默认或本地联调值（如 http://127.0.0.1/onlyoffice），非本机浏览器
+// 不可达，动态推导时视同未配置。
+func isLoopbackURL(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	return host == "localhost" || host == "::1" || strings.HasPrefix(host, "127.")
+}
+
+// PublicServerURLFor 按请求上下文返回浏览器可达的 DocumentServer 地址：
+//   - 显式配置的 PublicURL 非空且非本机回环（外网域名）时照旧返回；
+//   - 否则按 "{scheme}://{host}/onlyoffice" 推导（caddy 已将 /onlyoffice/*
+//     反代至 DocumentServer；scheme/host 由 HTTP 层从请求提取——反代场景
+//     X-Forwarded-Proto 优先，直连按 TLS 推断）。
+//
+// host 为空（异常请求）时回退 PublicServerURL() 保持既有行为。
+// 不影响回调 SSRF 校验基准（始终以 ServerURL 为准）。
+func (s *Service) PublicServerURLFor(scheme, host string) string {
+	if s.cfg.PublicURL != "" && !isLoopbackURL(s.cfg.PublicURL) {
+		return s.cfg.PublicURL
+	}
+	if host == "" {
+		return s.PublicServerURL()
+	}
+	if scheme != "https" {
+		scheme = "http"
+	}
+	return scheme + "://" + host + "/onlyoffice"
+}
+
 // documentKey 生成编辑会话与版本绑定的 document.key。
 // 格式：<file_id 去连字符 32hex>-<version_id 去连字符 32hex>：DocumentServer
 // 8.x 对 key 有字符白名单（仅 0-9-.a-zA-Z_=，实报 "unexpected key use key
@@ -216,6 +249,34 @@ func fileExt(name string) string {
 		return strings.ToLower(name[i+1:])
 	}
 	return ""
+}
+
+// supportedFileTypes 为 DocumentServer 支持的 document.fileType 白名单
+// （编辑/查看共用）。此前不校验扩展名即生成配置，把 .dfrt 等平台专属类型
+// 强制交给 OnlyOffice 时（「打开方式」允许非法组合显式覆盖），DS 报晦涩的
+// "document.fileType parameter is invalid"——现提前拦截并给出明确错误。
+// 无扩展名文件沿用 documentFileMeta 的 txt 回退口径，视同 txt。
+var supportedFileTypes = map[string]bool{
+	"doc": true, "docx": true, "odt": true, "rtf": true, "txt": true,
+	"xls": true, "xlsx": true, "ods": true, "csv": true,
+	"ppt": true, "pptx": true, "odp": true, "pdf": true,
+}
+
+// ErrInvalidFileType 表示目标文件扩展名不在 OnlyOffice 支持范围内
+// （如 .dfrt 富文本文档——应由富文本编辑器处理，而非 DocumentServer）。
+var ErrInvalidFileType = errors.New("onlyoffice does not support this file type")
+
+// validateFileType 校验文件名扩展名是否可交给 DocumentServer；无扩展名视同
+// txt（documentFileMeta 回退口径）。
+func validateFileType(name string) error {
+	ext := fileExt(name)
+	if ext == "" {
+		ext = "txt"
+	}
+	if !supportedFileTypes[ext] {
+		return fmt.Errorf("%w: .%s", ErrInvalidFileType, ext)
+	}
+	return nil
 }
 
 // documentFileMeta 归一化 document.fileType 与 document.title（对齐
@@ -296,6 +357,9 @@ func (s *Service) NewSessionConfig(user, fileID uuid.UUID, opts SessionOptions) 
 	if f.Type != "file" {
 		return nil, files.ErrInvalidTarget
 	}
+	if err := validateFileType(f.Name); err != nil {
+		return nil, err
+	}
 	version, blob, err := s.files.CurrentVersion(user, fileID)
 	if err != nil {
 		return nil, err
@@ -358,6 +422,9 @@ func (s *Service) NewSessionConfig(user, fileID uuid.UUID, opts SessionOptions) 
 func (s *Service) NewShareViewConfig(f files.File, version files.FileVersion, opts SessionOptions) (map[string]any, error) {
 	if f.Type != "file" {
 		return nil, files.ErrInvalidTarget
+	}
+	if err := validateFileType(f.Name); err != nil {
+		return nil, err
 	}
 	token, err := s.signDownloadToken(f.ID, version.ID)
 	if err != nil {
@@ -466,6 +533,10 @@ func (s *Service) parseDownloadToken(token string) (jwt.MapClaims, error) {
 		return []byte(s.cfg.JWTSecret), nil
 	}, jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}), jwt.WithExpirationRequired(), jwt.WithTimeFunc(s.now))
 	if err != nil || !parsed.Valid {
+		return nil, ErrInvalidToken
+	}
+	exp, ok := claimNumber(claims["exp"])
+	if !ok || s.now().Unix() >= exp {
 		return nil, ErrInvalidToken
 	}
 	return claims, nil

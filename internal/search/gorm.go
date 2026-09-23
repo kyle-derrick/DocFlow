@@ -61,6 +61,10 @@ func (g *GormRepo) QueryDocs(user uuid.UUID, opts QueryOptions) ([]Result, error
 		where += " AND f.is_starred = ?"
 		args = append(args, *opts.Starred)
 	}
+	if opts.SpaceID != nil {
+		where += " AND d.space_id = ?"
+		args = append(args, *opts.SpaceID)
+	}
 	args = append(args, pattern, opts.Limit)
 	var out []Result
 	err := g.db.Raw(`SELECT d.file_id AS id, f.name, f.type, f.parent_id, f.updated_at,

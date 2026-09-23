@@ -34,6 +34,8 @@ import ExcalidrawPage from './ExcalidrawPage'
 import TextEditorPage from './TextEditorPage'
 import MermaidDiagram from '../components/MermaidDiagram'
 import XMindViewer from '../components/XMindViewer'
+import { AISummaryInline } from '../components/AISummary'
+import { setAIContextFile } from '../components/AIAssistant'
 import { useColorMode } from '../theme'
 
 /**
@@ -204,16 +206,27 @@ export function FileViewerDispatch({
     return () => { alive = false }
   }, [fileId, endsXml])
 
-  if (force === 'office') return <EditorPage mode="view" fileId={fileId} />
-  if (force === 'drawio') return <DrawioPage mode="view" fileId={fileId} />
-  if (force === 'excalidraw') return <ExcalidrawPage mode="view" fileId={fileId} />
-  if (force === 'xmind') return <XMindFileViewer fileId={fileId} name={name} />
+  // force 兜底（与打开方式菜单门槛同规则）：非法「扩展名 × 引擎」组合
+  //（如 .dfrt 强制 office / .docx 强制 drawio）回落按扩展名自动分发，
+  // 不再把文件塞进不认识的引擎（OnlyOffice fileType invalid 同类问题）。
+  const forceOk =
+    (force === 'office' && (isOfficeFile(lower) || /\.(pdf|txt|rtf)$/.test(lower))) ||
+    (force === 'drawio' && isDrawioFile(lower)) ||
+    (force === 'excalidraw' && isExcalidrawFile(lower)) ||
+    (force === 'xmind' && isXmindFile(lower)) ||
+    (force === 'richtext' && (isDfdocFile(lower) || /\.(md|markdown|mdx)$/.test(lower))) ||
+    force === 'raw'
+  const effForce = forceOk ? force : undefined
+  if (effForce === 'office') return <EditorPage mode="view" fileId={fileId} />
+  if (effForce === 'drawio') return <DrawioPage mode="view" fileId={fileId} />
+  if (effForce === 'excalidraw') return <ExcalidrawPage mode="view" fileId={fileId} />
+  if (effForce === 'xmind') return <XMindFileViewer fileId={fileId} name={name} />
   // richtext 查看方式：.dfdoc → Tiptap 只读渲染；.md 家族 → Markdown 渲染。
-  if (force === 'richtext') {
+  if (effForce === 'richtext') {
     if (isDfdocFile(lower)) return <DfdocEditorPage mode="view" fileId={fileId} />
     return <TextEditorPage kind="markdown" mode="view" fileId={fileId} />
   }
-  if (force === 'raw') return <RawSourceViewer fileId={fileId} />
+  if (effForce === 'raw') return <RawSourceViewer fileId={fileId} />
   if (isOfficeFile(lower)) return <EditorPage mode="view" fileId={fileId} />
   if (isDrawioFile(lower)) return <DrawioPage mode="view" fileId={fileId} />
   if (isExcalidrawFile(lower)) return <ExcalidrawPage mode="view" fileId={fileId} />
@@ -266,8 +279,28 @@ function RawSourceViewer({ fileId }: { fileId: string }) {
  * DfdocEditorPage；md 家族 → TextEditorPage(markdown)；css/js → code；
  * 其余文本 → TextEditorPage(text)。不支持编辑的类型回退查看。
  */
-export function FileEditorDispatch({ fileId, name }: { fileId: string; name: string }) {
+export function FileEditorDispatch({ fileId, name, force }: { fileId: string; name: string; force?: string }) {
   const lower = name.toLowerCase()
+  // force（?open=）兜底：非法「扩展名 × 引擎」组合回落按扩展名自动分发
+  //（与 ViewerPage/ByPathPage 同规则，防 OnlyOffice fileType invalid 同类）。
+  const forceOk =
+    (force === 'office' && (isOfficeFile(lower) || /\.(pdf|txt|rtf)$/.test(lower))) ||
+    (force === 'drawio' && isDrawioFile(lower)) ||
+    (force === 'excalidraw' && isExcalidrawFile(lower)) ||
+    force === 'richtext' ||
+    force === 'text'
+  const effForce = forceOk ? force : undefined
+  if (effForce === 'office') return <EditorPage mode="edit" fileId={fileId} />
+  if (effForce === 'drawio') return <DrawioPage mode="edit" fileId={fileId} />
+  if (effForce === 'excalidraw') return <ExcalidrawPage mode="edit" fileId={fileId} />
+  if (effForce === 'richtext') {
+    if (isDfdocFile(lower)) return <DfdocEditorPage mode="edit" fileId={fileId} />
+    return <TextEditorPage kind="markdown" mode="edit" fileId={fileId} />
+  }
+  if (effForce === 'text') {
+    const kind = lower.endsWith('.css') ? 'css' : lower.endsWith('.js') || lower.endsWith('.mjs') ? 'javascript' : lower.endsWith('.json') ? 'javascript' : 'text'
+    return <TextEditorPage kind={kind} mode="edit" fileId={fileId} />
+  }
   if (isOfficeFile(lower)) return <EditorPage mode="edit" fileId={fileId} />
   if (isDrawioFile(lower)) return <DrawioPage mode="edit" fileId={fileId} />
   if (isExcalidrawFile(lower)) return <ExcalidrawPage mode="edit" fileId={fileId} />
@@ -277,6 +310,33 @@ export function FileEditorDispatch({ fileId, name }: { fileId: string; name: str
     return <TextEditorPage kind={lower.endsWith('.css') ? 'css' : 'javascript'} mode="edit" fileId={fileId} />
   }
   return <TextEditorPage kind="text" mode="edit" fileId={fileId} />
+}
+
+/**
+ * UUID 直链编辑分发页（/edit/:fileId）：与 /view/:fileId 的 ViewerPage 同构
+ * ——先取文件元数据，再按扩展名（及 ?open= 偏好，非法组合兜底回落）分发
+ * 对应编辑器。此前该路由固定渲染 OnlyOffice（EditorPage），文件页在无命名
+ * 空间/搜索模式下 routeFor 回退 UUID 直链时，txt/md/drawio/.dfrt 全被塞进
+ * OnlyOffice（"txt 变 word"、OnlyOffice fileType invalid 的根因）。
+ */
+export function EditDispatchPage() {
+  const { fileId = '' } = useParams()
+  const [searchParams] = useSearchParams()
+  const forceOpen = searchParams.get('open') ?? undefined
+  const [file, setFile] = useState<FileWithVersion | null>(null)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    let alive = true
+    void getFileMeta(fileId)
+      .then((meta) => { if (alive) setFile(meta) })
+      .catch((err) => { if (alive) setError(err instanceof Error ? err.message : '文件信息加载失败') })
+    return () => { alive = false }
+  }, [fileId])
+
+  if (error) return <main className="text-editor-page"><div className="banner error">{error}</div></main>
+  if (!file) return <main className="text-editor-page"><div className="text-editor-state">正在加载…</div></main>
+  return <FileEditorDispatch fileId={file.id} name={file.name} force={forceOpen} />
 }
 
 export default function ViewerPage() {
@@ -298,6 +358,12 @@ export default function ViewerPage() {
     return () => { alive = false }
   }, [fileId])
 
+  // AI 助手上下文：查看页打开即登记当前文件（全局 AI 侧边栏快捷摘要用）。
+  useEffect(() => {
+    if (file) setAIContextFile({ fileId: file.id, fileName: file.name })
+    return () => setAIContextFile(null)
+  }, [file])
+
   // .html 网页查看：由 fileId 重建命名空间与路径（沿 parent 链上溯）后
   // resolve 现取 raw_url；grant 10 分钟，失败可重试。
   const resolveRawUrl = useCallback(async () => {
@@ -312,5 +378,10 @@ export default function ViewerPage() {
   if (error) return <main className="text-editor-page"><div className="banner error">{error}</div></main>
   if (!file) return <main className="text-editor-page"><div className="text-editor-state">正在加载…</div></main>
 
-  return <FileViewerDispatch fileId={file.id} name={file.name} resolveRawUrl={resolveRawUrl} force={forceOpen} />
+  return (
+    <>
+      <div className="viewer-ai-actions"><AISummaryInline fileId={file.id} /></div>
+      <FileViewerDispatch fileId={file.id} name={file.name} resolveRawUrl={resolveRawUrl} force={forceOpen} />
+    </>
+  )
 }

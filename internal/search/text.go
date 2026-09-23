@@ -36,6 +36,27 @@ func IsTextIndexable(mime, name string) bool {
 	return textExts[ext]
 }
 
+// imageExts 可 OCR 图片扩展名白名单：上传落库 mime 恒 application/
+// octet-stream（upload.Service.Complete 不探测真实类型），图片判定与文本
+// 判定一样主要依赖扩展名兜底；svg 为矢量文本格式，视觉 OCR 收益低且
+// 与位图混流易误判，刻意不收。
+var imageExts = map[string]bool{
+	"jpg": true, "jpeg": true, "png": true, "webp": true,
+	"gif": true, "bmp": true, "tiff": true,
+}
+
+// IsImageIndexable 判定 blob 是否为可 OCR 的图片：mime image/* 或常见
+// 图片扩展名 jpg/jpeg/png/webp/gif/bmp/tiff（大小写不敏感，参照
+// IsTextIndexable 的实现风格）。命中即允许索引管道走图片 OCR 兜底。
+func IsImageIndexable(mimeType, name string) bool {
+	m := strings.ToLower(strings.TrimSpace(strings.Split(mimeType, ";")[0]))
+	if strings.HasPrefix(m, "image/") {
+		return true
+	}
+	ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(name)), ".")
+	return imageExts[ext]
+}
+
 // EscapeLike 转义 ILIKE 模式元字符 %、_、\，使 q 作为字面子串匹配。
 func EscapeLike(q string) string {
 	var b strings.Builder

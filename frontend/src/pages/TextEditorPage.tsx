@@ -9,6 +9,9 @@ import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { fetchFileText, getFileMeta, uploadFileVersion } from '../api'
 import MarkmapDiagram from '../components/MarkmapDiagram'
 import MermaidDiagram from '../components/MermaidDiagram'
+import type { AIEditTarget } from '../components/AIEdit'
+import AIEditChat, { AIEditChatButton } from '../components/AIEditChat'
+import type { AIQuickCommand } from '../components/AIEditChat'
 import { closeEditorWithFallback, safeReturnTo } from '../editorNavigation'
 import { MessageKey, t, useLocale } from '../i18n'
 import { useColorMode } from '../theme'
@@ -183,6 +186,24 @@ export default function TextEditorPage({
   const syncLockRef = useRef(false)
   // 分栏拖拽：containerRef 记录分栏容器（比例按容器宽度换算）。
   const splitHostRef = useRef<HTMLDivElement | null>(null)
+  // 编辑器 AI（AI 能力第一版）：Monaco 实例与选区（onMount/选区变化维护），
+  // AIEditMenu 读取选区、经 executeEdits 落盘插入/替换。
+  const aiEditorRef = useRef<{
+    getSelection(): { startLineNumber: number; startColumn: number; endLineNumber: number; endColumn: number; isEmpty?(): boolean }
+    getModel(): {
+      getOffsetAt(pos: { lineNumber: number; column: number }): number
+      positionAt?(offset: number): { lineNumber: number; column: number }
+    } | null
+    executeEdits(source: string, edits: Array<{ range: unknown; text: string; forceMoveMarkers?: boolean }>): boolean
+    pushUndoStop?(): boolean
+    focus(): void
+  } | null>(null)
+  const aiSelectionRef = useRef<{ start: number; end: number } | null>(null)
+  // AI 对话面板（AIEditChat）展开态（收起不清空会话）。
+  const [aiChatOpen, setAiChatOpen] = useState(false)
+  // 头部下拉快捷指令（打开面板后由 AIEditChat 消费一次；原 AIEditMenu
+  // 快捷指令已并入「AI 对话」下拉按钮）。
+  const [aiQuick, setAiQuick] = useState<AIQuickCommand | null>(null)
 
   const markDirty = () => {
     dirtyRef.current = true
@@ -335,6 +356,142 @@ export default function TextEditorPage({
     return () => window.removeEventListener('beforeunload', onBeforeUnload)
   }, [])
 
+  // ---- 编辑器 AI（AI 能力第一版）：选区读取与插入/替换落盘 ----
+  /** Monaco onMount 统一挂接：记录实例 + 跟踪选区（offset 区间）。 */
+  const bindAIEditor = (editor: unknown) => {
+    const ed = editor as unknown as NonNullable<typeof aiEditorRef.current> & {
+      onDidChangeCursorSelection(cb: () => void): unknown
+    }
+    aiEditorRef.current = ed
+    const track = () => {
+      const sel = ed.getSelection()
+      const model = ed.getModel()
+      if (!sel || !model) return
+      const start = model.getOffsetAt({ lineNumber: sel.startLineNumber, column: sel.startColumn })
+      const end = model.getOffsetAt({ lineNumber: sel.endLineNumber, column: sel.endColumn })
+      aiSelectionRef.current = { start, end }
+    }
+    track()
+    ed.onDidChangeCursorSelection(track)
+  }
+
+  /** AIEditMenu 的选区读取：无选区（或读取失败）回退全文模式。 */
+  const aiGetTarget = (): AIEditTarget => {
+    const sel = aiSelectionRef.current
+    if (sel && sel.end > sel.start) {
+      return { text: text.slice(sel.start, sel.end), hasSelection: true }
+    }
+    return { text, hasSelection: false }
+  }
+
+  /** AI 结果落盘：insert = 选区末尾/光标处插入；replace = 替换选区（无选区
+   * 时替换全文）。Monaco 未就绪（如预览模式切换中）时回退 setState 整文。 */
+  const aiApply = (mode: 'insert' | 'replace', output: string) => {
+    const ed = aiEditorRef.current
+    const sel = aiSelectionRef.current
+    const model = ed?.getModel()
+    if (!ed || !model || viewMode) {
+      setText((prev) => (mode === 'replace' || !sel ? output : prev + output))
+      markDirty()
+      return
+    }
+    const hasSelection = !!sel && sel.end > sel.start
+    const current = ed.getSelection()
+    if (mode === 'insert' && hasSelection && sel) {
+      // 选区末尾插入（选区保留，新文本接在后面）。
+      const offset = sel.end
+      const position = model.positionAt?.(offset)
+      if (position) {
+        ed.pushUndoStop?.()
+        ed.executeEdits('ai', [{ range: { startLineNumber: position.lineNumber, startColumn: position.column, endLineNumber: position.lineNumber, endColumn: position.column }, text: output, forceMoveMarkers: true }])
+        ed.pushUndoStop?.()
+        ed.focus()
+        return
+      }
+    }
+    if (mode === 'insert' && current) {
+      // 光标处插入。
+      ed.pushUndoStop?.()
+      ed.executeEdits('ai', [{ range: { startLineNumber: current.startLineNumber, startColumn: current.startColumn, endLineNumber: current.startLineNumber, endColumn: current.startColumn }, text: output, forceMoveMarkers: true }])
+      ed.pushUndoStop?.()
+      ed.focus()
+      return
+    }
+    if (mode === 'replace' && hasSelection && sel) {
+      const start = model.positionAt?.(sel.start)
+      const end = model.positionAt?.(sel.end)
+      if (start && end) {
+        ed.pushUndoStop?.()
+        ed.executeEdits('ai', [{ range: { startLineNumber: start.lineNumber, startColumn: start.column, endLineNumber: end.lineNumber, endColumn: end.column }, text: output }])
+        ed.pushUndoStop?.()
+        ed.focus()
+        return
+      }
+    }
+    // 全文替换（无选区 replace / positionAt 不可用兜底）。
+    setText(output)
+    markDirty()
+  }
+
+  /** AI 自动应用·无选区：追加到文档末尾——Monaco 文末 executeEdits（可
+   * Ctrl+Z 撤销），编辑器未就绪（预览/加载中）回退受控 setState 拼接。 */
+  const aiAppendEnd = (output: string) => {
+    const ed = aiEditorRef.current
+    const model = ed?.getModel()
+    const position = model?.positionAt?.(text.length)
+    if (!ed || !model || viewMode || !position) {
+      setText((prev) => prev + output)
+      markDirty()
+      return
+    }
+    try {
+      ed.pushUndoStop?.()
+      ed.executeEdits('ai', [{ range: { startLineNumber: position.lineNumber, startColumn: position.column, endLineNumber: position.lineNumber, endColumn: position.column }, text: output, forceMoveMarkers: true }])
+      ed.pushUndoStop?.()
+      ed.focus()
+    } catch {
+      // 编辑器已 dispose（视图切换间隙）等异常：回退受控拼接。
+      setText((prev) => prev + output)
+      markDirty()
+    }
+  }
+
+  /** 版本保护前置：确保当前内容已保存（有未保存修改先 save），返回应用前
+   * 版本信息（null=保存失败，AIEditChat 将放弃自动应用）。 */
+  const aiEnsureSaved = useCallback(async (): Promise<{ versionId: string; version: number } | null> => {
+    try {
+      if (dirtyRef.current) {
+        await save()
+        // save() 内部捕获错误不抛出：dirtyRef 仍为 true 即保存失败。
+        if (dirtyRef.current) return null
+      }
+      const meta = await getFileMeta(fileId)
+      return meta.current_version
+        ? { versionId: meta.current_version.id, version: meta.current_version.version }
+        : null
+    } catch {
+      return null
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fileId, save])
+
+  /** 撤销回退后刷新编辑器：重新拉取最新内容（Monaco 受控 value 随 setText
+   * 同步刷新，无需重挂）并清理 dirty。 */
+  const aiReload = useCallback(async () => {
+    const content = await fetchFileText(fileId)
+    setText(content)
+    dirtyRef.current = false
+    setDirty(false)
+    setNotice('')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fileId])
+
+  /** 头部下拉快捷指令：打开面板并透传给 AIEditChat 自动执行。 */
+  const openAiChatWith = (cmd: AIQuickCommand) => {
+    setAiChatOpen(true)
+    setAiQuick(cmd)
+  }
+
   if (viewMode) return (
     <main className="text-editor-page viewer-only">
       {loading ? <div className="text-editor-state">{msg('loading')}</div> : error ? (
@@ -347,66 +504,120 @@ export default function TextEditorPage({
   const canPreview = isMarkdown || editorKind === 'html'
   return (
     <main className="text-editor-page">
-      <header className="text-editor-head">
-        <div className="text-editor-head-title">
-          <div className="text-editor-back">
-            <Button type="text" size="small" onClick={exitWithConfirm}>{msg('back')}</Button>
-          </div>
-          <div>
-            <h1>{isMarkdown ? msg('markdownEditor') : `${name.split('.').pop()?.toUpperCase() ?? '文本'} 编辑器`}</h1>
-            <div className="muted">
-              {name}
-              {dirty && <span className="badge uploading text-editor-dirty-badge">{locale === 'zh-CN' ? '未保存' : 'Unsaved'}</span>}
+      {/* 行布局：主列（头部/横幅/编辑器）+ 右侧 AI 对话面板（可收起，
+          不破坏编辑区 flex 高度链；AI 未启用时面板不渲染）。 */}
+      <div className="text-editor-body">
+        <div className="text-editor-main">
+          <header className="text-editor-head">
+            <div className="text-editor-head-title">
+              <div className="text-editor-back">
+                <Button type="text" size="small" onClick={exitWithConfirm}>{msg('back')}</Button>
+              </div>
+              <div>
+                <h1>{isMarkdown ? msg('markdownEditor') : `${name.split('.').pop()?.toUpperCase() ?? '文本'} 编辑器`}</h1>
+                <div className="muted">
+                  {name}
+                  {dirty && <span className="badge uploading text-editor-dirty-badge">{locale === 'zh-CN' ? '未保存' : 'Unsaved'}</span>}
+                </div>
+              </div>
             </div>
-          </div>
-        </div>
-        <div className="editor-head-actions">
-          {/* markdown：视图切换（编辑/分栏/预览，默认分栏，localStorage 记住）。 */}
-          {isMarkdown && (
-            <Segmented
-              value={mdView}
-              onChange={(v) => changeMdView(v as MdViewMode)}
-              options={[
-                { label: locale === 'zh-CN' ? '编辑' : 'Edit', value: 'edit' },
-                { label: locale === 'zh-CN' ? '分栏' : 'Split', value: 'split' },
-                { label: locale === 'zh-CN' ? '预览' : 'Preview', value: 'preview' },
-              ]}
-            />
-          )}
-          {canPreview && !isMarkdown && (
-            <Button size="small" onClick={() => setPreview((value) => !value)}>
-              {preview ? msg('editMode') : msg('previewMode')}
-            </Button>
-          )}
-          <Button type="primary" size="small" disabled={loading || saving} loading={saving} onClick={() => void save()}>
-            {msg('save')}
-          </Button>
-        </div>
-      </header>
-      {error && <div className="banner error">{error}</div>}
-      {notice && <div className="banner ok">{notice}</div>}
-      {loading ? (
-        <div className="text-editor-state">{msg('loading')}</div>
-      ) : isMarkdown ? (
-        mdView === 'preview' ? (
-          <div className="md-preview-pane" ref={previewScrollRef}>
-            <MarkdownViewer source={text} />
-          </div>
-        ) : mdView === 'split' ? (
-          <div className="md-split md-split-draggable" ref={splitHostRef} style={{ gridTemplateColumns: `minmax(0, ${splitRatio}fr) 6px minmax(0, ${100 - splitRatio}fr)` }}>
-            {/* 分栏：左源码（Monaco）右预览，百分比同步滚动；中间分隔条可拖拽
-                调整比例（20-80%，localStorage 记住）。 */}
-            <div className="md-split-editor">
+            <div className="editor-head-actions">
+              {/* AI 对话（主点击开面板；下拉=原 AIEditMenu 并入的快捷指令：
+                  摘要/续写/润色/翻译成英文/自定义，打开面板自动发送）。 */}
+              <AIEditChatButton open={aiChatOpen} onToggle={() => setAiChatOpen((v) => !v)} onQuick={openAiChatWith} disabled={loading || saving} />
+              {/* markdown：视图切换（编辑/分栏/预览，默认分栏，localStorage 记住）。 */}
+              {isMarkdown && (
+                <Segmented
+                  value={mdView}
+                  onChange={(v) => changeMdView(v as MdViewMode)}
+                  options={[
+                    { label: locale === 'zh-CN' ? '编辑' : 'Edit', value: 'edit' },
+                    { label: locale === 'zh-CN' ? '分栏' : 'Split', value: 'split' },
+                    { label: locale === 'zh-CN' ? '预览' : 'Preview', value: 'preview' },
+                  ]}
+                />
+              )}
+              {canPreview && !isMarkdown && (
+                <Button size="small" onClick={() => setPreview((value) => !value)}>
+                  {preview ? msg('editMode') : msg('previewMode')}
+                </Button>
+              )}
+              <Button type="primary" size="small" disabled={loading || saving} loading={saving} onClick={() => void save()}>
+                {msg('save')}
+              </Button>
+            </div>
+          </header>
+          {error && <div className="banner error">{error}</div>}
+          {notice && <div className="banner ok">{notice}</div>}
+          {loading ? (
+            <div className="text-editor-state">{msg('loading')}</div>
+          ) : isMarkdown ? (
+            mdView === 'preview' ? (
+              <div className="md-preview-pane" ref={previewScrollRef}>
+                <MarkdownViewer source={text} />
+              </div>
+            ) : mdView === 'split' ? (
+              <div className="md-split md-split-draggable" ref={splitHostRef} style={{ gridTemplateColumns: `minmax(0, ${splitRatio}fr) 6px minmax(0, ${100 - splitRatio}fr)` }}>
+                {/* 分栏：左源码（Monaco）右预览，百分比同步滚动；中间分隔条可拖拽
+                    调整比例（20-80%，localStorage 记住）。 */}
+                <div className="md-split-editor">
+                  <Suspense fallback={<div className="text-editor-state">{msg('loading')}</div>}>
+                    <MonacoEditor
+                      language={monacoLanguages.markdown}
+                      theme={monacoTheme(dark)}
+                      value={text}
+                      options={monacoOptions(false)}
+                      onMount={(editor) => {
+                        monacoRef.current = editor as unknown as typeof monacoRef.current
+                        editor.onDidScrollChange(() => syncScrollToPreview())
+                        bindAIEditor(editor)
+                      }}
+                      onChange={(value) => {
+                        setText(value ?? '')
+                        markDirty()
+                      }}
+                    />
+                  </Suspense>
+                </div>
+                <div
+                  className="md-split-divider"
+                  role="separator"
+                  aria-orientation="vertical"
+                  title={locale === 'zh-CN' ? '拖拽调整分栏比例' : 'Drag to resize'}
+                  onMouseDown={startSplitDrag}
+                />
+                <div className="md-split-preview" ref={previewScrollRef} onScroll={syncScrollToEditor}>
+                  <MarkdownViewer source={text} />
+                </div>
+              </div>
+            ) : (
+              <div className="code-editor">
+                <Suspense fallback={<div className="text-editor-state">{msg('loading')}</div>}>
+                  <MonacoEditor
+                    language={monacoLanguages.markdown}
+                    theme={monacoTheme(dark)}
+                    value={text}
+                    options={monacoOptions(false)}
+                    onMount={(editor) => bindAIEditor(editor)}
+                    onChange={(value) => {
+                      setText(value ?? '')
+                      markDirty()
+                    }}
+                  />
+                </Suspense>
+              </div>
+            )
+          ) : preview && canPreview ? (
+            <SourceViewer kind={editorKind} source={text} name={name} />
+          ) : (
+            <div className="code-editor">
               <Suspense fallback={<div className="text-editor-state">{msg('loading')}</div>}>
                 <MonacoEditor
-                  language={monacoLanguages.markdown}
+                  language={monacoLanguages[editorKind]}
                   theme={monacoTheme(dark)}
                   value={text}
                   options={monacoOptions(false)}
-                  onMount={(editor) => {
-                    monacoRef.current = editor as unknown as typeof monacoRef.current
-                    editor.onDidScrollChange(() => syncScrollToPreview())
-                  }}
+                  onMount={(editor) => bindAIEditor(editor)}
                   onChange={(value) => {
                     setText(value ?? '')
                     markDirty()
@@ -414,51 +625,25 @@ export default function TextEditorPage({
                 />
               </Suspense>
             </div>
-            <div
-              className="md-split-divider"
-              role="separator"
-              aria-orientation="vertical"
-              title={locale === 'zh-CN' ? '拖拽调整分栏比例' : 'Drag to resize'}
-              onMouseDown={startSplitDrag}
-            />
-            <div className="md-split-preview" ref={previewScrollRef} onScroll={syncScrollToEditor}>
-              <MarkdownViewer source={text} />
-            </div>
-          </div>
-        ) : (
-          <div className="code-editor">
-            <Suspense fallback={<div className="text-editor-state">{msg('loading')}</div>}>
-              <MonacoEditor
-                language={monacoLanguages.markdown}
-                theme={monacoTheme(dark)}
-                value={text}
-                options={monacoOptions(false)}
-                onChange={(value) => {
-                  setText(value ?? '')
-                  markDirty()
-                }}
-              />
-            </Suspense>
-          </div>
-        )
-      ) : preview && canPreview ? (
-        <SourceViewer kind={editorKind} source={text} name={name} />
-      ) : (
-        <div className="code-editor">
-          <Suspense fallback={<div className="text-editor-state">{msg('loading')}</div>}>
-            <MonacoEditor
-              language={monacoLanguages[editorKind]}
-              theme={monacoTheme(dark)}
-              value={text}
-              options={monacoOptions(false)}
-              onChange={(value) => {
-                setText(value ?? '')
-                markDirty()
-              }}
-            />
-          </Suspense>
+          )}
         </div>
-      )}
+        {/* AI 对话式创作/编辑侧栏面板（文本页直接复用 aiApply/executeEdits
+            通道；可修改模式自动应用前经 aiEnsureSaved 保存基线版本，撤销
+            回退后 aiReload 刷新）。 */}
+        <AIEditChat
+          open={aiChatOpen}
+          onClose={() => setAiChatOpen(false)}
+          getTarget={aiGetTarget}
+          getAllText={() => text}
+          onApply={aiApply}
+          onAppend={aiAppendEnd}
+          fileId={fileId}
+          ensureSaved={aiEnsureSaved}
+          reload={aiReload}
+          quickCommand={aiQuick}
+          onQuickConsumed={() => setAiQuick(null)}
+        />
+      </div>
     </main>
   )
 }

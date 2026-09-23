@@ -119,6 +119,9 @@ func (m *MemoryRepo) QueryDocs(user uuid.UUID, opts QueryOptions) ([]Result, err
 		if opts.Starred != nil && f.Starred != *opts.Starred {
 			continue
 		}
+		if opts.SpaceID != nil && (d.SpaceID == nil || *d.SpaceID != *opts.SpaceID) {
+			continue
+		}
 		snippet := ""
 		if nameMatch {
 			snippet = f.Name

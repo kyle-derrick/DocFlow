@@ -23,18 +23,35 @@ import (
 // 按 IP 轻限流的默认值（每分钟次数；SetOnlyOffice 传入非正值时使用）。
 const onlyofficeRateLimitDefault = 60
 
+// requestSchemeHost 从请求提取 scheme 与 host（动态推导 public URL 用）：
+// scheme 取 X-Forwarded-Proto 优先（caddy 反代携带），否则按 TLS 推断；
+// host 用 Request.Host（反代默认保留原始 Host）。
+func requestSchemeHost(c *gin.Context) (scheme, host string) {
+	scheme = "http"
+	if c.Request.TLS != nil {
+		scheme = "https"
+	}
+	if proto := strings.TrimSpace(c.GetHeader("X-Forwarded-Proto")); proto == "http" || proto == "https" {
+		scheme = proto
+	}
+	return scheme, c.Request.Host
+}
+
 // onlyofficeConfig GET /api/v1/onlyoffice/config：前端探测集成可用性与
 // DocumentServer 地址（加载 DocEditor 脚本、决定是否显示「编辑」入口）。
 // 该端点恒注册（不随 ONLYOFFICE_ENABLED 开关 404）：禁用时返回
 // {enabled:false, server_url:null}，不暴露内部 URL；启用时 server_url 返回
-// 浏览器可达地址（ONLYOFFICE_PUBLIC_URL 优先，未配置回退 ONLYOFFICE_SERVER_URL
-// ——后者为 docker 内网名时浏览器无法解析加载 api.js，生产应配置 PUBLIC_URL）。
+// 浏览器可达地址——显式配置的 ONLYOFFICE_PUBLIC_URL（非 127.0.0.1/
+// localhost 本机回环值）照旧，否则按请求 Host 推导
+// "{scheme}://{host}/onlyoffice"（caddy /onlyoffice/* 反代；避免 env 默认
+// 的 http://127.0.0.1/onlyoffice 让非本机浏览器 Office 编辑白屏）。
 func (h *Handler) onlyofficeConfig(c *gin.Context) {
 	if h.onlyoffice == nil {
 		c.JSON(http.StatusOK, gin.H{"enabled": false, "server_url": nil})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"enabled": true, "server_url": h.onlyoffice.PublicServerURL()})
+	scheme, host := requestSchemeHost(c)
+	c.JSON(http.StatusOK, gin.H{"enabled": true, "server_url": h.onlyoffice.PublicServerURLFor(scheme, host)})
 }
 
 // SetOnlyOffice 注入 ONLYOFFICE 集成服务；非 nil 时启用路由挂载（幂等）。
@@ -138,7 +155,8 @@ func (h *Handler) publicShareOfficeConfig(c *gin.Context) {
 	if err := h.shares.IncrementPreviewView(r); err == nil {
 		h.recordPublicAccessEvent(c, r, share.ActionPreview)
 	}
-	c.JSON(http.StatusOK, gin.H{"server_url": h.onlyoffice.PublicServerURL(), "config": config})
+	scheme, host := requestSchemeHost(c)
+	c.JSON(http.StatusOK, gin.H{"server_url": h.onlyoffice.PublicServerURLFor(scheme, host), "config": config})
 }
 
 // onlyofficeDownload GET /api/v1/onlyoffice/download/:fileId?v=&token=：
@@ -216,7 +234,7 @@ func onlyofficeError(c *gin.Context, err error) bool {
 		return false
 	case errors.Is(err, onlyoffice.ErrInvalidToken):
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid onlyoffice token"})
-	case errors.Is(err, onlyoffice.ErrInvalidKey), errors.Is(err, files.ErrInvalidTarget):
+	case errors.Is(err, onlyoffice.ErrInvalidKey), errors.Is(err, onlyoffice.ErrInvalidFileType), errors.Is(err, files.ErrInvalidTarget):
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 	case errors.Is(err, onlyoffice.ErrURLNotAllowed), errors.Is(err, files.ErrForbidden),
 		errors.Is(err, files.ErrBlobUnavailable):

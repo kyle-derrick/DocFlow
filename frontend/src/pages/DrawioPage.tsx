@@ -23,6 +23,11 @@ import {
   uploadFileVersion,
 } from '../api'
 import DrawioViewer from '../components/DrawioViewer'
+import AIDrawio from '../components/AIDrawio'
+import { EditorLoadError } from '../components/EditorLoadError'
+import type { AIEditTarget } from '../components/AIEdit'
+import AIEditChat, { AIEditChatButton } from '../components/AIEditChat'
+import type { AIQuickCommand } from '../components/AIEditChat'
 import { useLocale } from '../i18n'
 import { useColorMode } from '../theme'
 import { closeEditorWithFallback, safeReturnTo } from '../editorNavigation'
@@ -60,6 +65,10 @@ interface DrawioMessage {
   exit?: boolean
 }
 
+/** draw.io iframe 初始化等待上限：超时仍未收到 init 事件（编辑器静态资源
+ * 不可达/服务端配置了浏览器不可达的地址）即展示页面级错误卡。 */
+const DRAWIO_INIT_TIMEOUT_MS = 20000
+
 export default function DrawioPage({ mode, fileId: fileIdProp }: { mode?: 'edit' | 'view'; fileId?: string } = {}) {
   const { fileId: routeFileId = '' } = useParams()
   // by-path 路由经 prop 传入 resolve 得到的 file_id；缺省回退路由参数。
@@ -80,6 +89,9 @@ export default function DrawioPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [saving, setSaving] = useState(false)
+  /** 页面级加载失败（EditorLoadError 错误卡）：iframe 加载失败或初始化
+   * 超时（超时仍未收到 init postMessage），展示图表服务地址与排查提示。 */
+  const [frameError, setFrameError] = useState<string | null>(null)
 
   const frameRef = useRef<HTMLIFrameElement | null>(null)
   // 初始图表 XML（init 事件时发给编辑器）、未保存标记（保存失败兜底提示）
@@ -93,6 +105,9 @@ export default function DrawioPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
   // 「保存并退出」之外的退出流程抑制 beforeunload（返回确认走 antd 弹窗，
   // 不再叠加浏览器原生弹窗）。
   const closingRef = useRef(false)
+  // AI 对话面板（AIEditChat）展开态（收起不清空会话）与头部下拉快捷指令。
+  const [aiChatOpen, setAiChatOpen] = useState(false)
+  const [aiQuick, setAiQuick] = useState<AIQuickCommand | null>(null)
   const { modal: antdModal } = AntdApp.useApp()
 
   // 探测集成 → 拉取文件元数据与内容 → 挂 iframe。内容读取失败或为空
@@ -103,6 +118,7 @@ export default function DrawioPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
       setLoading(true)
       setError('')
       setNotice('')
+      setFrameError(null)
       try {
         const status = await drawioStatus()
         if (!alive) return
@@ -143,6 +159,14 @@ export default function DrawioPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
   // dirty 确认）；autosave → 置脏 + 10s 静置自动落版本。
   useEffect(() => {
     if (!editorURL || viewMode) return
+    // 初始化超时兜底（v2.7 反馈 8）：drawio 静态资源不可达时 iframe 不会
+    // 发出 init 事件（跨域 iframe 加载失败多数也不触发 onerror），超时
+    // 即展示页面级错误卡（替代无限 loading/白屏）。
+    const initTimer = window.setTimeout(() => {
+      setFrameError(locale === 'zh-CN'
+        ? `图表编辑器初始化超时（${DRAWIO_INIT_TIMEOUT_MS / 1000} 秒内未就绪），图表服务可能不可达`
+        : `Diagram editor failed to initialize within ${DRAWIO_INIT_TIMEOUT_MS / 1000}s; the diagram service may be unreachable`)
+    }, DRAWIO_INIT_TIMEOUT_MS)
     const onMessage = (e: MessageEvent) => {
       const frame = frameRef.current
       if (!frame || e.source !== frame.contentWindow) return
@@ -153,6 +177,7 @@ export default function DrawioPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
         return // 非 JSON 协议消息忽略
       }
       if (msg.event === 'init') {
+        window.clearTimeout(initTimer)
         frame.contentWindow?.postMessage(JSON.stringify({ action: 'load', xml: xmlRef.current, autosave: 1 }), '*')
         return
       }
@@ -162,6 +187,8 @@ export default function DrawioPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
       }
       if (msg.event === 'autosave') {
         if (msg.xml) {
+          // 跟踪最新 XML（AI 上下文与 AI 应用前保存基线用）。
+          xmlRef.current = msg.xml
           dirtyRef.current = true
           window.clearTimeout(autosaveTimerRef.current)
           autosaveTimerRef.current = window.setTimeout(() => {
@@ -183,9 +210,12 @@ export default function DrawioPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
       }
     }
     window.addEventListener('message', onMessage)
-    return () => window.removeEventListener('message', onMessage)
+    return () => {
+      window.removeEventListener('message', onMessage)
+      window.clearTimeout(initTimer)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editorURL, fileId, file?.name, viewMode])
+  }, [editorURL, fileId, file?.name, viewMode, locale])
 
   // 保存：导出 XML 作为新版本上传（file_id 会话沿用目标文件名/父目录），
   // 成功后刷新元数据展示新版本号；失败置未保存标记。返回是否保存成功。
@@ -237,6 +267,63 @@ export default function DrawioPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
     })
   }
 
+  // ---- 编辑器 AI（applyKind=drawio-xml）：AI 基于当前 XML 生成/修改完整
+  //      drawio XML，经既有 postMessage 通道整体替换画布并落新版本 ----
+
+  /** AI 上下文目标：图表无选区概念，恒全文（=当前最新已知 XML）。 */
+  const aiGetTarget = (): AIEditTarget => ({ hasSelection: false, text: xmlRef.current })
+
+  /** AI XML 自动应用（AIEditChat 已提取完整 drawio XML）：向 iframe 发
+   * load 动作整体替换画布内容（与初始化装载同款消息）；load 本身不一定
+   * 触发 autosave 事件，故随后主动发 export 请求——drawio 回 export 事件
+   * 带最新 XML，走既有 saveDiagram 通道落新版本（导出→上传→版本号刷新）。
+   * 返回 string=失败原因（AIEditChat 显示 applyError，画布未被修改）。 */
+  const aiApply = (_mode: 'insert' | 'replace', xml: string): string | void => {
+    const frame = frameRef.current?.contentWindow
+    if (!frame) return '图表编辑器未就绪，未应用'
+    frame.postMessage(JSON.stringify({ action: 'load', xml, autosave: 1 }), '*')
+    dirtyRef.current = true
+    frame.postMessage(JSON.stringify({ action: 'export', format: 'xml' }), '*')
+  }
+
+  /** 版本保护前置：应用前先把当前图表（最新已知 XML）保存为基线版本。 */
+  const aiEnsureSaved = async (): Promise<{ versionId: string; version: number } | null> => {
+    try {
+      if (dirtyRef.current) {
+        const ok = await saveDiagram(xmlRef.current, true)
+        if (!ok) return null
+      }
+      const meta = await getFileMeta(fileId)
+      return meta.current_version
+        ? { versionId: meta.current_version.id, version: meta.current_version.version }
+        : null
+    } catch {
+      return null
+    }
+  }
+
+  /** 撤销回退后刷新画布：重新拉取文件内容，经 load 消息重载编辑器。 */
+  const aiReload = async (): Promise<void> => {
+    const text = await fetchFileText(fileId)
+    xmlRef.current = text.trim() ? text : EMPTY_DRAWIO_XML
+    dirtyRef.current = false
+    frameRef.current?.contentWindow?.postMessage(
+      JSON.stringify({ action: 'load', xml: xmlRef.current, autosave: 1 }),
+      '*',
+    )
+    try {
+      setFile(await getFileMeta(fileId))
+    } catch {
+      // 版本号刷新失败不影响回退结果
+    }
+  }
+
+  /** 头部下拉快捷指令：打开面板并透传给 AIEditChat 自动执行。 */
+  const openAiChatWith = (cmd: AIQuickCommand) => {
+    setAiChatOpen(true)
+    setAiQuick(cmd)
+  }
+
   // 未保存兜底提示：仅保存失败/静置窗口内退出时拦截（dirty 由 autosave
   // 事件驱动）；退出确认流程（closingRef）不叠加浏览器原生弹窗。
   useEffect(() => {
@@ -261,14 +348,40 @@ export default function DrawioPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
         <h2 className="editor-title">{file?.name ?? '加载中…'}</h2>
         {versionNo !== undefined && <span className="badge current">当前版本 v{versionNo}</span>}
         {saving && <span className="badge uploading">保存中…</span>}
+        {/* AI 生成（AI 能力第一版）：自然语言 → mermaid → 预览/复制/存 .mmd。 */}
+        <AIDrawio fileId={fileId} />
+        {/* AI 对话（applyKind=drawio-xml）：可修改模式下 AI 生成完整 drawio
+            XML 自动替换画布并落新版本（版本保护可撤销）。 */}
+        <AIEditChatButton open={aiChatOpen} onToggle={() => setAiChatOpen((v) => !v)} onQuick={openAiChatWith} kind="drawio-xml" disabled={loading || !!frameError} />
         {!viewMode && <span className="muted drawio-save-hint">Ctrl+S 保存（不退出）</span>}
       </div>}
 
-      {!viewMode && notice && <div className="banner ok editor-hint">{notice}</div>}
-      {error && <div className="banner error">{error}</div>}
-      {loading && !error && <div className="hint">{viewMode ? '正在加载图表查看器…' : '正在加载图表编辑器…'}</div>}
+      {!viewMode && notice && !frameError && <div className="banner ok editor-hint">{notice}</div>}
+      {error && !frameError && <div className="banner error">{error}</div>}
+      {loading && !error && !frameError && <div className="hint">{viewMode ? '正在加载图表查看器…' : '正在加载图表编辑器…'}</div>}
 
-      {!error && !loading && editorURL && (viewMode ? (
+      {/* 页面级加载失败错误卡（v2.7 反馈 8）：图表服务地址不可达（如
+          服务端返回 127.0.0.1 回环地址）或静态资源拉取失败时不再白屏。 */}
+      {frameError && (
+        <EditorLoadError
+          message={frameError}
+          resourceLabel={locale === 'zh-CN' ? '图表服务地址' : 'Diagram service URL'}
+          resourceUrl={editorURL}
+          hints={locale === 'zh-CN' ? [
+            '该地址来自平台 draw.io 集成配置，必须是当前浏览器可达的地址。',
+            '跨机/容器访问时请勿使用 127.0.0.1 等回环地址：请将 DRAWIO_PUBLIC_URL 配置为外部可达地址，或经反向代理域名访问。',
+            'HTTPS 页面无法加载 HTTP 资源（混合内容拦截），请保持协议一致；也可刷新页面重试。',
+          ] : [
+            'This URL comes from the platform draw.io integration config and must be reachable from your browser.',
+            'For cross-machine/container access, avoid 127.0.0.1 loopback addresses: configure DRAWIO_PUBLIC_URL to an externally reachable URL, or access via a reverse-proxy domain.',
+            'An HTTPS page cannot load HTTP resources (mixed content); keep the protocol consistent, or retry by reloading.',
+          ]}
+          onRetry={() => window.location.reload()}
+          retryText={locale === 'zh-CN' ? '刷新重试' : 'Reload'}
+        />
+      )}
+
+      {!error && !frameError && !loading && editorURL && (viewMode ? (
         <DrawioViewer
           baseURL={editorURL}
           xml={xmlRef.current}
@@ -277,12 +390,36 @@ export default function DrawioPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
           lang={viewerLang}
         />
       ) : (
-        <div className="editor-shell">
-          <iframe
-            ref={frameRef}
-            className="drawio-frame"
-            src={editorURL}
-            title={file?.name ?? '图表编辑器'}
+        <div className="editor-with-ai">
+          <div className="editor-shell">
+            <iframe
+              ref={frameRef}
+              className="drawio-frame"
+              src={editorURL}
+              title={file?.name ?? '图表编辑器'}
+              onError={() => {
+                // iframe 加载失败（部分浏览器对无效 src 触发；多数不可达场景
+                // 由上方 init 超时兜底覆盖）。
+                setFrameError(locale === 'zh-CN'
+                  ? '图表编辑器 iframe 加载失败，图表服务不可达'
+                  : 'Failed to load the diagram editor iframe; the diagram service is unreachable')
+              }}
+            />
+          </div>
+          {/* AI 对话式创作面板（drawio XML 整体替换；应用前 aiEnsureSaved 保存
+              基线版本，撤销回退后 aiReload 重载画布）。 */}
+          <AIEditChat
+            open={aiChatOpen}
+            onClose={() => setAiChatOpen(false)}
+            getTarget={aiGetTarget}
+            getAllText={() => xmlRef.current}
+            onApply={aiApply}
+            fileId={fileId}
+            ensureSaved={aiEnsureSaved}
+            reload={aiReload}
+            quickCommand={aiQuick}
+            onQuickConsumed={() => setAiQuick(null)}
+            applyKind="drawio-xml"
           />
         </div>
       ))}
