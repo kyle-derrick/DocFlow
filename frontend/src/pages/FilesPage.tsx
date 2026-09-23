@@ -39,6 +39,7 @@ import SpaceManageModal from '../components/SpaceManageModal'
 import SpaceMemberPanel from '../components/SpaceMemberPanel'
 import SpaceSwitcher from '../components/SpaceSwitcher'
 import { useHotkeys } from '../useHotkeys'
+import { setAILocation } from '../aiLocation'
 import { MessageKey, formatMessage, t, useLocale } from '../i18n'
 import { useAIEnabled } from '../aiFeature'
 import { aiFeatureEnabled } from '../aiFeature'
@@ -159,6 +160,22 @@ export default function FilesPage() {
 
   // 「空间管理」综合弹窗（owner/admin 全功能；其余成员经空间下拉入口只读）。
   const [manageOpen, setManageOpen] = useState(false)
+
+  // ---- AI 位置跟随（全局助手工作目录「跟随」态）：空间就绪/切换时广播空间根；
+  //      子目录导航由下方 listItems 包装广播。同空间重复加载不重置已进入的目录。 ----
+  const lastLocSpaceRef = useRef('')
+  useEffect(() => {
+    const space = activeSpace
+    if (!space || space.id === lastLocSpaceRef.current) return
+    lastLocSpaceRef.current = space.id
+    setAILocation({ spaceId: space.id, folderId: null, path: space.name })
+  }, [activeSpace])
+  // 目录名单/父子关系登记（folderId → 名称 / 父目录 id；null = 空间根直接子级）：
+  // 面包屑与左侧树的懒加载都经过 listItems，导航目标必先作为某次列表的子目录
+  // 出现，据此拼装「空间名/目录/…」路径。
+  const folderNamesRef = useRef<Map<string, string>>(new Map())
+  const folderParentsRef = useRef<Map<string, string | null>>(new Map())
+
 
   const [historyTarget, setHistoryTarget] = useState<FileItem | null>(null)
 
@@ -535,12 +552,37 @@ export default function FilesPage() {
   // 挂载时即确定）而非 activeSpace——后者经 listSpaces 异步加载，挂载瞬间
   // 为 null 会走默认空间端点，加载完成后无重载（列表仍是默认空间内容，
   // 再进目录即 folder not found）。
-  const listItems = async (parentId: string | null, opts?: FileQueryOptions): Promise<DirListing> => {
+  const rawListItems = async (parentId: string | null, opts?: FileQueryOptions): Promise<DirListing> => {
     if (spaceIdParam) {
       const res = await listSpaceFiles(spaceIdParam, parentId, opts)
       return { items: res.files ?? [], folderId: res.parent_id }
     }
     return { items: await listFiles(parentId, opts), folderId: parentId }
+  }
+  // 导航列表包装（面包屑/左侧树）：非跨目录检索（标签/收藏/最近）的目录
+  // 列举 → 登记子目录名单 + 广播 AI 位置（进入/切换目录，含空间根）。
+  const listItems = async (parentId: string | null, opts?: FileQueryOptions): Promise<DirListing> => {
+    const res = await rawListItems(parentId, opts)
+    const searching = Boolean(opts && (opts.recent || opts.tagId || opts.starred !== undefined))
+    if (!searching && activeSpace) {
+      for (const it of res.items) {
+        if (it.type !== 'folder') continue
+        folderNamesRef.current.set(it.id, it.name)
+        folderParentsRef.current.set(it.id, parentId)
+      }
+      const segs: string[] = []
+      let cur: string | null = parentId
+      const seen = new Set<string>()
+      while (cur && !seen.has(cur)) {
+        seen.add(cur)
+        const name = folderNamesRef.current.get(cur)
+        if (!name) break
+        segs.unshift(name)
+        cur = folderParentsRef.current.get(cur) ?? null
+      }
+      setAILocation({ spaceId: activeSpace.id, folderId: parentId, path: [activeSpace.name, ...segs].join('/') })
+    }
+    return res
   }
   const doCreateFolder = (name: string, parentId: string | null) =>
     spaceIdParam ? createSpaceFolder(spaceIdParam, name, parentId) : createFolder(name, parentId)
@@ -604,6 +646,9 @@ export default function FilesPage() {
           />
         ) : undefined}
         listItems={listItems}
+        /* 复制/移动弹窗目录树数据源：原始列表（不经 AI 位置广播包装——
+           弹窗内展开目录不应改变助手「跟随」位置）。 */
+        pickerListItems={rawListItems}
         createFolderFn={canWrite ? doCreateFolder : undefined}
         uploadFn={canWrite ? uploadFile : undefined}
         activeView={spaceView}

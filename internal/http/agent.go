@@ -20,6 +20,7 @@ import (
 	"github.com/docflow/docflow/internal/agent"
 	"github.com/docflow/docflow/internal/audit"
 	"github.com/docflow/docflow/internal/files"
+	"github.com/docflow/docflow/internal/settings"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -47,7 +48,7 @@ func (h *Handler) appendAgentLog(taskID uuid.UUID, stream, content string) {
 	h.agentDB.Table("agent_task_logs").Create(&agentLogRow{TaskID: taskID, Stream: stream, Content: content, CreatedAt: time.Now().UTC()})
 }
 
-func (h *Handler) executeAgentTask(taskID uuid.UUID, aiToken string) {
+func (h *Handler) executeAgentTask(taskID uuid.UUID, aiToken, harness string) {
 	if h.agentDB == nil {
 		return
 	}
@@ -141,7 +142,7 @@ func (h *Handler) executeAgentTask(taskID uuid.UUID, aiToken string) {
 	if v, ok := h.agentSetting("agent.sync_mode").(string); ok && v != "" {
 		syncMode = v
 	}
-	exec := agent.Executor{Runtime: runtime, Timeout: time.Duration(cfg.DefaultTimeoutSeconds) * time.Second, MaxEntries: 10000, MaxBytes: 512 << 20, AIToken: aiToken, SyncMode: syncMode}
+	exec := agent.Executor{Runtime: runtime, Timeout: time.Duration(cfg.DefaultTimeoutSeconds) * time.Second, MaxEntries: 10000, MaxBytes: 512 << 20, AIToken: aiToken, Harness: harness, SyncMode: syncMode}
 	result, runErr := exec.Execute(ctx, task.ID.String(), task.Image, task.Prompt, entries)
 	if runErr != nil {
 		status := agent.StatusFailed
@@ -219,6 +220,50 @@ func splitAgentImages(raw string) []string {
 	}
 	return out
 }
+
+// resolveAgentHarness 在任务创建时解析 harness 终值（agent.harness）：
+// 配置显式值（非 auto/空）原样；auto/缺省按任务归属用户解析平台默认
+// 对话 Provider 的 kind 路由——与网关两透传端点的 kind 要求一致
+// （anthropic→claude-code 经 /v1/messages、openai 兼容→pi 经
+// /v1/chat/completions）；解析失败/其余 kind（含 mock）→builtin。
+func (h *Handler) resolveAgentHarness(user uuid.UUID) string {
+	configured := ""
+	if v, ok := h.agentSetting("agent.harness").(string); ok {
+		configured = v
+	}
+	return agentHarnessTerminal(configured, func() (string, error) {
+		if h.aiSvc == nil {
+			return "", errors.New("ai service is not configured")
+		}
+		target, err := h.aiSvc.ForUser(user).ResolveChatTargetFor("", "", settings.AIScenarioChat)
+		if err != nil {
+			return "", err
+		}
+		return target.Provider.Kind, nil
+	})
+}
+
+// agentHarnessTerminal 为 harness 终值解析的纯函数（便于单测）：显式值
+// 原样透传；auto/空时经 resolveKind 解析 Provider kind 路由，失败或未知
+// kind 一律 builtin（内置轻量 runner 兜底）。
+func agentHarnessTerminal(configured string, resolveKind func() (string, error)) string {
+	if c := strings.TrimSpace(configured); c != "" && c != agent.HarnessAuto {
+		return c
+	}
+	kind, err := resolveKind()
+	if err != nil {
+		return agent.HarnessBuiltin
+	}
+	switch kind {
+	case settings.AIKindAnthropic:
+		return agent.HarnessClaudeCode
+	case settings.AIKindOpenAICompatible:
+		return agent.HarnessPi
+	default:
+		return agent.HarnessBuiltin
+	}
+}
+
 func (h *Handler) requireAgent(c *gin.Context) bool {
 	if !h.agentEnabled() {
 		// 友好文案（曾被用户看到英文 "agent is disabled"）：指明开启路径。
@@ -238,7 +283,7 @@ func (h *Handler) agentConfig(c *gin.Context) {
 		c.JSON(500, gin.H{"error": "settings service is not configured"})
 		return
 	}
-	keys := []string{"agent.enabled", "agent.runtime", "agent.allowed_images", "agent.max_concurrent", "agent.default_timeout_seconds", "agent.max_cpu", "agent.max_memory_bytes", "agent.network_mode", "agent.mcp_callback_base_url", "agent.allow_ai", "agent.ai_max_calls", "agent.sync_mode"}
+	keys := []string{"agent.enabled", "agent.runtime", "agent.allowed_images", "agent.max_concurrent", "agent.default_timeout_seconds", "agent.max_cpu", "agent.max_memory_bytes", "agent.network_mode", "agent.mcp_callback_base_url", "agent.allow_ai", "agent.ai_max_calls", "agent.sync_mode", "agent.harness"}
 	out := gin.H{}
 	for _, k := range keys {
 		v := h.agentSetting(k)
@@ -342,7 +387,10 @@ func (h *Handler) createAgentTask(c *gin.Context) {
 			aiToken = h.agentAI.Register(task.ID, actor, limit)
 		}
 	}
-	go h.executeAgentTask(task.ID, aiToken)
+	// Agent 执行引擎终值（agent.harness）：创建任务时解析，经
+	// Executor→RuntimeRequest 注入容器 env DOCFLOW_HARNESS。
+	harness := h.resolveAgentHarness(actor)
+	go h.executeAgentTask(task.ID, aiToken, harness)
 	h.recordAudit(c, audit.Entry{UserID: &actor, Action: "agent.task.create", ResourceType: audit.ResourceFolder, ResourceID: root.String()})
 	c.JSON(201, task)
 }

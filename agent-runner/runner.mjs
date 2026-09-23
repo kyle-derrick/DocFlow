@@ -288,7 +288,9 @@ async function finalize() {
 async function main() {
   let prompt = '';
   try {
-    prompt = readFileSync(PROMPT_FILE, 'utf8');
+    // 行尾归一化：Windows CRLF 的 \r 会混入命令与文件名（如
+    // `> out.txt\r`），统一转 \n。
+    prompt = readFileSync(PROMPT_FILE, 'utf8').replace(/\r\n?/g, '\n');
   } catch (err) {
     log(`agent-runner: unable to read prompt (${PROMPT_FILE}): ${err.message || err}`);
   }

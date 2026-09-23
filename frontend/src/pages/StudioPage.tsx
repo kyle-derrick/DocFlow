@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { App as AntdApp, Button, Input, Popover, Segmented, Select, Tooltip } from 'antd'
 import type { TextAreaRef } from 'antd/es/input/TextArea'
-import { Bot, Check, ChevronDown, ChevronRight, FilePlus2, FileText, FileType2, FolderClosed, FolderOpen, Paperclip, Plus, RefreshCw, Send, Sparkles, Square, Trash2 } from 'lucide-react'
+import { Bot, Check, ChevronDown, ChevronRight, FilePlus2, FileText, FileType2, FolderClosed, FolderOpen, Paperclip, Plus, RefreshCw, Search, Send, Sparkles, Square, Trash2 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { EMPTY_DFDOC_JSON, currentUserId, getMe, listAgentTasks, listFiles, listSpaces, listSpaceFiles, searchFiles, uploadFile } from '../api'
@@ -21,7 +21,15 @@ import { t, useLocale } from '../i18n'
 
 // ---------- 数据结构与本地持久化 ----------
 
-interface StudioProject { id: string; name: string; spaceId: string; rootFolderId: string; createdAt: string }
+/** 项目条目（localStorage）：spaceName/folderPath 创建时记录（旧数据缺省，
+ *  展示侧惰性解析空间名兜底）。 */
+interface StudioProject {
+  id: string; name: string; spaceId: string; rootFolderId: string; createdAt: string
+  /** 绑定空间名（创建时快照；旧项目缺省）。 */
+  spaceName?: string
+  /** 绑定路径「空间名/目录名」（空间根项目 = 空间名；旧项目缺省）。 */
+  folderPath?: string
+}
 interface StudioTurn {
   id: number; role: 'user' | 'assistant'; content: string; streaming?: boolean; stopped?: boolean; error?: string
   files?: AIAttachFile[]; webSources?: AIWebSource[]; task?: { id: string; prompt: string }
@@ -169,11 +177,14 @@ function LazyTree({ spaceId, rootId, onlyFolders = false, activeFolderId, active
 
 // ---------- 新建项目弹窗（空间下拉 + 目录懒加载树 + 名称） ----------
 
-function NewProjectModal({ onClose, onCreate }: { onClose: () => void; onCreate: (name: string, spaceId: string, folderId: string) => Promise<void> }) {
+function NewProjectModal({ onClose, onCreate }: { onClose: () => void; onCreate: (name: string, spaceId: string, folderId: string, meta?: { spaceName?: string; folderName?: string }) => Promise<void> }) {
   const [spaces, setSpaces] = useState<Space[]>([])
   const [spaceId, setSpaceId] = useState('')
   const [name, setName] = useState('')
   const [folderId, setFolderId] = useState('')
+  // 选中目录名（路径展示用；空 = 空间根）。提交失败留在弹窗内展示错误，
+  // 成功后 onClose 关闭（既有逻辑核对无误）。
+  const [folderName, setFolderName] = useState('')
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
   // 跟踪「自动填充」的项目名：名称为空或仍等于上次自动值时才随目录覆盖（手改后不再动）。
@@ -194,7 +205,10 @@ function NewProjectModal({ onClose, onCreate }: { onClose: () => void; onCreate:
     setBusy(true)
     setErr('')
     try {
-      await onCreate(name.trim(), spaceId, folderId)
+      await onCreate(name.trim(), spaceId, folderId, {
+        spaceName: spaces.find((s) => s.id === spaceId)?.name ?? '',
+        folderName,
+      })
       onClose() // 创建成功关闭弹窗；失败留在弹窗内展示错误
     } catch (e) {
       setErr(e instanceof Error ? e.message : '创建失败')
@@ -213,7 +227,7 @@ function NewProjectModal({ onClose, onCreate }: { onClose: () => void; onCreate:
         options={spaces.map((s) => ({ value: s.id, label: `${s.name}${s.is_default ? '（默认）' : ''}` }))} />
       <label className="studio-form-label">任务根目录</label>
       <div className="studio-pick-head">
-        <button type="button" className={`studio-root-pick${folderId === '' ? ' active' : ''}`} onClick={() => setFolderId('')}>空间根目录</button>
+        <button type="button" className={`studio-root-pick${folderId === '' ? ' active' : ''}`} onClick={() => { setFolderId(''); setFolderName('') }}>空间根目录</button>
         <span className="muted">或展开选择子目录</span>
       </div>
       <div className="studio-pick-tree">
@@ -222,6 +236,7 @@ function NewProjectModal({ onClose, onCreate }: { onClose: () => void; onCreate:
             spaceId={spaceId} rootId={null} onlyFolders activeFolderId={folderId}
             onFolder={(f) => {
               setFolderId(f.id)
+              setFolderName(f.name)
               // 选中子目录：名称为空或仍为上次自动填充值 → 默认填目录名（用户手改过则不覆盖）。
               setName((cur) => {
                 if (!cur.trim() || cur === autoNameRef.current) {
@@ -750,6 +765,11 @@ export default function StudioPage() {
   const [uid, setUid] = useState('')
   const [projects, setProjects] = useState<StudioProject[]>([])
   const [pid, setPid] = useState('')
+  // 项目搜索（按名称过滤；项目多后快速定位）。
+  const [projQuery, setProjQuery] = useState('')
+  // 旧项目（无 spaceName/folderPath 字段）惰性解析的空间名缓存（一次性拉取）。
+  const [spaceNameById, setSpaceNameById] = useState<Record<string, string>>({})
+  const spaceNamesFetchedRef = useRef(false)
   const [leftTab, setLeftTab] = useState<'dir' | 'tasks'>('dir')
   const [taskRoot, setTaskRoot] = useState('')
   const [taskIds, setTaskIds] = useState<Record<string, string[]>>({})
@@ -776,6 +796,30 @@ export default function StudioPage() {
     setTaskIds(loadJSON(taskIdsKey(uid), {}))
     setPid(list[0]?.id ?? '')
   }, [uid])
+
+  // 旧项目缺 spaceName 时惰性解析一次空间名（listSpaces 查名；失败静默，
+  // 展示兜底「未记录路径」）。
+  useEffect(() => {
+    if (spaceNamesFetchedRef.current || projects.length === 0 || projects.every((p) => p.spaceName)) return
+    spaceNamesFetchedRef.current = true
+    void listSpaces()
+      .then((list) => setSpaceNameById(Object.fromEntries(list.map((s) => [s.id, s.name]))))
+      .catch(() => { spaceNamesFetchedRef.current = false })
+  }, [projects])
+
+  /** 项目第二行路径文案：新项目用创建时快照；旧项目惰性空间名兜底。 */
+  const projPathText = (p: StudioProject): string => {
+    if (p.folderPath) return p.folderPath
+    if (p.spaceName) return p.spaceName
+    const sn = spaceNameById[p.spaceId]
+    return sn ? `${sn}（未记录目录）` : '未记录路径'
+  }
+
+  // 名称搜索过滤（大小写不敏感子串）。
+  const shownProjects = useMemo(() => {
+    const q = projQuery.trim().toLowerCase()
+    return q ? projects.filter((p) => p.name.toLowerCase().includes(q)) : projects
+  }, [projects, projQuery])
 
   // 切换项目：载入会话（无则建空会话）并重置任务根/引用/评审。
   useEffect(() => {
@@ -838,9 +882,12 @@ export default function StudioPage() {
     setRefs((prev) => (prev.some((x) => x.fileId === f.fileId) ? prev.filter((x) => x.fileId !== f.fileId) : [...prev, f]))
   }
 
-  const createProject = async (name: string, spaceId: string, folderId: string) => {
+  const createProject = async (name: string, spaceId: string, folderId: string, meta?: { spaceName?: string; folderName?: string }) => {
     const rootFolderId = folderId || (await listSpaceFiles(spaceId, null)).parent_id
-    const proj: StudioProject = { id: localId(), name, spaceId, rootFolderId, createdAt: new Date().toISOString() }
+    const spaceName = meta?.spaceName ?? ''
+    // 绑定路径快照：空间根项目 = 空间名；子目录 = 空间名/目录名。
+    const folderPath = folderId && meta?.folderName ? `${spaceName}/${meta.folderName}` : spaceName
+    const proj: StudioProject = { id: localId(), name, spaceId, rootFolderId, createdAt: new Date().toISOString(), spaceName, folderPath }
     setProjects((p) => [...p, proj])
     setPid(proj.id)
   }
@@ -895,10 +942,26 @@ export default function StudioPage() {
               <FolderClosed size={14} aria-hidden="true" />项目
               <Button size="small" type="text" className="studio-title-btn" aria-label="新建项目" title="新建项目" onClick={() => setNewProj(true)}><Plus size={14} aria-hidden="true" /></Button>
             </div>
+            {/* 搜索框（按名称过滤；项目多后快速定位）。 */}
+            <div className="studio-proj-search">
+              <Input
+                allowClear
+                size="small"
+                value={projQuery}
+                onChange={(e) => setProjQuery(e.target.value)}
+                placeholder="搜索项目…"
+                prefix={<Search size={12} strokeWidth={2} aria-hidden="true" />}
+              />
+            </div>
             {projects.length === 0 && <div className="muted studio-pad8">还没有项目，点 + 新建。</div>}
-            {projects.map((p) => (
+            {projects.length > 0 && shownProjects.length === 0 && <div className="muted studio-pad8">没有匹配的项目。</div>}
+            {shownProjects.map((p) => (
               <div key={p.id} className={`studio-proj-item${p.id === pid ? ' active' : ''}`} onClick={() => setPid(p.id)}>
-                <span className="name" title={p.name}>{p.name}</span>
+                <span className="meta">
+                  <span className="name" title={p.name}>{p.name}</span>
+                  {/* 第二行：绑定路径（空间名/目录名；旧项目惰性解析兜底）。 */}
+                  <span className="studio-proj-path" title={projPathText(p)}>{projPathText(p)}</span>
+                </span>
                 <button type="button" className="x" aria-label={`删除项目 ${p.name}`} onClick={(e) => { e.stopPropagation(); deleteProject(p.id) }}>×</button>
               </div>
             ))}

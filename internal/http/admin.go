@@ -31,6 +31,10 @@ type settingsService interface {
 	// GetInt 为 int 键的热读取（batch.max_items 等请求路径消费方使用）；
 	// *settings.Store 天然满足。
 	GetInt(key string) (int, error)
+	// GetIntDefined 为 int 键的入库值热读取（security.login_max_retries 等
+	// 「settings 优先、回落 env」语义的消费方使用）：键未入库返回
+	// ok=false；*settings.Store 天然满足。
+	GetIntDefined(key string) (int, bool)
 	// GetBool 为 bool 键的热读取（collab.enabled 等请求路径消费方使用）；
 	// *settings.Store 天然满足。
 	GetBool(key string) (bool, error)

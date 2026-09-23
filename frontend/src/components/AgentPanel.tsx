@@ -94,6 +94,8 @@ export default function AgentPanel({ onError, onNotice }: { onError: (m: string)
   const rawCalls = Number(cfg.ai_max_calls)
   const maxCalls = Number.isFinite(rawCalls) && rawCalls > 0 ? Math.round(rawCalls) : DEFAULT_AI_MAX_CALLS
   const syncMode: 'git' | 'scan' = cfg.sync_mode === 'scan' ? 'scan' : DEFAULT_SYNC_MODE
+  const harness: 'auto' | 'claude-code' | 'pi' | 'builtin' =
+    cfg.harness === 'claude-code' || cfg.harness === 'pi' || cfg.harness === 'builtin' ? cfg.harness : 'auto'
   const maxCallsDirty = maxCallsDraft !== null && Number.isInteger(maxCallsDraft) && maxCallsDraft !== maxCalls
 
   return (
@@ -213,6 +215,49 @@ export default function AgentPanel({ onError, onNotice }: { onError: (m: string)
                 <span className="setting-desc muted">
                   {zh ? '扫描工作区全部产物（内置忽略 node_modules 等）' : 'Scan the whole workspace (built-in ignores like node_modules)'}
                 </span>
+              </Radio>
+            </div>
+          </Radio.Group>
+        </div>
+      </div>
+
+      <div className="setting-row" style={{ alignItems: 'flex-start' }}>
+        <div className="setting-main">
+          <div className="setting-key">
+            {zh ? '执行引擎（Harness）' : 'Execution harness'} <code className="setting-desc muted">agent.harness</code>
+          </div>
+          <div className="setting-desc muted">
+            {zh
+              ? '沙箱内的 agent 执行引擎：auto 按平台默认模型协议自动选择（Anthropic → Claude Code，OpenAI 兼容 → pi）。'
+              : 'Agent execution engine inside the sandbox: auto routes by the platform default provider protocol (Anthropic → Claude Code, OpenAI-compatible → pi).'}
+          </div>
+        </div>
+        <div className="setting-control" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 6 }}>
+          <Radio.Group
+            value={harness}
+            disabled={busy}
+            onChange={(e) => {
+              const next = e.target.value as 'auto' | 'claude-code' | 'pi' | 'builtin'
+              if (next === harness) return
+              void saveKeys({ harness: next }, zh ? `已保存 agent.harness（当前值：${next}）` : `Saved agent.harness (value: ${next})`)
+            }}
+          >
+            <div className="agent-sync-options">
+              <Radio value="auto">
+                <span>{zh ? '自动（推荐）' : 'Auto (recommended)'}</span>
+                <span className="setting-desc muted">{zh ? '按默认 Provider 协议路由' : 'Route by default provider protocol'}</span>
+              </Radio>
+              <Radio value="claude-code">
+                <span>Claude Code</span>
+                <span className="setting-desc muted">{zh ? 'Anthropic 协议（工具透传）' : 'Anthropic protocol (tool pass-through)'}</span>
+              </Radio>
+              <Radio value="pi">
+                <span>pi</span>
+                <span className="setting-desc muted">{zh ? 'OpenAI 兼容协议（badlogic/pi-mono）' : 'OpenAI-compatible protocol (badlogic/pi-mono)'}</span>
+              </Radio>
+              <Radio value="builtin">
+                <span>{zh ? '内置 runner' : 'Builtin runner'}</span>
+                <span className="setting-desc muted">{zh ? '轻量兜底（无外部依赖）' : 'Lightweight fallback (no external deps)'}</span>
               </Radio>
             </div>
           </Radio.Group>

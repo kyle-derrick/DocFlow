@@ -132,8 +132,8 @@ Agent 的行为开关（镜像白名单、资源上限、AI 调用等）全部�
 | `RATE_LIMIT_PER_MIN` | `120` | `/api/v1` 认证接口基础限流（每分钟；0 = 禁用） | 启动时装配；同名运行时键 `security.rate_limit_per_minute` 当前亦须重启生效 |
 | `LOGIN_RATE_LIMIT_PER_MIN` | `10` | 登录接口单独限流（每分钟） | |
 | `PUBLIC_RATE_LIMIT_PER_MIN` | `60` | 公开分享接口单独按 IP 限流 | |
-| `LOGIN_MAX_RETRIES` | `5` | 连续登录失败锁定阈值（≥1） | 达到后锁定账号 |
-| `LOGIN_LOCK_MINUTES` | `15` | 登录失败锁定时长（分钟，≥1） | |
+| `LOGIN_MAX_RETRIES` | `5` | 连续登录失败锁定阈值（≥1） | 引导默认：运行时键 `security.login_max_retries` 优先（入库后即时生效，登录与 WebDAV 防爆破共用） |
+| `LOGIN_LOCK_MINUTES` | `15` | 登录失败锁定时长（分钟，≥1） | 引导默认：运行时键 `security.login_lock_minutes` 优先（入库后即时生效） |
 | `ACCESS_SALT` | 由 `JWT_SECRET` 派生 | 分享访问事件 IP 哈希静态盐：`ip_hash = SHA-256(salt‖ip)`，明文 IP 不落库 | 一般无需单独设置 |
 | `RAW_URL_SECRET` | 由 `JWT_SECRET` 经 HKDF 派生 | `/raw/*` 短期授权（HMAC grant，10 分钟）签名密钥源 | 显式设置时须 ≥32 字节 |
 | `SCAN_ENABLED` | `false` | 启用上传病毒扫描（clamd INSTREAM） | 需 `--profile antivirus` 启动 clamav |
@@ -287,8 +287,8 @@ Agent 的行为开关（镜像白名单、资源上限、AI 调用等）全部�
 | 键 | 默认值 | 范围 | 生效 | 说明 |
 | --- | --- | --- | --- | --- |
 | `security.rate_limit_per_minute` | `120` | 0–100000 | **须重启** | 认证 API 每分钟请求上限（限流器启动时按 env 装配，当前无热读取消费方） |
-| `security.login_max_retries` | `5` | 1–100 | **须重启** | 连续登录失败锁定阈值（由 env `LOGIN_MAX_RETRIES` 启动时注入） |
-| `security.login_lock_minutes` | `15` | 1–10080 | **须重启** | 登录失败锁定时长（分钟；由 env `LOGIN_LOCK_MINUTES` 启动时注入） |
+| `security.login_max_retries` | `5` | 1–100 | 即时 | 登录/WebDAV 失败锁定阈值（同一用户名+IP）：入库后即时生效；未入库沿用 env `LOGIN_MAX_RETRIES`（引导默认） |
+| `security.login_lock_minutes` | `15` | 1–10080 | 即时 | 防爆破锁定时长（分钟）：入库后即时生效；未入库沿用 env `LOGIN_LOCK_MINUTES`（引导默认） |
 | `security.scan_quarantine_policy` | `quarantine` | — | 即时 | 扫描失败处理策略：`quarantine` \| `reject`（当前版本未接线：失败一律隔离，隔离区经管理端处置） |
 
 **批量与目录**

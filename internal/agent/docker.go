@@ -63,7 +63,9 @@ func (d DockerRuntime) Run(ctx context.Context, req RuntimeRequest) (RuntimeResu
 		return RuntimeResult{}, errors.New("unable to prepare agent prompt")
 	}
 	defer os.RemoveAll(promptDir)
-	if err := os.WriteFile(filepath.Join(promptDir, "prompt"), []byte(req.Prompt), 0600); err != nil {
+	// prompt 文件 0644：backend 与 agent 容器用户 uid 不同（app vs
+	// 65534），0600 会让挂载只读的 agent 读不到 prompt。
+	if err := os.WriteFile(filepath.Join(promptDir, "prompt"), []byte(req.Prompt), 0644); err != nil {
 		return RuntimeResult{}, errors.New("unable to prepare agent prompt")
 	}
 	client := d.Client
@@ -79,6 +81,14 @@ func (d DockerRuntime) Run(ctx context.Context, req RuntimeRequest) (RuntimeResu
 	if d.AIVolume != "" && req.AIToken != "" {
 		binds = append(binds, d.AIVolume+":/run/docflow-ai:ro")
 		env = append(env, "DOCFLOW_AI_SOCK=/run/docflow-ai/ai.sock", "DOCFLOW_AI_TOKEN="+req.AIToken)
+	}
+	// Agent 执行引擎（agent.harness 终值）：claude-code/pi 时注入
+	// DOCFLOW_HARNESS 供 entrypoint 按协议启动对应 harness（Claude Code
+	// 走 /v1/messages、pi 走 /v1/chat/completions）；builtin/空 = 内置
+	// 轻量 runner，走镜像默认路径不注入。与 AI 令牌解耦：无令牌（断网
+	// 纯本地执行）的 harness 任务同样注入。
+	if req.Harness != "" && req.Harness != HarnessBuiltin {
+		env = append(env, "DOCFLOW_HARNESS="+req.Harness)
 	}
 	create := map[string]any{
 		"Image": req.Image, "WorkingDir": "/workspace", "Env": env,

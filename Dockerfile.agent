@@ -15,10 +15,21 @@
 #
 # 基础镜像取 node:22-alpine（与前端构建同一本地镜像，避免额外外网拉取）；
 # apk 源切换清华镜像（国内网络 docker.io/alpine CDN 不可达时仍可装包）。
+#
+# harness 分层：socat（unix socket→本机回环 TCP）+ 双成熟 harness——
+# Anthropic Claude Code（/v1/messages 工具透传）与 pi（badlogic/pi-mono，
+# OpenAI 兼容 /v1/chat/completions）。平台按默认 Provider 协议注入
+# DOCFLOW_HARNESS 自动路由（anthropic→claude-code，openai 兼容→pi）；
+# 不可用/无令牌回落自研 runner。详见 entrypoint.sh。
 FROM node:22-alpine
 RUN sed -i 's#https://dl-cdn.alpinelinux.org#https://mirrors.tuna.tsinghua.edu.cn#g' /etc/apk/repositories \
-    && apk add --no-cache git bash curl
+    && apk add --no-cache git bash curl socat
+# 双 harness：任一安装失败不阻塞构建（回落 runner 仍可用）。
+RUN npm config set registry https://registry.npmmirror.com \
+    && (npm install -g @anthropic-ai/claude-code 2>/dev/null || echo "warn: claude-code unavailable") \
+    && (npm install -g @mariozechner/pi-coding-agent 2>/dev/null || echo "warn: pi unavailable")
 COPY agent-runner/ /app/
+RUN chmod +x /app/entrypoint.sh /app/runner.mjs /app/changes.mjs
 ENV DOCFLOW_PROMPT_FILE=/run/docflow/prompt DOCFLOW_WORKSPACE=/workspace
 WORKDIR /workspace
-ENTRYPOINT ["node", "/app/runner.mjs"]
+ENTRYPOINT ["/app/entrypoint.sh"]

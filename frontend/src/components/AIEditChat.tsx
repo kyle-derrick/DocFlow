@@ -251,6 +251,7 @@ export default function AIEditChat({
   onQuickConsumed,
   applyKind = 'text',
   forceChatOnly = false,
+  outputFormat = 'plaintext',
 }: {
   open: boolean
   onClose: () => void
@@ -278,6 +279,10 @@ export default function AIEditChat({
   applyKind?: AIApplyKind
   /** 恒「仅对话」：隐藏模式切换（不支持改文档的宿主页，如 OnlyOffice）。 */
   forceChatOnly?: boolean
+  /** text 通道输出格式（默认 plaintext=原样纯文本输出，Monaco 等用）；
+   * markdown=富文本宿主（.dfrt 编辑页）：system 指令要求输出 Markdown，
+   * 宿主经 marked 转富文本 HTML 插入。仅 applyKind='text' 生效。 */
+  outputFormat?: 'markdown' | 'plaintext'
 }) {
   const locale = useLocale()
   const zh = locale === 'zh-CN'
@@ -446,9 +451,13 @@ export default function AIEditChat({
         ? (zh
           ? `你是 draw.io 图表助手。基于给定的当前图表 XML，按指令输出修改后的完整 drawio XML（以 <mxGraphModel>...</mxGraphModel> 或 <mxfile>...</mxfile> 包裹）。只输出 XML 本身，不要解释。\n\n${DRAWIO_XML_GUIDE}`
           : `You are a draw.io diagram assistant. Based on the given current diagram XML, output the complete modified drawio XML (wrapped in <mxGraphModel>...</mxGraphModel> or <mxfile>...</mxfile>). Output only the XML itself, no explanations.\n\n${DRAWIO_XML_GUIDE}`)
-        : zh
-          ? '你是文档写作助手。请按指令处理给定文本，仅输出最终内容本身：不要解释、不要说明，不要使用代码围栏。可以输出 Markdown 格式。'
-          : 'You are a writing assistant. Process the given text per the instruction and output only the final content itself: no explanations and no code fences. Markdown formatting is allowed.'
+        : outputFormat === 'markdown'
+          ? (zh
+            ? '你是富文本文档写作助手。请按指令处理给定文本，仅输出最终内容本身：不要解释、不要说明。请用 Markdown 输出结果（标题 #/##/###、有序与无序列表、表格、代码块、加粗、斜体、链接等）——内容将被转换为富文本样式插入文档。'
+            : 'You are a rich text document writing assistant. Process the given text per the instruction and output only the final content itself: no explanations. Write the result in Markdown (headings #/##/###, ordered and unordered lists, tables, code blocks, bold, italic, links, etc.) — it will be converted into rich text styles and inserted into the document.')
+          : zh
+            ? '你是文档写作助手。请按指令处理给定文本，仅输出最终内容本身：不要解释、不要说明，不要使用代码围栏。可以输出 Markdown 格式。'
+            : 'You are a writing assistant. Process the given text per the instruction and output only the final content itself: no explanations and no code fences. Markdown formatting is allowed.'
     const contextLabel = applyKind === 'excalidraw-mermaid'
       ? (zh ? '当前白板内容摘要' : 'Current whiteboard summary')
       : applyKind === 'drawio-xml'

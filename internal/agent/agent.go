@@ -32,6 +32,25 @@ var (
 	ErrInvalidTransition = errors.New("invalid agent task state transition")
 )
 
+// Harness 取值（settings 键 agent.harness 的配置值与 RuntimeRequest.Harness
+// 携带的终值；docker.go 据终值注入容器 env DOCFLOW_HARNESS 供 entrypoint
+// 选择执行器）。
+const (
+	// HarnessAuto 按平台默认模型协议自动选择（http 层在任务创建时解析为
+	// 终值后下发：anthropic→HarnessClaudeCode、openai 兼容→HarnessPi、
+	// 解析失败/其余 kind→HarnessBuiltin）。
+	HarnessAuto = "auto"
+	// HarnessClaudeCode Anthropic 协议 harness（Claude Code，经网关
+	// /v1/messages 工具透传）。
+	HarnessClaudeCode = "claude-code"
+	// HarnessPi OpenAI 兼容协议 harness（pi，经网关 /v1/chat/completions
+	// 工具直连）。
+	HarnessPi = "pi"
+	// HarnessBuiltin 内置轻量 runner（镜像默认路径，不注入
+	// DOCFLOW_HARNESS）。
+	HarnessBuiltin = "builtin"
+)
+
 type Config struct {
 	Enabled               bool     `json:"enabled"`
 	Runtime               string   `json:"runtime"`

@@ -1140,6 +1140,28 @@ svg.lucide {
   background: transparent;
 }
 
+/* 弹窗内 .preview-box 容器（分享页目录条目查看 PublicEntryViewer 的
+   image/pdf 分支）：撑满弹窗内容区，替代基础 min-height:120px 的塌陷
+   高度，使内部 iframe/img 拿到确定高度。 */
+.preview-embed .preview-box {
+  flex: 1;
+  min-height: 0;
+}
+
+/* 弹窗内 .preview-frame（PublicEntryViewer pdf 分支）：去基础 60vh 定高，
+   flex:1 铺满弹窗内容区（高度链：modal body 定高 → preview-embed →
+   preview-box → preview-frame）。 */
+.preview-embed .preview-frame {
+  height: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+/* 弹窗内图片：解除 60vh 限高，按内容区可用高度等比缩放（contain）。 */
+.preview-embed .preview-image {
+  max-height: 100%;
+}
+
 .web-folder-badge { display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 999px; color: var(--primary); background: color-mix(in srgb, var(--primary) 14%, transparent); font-size: 10px; }
 .user-search-field { position: relative; }
 /* 下拉浮层面板统一规格（与 file-card-menu/ctx-menu/user-search-options 同源）：
@@ -2844,6 +2866,13 @@ svg.lucide {
   border: 0;
   border-radius: 0;
   background: var(--bg);
+}
+
+/* 查看态图片（GenericViewer image 分支）：独立查看页铺满视口可用高度
+   （解除 .preview-image 基础 60vh 限高对大图的压缩；object-fit:contain
+   保证不变形，弹窗内见 .preview-embed .preview-image 同规则）。 */
+.text-editor-page.viewer-only .preview-image {
+  max-height: 100%;
 }
 
 .text-editor-state {
@@ -5522,6 +5551,8 @@ kbd {
 
 .rich-text-card-embed-xmind {
   position: relative;
+  display: flex;
+  flex-direction: column;
   width: 100%;
   height: 420px;
   overflow: hidden;
@@ -6434,7 +6465,7 @@ kbd {
 
 /* ==================== AI 助手体验增强（模型 / 人设 / 文件引用） ==================== */
 /* 次级工具行：紧贴主工具条下方（模型选择 + 人设 + 即将支持的联网/深度思考）。 */
-.ai-toolbar-sub { border-bottom: 1px solid var(--border); }
+.ai-toolbar-sub { border-bottom: 1px solid var(--border); flex-wrap: wrap; row-gap: 2px; }
 .ai-model-select { min-width: 132px; max-width: 178px; }
 .ai-model-select .ant-select-selection-item {
   display: inline-flex !important;
@@ -6538,7 +6569,8 @@ kbd {
 /* 引用文件弹层（最近访问 / 搜索，多选）。 */
 .ai-attach-pop { width: 292px; display: flex; flex-direction: column; gap: 8px; }
 .ai-attach-list { max-height: 236px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
-/* 工作目录按钮（df_* 文件工具基准；选中后内联显示目录名，title 全路径）。 */
+/* 工作目录按钮（df_* 文件工具基准；选中后内联显示目录名，title 全路径）；
+   跟随态（未手选且有文件页位置）内联显示「跟随：路径」并高亮。 */
 .ai-workdir-btn.ant-btn { gap: 3px; max-width: 148px; }
 .ai-workdir-btn .ai-workdir-name {
   max-width: 104px;
@@ -6546,6 +6578,9 @@ kbd {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.ai-workdir-btn .ai-workdir-name.ai-workdir-follow { color: var(--primary); }
+.ai-workdir-default:disabled { cursor: not-allowed; opacity: 0.55; }
+.ai-workdir-default:disabled:hover { color: var(--muted); border-color: var(--border); }
 /* 工作目录弹层（空间 Select + 目录懒树 + 默认空间根选项）。 */
 .ai-workdir-pop { width: 272px; display: flex; flex-direction: column; gap: 8px; }
 .ai-workdir-row { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; }
@@ -6578,6 +6613,69 @@ kbd {
 .ai-workdir-default:hover { color: var(--primary); border-color: var(--primary); }
 .ai-workdir-default.active { color: var(--primary); border-style: solid; }
 .ai-workdir-default > svg:last-child { margin-left: auto; flex-shrink: 0; }
+/* 抽屉头部右侧（会话下拉 + 固定按钮）。 */
+.ai-drawer-extra { display: inline-flex; align-items: center; gap: 2px; }
+/* 会话下拉按钮（当前标题 + 下拉箭头；标题超长省略）。 */
+.ai-conv-btn.ant-btn { gap: 3px; max-width: 200px; }
+.ai-conv-btn .ai-conv-cur {
+  max-width: 128px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+/* 会话下拉弹层（新会话 + 历史列表 + 说明）。 */
+.ai-conv-pop { width: 264px; display: flex; flex-direction: column; gap: 8px; }
+.ai-conv-list { max-height: 264px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+.ai-conv-item { display: flex; align-items: center; gap: 2px; border-radius: 8px; }
+.ai-conv-item:hover { background: var(--surface-2); }
+.ai-conv-item.active { background: var(--primary-bg, rgba(59, 130, 246, 0.12)); }
+.ai-conv-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  padding: 4px 6px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+.ai-conv-open .t { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.ai-conv-open .time { font-size: 11px; }
+.ai-conv-op {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  opacity: 0;
+}
+.ai-conv-item:hover .ai-conv-op { opacity: 1; }
+.ai-conv-op:hover { background: var(--surface-2); color: var(--danger, #dc2626); }
+.ai-conv-new {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 8px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+}
+.ai-conv-new:hover { color: var(--primary); border-color: var(--primary); }
 .ai-attach-item {
   display: flex;
   align-items: center;
@@ -6727,6 +6825,19 @@ kbd {
 .studio-tab:hover .x { opacity: 1; }
 .studio-proj-item .x:hover,
 .studio-tab .x:hover { background: var(--surface-2); color: var(--danger, #dc2626); }
+/* 项目搜索框（列表头部；按名称过滤）。 */
+.studio-proj-search { margin: 4px 0 6px; }
+/* 项目条目两行：名称 + 绑定路径（muted 小字）。 */
+.studio-proj-item .meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.studio-proj-item .meta .name { flex: 0 0 auto; width: 100%; }
+.studio-proj-path {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .studio-left-main { flex: 1; }
 .studio-left-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; flex-wrap: wrap; }
 .studio-left-body { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
@@ -7202,3 +7313,184 @@ a.ai-web-source-link:hover { text-decoration: underline; }
 
 /* 能力勾选组：紧凑内联。 */
 .ai-personal-caps { display: inline-flex; flex-wrap: wrap; gap: 2px 10px; margin: 0; }
+
+/* ==================== 查看页原始内容全幅 iframe（html/pdf/网页包自适应高度） ==================== */
+/* raw-frame-page：独立查看页上 iframe 此前直接挂在非 flex 的 #root 下，flex:1
+   失效导致高度塌陷为浏览器默认 150px（「高度被压缩」根因）。包进本容器后：
+   - 独立页：容器 100vh、iframe min-height 100vh 兜底铺满视口；注入脚本
+     （RawHtmlViewer onload）postMessage 回传内容实际高度时按实际高度撑开，
+     容器纵向滚动（完全顺应原始内容）；
+   - 弹窗（.preview-embed）：容器随高度链撑满、iframe min-height 收回，
+     滚动发生在 iframe 内部（与既有直挂行为一致）。宽度恒 100%。 */
+.raw-frame-page {
+  height: 100vh;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  overflow-x: hidden;
+  background: #fff;
+}
+.preview-embed .raw-frame-page {
+  height: 100%;
+  overflow: hidden;
+}
+/* 初始高度放开（min-height:100vh）：未取到内容高度前至少满屏，杜绝压缩。 */
+.raw-frame-page > .standalone-viewer-frame {
+  flex: 1 1 auto;
+  min-height: 100vh;
+}
+/* 弹窗内收回兜底（选择器特异性高于 .text-editor-page.viewer-only 的
+   min-height:100vh，避免弹窗 body 出现整屏高度的 iframe）。 */
+.preview-embed .text-editor-page.raw-frame-page > .standalone-viewer-frame {
+  min-height: 0;
+}
+
+/* ==================== 查看页悬浮 AI 助理（.viewer-aiw-*） ==================== */
+/* 收起态悬浮球：56px 圆形主色，可拖动（位置记忆 localStorage），点击展开。 */
+.viewer-aiw-ball {
+  position: fixed;
+  z-index: 1200;
+  width: 56px;
+  height: 56px;
+  border: 0;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  background: var(--primary);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  transition: transform 0.15s ease, background-color 0.15s ease;
+}
+:root[data-mode='light'] .viewer-aiw-ball { box-shadow: 0 6px 18px rgba(24, 30, 42, 0.25); }
+.viewer-aiw-ball:hover { background: var(--primary-hover); transform: scale(1.06); }
+.viewer-aiw-ball.dragging {
+  cursor: grabbing;
+  transform: none;
+  transition: none;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+}
+/* 展开态卡片：360×520（组件内联定位），头部可拖动把手。 */
+.viewer-aiw-card {
+  position: fixed;
+  z-index: 1200;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+  font-size: 13px;
+  color: var(--text);
+}
+:root[data-mode='light'] .viewer-aiw-card { box-shadow: 0 12px 36px rgba(24, 30, 42, 0.22); }
+.viewer-aiw-card.dragging { box-shadow: 0 16px 44px rgba(0, 0, 0, 0.5); }
+.viewer-aiw-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  flex-shrink: 0;
+}
+.viewer-aiw-head.dragging { cursor: grabbing; }
+.viewer-aiw-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  color: var(--primary);
+  white-space: nowrap;
+}
+.viewer-aiw-file {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 12px;
+}
+.viewer-aiw-tabs { padding: 8px 10px 6px; flex-shrink: 0; }
+.viewer-aiw-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.viewer-aiw-empty { font-size: 12.5px; line-height: 1.8; padding: 8px 2px; }
+/* 对话气泡：用户右对齐主色底 / 助手左对齐面板底（markdown 内联排版）。 */
+.viewer-aiw-bubble {
+  max-width: 92%;
+  padding: 8px 10px;
+  border-radius: 10px;
+  line-height: 1.6;
+  word-break: break-word;
+}
+.viewer-aiw-bubble.user {
+  align-self: flex-end;
+  background: color-mix(in srgb, var(--primary) 18%, transparent);
+  color: var(--text);
+  white-space: pre-wrap;
+}
+.viewer-aiw-bubble.assistant {
+  align-self: flex-start;
+  width: 100%;
+  max-width: 100%;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+/* 气泡内 markdown：去掉 .markdown-preview 的卡片外观（与编辑页 AI 面板同规则）。 */
+.viewer-aiw-bubble .markdown-preview,
+.viewer-aiw-card .markdown-preview {
+  flex: none;
+  width: auto;
+  min-height: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  font-size: 13px;
+}
+/* 消息级操作行（复制 / 保存为新版本）：hover 淡显。 */
+.viewer-aiw-msg-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 4px;
+  opacity: 0.75;
+}
+.viewer-aiw-msg-actions:hover { opacity: 1; }
+.viewer-aiw-act.ant-btn { padding: 0 4px; color: var(--muted); }
+.viewer-aiw-act.ant-btn:hover:not(:disabled) { color: var(--primary); }
+/* 摘要页底部操作（重新生成 / 复制）。 */
+.viewer-aiw-sum-actions { display: flex; gap: 8px; }
+/* 底部输入区：模型选择/清空行 + 输入框行。 */
+.viewer-aiw-input {
+  flex-shrink: 0;
+  padding: 8px 10px 10px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.viewer-aiw-input-row { display: flex; align-items: flex-end; gap: 6px; min-width: 0; }
+.viewer-aiw-input-row .ant-input { flex: 1; min-width: 0; }
+.viewer-aiw-input-spacer { flex: 1; }
+.viewer-aiw-model { min-width: 0; max-width: 200px; }
+/* 窄视口：卡片缩至近全宽，避免遮挡内容。 */
+@media (max-width: 420px) {
+  .viewer-aiw-card { width: calc(100vw - 16px) !important; }
+}

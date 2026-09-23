@@ -6,6 +6,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/docflow/docflow/internal/settings"
 )
 
 func TestDavPathRejectsTraversalAndOutsideRoot(t *testing.T) {
@@ -39,6 +42,79 @@ func TestWebDAVTokenDTODoesNotExposeSecrets(t *testing.T) {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("DTO contains forbidden field %q", forbidden)
 		}
+	}
+}
+
+// newDavLockoutEnv 构造仅装配锁定策略的 davHandler（不触 tokens/存储，
+// davAuthFail/davAuthLocked/davAuthOK 均为纯内存路径）。
+func newDavLockoutEnv(h *Handler) *davHandler {
+	return &davHandler{h: h}
+}
+
+// 防爆破参数运行时化：settings 配置的阈值/时长优先于 env 基线，第 N 次
+// 失败即锁定，锁定窗口按 settings 的分钟数；成功验证清零计数。
+func TestDavAuthFailLockoutUsesSettings(t *testing.T) {
+	h := NewHandler(nil, nil, nil, nil, nil, nil, nil, false, "", time.Hour)
+	// env 基线与 settings 值刻意不同，验证 settings 优先。
+	h.SetLoginLockout(5, 15*time.Minute)
+	h.SetSettingsService(&fakeSettingsService{intKeys: map[string]int{
+		settings.KeyLoginMaxRetries:  2,
+		settings.KeyLoginLockMinutes: 30,
+	}})
+	d := newDavLockoutEnv(h)
+	const key = "alice|10.0.0.1"
+
+	d.davAuthFail(key)
+	if locked, _ := d.davAuthLocked(key); locked {
+		t.Fatal("第 1 次失败不应锁定（settings 阈值 2）")
+	}
+	d.davAuthFail(key)
+	locked, wait := d.davAuthLocked(key)
+	if !locked {
+		t.Fatal("第 2 次失败应锁定（settings 阈值 2）")
+	}
+	if wait <= 0 || wait > 30*time.Minute {
+		t.Fatalf("锁定窗口 = %v, want (0, 30m]（settings 时长）", wait)
+	}
+	// 成功验证清零。
+	d.davAuthOK(key)
+	if locked, _ = d.davAuthLocked(key); locked {
+		t.Fatal("成功验证应清零该键计数")
+	}
+}
+
+// settings 未配置（键未入库 / settings 未装配）回落 env 基线
+// （LOGIN_MAX_RETRIES / LOGIN_LOCK_MINUTES）。
+func TestDavAuthFailLockoutFallsBackToEnv(t *testing.T) {
+	h := NewHandler(nil, nil, nil, nil, nil, nil, nil, false, "", time.Hour)
+	h.SetLoginLockout(3, 10*time.Minute)
+	d := newDavLockoutEnv(h)
+	const key = "bob|10.0.0.2"
+
+	for i := 0; i < 2; i++ {
+		d.davAuthFail(key)
+		if locked, _ := d.davAuthLocked(key); locked {
+			t.Fatalf("第 %d 次失败不应锁定（env 阈值 3）", i+1)
+		}
+	}
+	d.davAuthFail(key)
+	if locked, _ := d.davAuthLocked(key); !locked {
+		t.Fatal("第 3 次失败应锁定（env 阈值 3）")
+	}
+
+	// settings 装配但键未入库：同样回落 env。
+	h.SetSettingsService(&fakeSettingsService{intKeys: map[string]int{}})
+	d2 := newDavLockoutEnv(h)
+	const key2 = "carol|10.0.0.3"
+	for i := 0; i < 2; i++ {
+		d2.davAuthFail(key2)
+		if locked, _ := d2.davAuthLocked(key2); locked {
+			t.Fatalf("第 %d 次失败不应锁定（键未入库回落 env 阈值 3）", i+1)
+		}
+	}
+	d2.davAuthFail(key2)
+	if locked, _ := d2.davAuthLocked(key2); !locked {
+		t.Fatal("第 3 次失败应锁定（键未入库回落 env 阈值 3）")
 	}
 }
 

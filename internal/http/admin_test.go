@@ -47,6 +47,14 @@ func (f *fakeSettingsService) GetInt(key string) (int, error) {
 	return f.intKeys[key], nil
 }
 
+// GetIntDefined 补齐 settingsService 接口：intKeys 显式配置的键返回
+// (值, true)；未配置的键返回 (0, false)（与 *settings.Store 的「未入库」
+// 语义一致，供防爆破参数「settings 优先、回落 env」路径测试）。
+func (f *fakeSettingsService) GetIntDefined(key string) (int, bool) {
+	n, ok := f.intKeys[key]
+	return n, ok
+}
+
 // GetBool 补齐 settingsService 接口：显式配置优先，否则回退内置定义的
 // 默认值（如 collab.enabled 缺省 true）。
 func (f *fakeSettingsService) GetBool(key string) (bool, error) {

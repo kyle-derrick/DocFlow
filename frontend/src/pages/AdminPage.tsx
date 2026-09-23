@@ -67,6 +67,7 @@ const ConfigOverviewPanel = lazy(() => import('../components/ConfigOverviewPanel
 const MailPanel = lazy(() => import('./SettingsPage').then((m) => ({ default: m.MailPanel })))
 const TlsPanel = lazy(() => import('./SettingsPage').then((m) => ({ default: m.TlsPanel })))
 const SystemSettingsPanel = lazy(() => import('./SettingsPage').then((m) => ({ default: m.SystemSettingsPanel })))
+const SecurityPanel = lazy(() => import('../components/SecurityPanel'))
 
 /** 凭据状态卡的语义键 → 环境变量名展示（值绝不回显，仅展示配置状态）。 */
 const secretLabels: Array<{ key: string; env: string; label: string }> = [
@@ -2248,8 +2249,10 @@ const adminSections = [
   ['overview', '概览'], ['people', '人员与组'], ['spaces', '空间'], ['audit', '审计日志'], ['threat', '威胁防护'], ['backup', '备份'],
   // 平台设置拆分（v2.x）：AI / 创作舱 / 邮件 / TLS / 系统设置 各自独立分区，
   // 不再堆一个大 tag（用户反馈）；v2.8 增第六个 tag「配置总览」
-  //（ConfigOverviewPanel：启动级 env / 运行时设置索引 / AI 能力状态）。
-  ['ai', 'AI 设置'], ['agent', 'AI 创作舱'], ['mail', '邮件'], ['tls', 'TLS'], ['system', '系统设置'], ['config', '配置总览'],
+  //（ConfigOverviewPanel：启动级 env / 运行时设置索引 / AI 能力状态）；
+  // v2.9 增第七个 tag「安全与访问」（SecurityPanel：防爆破 / 限流 / 扫描
+  // 策略 / WebDAV 平台开关与接入指引，对应 security.* / webdav.* 键）。
+  ['ai', 'AI 设置'], ['agent', 'AI 创作舱'], ['mail', '邮件'], ['tls', 'TLS'], ['system', '系统设置'], ['security', '安全与访问'], ['config', '配置总览'],
 ] as const
 
 export default function AdminPage() {
@@ -2408,6 +2411,17 @@ export default function AdminPage() {
       {section === 'system' && !loading && !forbidden && (
         <Suspense fallback={<div className="hint">{msg('loading')}</div>}>
           <SystemSettingsPanel
+            onError={(m) => { setError(m); setNotice('') }}
+            onNotice={(m) => { setNotice(m); setError('') }}
+          />
+        </Suspense>
+      )}
+      {/* v2.9 第七个平台设置 tag：安全与访问（登录防爆破 / 认证限流 / 扫描
+          策略 + WebDAV 平台开关与接入指引；对应 security.* / webdav.* 键，
+          这些键已从「系统设置」排除以保持单一入口）。 */}
+      {section === 'security' && !loading && !forbidden && (
+        <Suspense fallback={<div className="hint">{msg('loading')}</div>}>
+          <SecurityPanel
             onError={(m) => { setError(m); setNotice('') }}
             onNotice={(m) => { setNotice(m); setError('') }}
           />

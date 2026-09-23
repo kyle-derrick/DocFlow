@@ -200,6 +200,33 @@ func TestStoreHotReadFallbacks(t *testing.T) {
 	}
 }
 
+// GetIntDefined 区分「未入库」与「入库值」（防爆破参数「settings 优先、
+// 回落 env」语义的读取基础）：未入库/未知键/损坏行返回 ok=false，入库
+// 返回 (值, true)，且不回退定义默认值。
+func TestStoreGetIntDefined(t *testing.T) {
+	repo := newMemRepo()
+	s := newTestStore(repo, audit.NopRecorder{})
+	// 未入库 → ok=false（调用方回落 env 基线，而非定义默认 5）。
+	if n, ok := s.GetIntDefined(KeyLoginMaxRetries); ok || n != 0 {
+		t.Fatalf("未入库 = %d, %v; want 0, false", n, ok)
+	}
+	if _, ok := s.GetIntDefined("no.such.key"); ok {
+		t.Fatal("未知键应返回 ok=false")
+	}
+	// 入库 → 返回入库值。
+	if _, err := s.Set(KeyLoginMaxRetries, 8, uuid.New()); err != nil {
+		t.Fatal(err)
+	}
+	if n, ok := s.GetIntDefined(KeyLoginMaxRetries); !ok || n != 8 {
+		t.Fatalf("入库值 = %d, %v; want 8, true", n, ok)
+	}
+	// 行损坏 → ok=false（容错回落 env）。
+	repo.rows[KeyLoginLockMinutes] = Setting{Key: KeyLoginLockMinutes, ValueJSON: "{bad", ValueType: TypeInt}
+	if _, ok := s.GetIntDefined(KeyLoginLockMinutes); ok {
+		t.Fatal("损坏行应返回 ok=false")
+	}
+}
+
 // TestDefinitionsEffectMetadata effect 元数据矩阵：每个内置键 effect 必须为
 // 合法枚举值；GetAll 视图透传 effect；关键键按真实行为标注
 // （热读取键 immediate、启动装配键 restart、本批次接线的门控键 immediate）。
@@ -220,8 +247,8 @@ func TestDefinitionsEffectMetadata(t *testing.T) {
 		KeyFolderMaxDepth:             EffectImmediate,
 		KeyAuditRetentionDays:         EffectImmediate,
 		KeyRateLimitPerMinute:         EffectRestart,
-		KeyLoginMaxRetries:            EffectRestart,
-		KeyLoginLockMinutes:           EffectRestart,
+		KeyLoginMaxRetries:            EffectImmediate,
+		KeyLoginLockMinutes:           EffectImmediate,
 		KeyBackupEnabled:              EffectRestart,
 		KeyBackupRetentionDays:        EffectRestart,
 	}

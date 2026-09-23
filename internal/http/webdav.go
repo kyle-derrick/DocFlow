@@ -55,8 +55,9 @@ type davHandler struct {
 	base      string
 	enabledFn func() bool
 	// WebDAV Basic Auth 失败锁定（防爆破）：per「用户名+IP」内存计数，
-	// 阈值/时长复用登录锁定策略（h.loginMaxRetries / h.loginLockDuration，
-	// 即 LOGIN_MAX_RETRIES / LOGIN_LOCK_MINUTES）。WebDAV 校验的是一次性
+	// 阈值/时长复用登录锁定策略（h.loginLockoutPolicy 热读取：settings 的
+	// security.login_max_retries / login_lock_minutes 优先，回落 env
+	// LOGIN_MAX_RETRIES / LOGIN_LOCK_MINUTES）。WebDAV 校验的是一次性
 	// 令牌而非账号密码，登录级 users 表锁定字段不适用，故独立内存态
 	//（重启清零可接受；成功验证即清零该键计数）。
 	mu    sync.Mutex
@@ -87,10 +88,11 @@ func (d *davHandler) davAuthLocked(key string) (bool, time.Duration) {
 	return true, time.Until(st.until)
 }
 
-// davAuthFail 记录一次失败；达到阈值（>=1 生效）进入锁定窗口。
+// davAuthFail 记录一次失败；达到阈值（>=1 生效）进入锁定窗口。阈值/时长
+// 每次（即每次失败）经 loginLockoutPolicy 热读取——管理端改
+// security.login_max_retries / login_lock_minutes 即时生效。
 func (d *davHandler) davAuthFail(key string) {
-	maxRetries := d.h.loginMaxRetries
-	lockFor := d.h.loginLockDuration
+	maxRetries, lockFor := d.h.loginLockoutPolicy()
 	if maxRetries < 1 || lockFor <= 0 {
 		return
 	}

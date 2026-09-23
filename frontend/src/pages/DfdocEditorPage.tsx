@@ -5,6 +5,7 @@
 import { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react'
 import { App as AntdApp, Button } from 'antd'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { marked } from 'marked'
 import { fetchFileText, getFileMeta, listDocumentComments, uploadFileVersion } from '../api'
 import type { DocumentComment } from '../api'
 import type { AIEditTarget } from '../components/AIEdit'
@@ -13,7 +14,6 @@ import type { AIQuickCommand } from '../components/AIEditChat'
 import { closeEditorWithFallback, safeReturnTo } from '../editorNavigation'
 import { MessageKey, t, useLocale } from '../i18n'
 import type { Editor as TiptapEditor } from '@tiptap/react'
-import type { JSONContent } from '@tiptap/core'
 import type { CollabSnapshot } from '../components/richtext/CollabSession'
 
 // 富文本编辑器（Tiptap + lowlight 产物 1MB+）懒加载独立 chunk。
@@ -176,38 +176,40 @@ export default function DfdocEditorPage({
     return { text: ed.getText(), hasSelection: false }
   }
 
-  /** 结果落盘：insert = 选区末尾/光标处插入段落文本；replace = 替换选区
-   *（无选区时追加到文末——富文本整文替换语义过强，避免误毁全文）。
-   * output 为纯文本/markdown 字符串，或段落节点数组（AI 对话面板按换行
-   * 拆段落传入，insertContentAt 接受 JSONContent[]）。 */
-  const aiApply = (mode: 'insert' | 'replace', output: string | JSONContent[]) => {
+  /** AI 输出（markdown）→ 富文本 HTML：marked 解析（GFM 默认开启，表格/
+   * 删除线等可用），随后 insertContent 按 Tiptap schema 将 HTML 解析为
+   * 富文本节点——标题/列表/表格/代码块/加粗斜体链接等标准 markdown
+   * 全部映射为富文本样式，而非追加 markdown 纯文本。 */
+  const aiMarkdownToHTML = (output: string): string => marked.parse(output, { async: false })
+
+  /** 结果落盘：insert = 选区末尾/光标处插入；replace = 替换选区（无选区时
+   * 整篇替换——自动应用前 aiEnsureSaved 已保存基线版本，可经面板
+   * 「撤销此修改」一键回退）。output 为 markdown 字符串，先转富文本 HTML。 */
+  const aiApply = (mode: 'insert' | 'replace', output: string) => {
     const ed = tiptapRef.current
     if (!ed) return
+    const html = aiMarkdownToHTML(output)
     const { from, to } = ed.state.selection
     const hasSelection = to > from
-    if (mode === 'replace' && hasSelection) {
-      ed.chain().focus().insertContentAt({ from, to }, output).run()
+    if (mode === 'replace') {
+      // 无选区 replace = 整篇替换（0 → 文末全范围换入；insertContentAt 走
+      // replaceWith 常规事务，update 正常回吐 onChange 置 dirty）。
+      const range = hasSelection ? { from, to } : { from: 0, to: ed.state.doc.content.size }
+      ed.chain().focus().insertContentAt(range, html).run()
     } else if (hasSelection) {
-      ed.chain().focus().insertContentAt(to, output).run()
-    } else if (mode === 'insert') {
-      ed.chain().focus().insertContentAt(from, output).run()
+      ed.chain().focus().insertContentAt(to, html).run()
     } else {
-      ed.chain().focus().insertContentAt(ed.state.doc.content.size, output).run()
+      ed.chain().focus().insertContentAt(from, html).run()
     }
   }
 
-  /** AI 对话面板落盘：面板输出为纯文本/markdown——按换行拆段落（空行→
-   * 空段落，避免多行文本被 HTML 解析折叠成一行）后复用 aiApply 落盘。 */
-  const aiChatApply = (mode: 'insert' | 'replace', output: string) => {
-    const paragraphs: JSONContent[] = output
-      .replace(/\r\n/g, '\n')
-      .split('\n')
-      .map((line) => (line ? { type: 'paragraph', content: [{ type: 'text', text: line }] } : { type: 'paragraph' }))
-    aiApply(mode, paragraphs)
+  /** AI 自动应用·无选区：追加到文档末尾——光标移文末后插入富文本 HTML
+   *（接续现有内容，不动已有部分）。 */
+  const aiChatAppendEnd = (output: string) => {
+    const ed = tiptapRef.current
+    if (!ed) return
+    ed.chain().focus().setTextSelection(ed.state.doc.content.size).insertContent(aiMarkdownToHTML(output)).run()
   }
-
-  /** AI 自动应用·无选区：追加到文档末尾（aiApply replace 无选区即文末追加）。 */
-  const aiChatAppendEnd = (output: string) => aiChatApply('replace', output)
 
   /** 版本保护前置：确保当前内容已保存（有未保存修改先 save），返回应用前
    * 版本信息（null=保存失败，AIEditChat 将放弃自动应用）。 */
@@ -323,20 +325,23 @@ export default function DfdocEditorPage({
             />
           </Suspense>
         </div>
-        {/* AI 对话式创作/编辑侧栏面板（富文本输出按换行拆段落落盘；可修改
-            模式自动应用前经 aiEnsureSaved 保存基线版本，撤销回退后 reload）。 */}
+        {/* AI 对话式创作/编辑侧栏面板（outputFormat=markdown：回复为
+            Markdown，经 marked 转富文本 HTML 插入——有选区替换选区，无选区
+            追加文末/整篇替换，不再是 markdown 纯文本；可修改模式自动应用前
+            经 aiEnsureSaved 保存基线版本，撤销回退后 reload）。 */}
         <AIEditChat
           open={aiChatOpen}
           onClose={() => setAiChatOpen(false)}
           getTarget={aiGetTarget}
           getAllText={() => aiGetTarget().text}
-          onApply={aiChatApply}
+          onApply={aiApply}
           onAppend={aiChatAppendEnd}
           fileId={fileId}
           ensureSaved={aiEnsureSaved}
           reload={aiReload}
           quickCommand={aiQuick}
           onQuickConsumed={() => setAiQuick(null)}
+          outputFormat="markdown"
         />
       </div>
     </main>

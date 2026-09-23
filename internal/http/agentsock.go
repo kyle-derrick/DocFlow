@@ -2,7 +2,10 @@
 //
 // 断网容器（NetworkMode=none）回调平台 AI 的唯一通道：后端在 unix
 // domain socket `/run/docflow-ipc/ai.sock`（目录可配 env
-// DOCFLOW_AGENT_IPC_DIR）上提供最小 HTTP 服务，路由仅 `POST /chat`：
+// DOCFLOW_AGENT_IPC_DIR）上提供最小 HTTP 服务，路由 `POST /chat`（自研
+// runner）、`POST /v1/chat/completions`（OpenAI Chat Completions 协议
+// 兼容子集，见 agentsock_openai.go）与 `POST /v1/messages`（Anthropic
+// Messages 协议兼容子集，见 agentsock_anthropic.go）：
 //   - 鉴权：`Authorization: Bearer <taskToken>`；token 为创建 agent 任务
 //     时签发的一次性 uuid v4（Register），内存 map 记录归属任务/用户与
 //     调用计数，任务终态即 Revoke 注销（过期）；
@@ -57,8 +60,9 @@ const (
 
 // AgentAIChatFunc 为平台 AI 调用回调（main.go 以 ai.Service 装配：
 // ForUser(user) 记账 + 系统默认对话模型；system 为请求内 system 消息
-// 归位后的系统提示；返回内容与 "provider/model"）。
-type AgentAIChatFunc func(ctx context.Context, user uuid.UUID, system string, messages []ai.Message, maxTokens int) (content, model string, err error)
+// 归位后的系统提示；onDelta 非空时平台引擎流式逐段回调（openai 兼容
+// 端点 stream 分支消费），nil 即非流式；返回内容与 "provider/model"）。
+type AgentAIChatFunc func(ctx context.Context, user uuid.UUID, system string, messages []ai.Message, maxTokens int, onDelta func(string)) (content, model string, err error)
 
 // agentAIToken 为一个已签发令牌的内存记录。
 type agentAITokenInfo struct {
@@ -73,13 +77,22 @@ type AgentAIGateway struct {
 	mu     sync.Mutex
 	tokens map[string]agentAITokenInfo
 	chat   AgentAIChatFunc
+	// anthropic 为 POST /v1/messages 工具透传路径的目标解析回调
+	// （agentsock_anthropic.go；nil 时该端点工具请求 503）。
+	anthropic AgentAIAnthropicTargetFunc
+	// openai 为 POST /v1/chat/completions 工具直连路径的目标解析回调
+	// （agentsock_openai.go；nil 时该端点带 tools/tool_calls 请求 503）。
+	openai AgentAIOpenAITargetFunc
+	// client 为网关侧 HTTP 客户端（工具透传直连上游用；超时由请求
+	// context 控制）。
+	client *http.Client
 	audit  audit.Recorder
 	now    func() time.Time
 }
 
 // NewAgentAIGateway 构造网关；chat 为 nil 时 /chat 恒 503（AI 未装配）。
 func NewAgentAIGateway(chat AgentAIChatFunc) *AgentAIGateway {
-	return &AgentAIGateway{tokens: make(map[string]agentAITokenInfo), chat: chat, audit: audit.NopRecorder{}, now: time.Now}
+	return &AgentAIGateway{tokens: make(map[string]agentAITokenInfo), chat: chat, client: &http.Client{}, audit: audit.NopRecorder{}, now: time.Now}
 }
 
 // SetAuditRecorder 注入审计写入器；nil 保持 Nop。
@@ -114,10 +127,14 @@ func (g *AgentAIGateway) Revoke(taskID uuid.UUID) {
 	g.mu.Unlock()
 }
 
-// Handler 返回 /chat 路由的 http.Handler（unix socket server 消费）。
+// Handler 返回 /chat、/v1/chat/completions 与 /v1/messages 路由的
+// http.Handler（unix socket server 消费；openai/anthropic 兼容端点分别
+// 见 agentsock_openai.go / agentsock_anthropic.go）。
 func (g *AgentAIGateway) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/chat", g.handleChat)
+	mux.HandleFunc("/v1/chat/completions", g.handleOpenAIChatCompletions)
+	mux.HandleFunc("/v1/messages", g.handleAnthropicMessages)
 	return mux
 }
 
@@ -134,22 +151,8 @@ func (g *AgentAIGateway) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeAgentAIError(w, http.StatusMethodNotAllowed, "POST /chat only")
 		return
 	}
-	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	g.mu.Lock()
-	info, ok := g.tokens[token]
-	if ok {
-		if info.calls >= info.limit {
-			g.mu.Unlock()
-			writeAgentAIError(w, http.StatusTooManyRequests, "agent ai call limit exceeded for this task")
-			return
-		}
-		// 调用计数在受理时即递增：并发请求共同受 limit 约束。
-		info.calls++
-		g.tokens[token] = info
-	}
-	g.mu.Unlock()
+	info, ok := g.authorize(w, r)
 	if !ok {
-		writeAgentAIError(w, http.StatusUnauthorized, "invalid or expired agent ai token")
 		return
 	}
 	if g.chat == nil {
@@ -161,51 +164,22 @@ func (g *AgentAIGateway) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeAgentAIError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if len(req.Messages) == 0 || len(req.Messages) > agentAIMaxMessages {
-		writeAgentAIError(w, http.StatusBadRequest, fmt.Sprintf("messages must contain 1-%d entries", agentAIMaxMessages))
-		return
-	}
 	// openai 消息数组子集：system 消息归位 ChatRequest.System（anthropic
 	// 协议不接受 messages 内的 system role），其余按序透传。
-	var system strings.Builder
-	msgs := make([]ai.Message, 0, len(req.Messages))
-	for _, m := range req.Messages {
-		switch m.Role {
-		case "system":
-			if system.Len() > 0 {
-				system.WriteString("\n")
-			}
-			system.WriteString(m.Content)
-		case "user", "assistant":
-			msgs = append(msgs, ai.Message{Role: m.Role, Content: m.Content})
-		default:
-			writeAgentAIError(w, http.StatusBadRequest, "message role must be system/user/assistant")
-			return
-		}
-	}
-	if len(msgs) == 0 {
-		writeAgentAIError(w, http.StatusBadRequest, "messages must contain at least one user/assistant entry")
+	system, msgs, err := agentAINormalizeMessages(req.Messages)
+	if err != nil {
+		writeAgentAIError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	maxTokens := req.MaxTokens
-	if maxTokens < 0 {
-		writeAgentAIError(w, http.StatusBadRequest, "max_tokens must be >= 0")
+	maxTokens, err := agentAIClampMaxTokens(req.MaxTokens)
+	if err != nil {
+		writeAgentAIError(w, http.StatusBadRequest, err.Error())
 		return
-	}
-	if maxTokens > agentAIMaxTokens {
-		maxTokens = agentAIMaxTokens
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), agentAIChatTimeout)
 	defer cancel()
-	content, model, err := g.chat(ctx, info.user, system.String(), msgs, maxTokens)
-	status := audit.StatusSuccess
-	if err != nil {
-		status = audit.StatusFailure
-	}
-	// 每次调用写审计（不落 prompt/回复内容，仅任务与模型元数据）。
-	metadata, _ := json.Marshal(map[string]string{"task_id": info.taskID, "model": model, "status": status})
-	user := info.user
-	_ = g.audit.Record(audit.Entry{UserID: &user, Action: ActionAgentAI, ResourceType: audit.ResourceAI, ResourceID: info.taskID, Status: status, Metadata: string(metadata), CreatedAt: g.now().UTC()})
+	content, model, err := g.chat(ctx, info.user, system, msgs, maxTokens, nil)
+	g.auditAICall(info, model, err, "")
 	if err != nil {
 		writeAgentAIError(w, http.StatusBadGateway, "platform ai request failed")
 		return
@@ -213,6 +187,87 @@ func (g *AgentAIGateway) handleChat(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]string{"content": content, "model": model})
+}
+
+// authorize 为 /chat 与 /v1/chat/completions 共用的入口闸门：Bearer 令牌
+// 校验 + 每任务调用计数（受理时即递增，并发请求共同受 limit 约束）。
+// 失败路径已写好错误响应（401/429），ok=false 时中止处理。
+func (g *AgentAIGateway) authorize(w http.ResponseWriter, r *http.Request) (agentAITokenInfo, bool) {
+	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	g.mu.Lock()
+	info, ok := g.tokens[token]
+	if ok {
+		if info.calls >= info.limit {
+			g.mu.Unlock()
+			writeAgentAIError(w, http.StatusTooManyRequests, "agent ai call limit exceeded for this task")
+			return agentAITokenInfo{}, false
+		}
+		info.calls++
+		g.tokens[token] = info
+	}
+	g.mu.Unlock()
+	if !ok {
+		writeAgentAIError(w, http.StatusUnauthorized, "invalid or expired agent ai token")
+		return agentAITokenInfo{}, false
+	}
+	return info, true
+}
+
+// agentAINormalizeMessages 校验并归一 openai 子集消息数组：条数 1-64，
+// system/developer 消息归位系统提示（多段以 \n 连接；developer 为 OpenAI
+// 新模型的 system 后继角色，同语义处理），user/assistant 按序透传，其余
+// role 拒绝。
+func agentAINormalizeMessages(in []ai.Message) (system string, msgs []ai.Message, err error) {
+	if len(in) == 0 || len(in) > agentAIMaxMessages {
+		return "", nil, fmt.Errorf("messages must contain 1-%d entries", agentAIMaxMessages)
+	}
+	var sys strings.Builder
+	msgs = make([]ai.Message, 0, len(in))
+	for _, m := range in {
+		switch m.Role {
+		case "system", "developer":
+			if sys.Len() > 0 {
+				sys.WriteString("\n")
+			}
+			sys.WriteString(m.Content)
+		case "user", "assistant":
+			msgs = append(msgs, ai.Message{Role: m.Role, Content: m.Content})
+		default:
+			return "", nil, errors.New("message role must be system/user/assistant")
+		}
+	}
+	if len(msgs) == 0 {
+		return "", nil, errors.New("messages must contain at least one user/assistant entry")
+	}
+	return sys.String(), msgs, nil
+}
+
+// agentAIClampMaxTokens 归一 max_tokens：负数拒绝，超上限截断。
+func agentAIClampMaxTokens(n int) (int, error) {
+	if n < 0 {
+		return 0, errors.New("max_tokens must be >= 0")
+	}
+	if n > agentAIMaxTokens {
+		n = agentAIMaxTokens
+	}
+	return n, nil
+}
+
+// auditAICall 为 /chat 与 openai 兼容端点共用的审计写入（成功/失败均记，
+// 不落 prompt/回复内容，仅任务与模型元数据）；endpoint 非空时 metadata
+// 追加该键（openai 端点传 "openai"），/chat 保持原三键不变。
+func (g *AgentAIGateway) auditAICall(info agentAITokenInfo, model string, err error, endpoint string) {
+	status := audit.StatusSuccess
+	if err != nil {
+		status = audit.StatusFailure
+	}
+	meta := map[string]string{"task_id": info.taskID, "model": model, "status": status}
+	if endpoint != "" {
+		meta["endpoint"] = endpoint
+	}
+	metadata, _ := json.Marshal(meta)
+	user := info.user
+	_ = g.audit.Record(audit.Entry{UserID: &user, Action: ActionAgentAI, ResourceType: audit.ResourceAI, ResourceID: info.taskID, Status: status, Metadata: string(metadata), CreatedAt: g.now().UTC()})
 }
 
 func writeAgentAIError(w http.ResponseWriter, code int, msg string) {

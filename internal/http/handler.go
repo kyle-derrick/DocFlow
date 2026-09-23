@@ -256,8 +256,10 @@ type Handler struct {
 	// contentBaseURL 为受控原始内容的对外基地址（CONTENT_PUBLIC_BASE_URL，
 	// 可选）：resolve 以 origin_content=1 请求时拼接绝对 raw_url。
 	contentBaseURL string
-	// loginMaxRetries / loginLockDuration 为 C9 连续登录失败锁定策略
-	//（LOGIN_MAX_RETRIES 默认 5 / LOGIN_LOCK_MINUTES 默认 15m）。
+	// loginMaxRetries / loginLockDuration 为 C9 连续登录失败锁定策略的
+	// env 基线（LOGIN_MAX_RETRIES 默认 5 / LOGIN_LOCK_MINUTES 默认 15m；
+	// SetLoginLockout 启动时注入）。运行时生效值经 loginLockoutPolicy
+	// 热读取（settings 的 security.login_* 键优先，键未入库回落本基线）。
 	loginMaxRetries   int
 	loginLockDuration time.Duration
 	backupDir         string
@@ -335,13 +337,33 @@ func (h *Handler) SetWebDAV(store *auth.WebDAVStore) {
 	}
 }
 
-// SetLoginLockout 注入 C9 登录失败锁定策略（LOGIN_MAX_RETRIES /
+// SetLoginLockout 注入 C9 登录失败锁定策略的 env 基线（LOGIN_MAX_RETRIES /
 // LOGIN_LOCK_MINUTES；maxRetries<1 或 lockFor<=0 时忽略，保持默认）。
+// 运行时可被 system_settings 的 security.login_max_retries /
+// security.login_lock_minutes 覆盖（见 loginLockoutPolicy，env 为引导默认）。
 func (h *Handler) SetLoginLockout(maxRetries int, lockFor time.Duration) {
 	if maxRetries >= 1 && lockFor > 0 {
 		h.loginMaxRetries = maxRetries
 		h.loginLockDuration = lockFor
 	}
+}
+
+// loginLockoutPolicy 返回当前生效的防爆破锁定策略（阈值 + 时长）：settings
+// 热读取优先（security.login_max_retries / security.login_lock_minutes，
+// 每次调用直读 system_settings，管理端变更即时生效；键未入库或值非法
+// 回落 env 基线）。登录失败计数与 WebDAV Basic 防爆破共用本策略；只读
+// 共享字段（settings 与 env 基线启动装配后不变），并发安全。
+func (h *Handler) loginLockoutPolicy() (int, time.Duration) {
+	maxRetries, lockFor := h.loginMaxRetries, h.loginLockDuration
+	if h.settings != nil {
+		if n, ok := h.settings.GetIntDefined(settings.KeyLoginMaxRetries); ok && n >= 1 {
+			maxRetries = n
+		}
+		if m, ok := h.settings.GetIntDefined(settings.KeyLoginLockMinutes); ok && m >= 1 {
+			lockFor = time.Duration(m) * time.Minute
+		}
+	}
+	return maxRetries, lockFor
 }
 
 // SetAuditRecorder 注入审计写入器；nil 时保持 Nop。
@@ -882,8 +904,10 @@ func lockedResponse(c *gin.Context) {
 
 // recordLoginFailure 记录一次登录失败（C9）：达到阈值即锁定；best-effort
 // （写库失败不影响统一 401 应答，防把 DB 故障当作凭据差异信号）。
+// 阈值/时长经 loginLockoutPolicy 热读取（settings 优先，回落 env 基线）。
 func (h *Handler) recordLoginFailure(id uuid.UUID) {
-	_ = h.users.RecordLoginFailure(id, h.loginMaxRetries, h.loginLockDuration)
+	maxRetries, lockFor := h.loginLockoutPolicy()
+	_ = h.users.RecordLoginFailure(id, maxRetries, lockFor)
 }
 
 func (h *Handler) login(c *gin.Context) {

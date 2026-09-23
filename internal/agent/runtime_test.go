@@ -57,6 +57,27 @@ func TestTransitionCancellationAndTimeout(t *testing.T) {
 	}
 }
 
+// captureRuntime 捕获 Executor 下发的 RuntimeRequest。
+type captureRuntime struct{ req RuntimeRequest }
+
+func (c *captureRuntime) Run(_ context.Context, req RuntimeRequest) (RuntimeResult, error) {
+	c.req = req
+	return RuntimeResult{DryRun: true}, nil
+}
+
+// TestExecutorPassesHarnessAndAIToken Executor 把 Harness/AIToken 原样
+// 透传进 RuntimeRequest（harness 终值链路的 Executor 一环）。
+func TestExecutorPassesHarnessAndAIToken(t *testing.T) {
+	rt := &captureRuntime{}
+	exec := Executor{Runtime: rt, MaxEntries: 10, MaxBytes: 1 << 20, AIToken: "tok-9", Harness: HarnessPi}
+	if _, err := exec.Execute(context.Background(), "task-1", "docflow/agent:1.0.0", "p", nil); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if rt.req.Harness != HarnessPi || rt.req.AIToken != "tok-9" || rt.req.TaskID != "task-1" {
+		t.Fatalf("runtime request = %+v, want harness=%q token=%q", rt.req, HarnessPi, "tok-9")
+	}
+}
+
 // 产物扫描忽略规则：node_modules/.git/dist 等依赖与缓存目录整目录
 // 剪枝（不逐文件哈希），以 action=ignored 汇总条目上报；正常源码
 // 文件照常进 diff。

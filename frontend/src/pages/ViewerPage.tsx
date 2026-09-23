@@ -8,7 +8,7 @@
 // /excalidraw）不受影响，仅本页只读。
 // FileViewerDispatch / RawHtmlViewer 同时供按路径查看页（/view/by-path）
 // 复用：fileId 由 resolve 结果提供（各编辑器页支持 fileId prop）。
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button } from 'antd'
 import { useParams, useSearchParams } from 'react-router-dom'
 import {
@@ -34,7 +34,7 @@ import ExcalidrawPage from './ExcalidrawPage'
 import TextEditorPage from './TextEditorPage'
 import MermaidDiagram from '../components/MermaidDiagram'
 import XMindViewer from '../components/XMindViewer'
-import { AISummaryInline } from '../components/AISummary'
+import ViewerAIWidget from '../components/ViewerAIWidget'
 import { setAIContextFile } from '../components/AIAssistant'
 import { useColorMode } from '../theme'
 
@@ -43,15 +43,27 @@ import { useColorMode } from '../theme'
  * grant 足够单次查看），sandbox iframe 渲染（allow-scripts/form/popups/modals，
  * 无 same-origin——文档进入唯一化 origin 沙箱，碰不到主站源）。失败兜底给
  * 重试按钮（重新 resolve 换新 grant）。
+ * iframe 高度完全顺应内容：onload 后尝试向文档注入高度上报脚本（同源可达
+ * contentDocument 时生效，ResizeObserver + postMessage 回传内容实际高度，
+ * 父页按高度撑开 iframe、容器纵向滚动）；跨域沙箱（contentDocument 不可达）
+ * 注入静默失败，回落 CSS min-height:100vh 视口高度兜底，彻底消除独立查看页
+ * 上 iframe 挂在非 flex 父级下高度塌陷为 150px 的「高度被压缩」问题。
  */
+/** iframe 内容高度上报消息类型（注入脚本 → parent postMessage）。 */
+const RAW_HEIGHT_MSG = 'docflow:raw-height'
+
 export function RawHtmlViewer({ resolveFn, title }: { resolveFn: () => Promise<string | null>; title: string }) {
   const [src, setSrc] = useState<string | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
+  // 内容实际高度（0 = 未取到，走 CSS 视口高度兜底）。
+  const [contentHeight, setContentHeight] = useState(0)
+  const frameRef = useRef<HTMLIFrameElement | null>(null)
 
   const load = useCallback(() => {
     setLoading(true)
     setError('')
+    setContentHeight(0)
     resolveFn()
       .then((url) => {
         if (url) setSrc(url)
@@ -68,6 +80,33 @@ export function RawHtmlViewer({ resolveFn, title }: { resolveFn: () => Promise<s
     load()
   }, [load])
 
+  // 高度上报监听：注入脚本 postMessage 回传 scrollHeight（跨域不可注入时
+  // 永不触发，保持 CSS 兜底）。
+  useEffect(() => {
+    const onMsg = (e: MessageEvent) => {
+      const data = e.data as { type?: string; height?: number } | null
+      if (data && typeof data === 'object' && data.type === RAW_HEIGHT_MSG && typeof data.height === 'number' && data.height > 0) {
+        setContentHeight(Math.ceil(data.height))
+      }
+    }
+    window.addEventListener('message', onMsg)
+    return () => window.removeEventListener('message', onMsg)
+  }, [])
+
+  /** onload 注入高度上报脚本（同源 srcdoc/blob 可达 contentDocument 时生效；
+   *  跨域访问抛 SecurityError/返回 null → 静默回落视口高度）。 */
+  const handleFrameLoad = () => {
+    try {
+      const doc = frameRef.current?.contentDocument
+      if (!doc?.documentElement) return
+      const script = doc.createElement('script')
+      script.textContent = `(function(){var send=function(){var h=Math.max(document.body?document.body.scrollHeight:0,document.documentElement?document.documentElement.scrollHeight:0);if(h>0)parent.postMessage({type:'${RAW_HEIGHT_MSG}',height:h},'*')};send();if(window.ResizeObserver)new ResizeObserver(send).observe(document.documentElement);window.addEventListener('load',send)})()`
+      doc.documentElement.appendChild(script)
+    } catch {
+      /* 跨域（sandbox 无 allow-same-origin）：不可注入，保持视口高度兜底 */
+    }
+  }
+
   if (error) {
     return (
       <main className="text-editor-page">
@@ -82,12 +121,17 @@ export function RawHtmlViewer({ resolveFn, title }: { resolveFn: () => Promise<s
     return <main className="text-editor-page viewer-only"><div className="text-editor-state">正在加载网页…</div></main>
   }
   return (
-    <iframe
-      className="standalone-viewer-frame"
-      sandbox="allow-scripts allow-forms allow-popups allow-modals"
-      src={src}
-      title={title}
-    />
+    <main className="text-editor-page viewer-only raw-frame-page">
+      <iframe
+        ref={frameRef}
+        className="standalone-viewer-frame"
+        sandbox="allow-scripts allow-forms allow-popups allow-modals"
+        src={src}
+        title={title}
+        onLoad={handleFrameLoad}
+        style={contentHeight > 0 ? { height: contentHeight } : undefined}
+      />
+    </main>
   )
 }
 
@@ -119,9 +163,24 @@ function GenericViewer({ fileId, name }: { fileId: string; name: string }) {
   if (error) return <main className="text-editor-page"><div className="banner error">{error}</div></main>
   if (!content) return <main className="text-editor-page"><div className="text-editor-state">正在加载…</div></main>
   if (content.kind === 'image') return <main className="text-editor-page viewer-only"><img className="preview-image" src={content.url} alt={name} /></main>
-  if (content.kind === 'pdf') return <iframe className="standalone-viewer-frame" src={content.url} title={name} />
-  if (content.kind === 'webpkg') return <iframe className="standalone-viewer-frame" sandbox="allow-scripts" src={content.url} title={name} />
-  if (content.kind === 'text') return <main className="text-editor-page"><pre className="preview-text">{content.text}</pre></main>
+  // pdf / 网页包：包进 raw-frame-page 全幅容器（独立页铺满视口顺应内容，
+  // 弹窗内随 .preview-embed 撑满），修复独立页 iframe 高度塌陷为 150px。
+  if (content.kind === 'pdf') {
+    return (
+      <main className="text-editor-page viewer-only raw-frame-page">
+        <iframe className="standalone-viewer-frame" src={content.url} title={name} />
+      </main>
+    )
+  }
+  if (content.kind === 'webpkg') {
+    return (
+      <main className="text-editor-page viewer-only raw-frame-page">
+        <iframe className="standalone-viewer-frame" sandbox="allow-scripts" src={content.url} title={name} />
+      </main>
+    )
+  }
+  // 文本：viewer-only 铺满视口（解除 .preview-text 基础 60vh 限高压缩）。
+  if (content.kind === 'text') return <main className="text-editor-page viewer-only"><pre className="preview-text">{content.text}</pre></main>
   return <main className="text-editor-page"><div className="empty">该文件类型暂不支持在线查看</div></main>
 }
 
@@ -349,6 +408,9 @@ export default function ViewerPage() {
   const forceOpen = searchParams.get('open') ?? undefined
   const [file, setFile] = useState<FileWithVersion | null>(null)
   const [error, setError] = useState('')
+  // AI 助理「保存为新版本」后的预览刷新：key 自增触发 FileViewerDispatch
+  // 整体重挂载（重新拉取元数据与预览，页面同步更新）。
+  const [reloadKey, setReloadKey] = useState(0)
 
   useEffect(() => {
     let alive = true
@@ -375,13 +437,28 @@ export default function ViewerPage() {
     }
   }, [fileId, originContent])
 
+  // AI 保存为新版本后：刷新元数据（版本号/时间）并重挂载查看器重取预览。
+  const handleAISaved = useCallback(() => {
+    setReloadKey((k) => k + 1)
+    void getFileMeta(fileId)
+      .then((meta) => setFile(meta))
+      .catch(() => { /* 元数据刷新失败不影响预览重挂载 */ })
+  }, [fileId])
+
   if (error) return <main className="text-editor-page"><div className="banner error">{error}</div></main>
   if (!file) return <main className="text-editor-page"><div className="text-editor-state">正在加载…</div></main>
 
   return (
     <>
-      <div className="viewer-ai-actions"><AISummaryInline fileId={file.id} /></div>
-      <FileViewerDispatch fileId={file.id} name={file.name} resolveRawUrl={resolveRawUrl} force={forceOpen} />
+      <FileViewerDispatch
+        key={reloadKey}
+        fileId={file.id}
+        name={file.name}
+        resolveRawUrl={resolveRawUrl}
+        force={forceOpen}
+      />
+      {/* 悬浮 AI 助理（可摘要/对话/修改保存新版本；AI 未启用时组件自隐藏）。 */}
+      <ViewerAIWidget fileId={file.id} fileName={file.name} onSaved={handleAISaved} />
     </>
   )
 }

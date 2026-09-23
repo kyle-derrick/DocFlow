@@ -621,15 +621,44 @@ func main() {
 	}
 	handler.SetAIService(aiService, aiEnvBaseline, aiUsageStore)
 	// Agent 容器平台 AI IPC 网关（agentsock.go）：任务创建时签发一次性
-	// 令牌，断网容器（NetworkMode=none）经 unix socket POST /chat 回调
-	// 平台默认对话模型（零值 ChatRequest：禁用工具/联网/记忆/思考）；
-	// 用量按任务归属用户记账（ForUser）。
-	agentAI := httpapi.NewAgentAIGateway(func(ctx context.Context, user uuid.UUID, system string, messages []ai.Message, maxTokens int) (string, string, error) {
-		res, err := aiService.ForUser(user).Chat(ctx, ai.ChatRequest{System: system, Messages: messages, MaxTokens: maxTokens}, nil)
+	// 令牌，断网容器（NetworkMode=none）经 unix socket POST /chat、
+	// POST /v1/chat/completions（OpenAI 协议兼容子集，agentsock_openai.go）
+	// 与 POST /v1/messages（Anthropic Messages 兼容子集，agentsock_anthropic.go）
+	// 回调平台默认对话模型（零值 ChatRequest：禁用工具/联网/记忆/思考；
+	// onDelta 非空即流式）；用量按任务归属用户记账（ForUser）。
+	agentAI := httpapi.NewAgentAIGateway(func(ctx context.Context, user uuid.UUID, system string, messages []ai.Message, maxTokens int, onDelta func(string)) (string, string, error) {
+		res, err := aiService.ForUser(user).Chat(ctx, ai.ChatRequest{System: system, Messages: messages, MaxTokens: maxTokens, Stream: onDelta != nil}, onDelta)
 		if err != nil {
 			return "", "", err
 		}
 		return res.Content, res.ProviderID + "/" + res.Model, nil
+	})
+	// /v1/messages 工具透传（Claude Code harness）：解析平台默认对话目标
+	// 供网关直连转发（要求 anthropic kind——网关把 tools/content 块以
+	// anthropic 原生形状透传，平台仍管鉴权/限流/审计/模型路由）。
+	agentAI.SetAnthropicTarget(func(ctx context.Context, user uuid.UUID) (string, string, string, error) {
+		target, err := aiService.ForUser(user).ResolveChatTargetFor("", "", settings.AIScenarioChat)
+		if err != nil {
+			return "", "", "", err
+		}
+		if target.Provider.Kind != settings.AIKindAnthropic {
+			return "", "", "", httpapi.ErrAgentAIAnthropicIncompatible
+		}
+		return target.Provider.BaseURL, target.Provider.APIKey, target.Model, nil
+	})
+	// /v1/chat/completions 工具直连（pi harness，OpenAI 兼容协议）：解析
+	// 平台默认对话目标（要求 openai 兼容 kind）供网关改写 model 后直发
+	// 上游 /chat/completions（tools/tool_choice/messages 原样、Bearer
+	// 鉴权、响应体原样回传），平台仍管鉴权/限流/审计/模型路由。
+	agentAI.SetOpenAITarget(func(ctx context.Context, user uuid.UUID) (string, string, string, error) {
+		target, err := aiService.ForUser(user).ResolveChatTargetFor("", "", settings.AIScenarioChat)
+		if err != nil {
+			return "", "", "", err
+		}
+		if target.Provider.Kind != settings.AIKindOpenAICompatible {
+			return "", "", "", httpapi.ErrAgentAIOpenAIIncompatible
+		}
+		return target.Provider.BaseURL, target.Provider.APIKey, target.Model, nil
 	})
 	agentAI.SetAuditRecorder(auditStore)
 	handler.SetAgentAI(agentAI)
@@ -645,7 +674,7 @@ func main() {
 		if ipcDir == "" {
 			ipcDir = httpapi.AgentAIIPCDefaultDir
 		}
-		log.Printf("agent ai ipc socket listening on %s/%s (POST /chat)", ipcDir, httpapi.AgentAISockName)
+		log.Printf("agent ai ipc socket listening on %s/%s (POST /chat, POST /v1/chat/completions, POST /v1/messages)", ipcDir, httpapi.AgentAISockName)
 	}
 	// 图片 OCR 自动入索引：aiService 读 blob 需要存储读取器；把它挂到
 	// 索引器（*ai.Service 满足 search.OCRExtractor，编译期保证），OCR

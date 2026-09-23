@@ -34,6 +34,10 @@ type fakeUserDirectory struct {
 	failures     map[uuid.UUID]int
 	cleared      map[uuid.UUID]bool
 	profiles     map[uuid.UUID]auth.ProfileUpdate
+	// lastLockoutRetries / lastLockoutFor 记录最近一次 RecordLoginFailure
+	// 收到的锁定策略参数（断言 settings/env 来源用）。
+	lastLockoutRetries int
+	lastLockoutFor     time.Duration
 }
 
 func (f *fakeUserDirectory) FindActiveByIdentifier(identifier string) (auth.User, error) {
@@ -63,6 +67,8 @@ func (f *fakeUserDirectory) RecordLoginFailure(id uuid.UUID, maxRetries int, loc
 		f.failures = make(map[uuid.UUID]int)
 	}
 	f.failures[id]++
+	f.lastLockoutRetries = maxRetries
+	f.lastLockoutFor = lockFor
 	return nil
 }
 

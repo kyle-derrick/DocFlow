@@ -35,10 +35,10 @@
 //     SSE tool 事件的 df_* 调用以「平台 / 列目录」双语小标签展示。
 import { useEffect, useRef, useState } from 'react'
 import type { Key } from 'react'
-import { Drawer, Button, Input, Popconfirm, Popover, Select, Switch, Tag, Tooltip, Tree } from 'antd'
+import { Drawer, Button, Input, Popconfirm, Popover, Segmented, Select, Switch, Tag, Tooltip, Tree } from 'antd'
 import type { DataNode } from 'antd/es/tree'
 import { useNavigate } from 'react-router-dom'
-import { Sparkles, Send, Trash2, FileText, Globe, RotateCcw, Copy, Bot, Plus, Square, Check, Paperclip, Brain, Pencil, PencilLine, Pin, BookMarked, Wrench, Zap, FolderInput, FolderCog, FolderOpen } from 'lucide-react'
+import { Sparkles, Send, Trash2, FileText, Globe, RotateCcw, Copy, Bot, Plus, Square, Check, Paperclip, Brain, Pencil, PencilLine, Pin, BookMarked, Wrench, Zap, FolderInput, FolderCog, FolderOpen, MessagesSquare, ChevronDown, Crosshair } from 'lucide-react'
 import {
   AISkillDef,
   AIUsage,
@@ -50,9 +50,11 @@ import {
   aiSummarizeFileStream,
   authFetch,
   createAIMemory,
+  currentUserId,
   deleteAIMemory,
   getAIMCPServices,
   getAIPersonalSettings,
+  getMe,
   listAIMemory,
   listPlatformSkills,
   putAIPersonalSettings,
@@ -64,6 +66,8 @@ import {
   AIMemoryItem,
 } from '../api'
 import type { Space } from '../api'
+import { useAILocation } from '../aiLocation'
+import type { AILocation } from '../aiLocation'
 import { Modal } from './FileBrowser'
 import AIMarkdown from './AIMarkdown'
 import { useAIEnabled, useAIFeatures } from '../aiFeature'
@@ -113,6 +117,18 @@ export const AI_FILES_STORAGE_KEY = 'docflow.ai.files'
 
 /** AI 助手固定（pin）持久化 key。 */
 export const AI_PIN_STORAGE_KEY = 'docflow.ai.pinned'
+
+/** 助手模式持久化 key（'chat' = 仅对话（不修改/不操作文件）；缺省/其他 = 智能）。 */
+export const AI_MODE_STORAGE_KEY = 'docflow.ai.mode'
+
+/** 读取助手模式（非法/未存储回退「智能」）。 */
+function loadAIMode(): 'smart' | 'chat' {
+  try {
+    return window.localStorage.getItem(AI_MODE_STORAGE_KEY) === 'chat' ? 'chat' : 'smart'
+  } catch {
+    return 'smart'
+  }
+}
 
 /** 同页多个开关实例的状态同步事件（storage 事件仅跨标签页触发）。 */
 const AI_FLAGS_EVENT = 'docflow:ai-flags'
@@ -209,7 +225,26 @@ function normalizeAIModel(entry: unknown): AIModelOption | null {
 }
 
 /** 拉取可选模型列表（失败返回空数组；成功后按会话缓存；同时缓存
- *  default_models.chat 供选择器默认选中）。 */
+ *  default_models.chat 供选择器默认选中）。
+ *  仅保留对话模型：/ai/models 模型条目的 capabilities 实际为对象
+ *  {chat,embedding,vision,rerank,reasoning}（布尔勾选，见后端
+ *  internal/http/ai.go aiModels → settings.AIModelCapabilities）——
+ *  chat!==true 的条目（embedding/rerank/vision-only 等）在此过滤，
+ *  对话选择器（助手/编辑页）不再出现；capabilities 缺失（旧后端/字符串
+ *  条目）无法判定时宽松保留。 */
+function modelChatCapable(raw: unknown): boolean | null {
+  if (Array.isArray(raw)) {
+    if (raw.length === 0) return null
+    return raw.some((c) => String(c).trim().toLowerCase() === 'chat')
+  }
+  if (raw && typeof raw === 'object') {
+    const o = raw as Record<string, unknown>
+    if ('chat' in o) return o.chat === true
+    return Object.keys(o).length > 0 ? false : null
+  }
+  return null
+}
+
 export async function getAIModels(force = false): Promise<AIModelOption[]> {
   if (!force && aiModelsCache) return aiModelsCache
   try {
@@ -241,7 +276,10 @@ export async function getAIModels(force = false): Promise<AIModelOption[]> {
     } else {
       raw = []
     }
-    const list = raw.map(normalizeAIModel).filter((x): x is AIModelOption => x !== null)
+    const list = raw
+      .filter((entry) => modelChatCapable(entry && typeof entry === 'object' ? (entry as Record<string, unknown>).capabilities : undefined) !== false)
+      .map(normalizeAIModel)
+      .filter((x): x is AIModelOption => x !== null)
     aiModelsCache = list
     return list
   } catch {
@@ -551,6 +589,8 @@ export function AIChatToggleBar({
   onMcp,
   onDocs,
   onFiles,
+  /** 仅对话模式下文件操作开关禁用置灰（不传 = 正常可用）。 */
+  filesDisabled = false,
   compact = false,
 }: {
   zh: boolean
@@ -573,6 +613,8 @@ export function AIChatToggleBar({
   onDocs: (v: boolean) => void
   /** 文件工具开关回调（可选；未传 = 不渲染该开关，编辑页等场景保持原状）。 */
   onFiles?: (v: boolean) => void
+  /** 仅对话模式：开关禁用置灰 + Tooltip 说明。 */
+  filesDisabled?: boolean
   compact?: boolean
 }) {
   return (
@@ -612,12 +654,15 @@ export function AIChatToggleBar({
         </Tooltip>
       )}
       {/* 文件操作（df_* 平台文件工具）：默认开；onFiles 未传的调用方
-          （编辑页 AIEditChat 等保持编辑器内语义）不渲染。 */}
+          （编辑页 AIEditChat 等保持编辑器内语义）不渲染；仅对话模式
+          下禁用置灰（发送恒 use_files:false）。 */}
       {onFiles && (
-        <Tooltip title={aiFilesTooltip(zh)}>
-          <label className="ai-rag-toggle ai-toggle">
+        <Tooltip title={filesDisabled
+          ? (zh ? '仅对话模式下已禁用文件操作' : 'File operations are disabled in chat-only mode')
+          : aiFilesTooltip(zh)}>
+          <label className={`ai-rag-toggle ai-toggle${filesDisabled ? ' ai-toggle-blocked' : ''}`}>
             <FolderCog size={14} strokeWidth={2} aria-hidden="true" />
-            <Switch size="small" checked={files ?? true} onChange={onFiles} />
+            <Switch size="small" checked={filesDisabled ? false : (files ?? true)} disabled={filesDisabled} onChange={onFiles} />
             <span>{compact ? (zh ? '文件' : 'Files') : (zh ? '文件操作' : 'File operations')}</span>
           </label>
         </Tooltip>
@@ -807,10 +852,12 @@ function findTreeTitlePath(nodes: DataNode[], key: Key): string[] | null {
 /**
  * 「工作目录」按钮（输入工具行；FolderOpen）：Popover 内 空间 Select
  * （listSpaces）+ 目录懒树（仅目录节点，逐级展开；参考 AIMarkdown 保存
- * 弹窗的树实现）+「默认空间根」选项。选中目录即生效并记忆 localStorage
- * （{spaceId, folderId, name}）；未选择 = 默认空间根（发送不传 work_root）。
+ * 弹窗的树实现）+「跟随当前位置」/「默认空间根」选项。选中目录即生效并
+ * 记忆 localStorage（{spaceId, folderId, name}）；显示优先级：手选（固定）
+ * > 跟随文件页当前位置（follow，标「跟随：」）> 默认空间根（发送不传
+ * work_root）；点「跟随当前位置」清除手选回到跟随态。
  */
-function AIWorkDirButton({ value, onChange, zh }: { value: AIWorkDir | null; onChange: (v: AIWorkDir | null) => void; zh: boolean }) {
+function AIWorkDirButton({ value, follow, onFollow, onChange, zh }: { value: AIWorkDir | null; follow: { path: string } | null; onFollow: () => void; onChange: (v: AIWorkDir | null) => void; zh: boolean }) {
   const [open, setOpen] = useState(false)
   const [spacesLoaded, setSpacesLoaded] = useState(false)
   const [spaces, setSpaces] = useState<Space[]>([])
@@ -938,10 +985,28 @@ function AIWorkDirButton({ value, onChange, zh }: { value: AIWorkDir | null; onC
               }}
             />
           </div>
-          {/* 默认空间根：不指定工作目录（发送不传 work_root，后端回落默认空间根）。 */}
+          {/* 跟随当前位置：清除手选，随文件页所在空间/目录（无位置时不可选）。 */}
           <button
             type="button"
-            className={`ai-workdir-default${value ? '' : ' active'}`}
+            className={`ai-workdir-default${!value && follow ? ' active' : ''}`}
+            disabled={!follow}
+            title={follow
+              ? (zh ? `跟随文件页当前位置：${follow.path}` : `Follow the file page location: ${follow.path}`)
+              : (zh ? '暂无文件页位置（打开文件页后可用）' : 'No file page location yet (open the Files page first)')}
+            onClick={() => {
+              onFollow()
+              setOpen(false)
+            }}
+          >
+            <Crosshair size={13} strokeWidth={2} aria-hidden="true" />
+            <span>{zh ? '跟随当前位置' : 'Follow current location'}</span>
+            {!value && follow && <Check size={13} strokeWidth={2} aria-hidden="true" />}
+          </button>
+          {/* 默认空间根：不指定工作目录（发送不传 work_root，后端回落默认空间根）；
+              有跟随位置时按优先级实际生效跟随态（点选 = 清除手选）。 */}
+          <button
+            type="button"
+            className={`ai-workdir-default${!value && !follow ? ' active' : ''}`}
             onClick={() => {
               onChange(null)
               setOpen(false)
@@ -949,25 +1014,35 @@ function AIWorkDirButton({ value, onChange, zh }: { value: AIWorkDir | null; onC
           >
             <FolderCog size={13} strokeWidth={2} aria-hidden="true" />
             <span>{zh ? '默认空间根（不指定）' : 'Default space root (none)'}</span>
-            {!value && <Check size={13} strokeWidth={2} aria-hidden="true" />}
+            {!value && !follow && <Check size={13} strokeWidth={2} aria-hidden="true" />}
           </button>
           <div className="ai-attach-state muted">
-            {zh ? 'AI 文件操作以所选目录为基准（相对路径）' : 'AI file operations resolve relative paths against this folder'}
+            {zh ? 'AI 文件操作以所选目录为基准（相对路径）；未手选时跟随文件页位置' : 'AI file operations resolve relative paths against this folder; otherwise follow the Files page location'}
           </div>
           {err && <div className="ai-md-save-error error-text">{err}</div>}
         </div>
       }
     >
-      <Button
-        size="small"
-        type="text"
-        className="ai-attach-btn ai-workdir-btn"
-        aria-label={zh ? '工作目录' : 'Working directory'}
-        title={zh ? '工作目录' : 'Working directory'}
-      >
-        <FolderOpen size={14} strokeWidth={2} aria-hidden="true" />
-        {value && <span className="ai-workdir-name" title={value.path || value.name}>{value.name}</span>}
-      </Button>
+      <Tooltip title={value
+        ? (value.path || value.name)
+        : follow
+          ? (zh ? `跟随文件页当前位置：${follow.path}` : `Following the Files page location: ${follow.path}`)
+          : (zh ? '工作目录：默认空间根' : 'Working directory: default space root')}>
+        <Button
+          size="small"
+          type="text"
+          className="ai-attach-btn ai-workdir-btn"
+          aria-label={zh ? '工作目录' : 'Working directory'}
+        >
+          <FolderOpen size={14} strokeWidth={2} aria-hidden="true" />
+          {value && <span className="ai-workdir-name" title={value.path || value.name}>{value.name}</span>}
+          {!value && follow && (
+            <span className="ai-workdir-name ai-workdir-follow" title={follow.path}>
+              {zh ? '跟随：' : 'Follow: '}{follow.path}
+            </span>
+          )}
+        </Button>
+      </Tooltip>
     </Popover>
   )
 }
@@ -1046,6 +1121,95 @@ interface ChatTurn {
   usage?: AIUsage | null
 }
 
+// ---------- 多会话（历史会话；localStorage docflow.ai.convos.{uid}） ----------
+
+/** 会话内持久化消息（仅 role/content/ts；附件/来源等展示态不入库）。 */
+export interface AIConvoMessage {
+  role: 'user' | 'assistant'
+  content: string
+  ts: number
+}
+
+/** 历史会话条目（≤30 个，超出裁最旧；单会话消息 ≤50 条，超出裁最旧）。 */
+export interface AIConvo {
+  id: string
+  title: string
+  updatedAt: number
+  messages: AIConvoMessage[]
+}
+
+/** 会话数量 / 单会话消息数上限（超出裁最旧）。 */
+const AI_CONVO_MAX = 30
+const AI_CONVO_MSG_MAX = 50
+
+/** 会话列表持久化 key（按用户维度）。 */
+const aiConvosKey = (uid: string) => `docflow.ai.convos.${uid}`
+
+/** 读取历史会话（宽松解析；损坏条目跳过；按 updatedAt 降序）。 */
+function loadAIConvos(uid: string): AIConvo[] {
+  try {
+    const raw = window.localStorage.getItem(aiConvosKey(uid))
+    if (!raw) return []
+    const arr = JSON.parse(raw) as unknown
+    if (!Array.isArray(arr)) return []
+    const out: AIConvo[] = []
+    for (const it of arr) {
+      if (!it || typeof it !== 'object') continue
+      const e = it as Record<string, unknown>
+      const id = String(e.id ?? '')
+      if (!id) continue
+      const msgs = Array.isArray(e.messages) ? e.messages : []
+      out.push({
+        id,
+        title: String(e.title ?? ''),
+        updatedAt: Number(e.updatedAt) || 0,
+        messages: msgs
+          .map((m) => {
+            if (!m || typeof m !== 'object') return null
+            const mm = m as Record<string, unknown>
+            const role = mm.role === 'assistant' ? 'assistant' : mm.role === 'user' ? 'user' : null
+            const content = String(mm.content ?? '')
+            return role && content ? { role, content, ts: Number(mm.ts) || 0 } : null
+          })
+          .filter((m): m is AIConvoMessage => m !== null),
+      })
+    }
+    out.sort((a, b) => b.updatedAt - a.updatedAt)
+    return out
+  } catch {
+    return []
+  }
+}
+
+/** 保存历史会话（失败静默）。 */
+function saveAIConvos(uid: string, convos: AIConvo[]): void {
+  try {
+    window.localStorage.setItem(aiConvosKey(uid), JSON.stringify(convos))
+  } catch {
+    /* ignore */
+  }
+}
+
+/** 会话标题：首条用户消息前 16 字（空会话返回空串）。 */
+function aiConvoTitleFrom(turns: ChatTurn[]): string {
+  const first = turns.find((x) => x.role === 'user' && x.content.trim())
+  return first ? first.content.trim().slice(0, 16) : ''
+}
+
+/** 相对时间展示（刚刚 / x 分钟前 / x 小时前 / x 天前 / 日期）。 */
+function aiConvoRelTime(ts: number, zh: boolean): string {
+  if (!ts) return ''
+  const diff = Date.now() - ts
+  const m = Math.floor(diff / 60000)
+  if (m < 1) return zh ? '刚刚' : 'just now'
+  if (m < 60) return zh ? `${m} 分钟前` : `${m}m ago`
+  const h = Math.floor(m / 60)
+  if (h < 24) return zh ? `${h} 小时前` : `${h}h ago`
+  const d = Math.floor(h / 24)
+  if (d < 30) return zh ? `${d} 天前` : `${d}d ago`
+  return new Date(ts).toLocaleDateString()
+}
+
 /** 顶栏 AI 助手入口按钮（Sparkles；AI 未启用时不渲染）。 */
 export function AIAssistantButton() {
   const locale = useLocale()
@@ -1100,8 +1264,43 @@ export default function AIAssistant() {
   })
   // 联网/思考开关（共享逻辑，AIEditChat / StudioChat 复用同一 hook 与 key）。
   const toggles = useAIChatToggles(models, modelKey)
+  // ---- 助手模式（智能 | 仅对话）：仅对话 = 不注入 df_* 文件工具
+  //      （use_files 显式 false）+ 系统提示声明不读写文件；localStorage 记忆。 ----
+  const [aiMode, setAiMode] = useState<'smart' | 'chat'>(loadAIMode)
+  const chatOnly = aiMode === 'chat'
+  const changeAIMode = (v: string | number) => {
+    const next: 'smart' | 'chat' = v === 'chat' ? 'chat' : 'smart'
+    setAiMode(next)
+    try {
+      window.localStorage.setItem(AI_MODE_STORAGE_KEY, next)
+    } catch {
+      /* ignore */
+    }
+  }
+  // ---- 位置跟随（文件页广播的当前空间/目录）：工作目录显示优先级
+  //      手选（固定）> 跟随当前位置 > 默认空间根。 ----
+  const aiLoc = useAILocation()
+  const aiLocRef = useRef<AILocation | null>(aiLoc)
+  aiLocRef.current = aiLoc
+  // 各空间根目录 folderId 惰性解析缓存（listSpaceFiles(spaceId,null).parent_id；
+  // 跟随态 folderId=null 时发送前解析空间根）。
+  const spaceRootIdsRef = useRef<Record<string, string>>({})
+  const resolveSpaceRootFolderId = async (spaceId: string): Promise<string | null> => {
+    if (spaceRootIdsRef.current[spaceId]) return spaceRootIdsRef.current[spaceId]
+    try {
+      const { parent_id } = await listSpaceFiles(spaceId, null)
+      if (parent_id) spaceRootIdsRef.current[spaceId] = parent_id
+      return parent_id ?? null
+    } catch {
+      return null
+    }
+  }
+  // 跟随态进入空间根时预热根目录 folderId 缓存。
+  useEffect(() => {
+    if (aiLoc && !aiLoc.folderId && aiLoc.spaceId) void resolveSpaceRootFolderId(aiLoc.spaceId)
+  }, [aiLoc])
   // 工作目录（df_* 文件工具相对路径基准）：localStorage 记忆
-  // {spaceId, folderId, name}；未选择 = 默认空间根（发送不传 work_root）。
+  // {spaceId, folderId, name}；未选择 = 跟随文件页位置（有）或默认空间根。
   const [workdir, setWorkdir] = useState<AIWorkDir | null>(loadAIWorkDir)
   const selectWorkDir = (w: AIWorkDir | null) => {
     setWorkdir(w)
@@ -1112,6 +1311,18 @@ export default function AIAssistant() {
       /* ignore */
     }
   }
+  // ---- 多会话（历史会话；localStorage docflow.ai.convos.{uid}，uid 就绪后载入）----
+  const [aiUid, setAiUid] = useState('')
+  const [convos, setConvos] = useState<AIConvo[]>([])
+  const [convoId, setConvoId] = useState('')
+  const [convoOpen, setConvoOpen] = useState(false)
+  // 重命名中条目（Modal 输入新标题）。
+  const [convoEditing, setConvoEditing] = useState<{ id: string; draft: string } | null>(null)
+  const convosRef = useRef<AIConvo[]>([])
+  const convoIdRef = useRef('')
+  useEffect(() => {
+    void getMe().then((m) => setAiUid(m.id)).catch(() => setAiUid(currentUserId() ?? 'anon'))
+  }, [])
   // 助手固定（pin）：固定后无遮罩、点页面/Esc 不关闭（localStorage 记忆）。
   const [pinned, setPinned] = useState(() => {
     try {
@@ -1187,6 +1398,96 @@ export default function AIAssistant() {
   const setBusyState = (value: boolean) => {
     busyRef.current = value
     setBusy(value)
+  }
+
+  // ---- 多会话：uid 就绪后载入历史会话并恢复最近一条 ----
+  useEffect(() => {
+    if (!aiUid) return
+    const list = loadAIConvos(aiUid)
+    convosRef.current = list
+    setConvos(list)
+    const top = list[0]
+    if (top) {
+      convoIdRef.current = top.id
+      setConvoId(top.id)
+      applyTurns(() => top.messages.map((m) => ({ id: ++turnSeq.current, role: m.role, content: m.content })))
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [aiUid])
+
+  // 会话写回：turns 变化 400ms 防抖（流式逐 token 期间持续重置，done 后
+  // 落盘）→ 当前会话更新/创建（标题 = 首条用户消息前 16 字，重命名优先），
+  // 裁剪单会话 ≤50 条 / 总数 ≤30 个（超出裁最旧）；清空（0 条）的会话从
+  // 列表移除。
+  useEffect(() => {
+    if (!aiUid) return
+    const timer = window.setTimeout(() => {
+      const now = Date.now()
+      const msgs: AIConvoMessage[] = turns
+        .filter((x) => !x.error && x.content.trim())
+        .map((x) => ({ role: x.role, content: x.content, ts: now }))
+      let id = convoIdRef.current
+      let rest = convosRef.current.filter((c) => c.id !== id)
+      if (msgs.length > 0) {
+        if (!id) {
+          id = crypto.randomUUID()
+          convoIdRef.current = id
+          setConvoId(id)
+        }
+        const prev = convosRef.current.find((c) => c.id === id)
+        const title = prev?.title || aiConvoTitleFrom(turns) || (zh ? '新对话' : 'New chat')
+        rest = [{ id, title, updatedAt: now, messages: msgs.slice(-AI_CONVO_MSG_MAX) }, ...rest]
+          .sort((a, b) => b.updatedAt - a.updatedAt)
+          .slice(0, AI_CONVO_MAX)
+      }
+      convosRef.current = rest
+      setConvos(rest)
+      saveAIConvos(aiUid, rest)
+    }, 400)
+    return () => window.clearTimeout(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [turns, aiUid])
+
+  /** 切换会话：中断进行中的流式请求并恢复目标会话消息。 */
+  const switchConvo = (id: string) => {
+    const target = convosRef.current.find((c) => c.id === id)
+    if (!target || id === convoIdRef.current) return
+    abortRef.current?.abort()
+    convoIdRef.current = id
+    setConvoId(id)
+    setNotice('')
+    setLastQuestion('')
+    setInput('')
+    setAttached([])
+    applyTurns(() => target.messages.map((m) => ({ id: ++turnSeq.current, role: m.role, content: m.content })))
+  }
+
+  /** 重命名会话（Modal 输入；空标题忽略）。 */
+  const renameConvo = () => {
+    const editing = convoEditing
+    if (!editing || !editing.draft.trim()) return
+    const list = convosRef.current.map((c) => (c.id === editing.id ? { ...c, title: editing.draft.trim().slice(0, 60) } : c))
+    convosRef.current = list
+    setConvos(list)
+    if (aiUid) saveAIConvos(aiUid, list)
+    setConvoEditing(null)
+  }
+
+  /** 删除会话（确认后；删除当前会话则切到最近一条，无则回到新会话）。 */
+  const deleteConvo = (id: string) => {
+    const target = convosRef.current.find((c) => c.id === id)
+    if (!target) return
+    const label = target.title || (zh ? '未命名会话' : 'Untitled')
+    if (!window.confirm(zh ? `删除会话「${label}」？删除后不可恢复。` : `Delete conversation "${label}"? This cannot be undone.`)) return
+    const list = convosRef.current.filter((c) => c.id !== id)
+    convosRef.current = list
+    setConvos(list)
+    if (aiUid) saveAIConvos(aiUid, list)
+    if (convoIdRef.current === id) {
+      const top = list[0]
+      if (top) switchConvo(top.id)
+      else newChat()
+    }
   }
 
   useEffect(() => {
@@ -1442,6 +1743,8 @@ export default function AIAssistant() {
     }
     const sysPrefix: AIMessage[] = []
     if (personaPrompt) sysPrefix.push({ role: 'system', content: personaPrompt })
+    // 仅对话模式：系统提示显式声明不读写文件（与 use_files:false 双保险）。
+    if (chatOnly) sysPrefix.push({ role: 'system', content: '当前为仅对话模式：不要尝试读写文件' })
     const messages: AIMessage[] = [...sysPrefix, ...messagesBody]
     // 引用文件：本轮上送后清空（气泡记录文件名供回看）；重试/重新生成时
     // 复用最后一问所引用的文件（重发同样上下文）。
@@ -1459,6 +1762,14 @@ export default function AIAssistant() {
     })
     const ac = new AbortController()
     abortRef.current = ac
+    // 实际生效工作目录：手选（固定）> 跟随文件页位置（空间根 folderId 惰性
+    // 解析并缓存）> 默认空间根（不传 work_root）；仅对话模式不传。
+    let workRoot: string | undefined = workdir?.folderId
+    if (!workdir && aiLocRef.current) {
+      const loc = aiLocRef.current
+      workRoot = loc.folderId ?? (await resolveSpaceRootFolderId(loc.spaceId)) ?? undefined
+    }
+    if (chatOnly) workRoot = undefined
     try {
       await aiChat(
         {
@@ -1477,10 +1788,11 @@ export default function AIAssistant() {
           include_memory: true,
           // 我的文件（RAG 引用本人文档）：默认开（后端就绪前透传、忽略）。
           include_docs: toggles.docs ? true : undefined,
-          // 平台文件工具（df_*）：开关显式透传（关闭时传 false 停止注入）。
-          use_files: toggles.files,
-          // 工作目录（相对路径解析基准）：未选 = 默认空间根（不传 work_root）。
-          work_root: workdir?.folderId || undefined,
+          // 平台文件工具（df_*）：开关显式透传（关闭时传 false 停止注入）；
+          // 仅对话模式恒 false（不注入任何文件工具）。
+          use_files: chatOnly ? false : toggles.files,
+          // 工作目录（相对路径解析基准）：实际生效目录（见上方 workRoot）。
+          work_root: workRoot || undefined,
         },
         {
           onMeta: (meta) => {
@@ -1550,9 +1862,13 @@ export default function AIAssistant() {
     }
   }
 
-  /** 新对话/清空：中断进行中的流式请求并清空会话（旧流回调按 id 落空）。 */
+  /** 新对话/清空：中断进行中的流式请求并清空当前会话（旧流回调按 id 落空）。
+   *  多会话语义：清空 = 清当前会话消息（空会话自动从历史列表移除）；
+   *  「新对话」按钮同此（convoId 置空 → 下一条消息开启新会话）。 */
   const newChat = () => {
     abortRef.current?.abort()
+    convoIdRef.current = ''
+    setConvoId('')
     applyTurns(() => [])
     setNotice('')
     setLastQuestion('')
@@ -1618,20 +1934,91 @@ export default function AIAssistant() {
       maskClosable={!pinned}
       keyboard={!pinned}
       extra={
-        <Tooltip title={pinned
-          ? (zh ? '已固定：点击页面 / Esc 不会关闭助手，点击图钉取消固定' : 'Pinned: clicking the page or Esc will not close the assistant; click the pin to unpin')
-          : (zh ? '固定后点击页面不会关闭助手' : 'Pin: clicking the page will not close the assistant')}>
-          <Button
-            size="small"
-            type="text"
-            className={`ai-pin-btn${pinned ? ' active' : ''}`}
-            aria-label={zh ? '固定助手' : 'Pin assistant'}
-            aria-pressed={pinned}
-            onClick={togglePinned}
+        <span className="ai-drawer-extra">
+          {/* 会话下拉：当前会话标题 + 历史会话列表（切换/重命名/删除）+ 新会话。 */}
+          <Popover
+            trigger="click"
+            placement="bottomRight"
+            arrow={false}
+            open={convoOpen}
+            onOpenChange={(next) => {
+              // 重命名弹窗打开期间忽略外点关闭（Modal 挂载于 body）。
+              if (!next && convoEditing) return
+              setConvoOpen(next)
+            }}
+            content={
+              <div className="ai-conv-pop">
+                <button type="button" className="ai-conv-new" onClick={() => { setConvoOpen(false); newChat() }}>
+                  <Plus size={13} strokeWidth={2} aria-hidden="true" />
+                  <span>{zh ? '新会话' : 'New conversation'}</span>
+                </button>
+                <div className="ai-conv-list">
+                  {convos.length === 0 && (
+                    <div className="ai-attach-state muted">{zh ? '暂无历史会话' : 'No conversations yet'}</div>
+                  )}
+                  {convos.map((c) => (
+                    <div key={c.id} className={`ai-conv-item${c.id === convoId ? ' active' : ''}`}>
+                      <button
+                        type="button"
+                        className="ai-conv-open"
+                        title={c.title}
+                        onClick={() => { setConvoOpen(false); switchConvo(c.id) }}
+                      >
+                        <span className="t">{c.title || (zh ? '未命名会话' : 'Untitled')}</span>
+                        <span className="time muted">{aiConvoRelTime(c.updatedAt, zh)}</span>
+                      </button>
+                      <Tooltip title={zh ? '重命名' : 'Rename'}>
+                        <button
+                          type="button"
+                          className="ai-conv-op"
+                          aria-label={zh ? '重命名会话' : 'Rename conversation'}
+                          onClick={() => setConvoEditing({ id: c.id, draft: c.title })}
+                        >
+                          <Pencil size={12} strokeWidth={2} aria-hidden="true" />
+                        </button>
+                      </Tooltip>
+                      <Tooltip title={zh ? '删除' : 'Delete'}>
+                        <button
+                          type="button"
+                          className="ai-conv-op"
+                          aria-label={zh ? '删除会话' : 'Delete conversation'}
+                          onClick={() => deleteConvo(c.id)}
+                        >
+                          <Trash2 size={12} strokeWidth={2} aria-hidden="true" />
+                        </button>
+                      </Tooltip>
+                    </div>
+                  ))}
+                </div>
+                <div className="ai-attach-state muted">
+                  {zh ? '会话保存在本机（最近 30 个）' : 'Conversations are stored locally (latest 30)'}
+                </div>
+              </div>
+            }
           >
-            <Pin size={14} strokeWidth={2} aria-hidden="true" />
-          </Button>
-        </Tooltip>
+            <Tooltip title={zh ? '历史会话（切换 / 重命名 / 删除）' : 'Conversation history (switch / rename / delete)'}>
+              <Button size="small" type="text" className="ai-conv-btn" aria-label={zh ? '历史会话' : 'Conversation history'}>
+                <MessagesSquare size={14} strokeWidth={2} aria-hidden="true" />
+                <span className="ai-conv-cur">{convos.find((c) => c.id === convoId)?.title || (zh ? '新对话' : 'New chat')}</span>
+                <ChevronDown size={12} strokeWidth={2} aria-hidden="true" />
+              </Button>
+            </Tooltip>
+          </Popover>
+          <Tooltip title={pinned
+            ? (zh ? '已固定：点击页面 / Esc 不会关闭助手，点击图钉取消固定' : 'Pinned: clicking the page or Esc will not close the assistant; click the pin to unpin')
+            : (zh ? '固定后点击页面不会关闭助手' : 'Pin: clicking the page will not close the assistant')}>
+            <Button
+              size="small"
+              type="text"
+              className={`ai-pin-btn${pinned ? ' active' : ''}`}
+              aria-label={zh ? '固定助手' : 'Pin assistant'}
+              aria-pressed={pinned}
+              onClick={togglePinned}
+            >
+              <Pin size={14} strokeWidth={2} aria-hidden="true" />
+            </Button>
+          </Tooltip>
+        </span>
       }
       styles={{ header: { padding: '8px 16px' }, body: { padding: 0, display: 'flex', flexDirection: 'column' } }}
     >
@@ -1807,6 +2194,17 @@ export default function AIAssistant() {
                 />
               )
             })()}
+            {/* 助手模式：智能（文件工具等开关生效）| 仅对话（不修改/不操作
+                文件：use_files 恒 false + 文件开关禁用 + 系统提示声明）。 */}
+            <Segmented
+              size="small"
+              value={aiMode}
+              onChange={changeAIMode}
+              options={[
+                { label: zh ? '智能' : 'Smart', value: 'smart' },
+                { label: zh ? '仅对话' : 'Chat only', value: 'chat' },
+              ]}
+            />
             <Select
               className="ai-persona-select"
               size="small"
@@ -1876,6 +2274,7 @@ export default function AIAssistant() {
               docs={toggles.docs}
               docsAvailable={toggles.docsAvailable}
               files={toggles.files}
+              filesDisabled={chatOnly}
               onWeb={toggles.setWeb}
               onThink={toggles.setThink}
               onMcp={toggles.setMcp}
@@ -2091,8 +2490,15 @@ export default function AIAssistant() {
                 </Popover>
                 {/* 平台技能模板：全局助手无文件/选区语境，占位符置空后压缩空行填入。 */}
                 <AISkillButton zh={zh} onPick={(s) => setInput(renderSkillPrompt(s.prompt))} />
-                {/* 工作目录（df_* 文件工具基准）：未选 = 默认空间根。 */}
-                <AIWorkDirButton value={workdir} onChange={selectWorkDir} zh={zh} />
+                {/* 工作目录（df_* 文件工具基准）：手选（固定）> 跟随文件页
+                    当前位置 > 默认空间根。 */}
+                <AIWorkDirButton
+                  value={workdir}
+                  follow={!workdir && aiLoc ? { path: aiLoc.path } : null}
+                  onFollow={() => selectWorkDir(null)}
+                  onChange={selectWorkDir}
+                  zh={zh}
+                />
                 <span className="ai-input-hint muted">{t(locale, 'aiAssistantInputHint')}</span>
               </span>
               {busy ? (
@@ -2124,6 +2530,25 @@ export default function AIAssistant() {
           </div>
         </div>
       </div>
+
+      {/* 重命名会话弹窗（空标题忽略；保存即写回 localStorage）。 */}
+      {convoEditing && (
+        <Modal title={zh ? '重命名会话' : 'Rename conversation'} onClose={() => setConvoEditing(null)}>
+          <Input
+            value={convoEditing.draft}
+            maxLength={60}
+            onChange={(e) => setConvoEditing((cur) => (cur ? { ...cur, draft: e.target.value } : cur))}
+            onPressEnter={renameConvo}
+            placeholder={zh ? '输入新的会话标题' : 'Enter a new title'}
+          />
+          <div className="modal-actions">
+            <Button type="primary" disabled={!convoEditing.draft.trim()} onClick={renameConvo}>
+              {zh ? '确定' : 'OK'}
+            </Button>
+            <Button onClick={() => setConvoEditing(null)}>{zh ? '取消' : 'Cancel'}</Button>
+          </div>
+        </Modal>
+      )}
 
       {/* 编辑记忆弹窗（PUT /ai/memory/:id 原地更新；失败走面板 memoryNotice 提示）。 */}
       {memoryEditing && (

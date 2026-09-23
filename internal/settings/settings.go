@@ -101,6 +101,10 @@ const (
 	KeyAgentAllowAI    = "agent.allow_ai"
 	KeyAgentAIMaxCalls = "agent.ai_max_calls"
 	KeyAgentSyncMode   = "agent.sync_mode"
+	// KeyAgentHarness 为 Agent 执行引擎选择（键名冻结）：auto 按平台默认
+	// 模型协议自动路由，claude-code/pi 为显式指定，builtin 为内置轻量
+	// runner；终值经 RuntimeRequest 注入容器 env DOCFLOW_HARNESS。
+	KeyAgentHarness = "agent.harness"
 )
 
 // SMTP 运行时配置键（system_settings 存储，邮件发送处优先读库回退 env）。
@@ -924,8 +928,8 @@ var Definitions = []Definition{
 	{Key: KeyRetentionTrashDays, Type: TypeInt, Default: int64(30), Min: intPtr(1), Max: intPtr(3650), Effect: EffectImmediate, Description: "回收站保留天数：软删除超过该天数后由后台清理任务彻底删除"},
 	{Key: KeyRetentionAccessEventsDays, Type: TypeInt, Default: int64(90), Min: intPtr(1), Max: intPtr(3650), Effect: EffectImmediate, Description: "文件访问事件保留天数：超过该天数后由后台清理任务删除"},
 	{Key: KeyRateLimitPerMinute, Type: TypeInt, Default: int64(120), Min: intPtr(0), Max: intPtr(100000), Effect: EffectRestart, Description: "认证 API 每分钟请求上限（须重启生效：限流器在启动时按 env 装配，本键当前无热读取消费方）"},
-	{Key: KeyLoginMaxRetries, Type: TypeInt, Default: int64(5), Min: intPtr(1), Max: intPtr(100), Effect: EffectRestart, Description: "连续登录失败锁定阈值（须重启生效：由 env LOGIN_MAX_RETRIES 启动时注入）"},
-	{Key: KeyLoginLockMinutes, Type: TypeInt, Default: int64(15), Min: intPtr(1), Max: intPtr(10080), Effect: EffectRestart, Description: "登录失败锁定时长（分钟；须重启生效：由 env LOGIN_LOCK_MINUTES 启动时注入）"},
+	{Key: KeyLoginMaxRetries, Type: TypeInt, Default: int64(5), Min: intPtr(1), Max: intPtr(100), Effect: EffectImmediate, Description: "登录/WebDAV 失败锁定阈值（同一用户名+IP）；即时生效，env LOGIN_MAX_RETRIES 仅为引导默认（键未入库时沿用 env 值）"},
+	{Key: KeyLoginLockMinutes, Type: TypeInt, Default: int64(15), Min: intPtr(1), Max: intPtr(10080), Effect: EffectImmediate, Description: "防爆破锁定时长（分钟）；即时生效，env LOGIN_LOCK_MINUTES 仅为引导默认（键未入库时沿用 env 值）"},
 	{Key: KeyMaxConcurrentUploads, Type: TypeInt, Default: int64(3), Min: intPtr(1), Max: intPtr(100), Effect: EffectImmediate, Description: "每用户并发上传会话上限：非终态会话（uploading/verifying/scanning）达到上限时新建会话返回 429"},
 	{Key: KeyBatchMaxItems, Type: TypeInt, Default: int64(100), Min: intPtr(1), Max: intPtr(1000), Effect: EffectImmediate, Description: "批量操作单次最大项目数"},
 	{Key: KeyFolderMaxDepth, Type: TypeInt, Default: int64(32), Min: intPtr(1), Max: intPtr(1000), Effect: EffectImmediate, Description: "目录最大深度（根为 1）：创建子目录与目录移动超过上限拒绝"},
@@ -953,6 +957,7 @@ var Definitions = []Definition{
 	{Key: KeyAgentAllowAI, Type: TypeBool, Default: true, Effect: EffectImmediate, Description: "允许 Agent 容器经 IPC socket（unix domain，NetworkMode=none 下仍可用）调用平台默认对话模型；关闭时创建任务不签发 AI 令牌、容器不注入 DOCFLOW_AI_TOKEN"},
 	{Key: KeyAgentAIMaxCalls, Type: TypeInt, Default: int64(40), Min: intPtr(1), Max: intPtr(10000), Effect: EffectImmediate, Description: "单个 Agent 任务经 IPC socket 调用平台 AI 的次数上限（超出返回 429，令牌随任务终态注销）"},
 	{Key: KeyAgentSyncMode, Type: TypeString, Default: "git", Effect: EffectImmediate, Description: "Agent 产物同步模式：git 优先读取容器内 runner 产出的 .docflow-changes.json（A/M/D 清单）构造 diff，缺失/非法时回退全量扫描；scan 恒走全量扫描"},
+	{Key: KeyAgentHarness, Type: TypeString, Default: "auto", Effect: EffectImmediate, Description: "Agent 执行引擎：auto 按平台默认模型协议自动选择（Anthropic→Claude Code，OpenAI 兼容→pi）；builtin=内置轻量 runner"},
 }
 
 // DefinitionByKey 返回键定义；未知键返回 ErrUnknownKey。
@@ -1173,6 +1178,31 @@ func (s *Store) GetInt(key string) (int, error) {
 		return 0, fmt.Errorf("settings key %s is not int", key)
 	}
 	return int(n), nil
+}
+
+// GetIntDefined 返回 int 类型键的入库值（热读取）：键在 system_settings
+// 有行且值可解析时返回 (值, true)；未入库（ErrNotSet）、行损坏或键未知
+// 返回 (0, false)。与 Get 的「回退定义默认值」不同，本方法区分「未配置」，
+// 供消费方回落自身基线（如 env 注入值——env 为引导默认、运行时键优先，
+// 典型消费方：登录/WebDAV 防爆破锁定参数）。
+func (s *Store) GetIntDefined(key string) (int, bool) {
+	d, err := DefinitionByKey(key)
+	if err != nil {
+		return 0, false
+	}
+	row, err := s.repo.GetRow(key)
+	if err != nil {
+		return 0, false
+	}
+	value, err := decode(d, row.ValueJSON)
+	if err != nil {
+		return 0, false
+	}
+	n, ok := value.(int64)
+	if !ok {
+		return 0, false
+	}
+	return int(n), true
 }
 
 // GetBool 返回 bool 类型键的当前值（热读取）；未知键或值非法返回错误，

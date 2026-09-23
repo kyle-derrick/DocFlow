@@ -2080,6 +2080,12 @@ const QUOTA_BYTE_KEYS = new Set([
   'agent.max_memory_bytes',
 ])
 
+/** 本面板不展示的键前缀（v2.9 反馈 9/10 去重）：ai.* 属「AI 设置」面板、
+ * agent.* 属「AI 创作舱」面板、security.* 与 webdav.*（防爆破/限流/扫描
+ * 策略/WebDAV 平台开关）属「安全与访问」面板——同一键保持单一编辑入口，
+ * 避免双入口漂移；过滤在渲染层做（读取后 filter，仍一次拉全量）。 */
+const HIDDEN_SETTING_PREFIXES = new Set(['ai', 'agent', 'security', 'webdav'])
+
 /** 全部内置设置键的双语名称与简短说明（v2.7 反馈 14：此前仅部分键有
  * 中文名、其余裸显 key，且不随界面语言切换）。清单与后端 settings
  * Definitions 一一对应（admin settings 端点只输出内置键，smtp 与 ai 的
@@ -2118,8 +2124,8 @@ export const SETTING_KEY_META: Record<string, { zh: string; en: string; dzh: str
   'retention.access_events_days': { zh: '访问事件保留天数', en: 'Access event retention', dzh: '文件访问事件超过该天数后删除', den: 'Access events older than this are deleted' },
   // ---- security.* ----
   'security.rate_limit_per_minute': { zh: '认证 API 每分钟限流', en: 'Auth API rate limit', dzh: '每分钟请求上限（须重启生效：限流器启动时装配）', den: 'Requests per minute (restart required: limiter built at startup)' },
-  'security.login_max_retries': { zh: '登录失败锁定阈值', en: 'Login lockout threshold', dzh: '连续失败达到阈值后锁定（须重启生效）', den: 'Lock after consecutive failures (restart required)' },
-  'security.login_lock_minutes': { zh: '登录锁定时长', en: 'Login lockout duration', dzh: '触发锁定后的锁定分钟数（须重启生效）', den: 'Lockout duration in minutes (restart required)' },
+  'security.login_max_retries': { zh: '登录失败锁定阈值', en: 'Login lockout threshold', dzh: '同一用户名+IP 连续失败达到阈值后锁定，覆盖登录与 WebDAV', den: 'Lock after N consecutive failures per username+IP; covers login and WebDAV' },
+  'security.login_lock_minutes': { zh: '登录锁定时长', en: 'Login lockout duration', dzh: '触发锁定后的锁定分钟数，到期自动解除', den: 'Lockout duration in minutes; lifts automatically on expiry' },
   'security.scan_quarantine_policy': { zh: '扫描失败处理策略', en: 'Scan failure policy', dzh: 'quarantine（隔离）或 reject（拒绝）', den: 'quarantine or reject' },
   // ---- batch / folder ----
   'batch.max_items': { zh: '批量操作单次上限', en: 'Batch max items', dzh: '批量操作单次可处理的最大项目数', den: 'Max items per batch operation' },
@@ -2147,13 +2153,19 @@ export const SETTING_KEY_META: Record<string, { zh: string; en: string; dzh: str
   'agent.max_memory_bytes': { zh: 'Agent 最大内存', en: 'Agent max memory', dzh: '单容器内存上限（字节）', den: 'Memory limit per container (bytes)' },
   'agent.network_mode': { zh: 'Agent 网络模式', en: 'Agent network mode', dzh: 'none 或 restricted（受限出网）', den: 'none or restricted' },
   'agent.mcp_callback_base_url': { zh: '受限 MCP 回调基地址', en: 'MCP callback base URL', dzh: '不含凭据的回调地址前缀', den: 'Credential-free callback URL prefix' },
+  'agent.allow_ai': { zh: '允许 Agent 调用平台 AI', en: 'Agent AI over IPC', dzh: '容器保持断网，经 IPC socket 调用平台默认对话模型', den: 'Containers stay offline; platform AI reached over an IPC socket' },
+  'agent.ai_max_calls': { zh: 'Agent 单任务 AI 调用上限', en: 'Agent AI call limit', dzh: '单个任务经 IPC 调用平台 AI 的次数上限（超出 429）', den: 'Per-task platform AI calls over IPC (429 beyond)' },
+  'agent.sync_mode': { zh: 'Agent 产物同步模式', en: 'Agent sync mode', dzh: 'git（按变更清单同步，推荐）或 scan（全量扫描）', den: 'git (change-list based, recommended) or scan (full scan)' },
 }
 
 /**
- * 系统设置面板（v2.3 自管理页迁入，仅 admin）：system_settings 全量内置键，
- * 按前缀分组（分组标题中文化）、key 直显 + 中文名 + 说明，值按类型渲染
- * （bool 开关直开直关 / int 数字 / string 文本），行内编辑保存；
+ * 系统设置面板（v2.3 自管理页迁入，仅 admin）：system_settings 内置键的
+ * 通用入口，按前缀分组（分组标题中文化）、key 直显 + 中文名 + 说明，值按
+ * 类型渲染（bool 开关直开直关 / int 数字 / string 文本），行内编辑保存；
  * 顶部搜索框按 key/中文名/描述过滤，分组可折叠。
+ * v2.9 去重：ai.* / agent.* / security.* / webdav.* 不在此展示（分属
+ * 「AI 设置」「AI 创作舱」「安全与访问」面板，见 HIDDEN_SETTING_PREFIXES），
+ * 面板顶部以 notice 指引对应位置。
  */
 export function SystemSettingsPanel({ onError, onNotice }: { onError: (msg: string) => void; onNotice: (msg: string) => void }) {
   // v2.7（反馈 14）：名称/说明/分组标题随界面语言切换（SETTING_KEY_META）。
@@ -2205,11 +2217,13 @@ export function SystemSettingsPanel({ onError, onNotice }: { onError: (msg: stri
   }
 
   /** 按键前缀分组（保持 Definitions 输出顺序），支持按 key/名称/说明过滤
-   *（双语名称均参与匹配，中英文界面过滤行为一致）。 */
+   *（双语名称均参与匹配，中英文界面过滤行为一致）；ai、agent、security、
+   * webdav 四类前缀已分属专属面板，在此渲染层排除（见 HIDDEN_SETTING_PREFIXES）。 */
   const settingGroups = useMemo(() => {
     const needle = settingsQuery.trim().toLowerCase()
     const map = new Map<string, SettingItem[]>()
     for (const item of settings) {
+      if (HIDDEN_SETTING_PREFIXES.has(item.key.split('.')[0])) continue
       const meta = SETTING_KEY_META[item.key]
       if (needle !== '') {
         const haystack = meta
@@ -2291,6 +2305,16 @@ export function SystemSettingsPanel({ onError, onNotice }: { onError: (msg: stri
   return (
     <>
       <div className="panel setting-group" style={{ padding: '12px 16px' }}>
+        {/* v2.9 去重指引：被排除的键分组不再出现，告知对应修改入口。 */}
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message={zh ? '部分配置已移至对应面板（此处不再重复展示）' : 'Some settings live in their own panels (not listed here)'}
+          description={zh
+            ? 'AI 检索与联网搜索（ai.*）请前往「AI 设置」；Agent 创作舱（agent.*）请前往「AI 创作舱」；登录防爆破、认证限流、扫描策略与 WebDAV 平台开关（security.* / webdav.*）请前往「安全与访问」。'
+            : 'AI retrieval & web search (ai.*) → "AI settings"; agent keys (agent.*) → "AI agent studio"; login anti-bruteforce, auth rate limit, scan policy and the WebDAV platform toggle (security.* / webdav.*) → "Security & access".'}
+        />
         <form className="team-create-row" style={{ marginBottom: 0 }} onSubmit={(e) => e.preventDefault()}>
           <label className="field" style={{ flex: 1 }}>
             <span>{zh ? '过滤设置键（按 key / 名称 / 说明匹配；过滤时分组自动展开）' : 'Filter setting keys (by key / name / description; groups auto-expand while filtering)'}</span>

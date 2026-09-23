@@ -705,8 +705,10 @@ export function FileBrowserWithTree({ listChildren, aside, treeRootLabel, ...bro
             listItems={drivenListItems}
             /* 复制/移动弹窗目录树数据源：回传「未包装」的原始 listItems——
                drivenListItems 会登记左侧主树节点并同步当前目录高亮，弹窗
-               展开目录若走它会把左侧主树也展开（联动 bug），故隔离。 */
-            pickerListItems={browserProps.listItems}
+               展开目录若走它会把左侧主树也展开（联动 bug），故隔离；
+               调用方显式传入 pickerListItems（如 FilesPage 的 AI 位置广播
+               隔离版）时优先使用。 */
+            pickerListItems={browserProps.pickerListItems ?? browserProps.listItems}
             fileOpenSignal={fileOpenSignal}
             folderNavSignal={folderNavSignal}
             toolbarHost={toolbarHost}

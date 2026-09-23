@@ -29,6 +29,10 @@ type RuntimeRequest struct {
 	// AIToken 为该任务的平台 AI IPC 令牌（agentsock 网关签发；空 = 容器
 	// 内无 AI 能力，DockerRuntime 不注入 DOCFLOW_AI_TOKEN）。
 	AIToken string
+	// Harness 为任务创建时解析的 Agent 执行引擎终值（claude-code/pi/
+	// builtin，见 agent.go 常量；DockerRuntime 对非空且非 builtin 值注入
+	// DOCFLOW_HARNESS，builtin/空走镜像默认 runner 不注入）。
+	Harness string
 }
 
 type RuntimeResult struct {
@@ -403,7 +407,7 @@ func ExportWorkspace(entries []ExportEntry, limits ExportLimits) (string, error)
 		if err != nil {
 			return cleanup(err)
 		}
-		f, err := os.OpenFile(rel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		f, err := os.OpenFile(rel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0666)
 		if err != nil {
 			r.Close()
 			return cleanup(err)
@@ -415,6 +419,20 @@ func ExportWorkspace(entries []ExportEntry, limits ExportLimits) (string, error)
 			return cleanup(copyErr)
 		}
 	}
+	// 跨容器 uid 错配放行：backend（app uid）导出的临时目录默认 0700/
+	// 0600，agent 容器以 65534 运行（Claude Code 拒绝 root）会无权读写。
+	// 导出内容本就是给容器使用的临时数据，统一放开组/其他读写位。
+	_ = filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			_ = os.Chmod(p, 0777)
+		} else {
+			_ = os.Chmod(p, 0666)
+		}
+		return nil
+	})
 	return root, nil
 }
 
@@ -426,6 +444,9 @@ type Executor struct {
 	// AIToken 为该任务的平台 AI IPC 令牌（agentsock 网关签发；空 = 容器
 	// 内无 AI 能力，DockerRuntime 不注入 DOCFLOW_AI_TOKEN 相关 env）。
 	AIToken string
+	// Harness 为该任务的 Agent 执行引擎终值（见 agent.go 常量；随
+	// RuntimeRequest 下发）。
+	Harness string
 	// SyncMode 产物同步模式（agent.sync_mode）：git（默认，优先消费
 	// runner 产出的 .docflow-changes.json）| scan（恒全量扫描）。
 	SyncMode string
@@ -463,7 +484,7 @@ func (e Executor) Execute(ctx context.Context, taskID, image, prompt string, ent
 	}
 	execCtx, cancel := context.WithTimeout(ctx, e.Timeout)
 	defer cancel()
-	result, err := e.Runtime.Run(execCtx, RuntimeRequest{TaskID: taskID, Image: image, Prompt: prompt, Workspace: workspace, AIToken: e.AIToken})
+	result, err := e.Runtime.Run(execCtx, RuntimeRequest{TaskID: taskID, Image: image, Prompt: prompt, Workspace: workspace, AIToken: e.AIToken, Harness: e.Harness})
 	if err != nil {
 		_ = os.RemoveAll(workspace)
 		return RuntimeResult{}, err

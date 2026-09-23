@@ -30,7 +30,7 @@ const RUNTIME_GROUPS: Array<{
     prefixes: ['ai'],
   },
   {
-    id: 'agent', title: { zh: 'Agent', en: 'Agent' }, panel: { zh: 'AI 智能体', en: 'AI agent' },
+    id: 'agent', title: { zh: 'Agent', en: 'Agent' }, panel: { zh: 'AI 创作舱', en: 'AI agent studio' },
     prefixes: ['agent'],
   },
   {
@@ -51,11 +51,13 @@ const RUNTIME_GROUPS: Array<{
   },
   {
     id: 'system', title: { zh: '系统', en: 'System' }, panel: { zh: '系统设置', en: 'System settings' },
-    prefixes: ['site', 'share', 'retention', 'batch', 'folder', 'backup', 'audit', 'space', 'webdav'],
+    prefixes: ['site', 'share', 'retention', 'batch', 'folder', 'backup', 'audit', 'space'],
   },
+  // v2.9：security.*（防爆破/限流/扫描策略）与 webdav.*（平台开关）迁往
+  //「安全与访问」面板（SecurityPanel），系统设置面板已排除这些前缀。
   {
-    id: 'security', title: { zh: '安全', en: 'Security' }, panel: { zh: '系统设置', en: 'System settings' },
-    prefixes: ['security'],
+    id: 'security', title: { zh: '安全与访问', en: 'Security & access' }, panel: { zh: '安全与访问', en: 'Security & access' },
+    prefixes: ['security', 'webdav'],
   },
   {
     id: 'collab', title: { zh: '协作', en: 'Collaboration' }, panel: { zh: '系统设置', en: 'System settings' },
