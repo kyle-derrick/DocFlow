@@ -1,0 +1,138 @@
+<!doctype html>
+<!-- DocFlow AI OnlyOffice 插件面板：
+     - plugins.js 引用同源反代路径 /onlyoffice/sdkjs-plugins/v1/plugins.js
+       （OnlyOffice Document Server 容器自带官方插件基座，Caddy/Nginx 将
+       /onlyoffice/* 反代到 DS；开发模式 vite dev server 未代理该路径时插件
+       基座加载失败，面板显示排查提示）；
+     - 就绪后（window.Asc.plugin.init 触发）向顶层宿主页（DocFlow 前端，
+       与本 iframe 同源）postMessage 上报 docflow-ai-plugin-ready；
+     - 监听 docflow-ai-insert 消息：executeMethod PasteHtml（word 富文本）
+       / PasteText（其余），插入编辑器光标处、有选区时替换选区，并回执
+       docflow-ai-insert-result；
+     - 自带最小 UI：文本域 + 插入按钮（宿主链路不可用时的手动兜底）。 -->
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>DocFlow AI</title>
+  <script src="/onlyoffice/sdkjs-plugins/v1/plugins.js"></script>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      margin: 0; padding: 12px;
+      font: 13px/1.6 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    h3 { margin: 0 0 6px; font-size: 14px; }
+    p { margin: 0 0 10px; color: #8a8f98; font-size: 12px; }
+    textarea {
+      width: 100%; box-sizing: border-box; min-height: 120px; margin-bottom: 8px;
+      font: inherit; padding: 6px 8px; border: 1px solid #c9ced6; border-radius: 6px;
+      background: transparent;
+    }
+    button {
+      font: inherit; padding: 5px 14px; border: none; border-radius: 6px;
+      background: #2f6fed; color: #fff; cursor: pointer;
+    }
+    button:disabled { background: #9db2ce; cursor: not-allowed; }
+    .status { margin-top: 8px; }
+    .status.ok { color: #2f9e44; }
+    .status.err { color: #e03131; }
+  </style>
+</head>
+<body>
+  <h3>DocFlow AI</h3>
+  <p id="hint">DocFlow 侧边 AI 面板的回复会经此插入文档；也可粘贴文本手动插入。</p>
+  <textarea id="payload" placeholder="粘贴或等待 DocFlow AI 面板下发内容…"></textarea>
+  <div>
+    <button id="insert" disabled>插入到光标 / 替换选区</button>
+  </div>
+  <p id="status" class="status"></p>
+  <script>
+    (function () {
+      'use strict'
+      var HOST_ORIGIN = window.location.origin // 宿主页（DocFlow 前端）与本插件 iframe 同源
+      var insertBtn = document.getElementById('insert')
+      var payloadEl = document.getElementById('payload')
+      var statusEl = document.getElementById('status')
+      var hintEl = document.getElementById('hint')
+
+      function setStatus(text, cls) {
+        statusEl.textContent = text || ''
+        statusEl.className = 'status' + (cls ? ' ' + cls : '')
+      }
+
+      function notifyHost(data) {
+        // 宿主=顶层 window（编辑器 iframe 之上）；同源部署下 origin 相同。
+        try { window.top.postMessage(data, HOST_ORIGIN) } catch (e) { /* 跨源被拦：静默 */ }
+      }
+
+      function pluginReady() {
+        return typeof window.Asc !== 'undefined' && window.Asc.plugin
+      }
+
+      // 插件协议就绪（编辑器触发 init）：放行 UI 并向宿主上报。
+      var hooked = false
+      function onPluginInit() {
+        if (hooked) return
+        hooked = true
+        insertBtn.disabled = false
+        setStatus('插件就绪', 'ok')
+        notifyHost({ type: 'docflow-ai-plugin-ready' })
+      }
+      if (pluginReady()) {
+        window.Asc.plugin.init = onPluginInit
+        // 兜底：init 消息早于本脚本赋值到达时不会再触发回调，延迟自行
+        // 放行（executeMethod 由 plugins.js 内部排队，晚连不丢指令）。
+        window.setTimeout(onPluginInit, 1500)
+      } else {
+        hintEl.textContent = '插件基座（plugins.js）未加载：/onlyoffice/sdkjs-plugins/v1/plugins.js 不可达。部署形态下经反向代理提供；本地 vite 开发模式不支持。'
+        setStatus('插件基座未加载', 'err')
+      }
+
+      /** 插入文本：word 场景优先 PasteHtml（富文本），其余 PasteText。 */
+      function insertPayload(text, html, source) {
+        if (!pluginReady()) return { ok: false, error: 'plugin API not ready' }
+        if (html) window.Asc.plugin.executeMethod('PasteHtml', [html])
+        else window.Asc.plugin.executeMethod('PasteText', [text || ''])
+        setStatus((source === 'host' ? '已插入来自 DocFlow AI 面板的内容' : '已插入'), 'ok')
+        return { ok: true }
+      }
+
+      // 宿主页 → 插件：AI 回复插入指令（origin 严格校验同源）。
+      window.addEventListener('message', function (e) {
+        if (e.origin !== HOST_ORIGIN) return
+        var d = e.data
+        if (!d || typeof d !== 'object' || d.type !== 'docflow-ai-insert') return
+        var text = typeof d.text === 'string' ? d.text : ''
+        var html = typeof d.html === 'string' && d.html ? d.html : ''
+        var result
+        if (!pluginReady()) {
+          result = { ok: false, error: 'plugin API not ready' }
+        } else if (!text && !html) {
+          result = { ok: false, error: 'empty payload' }
+        } else {
+          try {
+            result = insertPayload(text, html, 'host')
+          } catch (err) {
+            result = { ok: false, error: String((err && err.message) || err) }
+          }
+        }
+        if (!result.ok) setStatus('插入失败：' + result.error, 'err')
+        try {
+          e.source && e.source.postMessage(
+            { type: 'docflow-ai-insert-result', ok: result.ok, error: result.error || null, nonce: d.nonce || null },
+            e.origin,
+          )
+        } catch (err) { /* 回执失败不阻塞插入 */ }
+      })
+
+      // 面板手动插入（兜底路径）。
+      insertBtn.addEventListener('click', function () {
+        var text = payloadEl.value
+        if (!text.trim()) { setStatus('请先粘贴内容', 'err'); return }
+        var r = insertPayload(text, '', 'manual')
+        if (!r.ok) setStatus('插入失败：' + r.error, 'err')
+      })
+    })()
+  </script>
+</body>
+</html>

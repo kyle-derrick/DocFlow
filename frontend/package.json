@@ -12,8 +12,8 @@
   },
   "dependencies": {
     "@ant-design/icons": "^6.3.4",
+    "@ant-design/x": "^2.9.0",
     "@excalidraw/excalidraw": "0.17.6",
-    "@excalidraw/mermaid-to-excalidraw": "^2.2.2",
     "@monaco-editor/react": "^4.7.0",
     "@tiptap/extension-code-block-lowlight": "^2.27.3",
     "@tiptap/extension-highlight": "2.27.3",

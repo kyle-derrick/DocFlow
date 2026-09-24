@@ -2913,20 +2913,32 @@ svg.lucide {
   padding: 12px 16px 16px;
 }
 
+/* 顶栏恒单行（不 wrap）：drawio/Office/白板页的长文件名曾把 AI 按钮、保存
+   等操作挤到第二行（用户反馈「AI 按钮等单独一行挤压高度」）；宽度不足时
+   仅标题按省略号收缩，按钮/徽标永不换行。 */
 .editor-head {
   display: flex;
   align-items: center;
   gap: 10px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  min-width: 0;
+  overflow: hidden;
   margin-bottom: 8px;
+  flex-shrink: 0;
+}
+
+.editor-head > *:not(.editor-title) {
   flex-shrink: 0;
 }
 
 .editor-title {
   margin: 0;
   font-size: 15px;
-  word-break: break-all;
   min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .editor-hint {
@@ -3737,8 +3749,12 @@ kbd {
 
 /* ---------- 富文本编辑器（Tiptap v2，.rich-text-*） ---------- */
 
-/* 编辑器整体：独立窗口编辑页内占满剩余高度（页面根已锁定 100vh 定高）。 */
+/* 编辑器整体：独立窗口编辑页内占满剩余高度（页面根已锁定 100vh 定高）。
+   position:relative——大纲浮层（.rich-text-outline）的定位锚点：此前祖先链
+   上无任何 positioned 元素，浮层锚到页面初始包含块右上角，盖住页头与右侧
+   AI 面板（用户反馈「大纲框挡住很多东西，包括 AI 窗口」）。 */
 .rich-text-wrap {
+  position: relative;
   display: flex;
   flex-direction: column;
   flex: 1;
@@ -4007,6 +4023,11 @@ kbd {
   border-radius: 8px;
   background: var(--surface-2);
   box-shadow: 0 6px 20px rgba(0,0,0,.12);
+}
+/* AI 对话面板打开时大纲浮层自动收起（面板关闭即恢复）：面板以行布局挂在
+   .text-editor-body 下，:has 检测其存在即隐藏大纲，避免两者抢右侧空间。 */
+.text-editor-body:has(> .ai-edit-chat-panel) .rich-text-outline {
+  display: none;
 }
 .rich-text-outline strong { display: block; margin-bottom: 6px; font-size: 12px; }
 .rich-text-outline-item {
@@ -5749,13 +5770,15 @@ kbd {
   white-space: nowrap;
 }
 
-/* drawio 编辑页官方 MCP 说明行（编辑面板顶部一行，AI 对话 + 平台 MCP
-   服务提示；随 AI 总开关显隐）。 */
-.drawio-mcp-hint {
+/* drawio 编辑页官方 MCP 提示（并入顶栏行内、随 AI 总开关显隐；宽度不足
+   时省略收缩不换行，完整文案经 title 悬浮查看）——不再独占一行挤压高度。 */
+.editor-head > .drawio-mcp-hint {
   font-size: 12px;
-  margin: -2px 0 6px;
-  flex-shrink: 0;
-  word-break: break-all;
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ---- 项16：全站过渡（180ms fade/slide，克制口径） ---- */
@@ -6071,25 +6094,6 @@ kbd {
 }
 .ai-input-hint { font-size: 11px; user-select: none; }
 .ai-send-btn, .ai-stop-btn { flex-shrink: 0; }
-/* 选项行（输入框下方）：模型选择 / 模式 / 人设（左）+ 开关组与发送⇄停止
-   （右）；窄宽时自动换行（开关组整体靠右，放不下退居下一行右对齐）。 */
-.ai-input-opts {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px 8px;
-  padding: 8px 2px 0;
-  min-width: 0;
-}
-.ai-input-opts-right {
-  margin-left: auto;
-  display: inline-flex;
-  align-items: center;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 6px 8px;
-  min-width: 0;
-}
 /* 打字机光标（流式输出中）。 */
 .ai-caret::after {
   content: '▍';
@@ -6535,21 +6539,6 @@ kbd {
   line-height: 16px;
   color: var(--muted);
 }
-.ai-persona-select { min-width: 96px; }
-.ai-persona-pop { width: 300px; display: flex; flex-direction: column; gap: 8px; font-size: 12px; }
-/* 人设下拉选项：名称 + 「平台」tag（平台人设三源合并）。 */
-.ai-persona-option { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
-.ai-persona-option-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ai-persona-platform-tag {
-  flex-shrink: 0;
-  padding: 0 6px;
-  border: 1px solid var(--primary);
-  border-radius: 999px;
-  color: var(--primary);
-  font-size: 10px;
-  line-height: 16px;
-  opacity: 0.85;
-}
 /* 长期记忆弹层（手动版）：列表编辑/删除 + 新增 + 清空。 */
 .ai-memory-pop { width: 300px; display: flex; flex-direction: column; gap: 8px; font-size: 12px; }
 /* 面板顶部「自动记忆」开关（prefs.memory_auto）。 */
@@ -6701,60 +6690,6 @@ kbd {
 }
 .ai-title-btn > svg { flex-shrink: 0; color: var(--muted); opacity: 0; transition: opacity 0.15s; }
 .ai-title-btn:hover:not(:disabled) > svg { opacity: 1; }
-/* 会话列表按钮（纯图标；历史会话切换 / 重命名 / 删除）。 */
-.ai-conv-btn.ant-btn { padding: 0 4px; }
-/* 会话下拉弹层（新会话 + 历史列表 + 说明）。 */
-.ai-conv-pop { width: 264px; display: flex; flex-direction: column; gap: 8px; }
-.ai-conv-list { max-height: 264px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
-.ai-conv-item { display: flex; align-items: center; gap: 2px; border-radius: 8px; }
-.ai-conv-item:hover { background: var(--surface-2); }
-.ai-conv-item.active { background: var(--primary-bg, rgba(59, 130, 246, 0.12)); }
-.ai-conv-open {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 1px;
-  padding: 4px 6px;
-  border: none;
-  background: transparent;
-  color: var(--text);
-  cursor: pointer;
-  text-align: left;
-}
-.ai-conv-open .t { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
-.ai-conv-open .time { font-size: 11px; }
-.ai-conv-op {
-  flex-shrink: 0;
-  width: 24px;
-  height: 24px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-  opacity: 0;
-}
-.ai-conv-item:hover .ai-conv-op { opacity: 1; }
-.ai-conv-op:hover { background: var(--surface-2); color: var(--danger, #dc2626); }
-.ai-conv-new {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  padding: 5px 8px;
-  border: 1px dashed var(--border);
-  border-radius: 8px;
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-  font-size: 13px;
-}
-.ai-conv-new:hover { color: var(--primary); border-color: var(--primary); }
 .ai-attach-item {
   display: flex;
   align-items: center;
@@ -7632,3 +7567,155 @@ a.ai-web-source-link:hover { text-decoration: underline; }
 @media (max-width: 420px) {
   .viewer-aiw-card { width: calc(100vw - 16px) !important; }
 }
+
+/* ==================== AI 助手 @ant-design/x 重构（.aiax-*）+ 悬浮球边缘吸附 ====================
+   本节为 AIAssistant（Bubble.List / Sender / Conversations / XProvider 换壳）与
+   ViewerAIWidget（40px 悬浮球 + 边缘吸附半嵌圆点 + 弹窗内挂载）的新样式；
+   全部追加在文件末尾，避免与其他并行任务的编辑冲突。 */
+
+/* ---- AI 助手 Drawer 骨架 ---- */
+.aiax-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+/* 顶部工具栏：人设 / 模式 / 工作目录（左）+ 记忆 / 清空 / 智能体（右）；
+   单行 flex，元素多时 wrap。 */
+.aiax-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  min-width: 0;
+}
+.aiax-toolbar-gap { flex: 1; min-width: 4px; }
+/* 头部/工具栏纯图标按钮（紧凑内边距）。 */
+.aiax-head-btn.ant-btn { padding: 0 4px; }
+/* 人设选择（紧凑；选项 = 名称 + 「平台」tag）。 */
+.aiax-persona { min-width: 92px; max-width: 150px; }
+.aiax-persona-pop { width: 300px; display: flex; flex-direction: column; gap: 8px; font-size: 12px; }
+.aiax-persona-option { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.aiax-persona-option-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.aiax-persona-platform-tag {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border: 1px solid var(--primary);
+  border-radius: 999px;
+  color: var(--primary);
+  font-size: 10px;
+  line-height: 16px;
+  opacity: 0.85;
+}
+
+/* ---- 历史会话弹层（Conversations 组件） ---- */
+.aiax-conv-pop { width: 260px; display: flex; flex-direction: column; gap: 8px; }
+.aiax-conv-new {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 8px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+}
+.aiax-conv-new:hover { color: var(--primary); border-color: var(--primary); }
+.aiax-conv-list { max-height: 300px; overflow-y: auto; }
+/* 会话条目两行：标题 + 相对时间。 */
+.aiax-conv-label { display: flex; flex-direction: column; gap: 1px; min-width: 0; width: 100%; }
+.aiax-conv-label .t { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.aiax-conv-label .time { font-size: 11px; }
+
+/* ---- 消息流（Bubble.List） ---- */
+.aiax-thread {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.aiax-thread .ai-empty { margin: auto; }
+.aiax-bubbles.ant-bubble-list { flex: 1; min-height: 0; }
+/* 气泡间距收紧（默认 padding 偏大）；左右留白比例下调。 */
+.aiax-bubbles .ant-bubble { padding-block: 5px; }
+.aiax-bubbles .ant-bubble-start { padding-inline-end: 5%; }
+.aiax-bubbles .ant-bubble-end { padding-inline-start: 5%; }
+/* 用户气泡：主色胶囊（覆盖 filled 默认灰底）。 */
+.aiax-bubbles .ant-bubble-content.aiax-bubble-user {
+  background: var(--primary);
+  color: #fff;
+}
+.aiax-user-msg { min-width: 0; white-space: pre-wrap; word-break: break-word; }
+/* 吸附半嵌圆点内文件 chips 沿用 .ai-turn-files（flex-end 对齐不变）。 */
+/* AI 气泡：borderless（透明无内边距），内容全宽。 */
+.aiax-bubbles .ant-bubble-content.aiax-bubble-ai { max-width: 100%; }
+.aiax-ai-msg { min-width: 0; max-width: 100%; font-size: 13px; line-height: 1.7; }
+/* 回答操作行（复制 / 重新生成）：默认淡显，hover 全显（触屏常显）。 */
+.aiax-msg-actions { display: flex; gap: 2px; margin-top: 4px; opacity: 0.55; transition: opacity 0.15s; }
+.aiax-msg-actions:hover, .aiax-msg-actions:focus-within { opacity: 1; }
+@media (hover: none) { .aiax-msg-actions { opacity: 1; } }
+.aiax-msg-actions .ant-btn { padding: 0 4px; color: var(--muted); }
+.aiax-msg-actions .ant-btn:hover { color: var(--primary); }
+
+/* ---- 底部输入区（Sender） ---- */
+.aiax-composer {
+  border-top: 1px solid var(--border);
+  padding: 8px 10px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex-shrink: 0;
+}
+/* 开关 pill 行：模型选择（左）+ 图标式 pill 组。 */
+.aiax-toggles { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; }
+/* 图标式开关 pill（DeepSeek 式）：图标 + 短词；开启态主色描边 + 淡填充。 */
+.aiax-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+  white-space: nowrap;
+  user-select: none;
+  transition: color 0.15s, border-color 0.15s, background-color 0.15s;
+}
+.aiax-pill:hover:not(:disabled) { color: var(--primary); border-color: var(--primary); }
+.aiax-pill.on {
+  color: var(--primary);
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+}
+.aiax-pill:disabled { opacity: 0.5; cursor: default; }
+/* Sender 容器：圆角面板底 + 聚焦主色描边（对齐旧 .ai-input-box 视觉）。 */
+.aiax-sender.ant-sender {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface-2);
+  transition: border-color 0.15s;
+}
+.aiax-sender.ant-sender:focus-within { border-color: var(--primary); }
+/* Sender header 区：工具行（引用 / 技能 / 当前文档）+ 引用文件 chips。 */
+.aiax-send-header { display: flex; flex-direction: column; gap: 4px; padding: 6px 8px 2px; }
+.aiax-send-tools { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; row-gap: 2px; min-width: 0; }
+
+/* ---- 查看页悬浮 AI 助理：缩小（40px）+ 边缘吸附半嵌圆点 ---- */
+/* 边界探测锚点（display:none 不参与布局，仅 closest 探测弹窗容器）。 */
+.viewer-aiw-anchor { display: none; }
+/* 悬浮球缩小为 40px（追加在末尾覆盖上方 56px 旧值；其余视觉不变）。 */
+.viewer-aiw-ball { width: 40px; height: 40px; }
+/* 吸附态：半嵌边缘圆点——露出的一半可点击展开；阴影更聚拢。 */
+.viewer-aiw-ball.snapped { box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4); }
+:root[data-mode='light'] .viewer-aiw-ball.snapped { box-shadow: 0 4px 12px rgba(24, 30, 42, 0.28); }
+.viewer-aiw-ball.snapped:hover { transform: scale(1.1); }

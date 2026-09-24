@@ -1,0 +1,23 @@
+{
+  "name": "DocFlow AI",
+  "nameLocale": {
+    "zh": "DocFlow AI 助手"
+  },
+  "guid": "asc.{B7A5D2E4-9C3F-4E8A-8B6D-1F2A4C5E6D80}",
+  "version": "1.0.0",
+  "variations": [
+    {
+      "url": "plugin.html",
+      "icons": ["icon.svg"],
+      "isVisual": true,
+      "isViewer": false,
+      "EditorsSupport": ["word", "cell", "slide"],
+      "type": "panel",
+      "buttons": [],
+      "description": "DocFlow AI bridge: insert AI replies from the DocFlow side panel into the document at the caret (or over the selection).",
+      "descriptionLocale": {
+        "zh": "DocFlow AI 桥接：把 DocFlow 侧边 AI 面板的回复插入文档光标处（有选区时替换选区）。"
+      }
+    }
+  ]
+}

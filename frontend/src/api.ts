@@ -877,6 +877,12 @@ export async function downloadFile(item: FileItem): Promise<void> {
   saveBlob(blob, item.name)
 }
 
+/** 按 id 下载文件当前版本（无完整 FileItem 的调用点：Studio 中栏查看器）。 */
+export async function downloadFileById(id: string, name: string): Promise<void> {
+  const blob = await fetchBlob(`/api/v1/files/${id}/download`, '下载失败')
+  saveBlob(blob, name)
+}
+
 /** 认证读取文件当前版本内容为文本（draw.io 编辑器加载 XML 用；走下载端点）。
  * bust 非空时追加查询参数绕过浏览器 HTTP 缓存（嵌入块「刷新」/返回检测用）。 */
 export async function fetchFileText(fileId: string, bust?: number | string): Promise<string> {

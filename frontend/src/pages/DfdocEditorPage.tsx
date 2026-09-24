@@ -14,10 +14,95 @@ import type { AIQuickCommand } from '../components/AIEditChat'
 import { closeEditorWithFallback, safeReturnTo } from '../editorNavigation'
 import { MessageKey, t, useLocale } from '../i18n'
 import type { Editor as TiptapEditor } from '@tiptap/react'
+import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import type { CollabSnapshot } from '../components/richtext/CollabSession'
 
 // 富文本编辑器（Tiptap + lowlight 产物 1MB+）懒加载独立 chunk。
 const RichTextEditor = lazy(() => import('../components/richtext/RichTextEditor'))
+
+// ---- 富文本指令式编辑（AIEditChat applyKind=richtext-patch）----
+// AI 回复 ```docflow-edit 围栏内的 JSON 编辑指令数组（replace/insert/delete/
+// replaceAll），由执行器 applyRichTextPatch 在 Tiptap 文档中按定位原文精确
+// 匹配逐条落盘（增删改插，而非整段追加）。
+
+/** 单条编辑指令（宽松类型：字段存在性由执行器逐条校验）。 */
+type RichTextPatchOp = { op?: unknown; find?: unknown; after?: unknown; text?: unknown }
+
+/** 提取回复中全部 ```docflow-edit 围栏的候选指令体：逐个非贪婪截取 + 一个
+ * 贪婪兜底（text 值内嵌 ``` 代码块时非贪婪会提前截断切碎 JSON，贪婪整段取
+ * 首围栏起到末个 ```），任一候选可解析即用。空数组=无围栏（回落追加）。 */
+function docflowEditFenceCandidates(raw: string): string[] {
+  const out: string[] = []
+  const re = /```docflow-edit[^\n]*\n([\s\S]*?)(?:```|$)/gi
+  for (let m = re.exec(raw); m; m = re.exec(raw)) {
+    if (m[1].trim()) out.push(m[1].trim())
+  }
+  const greedy = /```docflow-edit[^\n]*\n([\s\S]*?)\n?```[ \t]*$/i.exec(raw.trim())
+  const body = greedy?.[1]?.trim()
+  if (body && !out.includes(body)) out.push(body)
+  return out
+}
+
+/** 在 ProseMirror 文档中按纯文本查找 needle（首个匹配，首尾空白不参与）：
+ * 遍历 text 节点拼接连续纯文本并维护「字符偏移→文档位置」映射——同块内
+ * 相邻 text 节点无缝拼接（支持跨加粗等格式节点的连续匹配），块边界插入
+ * '\n\n'（与 editor.getText() 全文上下文一致）。精确 indexOf 未命中时做
+ * 空白折叠兜底（全文 '\n\n' 与选区 '\n' 分隔、连续空格差异归一）。返回匹
+ * 配的 {from,to} 文档位置；未命中返回 null。 */
+function docFindText(doc: ProseMirrorNode, needleRaw: string): { from: number; to: number } | null {
+  const needle = needleRaw.trim()
+  if (!needle) return null
+  let raw = ''
+  const segs: Array<{ start: number; end: number; from: number; to: number }> = []
+  let lastBlock: ProseMirrorNode | null = null
+  doc.descendants((node, pos) => {
+    if (!node.isText || !node.text) return
+    const block = doc.resolve(pos).parent
+    if (lastBlock !== null && block !== lastBlock) raw += '\n\n'
+    lastBlock = block
+    segs.push({ start: raw.length, end: raw.length + node.text.length, from: pos, to: pos + node.text.length })
+    raw += node.text
+  })
+  if (!segs.length) return null
+  // 字符偏移→文档位置（落在块边界分隔符上时取相邻文本节点端点）。
+  const mapPos = (offset: number): number => {
+    for (const seg of segs) {
+      if (offset < seg.start) return seg.from
+      if (offset <= seg.end) return seg.from + (offset - seg.start)
+    }
+    return segs[segs.length - 1].to
+  }
+  const hit = raw.indexOf(needle)
+  if (hit >= 0) return { from: mapPos(hit), to: mapPos(hit + needle.length) }
+  // 空白折叠兜底：norm 为折叠后文本，normIdx[i] 为第 i 个字符在 raw 的偏移
+  //（合成空格记 -1，真实字符记原偏移）。
+  let norm = ''
+  const normIdx: number[] = []
+  let gap = false
+  for (let i = 0; i < raw.length; i++) {
+    if (/\s/.test(raw[i])) {
+      if (norm) gap = true
+      continue
+    }
+    if (gap) {
+      norm += ' '
+      normIdx.push(-1)
+      gap = false
+    }
+    norm += raw[i]
+    normIdx.push(i)
+  }
+  const normNeedle = needle.replace(/\s+/g, ' ').trim()
+  const idx = normNeedle ? norm.indexOf(normNeedle) : -1
+  if (idx >= 0) {
+    const start = normIdx[idx]
+    const end = normIdx[idx + normNeedle.length - 1]
+    if (start !== undefined && end !== undefined && start >= 0 && end >= 0) {
+      return { from: mapPos(start), to: mapPos(end + 1) }
+    }
+  }
+  return null
+}
 
 export default function DfdocEditorPage({
   mode,
@@ -28,7 +113,7 @@ export default function DfdocEditorPage({
   const [searchParams] = useSearchParams()
   const navigate = useNavigate()
   const returnTo = safeReturnTo(searchParams.get('returnTo'))
-  const { modal: antdModal } = AntdApp.useApp()
+  const { modal: antdModal, message } = AntdApp.useApp()
   const viewMode = mode === 'view' || searchParams.get('mode') === 'view'
   const locale = useLocale()
   const msg = (key: MessageKey) => t(locale, key)
@@ -195,33 +280,92 @@ export default function DfdocEditorPage({
   const aiMarkdownToHTML = (output: string): string =>
     marked.parse(stripOuterMarkdownFence(output), { async: false, gfm: true, breaks: true })
 
-  /** 结果落盘：insert = 选区末尾/光标处插入；replace = 替换选区（无选区时
-   * 整篇替换——自动应用前 aiEnsureSaved 已保存基线版本，可经面板
-   * 「撤销此修改」一键回退）。output 为 markdown 字符串，先转富文本 HTML。 */
-  const aiApply = (mode: 'insert' | 'replace', output: string) => {
+  /** AI 编辑指令执行器（AIEditChat applyKind=richtext-patch 的 onApply 通道）：
+   * - 解析回复中的 ```docflow-edit 围栏 → JSON 指令数组（非法 JSON 返回失败
+   *   原因，文档不被修改）；
+   * - replace：定位原文范围原位替换（marked→HTML insertContentAt(range)）；
+   *   insert：after 定位末尾插入；delete：删除定位范围；replaceAll：整篇
+   *   替换（0→文末，常规事务正常回吐 onChange 置 dirty）；
+   * - 每条指令在「当前」文档重新定位（前序指令已改动文档），找不到→跳过并
+   *   累计，结果 message 汇报「已应用 N/M 条；未定位 K 条」及未定位摘要；
+   * - 全部未定位/无有效指令：返回失败原因（文档未被修改，面板显示
+   *   applyError）；围栏缺失（AI 未按指令格式）：回落既有通道（选区替换/
+   *   文末追加，不丢内容）并提示「已按追加处理」。
+   * 版本基线由面板 autoApply 先经 aiEnsureSaved 保存；撤销走既有
+   * restoreVersion + aiReload。 */
+  const applyRichTextPatch = (raw: string): string | void => {
+    const zh = locale === 'zh-CN'
     const ed = tiptapRef.current
-    if (!ed) return
-    const html = aiMarkdownToHTML(output)
-    const { from, to } = ed.state.selection
-    const hasSelection = to > from
-    if (mode === 'replace') {
-      // 无选区 replace = 整篇替换（0 → 文末全范围换入；insertContentAt 走
-      // replaceWith 常规事务，update 正常回吐 onChange 置 dirty）。
-      const range = hasSelection ? { from, to } : { from: 0, to: ed.state.doc.content.size }
-      ed.chain().focus().insertContentAt(range, html).run()
-    } else if (hasSelection) {
-      ed.chain().focus().insertContentAt(to, html).run()
-    } else {
-      ed.chain().focus().insertContentAt(from, html).run()
+    if (!ed) return zh ? '编辑器未就绪，未应用' : 'Editor not ready; not applied'
+    const candidates = docflowEditFenceCandidates(raw)
+    if (!candidates.length) {
+      // 围栏缺失：回落现有追加/替换选区通道，内容不丢。
+      const { from, to } = ed.state.selection
+      const html = aiMarkdownToHTML(raw)
+      if (to > from) ed.chain().focus().insertContentAt({ from, to }, html).run()
+      else ed.chain().focus().setTextSelection(ed.state.doc.content.size).insertContent(html).run()
+      void message.warning(zh ? 'AI 未按编辑指令格式输出，已按追加处理' : 'The AI reply was not in edit-instruction format; it was appended instead')
+      return
     }
-  }
-
-  /** AI 自动应用·无选区：追加到文档末尾——光标移文末后插入富文本 HTML
-   *（接续现有内容，不动已有部分）。 */
-  const aiChatAppendEnd = (output: string) => {
-    const ed = tiptapRef.current
-    if (!ed) return
-    ed.chain().focus().setTextSelection(ed.state.doc.content.size).insertContent(aiMarkdownToHTML(output)).run()
+    let ops: unknown[] | null = null
+    for (const cand of candidates) {
+      try {
+        const parsed: unknown = JSON.parse(cand)
+        if (Array.isArray(parsed)) {
+          ops = parsed
+          break
+        }
+      } catch {
+        // 尝试下一候选（围栏内嵌 ``` 代码块被非贪婪截断等形态）
+      }
+    }
+    if (!ops) return zh ? '编辑指令不是合法的 JSON 数组，文档未被修改' : 'The edit instructions are not a valid JSON array; the document was left unchanged'
+    let applied = 0
+    let invalid = 0
+    const missed: string[] = []
+    for (const item of ops) {
+      const op = (item ?? {}) as RichTextPatchOp
+      const kind = typeof op.op === 'string' ? op.op : ''
+      const text = typeof op.text === 'string' ? op.text : ''
+      if (kind === 'replaceAll') {
+        if (!text.trim()) {
+          invalid++
+          continue
+        }
+        ed.chain().focus().insertContentAt({ from: 0, to: ed.state.doc.content.size }, aiMarkdownToHTML(text)).run()
+        applied++
+        continue
+      }
+      const locate = kind === 'insert' ? op.after : op.find
+      if (typeof locate !== 'string' || !locate.trim() || (kind !== 'delete' && !text.trim())) {
+        invalid++
+        continue
+      }
+      const range = docFindText(ed.state.doc, locate)
+      if (!range) {
+        missed.push(locate.trim().replace(/\s+/g, ' ').slice(0, 20))
+        continue
+      }
+      if (kind === 'delete') ed.chain().focus().deleteRange(range).run()
+      else if (kind === 'insert') ed.chain().focus().insertContentAt(range.to, aiMarkdownToHTML(text)).run()
+      else if (kind === 'replace') ed.chain().focus().insertContentAt(range, aiMarkdownToHTML(text)).run()
+      else {
+        invalid++
+        continue
+      }
+      applied++
+    }
+    if (applied === 0) {
+      return missed.length
+        ? (zh ? `未定位到任何编辑指令的原文（0/${ops.length} 条），文档未被修改` : `No instruction could be located in the document (0/${ops.length}); the document was left unchanged`)
+        : (zh ? `未识别到有效的编辑指令（0/${ops.length} 条），文档未被修改` : `No valid edit instruction found (0/${ops.length}); the document was left unchanged`)
+    }
+    if (missed.length > 0 || invalid > 0) {
+      const parts: string[] = [`${zh ? '已应用' : 'Applied'} ${applied}/${ops.length} ${zh ? '条编辑指令' : 'instructions'}`]
+      if (missed.length) parts.push(`${zh ? `未定位 ${missed.length} 条` : `${missed.length} not located`}：${missed.map((s) => `「${s}」`).join(zh ? '、' : ', ')}`)
+      if (invalid) parts.push(zh ? `格式无效 ${invalid} 条` : `${invalid} invalid`)
+      void message.info(parts.join(zh ? '；' : '; '))
+    }
   }
 
   /** 版本保护前置：确保当前内容已保存（有未保存修改先 save），返回应用前
@@ -299,9 +443,9 @@ export default function DfdocEditorPage({
               </div>
             </div>
             <div className="editor-head-actions">
-              {/* AI 对话（主点击开面板；下拉=原 AIEditMenu 并入的快捷指令：
-                  摘要/续写/润色/翻译成英文/自定义，打开面板自动发送）。 */}
-              <AIEditChatButton open={aiChatOpen} onToggle={() => setAiChatOpen((v) => !v)} onQuick={openAiChatWith} disabled={saving} />
+              {/* AI 对话（主点击开面板；下拉快捷指令引导走编辑指令模式：
+                  润色/重构全文/修正错别字/摘要/自定义，打开面板自动发送）。 */}
+              <AIEditChatButton open={aiChatOpen} onToggle={() => setAiChatOpen((v) => !v)} onQuick={openAiChatWith} kind="richtext-patch" disabled={saving} />
               <Button
                 type="primary"
                 size="small"
@@ -338,23 +482,23 @@ export default function DfdocEditorPage({
             />
           </Suspense>
         </div>
-        {/* AI 对话式创作/编辑侧栏面板（outputFormat=markdown：回复为
-            Markdown，经 marked 转富文本 HTML 插入——有选区替换选区，无选区
-            追加文末/整篇替换，不再是 markdown 纯文本；可修改模式自动应用前
-            经 aiEnsureSaved 保存基线版本，撤销回退后 reload）。 */}
+        {/* AI 对话式创作/编辑侧栏面板（applyKind=richtext-patch 指令式编辑）：
+            AI 回复 ```docflow-edit 围栏内的 JSON 编辑指令数组，经
+            applyRichTextPatch 在文档中按定位原文精确执行增删改插（可撤销）；
+            围栏缺失时执行器回落选区替换/文末追加。可修改模式自动应用前经
+            aiEnsureSaved 保存基线版本，撤销回退后 reload。 */}
         <AIEditChat
           open={aiChatOpen}
           onClose={() => setAiChatOpen(false)}
           getTarget={aiGetTarget}
           getAllText={() => aiGetTarget().text}
-          onApply={aiApply}
-          onAppend={aiChatAppendEnd}
+          onApply={(_mode, raw) => applyRichTextPatch(raw)}
           fileId={fileId}
           ensureSaved={aiEnsureSaved}
           reload={aiReload}
           quickCommand={aiQuick}
           onQuickConsumed={() => setAiQuick(null)}
-          outputFormat="markdown"
+          applyKind="richtext-patch"
         />
       </div>
     </main>

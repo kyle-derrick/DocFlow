@@ -354,20 +354,24 @@ export default function DrawioPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
         {saving && <span className="badge uploading">保存中…</span>}
         {/* AI 统一入口：完整 AIEditChat 右侧面板（applyKind=drawio-xml，可
             修改模式下 AI 生成完整 drawio XML 自动替换画布并落新版本、版本
-            保护可撤销）。原「AI 生成」mermaid 小弹窗（AIDrawio）已下线。 */}
+            保护可撤销）。原「AI 生成」mermaid 小弹窗（AIDrawio）已下线。
+            与下方提示均并入顶栏同一行（不新增行挤压编辑区高度）。 */}
         <AIEditChatButton open={aiChatOpen} onToggle={() => setAiChatOpen((v) => !v)} onQuick={openAiChatWith} kind="drawio-xml" disabled={loading || !!frameError} />
         {!viewMode && <span className="muted drawio-save-hint">Ctrl+S 保存（不退出）</span>}
+        {/* 官方 draw.io MCP 提示（顶栏行内，宽度不足省略收缩；title 悬浮看全文）。 */}
+        {!frameError && aiOn && (
+          <span
+            className="muted drawio-mcp-hint"
+            title={locale === 'zh-CN'
+              ? '提示：平台 MCP 服务可添加官方 draw.io MCP（https://mcp.draw.io/mcp）在对话中生成/预览图表'
+              : 'Tip: platform MCP services can add the official draw.io MCP (https://mcp.draw.io/mcp) to generate/preview diagrams in chat'}
+          >
+            {locale === 'zh-CN'
+              ? '提示：平台 MCP 服务可添加官方 draw.io MCP 在对话中生成/预览图表'
+              : 'Tip: add the official draw.io MCP to generate/preview diagrams in chat'}
+          </span>
+        )}
       </div>}
-
-      {/* 官方 draw.io MCP 说明（编辑态）：平台 MCP 服务可添加官方 draw.io
-          MCP，在 AI 对话中经工具直接生成/预览图表。 */}
-      {!viewMode && !frameError && aiOn && (
-        <div className="muted drawio-mcp-hint">
-          {locale === 'zh-CN'
-            ? '提示：平台 MCP 服务可添加官方 draw.io MCP（https://mcp.draw.io/mcp）在对话中生成/预览图表'
-            : 'Tip: platform MCP services can add the official draw.io MCP (https://mcp.draw.io/mcp) to generate/preview diagrams in chat'}
-        </div>
-      )}
 
       {!viewMode && notice && !frameError && <div className="banner ok editor-hint">{notice}</div>}
       {error && !frameError && <div className="banner error">{error}</div>}

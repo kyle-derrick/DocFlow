@@ -73,6 +73,104 @@ export function parseScene(text: string): SceneSnapshot {
   return { elements: [], appState: {}, files: {} }
 }
 
+// ---- AI excalidraw 元素骨架校验（applyKind=excalidraw-json 前置）----
+
+/** 合法骨架 type 白名单（与官方 convertToExcalidrawElements 的生成类支持
+ * 集对齐；image/embeddable/freedraw/frame/selection 等非本次生成路径的类型
+ * 一律剔除）。 */
+const AI_ELEMENT_TYPES = new Set(['rectangle', 'ellipse', 'diamond', 'text', 'arrow', 'line'])
+
+/** 随机 id（AI 元素缺失/冲突时补；前缀 ai- 便于人工辨认来源）。 */
+const randomAIElementId = () => `ai-${Math.random().toString(36).slice(2, 10)}`
+
+/** points 字段深校验：[[x,y],...]（至少 2 点，坐标须为有限数）。 */
+const isValidPoints = (v: unknown): boolean =>
+  Array.isArray(v) && v.length >= 2 && v.every(
+    (p) => Array.isArray(p) && p.length === 2
+      && typeof p[0] === 'number' && Number.isFinite(p[0])
+      && typeof p[1] === 'number' && Number.isFinite(p[1]),
+  )
+
+/** 解析并规整 AI 生成的 excalidraw 元素骨架数组（应用前唯一守门）：
+ * 1) JSON.parse——失败抛错（调用方回落展示原文）；
+ * 2) 逐项过滤非法元素：非对象 / type 缺失或不在白名单 / x、y 非有限数 /
+ *    text 元素缺字符串 text / arrow·line 既无 start·end 绑定又无合法
+ *    points / label 非 {text:string}（label 非法时删除字段保留元素）；
+ * 3) id 规整：缺失/空串/与现有画布 id 冲突/数组内重复 → 补随机 id，并记
+ *    录映射同步改写其它元素 start/end 引用；
+ * 4) start/end 引用改写后仍指向未知 id → 删除该端绑定；两端皆失且无
+ *    points 的连线剔除（避免悬空绑定）。
+ * 全部被剔除时抛错；返回规整后的骨架数组（交给官方
+ * convertToExcalidrawElements 补全派生字段）。 */
+function parseExcalidrawSkeletons(raw: string, existingIds: Set<string>): Array<Record<string, unknown>> {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    throw new Error('invalid JSON')
+  }
+  if (!Array.isArray(parsed) || !parsed.length) {
+    throw new Error('expected a non-empty JSON array of elements')
+  }
+  const items = parsed.filter((el): el is Record<string, unknown> => {
+    if (!el || typeof el !== 'object' || Array.isArray(el)) return false
+    if (typeof el.type !== 'string' || !AI_ELEMENT_TYPES.has(el.type)) return false
+    if (typeof el.x !== 'number' || !Number.isFinite(el.x)) return false
+    if (typeof el.y !== 'number' || !Number.isFinite(el.y)) return false
+    if (el.type === 'text' && typeof el.text !== 'string') return false
+    if (el.type === 'arrow' || el.type === 'line') {
+      const hasBind = (el.start != null && typeof el.start === 'object') || (el.end != null && typeof el.end === 'object')
+      if (!hasBind && !isValidPoints(el.points)) return false
+    }
+    // label 非法（缺 text 字符串）时删除字段保留元素（label 可选）。
+    if (el.label !== undefined && (!el.label || typeof el.label !== 'object' || typeof (el.label as { text?: unknown }).text !== 'string')) {
+      delete el.label
+    }
+    return true
+  })
+  if (!items.length) {
+    throw new Error('no valid elements — every element needs a supported type and numeric x/y')
+  }
+  // id 规整：缺失/冲突补随机（旧 id→新 id 映射供引用改写）。
+  const rename = new Map<string, string>()
+  const seen = new Set(existingIds)
+  for (const el of items) {
+    const id = el.id
+    if (typeof id === 'string' && id && !seen.has(id)) {
+      seen.add(id)
+      continue
+    }
+    const fresh = randomAIElementId()
+    if (typeof id === 'string' && id) rename.set(id, fresh)
+    el.id = fresh
+    seen.add(fresh)
+  }
+  // start/end 引用改写与悬空剔除。
+  const known = new Set(items.map((el) => String(el.id)))
+  const out = items.filter((el) => {
+    if (el.type !== 'arrow' && el.type !== 'line') return true
+    let keep = true
+    for (const key of ['start', 'end'] as const) {
+      const bind = el[key]
+      if (!bind || typeof bind !== 'object') continue
+      const ref = typeof (bind as { id?: unknown }).id === 'string' ? (bind as { id: string }).id : ''
+      const mapped = (ref && rename.get(ref)) || ref
+      if (mapped && known.has(mapped)) {
+        if (mapped !== ref) (bind as { id: string }).id = mapped
+      } else {
+        delete el[key]
+        const other = key === 'start' ? el.end : el.start
+        if (!other && !isValidPoints(el.points)) keep = false
+      }
+    }
+    return keep
+  })
+  if (!out.length) {
+    throw new Error('all connector elements reference unknown ids')
+  }
+  return out
+}
+
 export default function ExcalidrawPage({
   mode: routeMode,
   fileId: fileIdProp,
@@ -127,7 +225,7 @@ export default function ExcalidrawPage({
   // onChange 与之对比，相同则不置脏——挂载期编辑器可能多次同步触发
   // onChange（字体加载等），仅凭「首次回调」标记会误判为已修改。
   const initialJSONRef = useRef<string | null>(null)
-  // 命令式 API 实例（excalidrawAPI 回调登记；AI mermaid 转换插入用）。
+  // 命令式 API 实例（excalidrawAPI 回调登记；AI 元素 JSON 插入用）。
   const excalidrawAPIRef = useRef<ExcalidrawAPIInstance | null>(null)
   // AI 对话面板（AIEditChat）展开态（收起不清空会话）与头部下拉快捷指令。
   const [aiChatOpen, setAiChatOpen] = useState(false)
@@ -253,8 +351,9 @@ export default function ExcalidrawPage({
     return () => setAIContextFile(null)
   }, [file])
 
-  // ---- 编辑器 AI（applyKind=excalidraw-mermaid）：AI 生成 mermaid → 官方
-  //      库 @excalidraw/mermaid-to-excalidraw 转换为白板图形元素追加画布 ----
+  // ---- 编辑器 AI（applyKind=excalidraw-json）：AI 生成官方元素 JSON（骨架）
+  //      → 前端校验规整 → 官方 convertToExcalidrawElements 补全为正式元素
+  //      追加画布 ----
 
   /** 白板内容摘要（AI 上下文用）：白板无天然全文，取元素计数与各元素文本
    * 标签（无文本用元素类型）按行拼接，截前 4000 字符——仅供 AI 理解画布
@@ -274,24 +373,37 @@ export default function ExcalidrawPage({
   /** AI 上下文目标：白板无选区概念，恒全文（=摘要）。 */
   const aiGetTarget = (): AIEditTarget => ({ hasSelection: false, text: sceneSummary() })
 
-  /** AI mermaid 自动应用（AIEditChat 已提取 mermaid 源码）：动态 import 官方
-   * 转换库（体积大，勿进主包）→ parseMermaidToExcalidraw → skeleton 经
-   * convertToExcalidrawElements 转正式元素 → 平移到现有内容下方 →
+  /** AI excalidraw JSON 自动应用（AIEditChat 已提取 ```excalidraw-json 围栏
+   * 内的 JSON 数组文本）：JSON.parse 校验 → 过滤非法元素（缺 type/数值 x/y、
+   * text 缺 text、连线缺绑定与 points 均剔除）→ id 缺失/与画布冲突自动补
+   * 随机（start/end 引用同步改写，悬空引用的连线剔除）→ 官方
+   * convertToExcalidrawElements 把骨架补全为正式元素（seed/versionNonce/
+   * 文本量宽/绑定端点等派生字段全部自动生成）→ 平移到现有内容下方 →
    * updateScene 追加插入（不覆盖现有内容）→ scrollToContent 对焦 →
    * onChange 链路自动置脏并走 8s 静置自动保存。
    * 返回 string=失败原因（AIEditChat 显示 applyError，画布未被修改）。 */
-  const aiApply = async (_mode: 'insert' | 'replace', mermaid: string): Promise<string | void> => {
+  const aiApply = async (_mode: 'insert' | 'replace', json: string): Promise<string | void> => {
     const api = excalidrawAPIRef.current
     if (!api) return locale === 'zh-CN' ? '白板编辑器未就绪，未应用' : 'Whiteboard editor not ready; not applied'
+    let skeletons: Array<Record<string, unknown>>
     try {
-      const [{ parseMermaidToExcalidraw }, { convertToExcalidrawElements }] = await Promise.all([
-        import('@excalidraw/mermaid-to-excalidraw'),
-        import('@excalidraw/excalidraw'),
-      ])
-      const { elements: skeletons, files } = await parseMermaidToExcalidraw(mermaid)
-      const converted = convertToExcalidrawElements(skeletons)
+      skeletons = parseExcalidrawSkeletons(json, new Set(api.getSceneElements().map((el) => el.id)))
+    } catch (err) {
+      const why = err instanceof Error ? err.message : String(err)
+      const head = json.replace(/\s+/g, ' ').slice(0, 100)
+      return (locale === 'zh-CN'
+        ? `excalidraw JSON 校验失败（${why}），画布未被修改；原文已保留在上面对话中（开头：${head}…）`
+        : `Failed to validate the excalidraw JSON (${why}); the canvas was left unchanged. The original reply is kept above (starts with: ${head}…)`)
+    }
+    try {
+      // 官方转换器（与编辑器同一懒加载 chunk）：骨架 → 正式元素。
+      const { convertToExcalidrawElements } = await import('@excalidraw/excalidraw')
+      const converted = convertToExcalidrawElements(
+        skeletons as unknown as Parameters<typeof convertToExcalidrawElements>[0],
+        { regenerateIds: false },
+      )
       if (!converted.length) {
-        return locale === 'zh-CN' ? 'mermaid 未产生可插入的图形，画布未被修改' : 'The mermaid produced no shapes; the canvas was left unchanged'
+        return locale === 'zh-CN' ? '未产生可插入的白板元素，画布未被修改' : 'No insertable whiteboard elements were produced; the canvas was left unchanged'
       }
       const current = api.getSceneElements()
       // 追加插入：平移到现有内容正下方（留 60px 间距）避免重叠。
@@ -299,12 +411,11 @@ export default function ExcalidrawPage({
       const offset = current.length ? bottom + 60 : 0
       const placed = offset ? converted.map((el) => ({ ...el, y: el.y + offset })) : converted
       api.updateScene({ elements: [...current, ...placed] })
-      if (files && Object.keys(files).length > 0) api.addFiles(Object.values(files))
       api.scrollToContent(placed)
     } catch (err) {
-      // mermaid 语法错误等：不写文档，错误文案回 AIEditChat 显示。
+      // 骨架字段类型错误等：不写画布，错误文案回 AIEditChat 显示。
       const why = err instanceof Error ? err.message : String(err)
-      return (locale === 'zh-CN' ? 'mermaid 转换失败：' : 'Mermaid conversion failed: ') + why
+      return (locale === 'zh-CN' ? 'excalidraw 元素转换失败：' : 'Excalidraw element conversion failed: ') + why
     }
   }
 
@@ -371,9 +482,9 @@ export default function ExcalidrawPage({
         {saving && <span className="badge uploading">{msg('saving')}</span>}
         <span className="editor-head-actions">
             {/* AI 统一入口：完整 AIEditChat 右侧面板（applyKind=
-                excalidraw-mermaid）：可修改模式下 AI 生成 mermaid 自动转换
-                为白板图形插入画布（版本保护可撤销）。 */}
-            <AIEditChatButton open={aiChatOpen} onToggle={() => setAiChatOpen((v) => !v)} onQuick={openAiChatWith} kind="excalidraw-mermaid" disabled={saving || !initial} />
+                excalidraw-json）：可修改模式下 AI 生成官方元素 JSON 自动转换
+                为白板原生元素追加画布（版本保护可撤销）。 */}
+            <AIEditChatButton open={aiChatOpen} onToggle={() => setAiChatOpen((v) => !v)} onQuick={openAiChatWith} kind="excalidraw-json" disabled={saving || !initial} />
             <Button size="small" disabled={saving || !initial} loading={saving} onClick={() => void save(false)}>
               {msg('save')}
             </Button>
@@ -421,7 +532,7 @@ export default function ExcalidrawPage({
           >
             <Suspense fallback={<div className="excalidraw-loading">{msg('whiteboardLoading')}</div>}>
               {/* key=reloadKey：AI 撤销回退后强制重挂重载 initialData；
-                  excalidrawAPI：登记命令式实例（AI mermaid 转换插入用）。 */}
+                  excalidrawAPI：登记命令式实例（AI 元素 JSON 插入用）。 */}
               <Excalidraw
                 key={reloadKey}
                 langCode={locale === 'zh-CN' ? 'zh-CN' : 'en'}
@@ -435,8 +546,8 @@ export default function ExcalidrawPage({
             </Suspense>
           </EditorLoadErrorBoundary>
           </div>
-          {/* AI 对话式创作面板（mermaid → 白板图形；应用前 aiEnsureSaved 保存
-              基线版本，撤销回退后 aiReload 重载画布）。 */}
+          {/* AI 对话式创作面板（excalidraw 元素 JSON → 白板原生元素；应用前
+              aiEnsureSaved 保存基线版本，撤销回退后 aiReload 重载画布）。 */}
           <AIEditChat
             open={aiChatOpen}
             onClose={() => setAiChatOpen(false)}
@@ -448,7 +559,7 @@ export default function ExcalidrawPage({
             reload={aiReload}
             quickCommand={aiQuick}
             onQuickConsumed={() => setAiQuick(null)}
-            applyKind="excalidraw-mermaid"
+            applyKind="excalidraw-json"
           />
         </div>
       ))}

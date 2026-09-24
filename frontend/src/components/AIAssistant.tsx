@@ -1,11 +1,15 @@
-// 全局 AI 助手侧边栏（ChatGPT / Cherry Studio 式布局）：
-// - 480px 右侧 Drawer（窄屏 100% 全宽）；结构 = 顶部栏（左：当前会话标题，
-//   点击重命名；右：会话列表 + 新建 + 图钉 + 关闭）+ 消息流（气泡式，
-//   用户右 / AI 左，含来源引用与工具调用展示）+ 底部紧凑输入区
-//   （输入框自动增高 → 工具行（引用 / 技能 / 工作目录 / 当前文档 / 智能体 /
-//    记忆 / 清空 / 文件检索）→ 选项行（模型 + 模式 + 人设（左）+ 开关组 +
-//    发送⇄停止（右）））；多轮对话 SSE 流式渲染（markdown + 打字机光标）；
-// - 「停止生成」：每轮流式请求挂 AbortController，busy 时发送按钮变停止方块，
+// 全局 AI 助手侧边栏（ChatGPT / Cherry Studio 式布局；UI 壳基于 @ant-design/x）：
+// - 480px 右侧 Drawer（窄屏 100% 全宽），内容包 XProvider（x 组件 locale）；
+//   结构 = 顶部栏（左：当前会话标题，点击重命名；右：历史会话（Conversations）
+//   + 新建 + 图钉 + 关闭）+ 顶部工具栏（人设 Select + 智能|仅对话 Segmented +
+//   工作目录 + 记忆 / 清空 / 智能体任务（跳 /studio））+ 消息流（Bubble.List，
+//   用户右 / AI 左，含来源引用与工具调用展示）+ 底部 Sender（autoSize，发送
+//   按钮内嵌右下角 = Sender 自带；busy 自动变停止）+ Sender 上方一行图标式
+//   开关 pill（模型选择 + 联网 / 文件RAG / 思考 / MCP / 文件工具 / 文件检索，
+//   开启态主色描边填充，DeepSeek 式）；引用文件 chips 与工具按钮在 Sender
+//   header 区；多轮对话 SSE 流式渲染（markdown + 打字机光标）；
+// - 「停止生成」：每轮流式请求挂 AbortController，busy 时 Sender 自带
+//   发送按钮变停止（onCancel），
 //   abort 后消息保留已生成内容并标记「已停止」（不视为错误，可继续输入）；
 //   会话不持久化（刷新即清空）；
 // - 「联网我的文件」开关（RAG-lite）：回答基于当前用户可见文件的全文检索，
@@ -36,11 +40,17 @@
 //     docflow.ai.workdir；未选 = 默认空间根）——发送 use_files/work_root，
 //     SSE tool 事件的 df_* 调用以「平台 / 列目录」双语小标签展示。
 import { useEffect, useRef, useState } from 'react'
-import type { Key } from 'react'
+import type { Key, ReactNode } from 'react'
 import { Drawer, Button, Input, Popconfirm, Popover, Segmented, Select, Switch, Tag, Tooltip, Tree } from 'antd'
 import type { DataNode } from 'antd/es/tree'
+import antdZhCN from 'antd/locale/zh_CN'
+import antdEnUS from 'antd/locale/en_US'
 import { useNavigate } from 'react-router-dom'
-import { Sparkles, Send, Trash2, FileText, Globe, RotateCcw, Copy, Bot, Plus, Square, Check, Paperclip, Brain, Pencil, PencilLine, Pin, BookMarked, Wrench, Zap, FolderCog, FolderOpen, MessagesSquare, Crosshair, FileSearch, Search } from 'lucide-react'
+import { Bubble, Conversations, Sender, XProvider } from '@ant-design/x'
+import type { BubbleItemType } from '@ant-design/x'
+import xZhCN from '@ant-design/x/es/locale/zh_CN'
+import xEnUS from '@ant-design/x/es/locale/en_US'
+import { Sparkles, Trash2, FileText, Globe, RotateCcw, Copy, Bot, Plus, Check, Paperclip, Brain, Pencil, PencilLine, Pin, BookMarked, Wrench, Zap, FolderCog, FolderOpen, MessagesSquare, Crosshair, FileSearch, Search } from 'lucide-react'
 import {
   AISkillDef,
   AIUsage,
@@ -972,7 +982,7 @@ function AIWorkDirButton({ value, follow, onFollow, onChange, zh }: { value: AIW
   return (
     <Popover
       trigger="click"
-      placement="topLeft"
+      placement="bottomLeft"
       arrow={false}
       open={open}
       onOpenChange={(next) => {
@@ -1242,6 +1252,36 @@ function aiConvoRelTime(ts: number, zh: boolean): string {
   return new Date(ts).toLocaleDateString()
 }
 
+/**
+ * 图标式开关 pill（DeepSeek 式：图标 + 短词；开启态主色描边 + 淡填充，
+ * 未开启灰）。仅本组件内部使用——AIEditChat / StudioPage 仍用导出的
+ * AIChatToggleBar（Switch 形态，签名不变）。
+ */
+function AITogglePill({ icon, label, active, disabled, title, onClick }: {
+  icon: ReactNode
+  label: string
+  active: boolean
+  disabled?: boolean
+  title: string
+  onClick: () => void
+}) {
+  return (
+    <Tooltip title={title}>
+      <button
+        type="button"
+        className={`aiax-pill${active ? ' on' : ''}`}
+        disabled={disabled}
+        aria-pressed={active}
+        aria-label={label}
+        onClick={onClick}
+      >
+        {icon}
+        <span>{label}</span>
+      </button>
+    </Tooltip>
+  )
+}
+
 /** 顶栏 AI 助手入口按钮（Sparkles；AI 未启用时不渲染）。 */
 export function AIAssistantButton() {
   const locale = useLocale()
@@ -1410,7 +1450,6 @@ export default function AIAssistant() {
   const [memoryAuto, setMemoryAuto] = useState(false)
   const [memoryAutoSaving, setMemoryAutoSaving] = useState(false)
   const memoryPrefsRef = useRef<AIPersonalPrefsView | null>(null)
-  const listRef = useRef<HTMLDivElement | null>(null)
   const turnsRef = useRef<ChatTurn[]>([])
   const busyRef = useRef(false)
   const abortRef = useRef<AbortController | null>(null)
@@ -1552,10 +1591,7 @@ export default function AIAssistant() {
     }
   }, [])
 
-  // 新回合/流式更新时滚动到底部。
-  useEffect(() => {
-    listRef.current?.scrollTo({ top: listRef.current.scrollHeight })
-  }, [turns])
+  // 消息流滚动由 Bubble.List autoScroll 承担（底部跟随），无需手动 scrollTo。
 
   // 模型列表：AI 启用即拉取（不等抽屉打开；模块缓存，失败/未配置返回空
   // → 选择器隐藏）。记忆的选择不在列表中（后端配置变更）回退默认；无记忆时
@@ -1959,10 +1995,111 @@ export default function AIAssistant() {
         { label: t(locale, 'aiAssistantSuggestIdeas'), onClick: () => void send(t(locale, 'aiAssistantSuggestIdeas')) },
       ]
 
+  // ---- Bubble.List 消息内容渲染（复用既有内容组件与 .ai-* 展示样式） ----
+  /** 用户气泡：纯文本 + 📎 引用文件 chips（发送后回看）。 */
+  const renderUserContent = (turn: ChatTurn) => (
+    <div className="aiax-user-msg">
+      {turn.content}
+      {turn.files && turn.files.length > 0 && (
+        <span className="ai-turn-files">
+          {turn.files.map((f) => (
+            <span key={f.fileId} className="ai-turn-file-chip" title={f.fileName}>
+              <Paperclip size={10} strokeWidth={2} aria-hidden="true" />
+              <span>{f.fileName}</span>
+            </span>
+          ))}
+        </span>
+      )}
+    </div>
+  )
+
+  /** AI 气泡：markdown 流式 + 工具调用 / 引用来源 / 网络来源 / 操作行。 */
+  const renderAssistantContent = (turn: ChatTurn, isLastTurn: boolean) => {
+    if (turn.error) {
+      return (
+        <div className="ai-error-bubble">
+          <div className="ai-error-msg">{turn.error}</div>
+          <Button size="small" danger onClick={retryLast}>
+            {t(locale, 'aiAssistantRetry')}
+          </Button>
+        </div>
+      )
+    }
+    return (
+      <div className="aiax-ai-msg">
+        {turn.content ? (
+          <AIMarkdown text={turn.content} zh={zh} streaming={turn.streaming} />
+        ) : turn.streaming ? (
+          <span className="ai-thinking">{t(locale, 'aiAssistantGenerating')}</span>
+        ) : turn.stopped ? (
+          <span className="ai-thinking muted">{t(locale, 'aiAssistantStopped')}</span>
+        ) : null}
+        {turn.streaming && turn.content && <span className="ai-caret" aria-hidden="true" />}
+        {turn.stopped && turn.content && <span className="ai-stopped-tag">{t(locale, 'aiAssistantStopped')}</span>}
+        {/* 外部工具调用（MCP / df_* 平台文件工具）：Wrench 小标签逐条列出（顺序保留）。 */}
+        {turn.toolCalls && <AIToolCalls toolCalls={turn.toolCalls} zh={zh} />}
+        {turn.sources && turn.sources.length > 0 && (
+          <div className="ai-sources">
+            <span className="ai-sources-label muted">{t(locale, 'aiAssistantSources')}：</span>
+            {turn.sources.map((s) => (
+              <a
+                key={s.file_id}
+                className="ai-source-link"
+                href={s.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                title={s.name}
+              >
+                <FileText size={12} strokeWidth={2} aria-hidden="true" />
+                {s.name}
+              </a>
+            ))}
+          </div>
+        )}
+        {/* 联网搜索来源：折叠列表（编号 + 标题超链接）。 */}
+        {turn.webSources && <AIWebSources sources={turn.webSources} zh={zh} />}
+        {/* 操作行：复制（任意回答）/ 重新生成（仅最后一条）。 */}
+        {!turn.streaming && !turn.error && (turn.content || turn.stopped) && (
+          <div className="aiax-msg-actions">
+            {turn.content && (
+              <Tooltip title={copiedTurn === turn.id ? t(locale, 'aiAssistantCopied') : t(locale, 'aiAssistantCopy')}>
+                <Button size="small" type="text" aria-label={t(locale, 'aiAssistantCopy')} onClick={() => copyTurn(turn)}>
+                  {copiedTurn === turn.id ? (
+                    <Check size={13} strokeWidth={2} aria-hidden="true" />
+                  ) : (
+                    <Copy size={13} strokeWidth={2} aria-hidden="true" />
+                  )}
+                </Button>
+              </Tooltip>
+            )}
+            {isLastTurn && (
+              <Tooltip title={t(locale, 'aiAssistantRegenerate')}>
+                <Button size="small" type="text" aria-label={t(locale, 'aiAssistantRegenerate')} onClick={retryLast}>
+                  <RotateCcw size={13} strokeWidth={2} aria-hidden="true" />
+                </Button>
+              </Tooltip>
+            )}
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  const bubbleItems: BubbleItemType[] = turns.map((turn, i) => ({
+    key: turn.id,
+    role: turn.role,
+    content: turn.role === 'user' ? renderUserContent(turn) : renderAssistantContent(turn, i === turns.length - 1),
+  }))
+
+  // XProvider locale：x 组件 locale 会同时透传给内部 antd ConfigProvider，
+  // 故与完整 antd locale 合并（避免 Drawer 子树内 antd 组件文案回退英文）。
+  const xLocale = zh ? { ...antdZhCN, ...xZhCN } : { ...antdEnUS, ...xEnUS }
+
   return (
-    <Drawer
+    <XProvider locale={xLocale}>
+      <Drawer
       /* 顶栏（ChatGPT 式）：左 = 当前会话标题（点击重命名）；
-         右 = 会话列表 + 新建 + 图钉 + 关闭（antd 自带 X）。 */
+         右 = 历史会话（Conversations）+ 新建 + 图钉 + 关闭（antd 自带 X）。 */
       title={
         <Tooltip title={convoId
           ? (zh ? '点击重命名会话' : 'Click to rename this conversation')
@@ -1992,7 +2129,7 @@ export default function AIAssistant() {
       keyboard={!pinned}
       extra={
         <span className="ai-drawer-extra">
-          {/* 会话列表：历史会话（切换 / 重命名 / 删除）。 */}
+          {/* 历史会话：Conversations 组件（切换 + ⋯ 菜单重命名 / 删除）。 */}
           <Popover
             trigger="click"
             placement="bottomRight"
@@ -2004,49 +2141,44 @@ export default function AIAssistant() {
               setConvoOpen(next)
             }}
             content={
-              <div className="ai-conv-pop">
-                <button type="button" className="ai-conv-new" onClick={() => { setConvoOpen(false); newChat() }}>
+              <div className="aiax-conv-pop">
+                <button type="button" className="aiax-conv-new" onClick={() => { setConvoOpen(false); newChat() }}>
                   <Plus size={13} strokeWidth={2} aria-hidden="true" />
                   <span>{zh ? '新会话' : 'New conversation'}</span>
                 </button>
-                <div className="ai-conv-list">
-                  {convos.length === 0 && (
-                    <div className="ai-attach-state muted">{zh ? '暂无历史会话' : 'No conversations yet'}</div>
-                  )}
-                  {convos.map((c) => (
-                    <div key={c.id} className={`ai-conv-item${c.id === convoId ? ' active' : ''}`}>
-                      <button
-                        type="button"
-                        className="ai-conv-open"
-                        title={c.title}
-                        onClick={() => { setConvoOpen(false); switchConvo(c.id) }}
-                      >
-                        <span className="t">{c.title || (zh ? '未命名会话' : 'Untitled')}</span>
-                        <span className="time muted">{aiConvoRelTime(c.updatedAt, zh)}</span>
-                      </button>
-                      <Tooltip title={zh ? '重命名' : 'Rename'}>
-                        <button
-                          type="button"
-                          className="ai-conv-op"
-                          aria-label={zh ? '重命名会话' : 'Rename conversation'}
-                          onClick={() => setConvoEditing({ id: c.id, draft: c.title })}
-                        >
-                          <Pencil size={12} strokeWidth={2} aria-hidden="true" />
-                        </button>
-                      </Tooltip>
-                      <Tooltip title={zh ? '删除' : 'Delete'}>
-                        <button
-                          type="button"
-                          className="ai-conv-op"
-                          aria-label={zh ? '删除会话' : 'Delete conversation'}
-                          onClick={() => deleteConvo(c.id)}
-                        >
-                          <Trash2 size={12} strokeWidth={2} aria-hidden="true" />
-                        </button>
-                      </Tooltip>
-                    </div>
-                  ))}
-                </div>
+                {convos.length === 0 ? (
+                  <div className="ai-attach-state muted">{zh ? '暂无历史会话' : 'No conversations yet'}</div>
+                ) : (
+                  <Conversations
+                    className="aiax-conv-list"
+                    items={convos.map((c) => ({
+                      key: c.id,
+                      label: (
+                        <span className="aiax-conv-label" title={c.title}>
+                          <span className="t">{c.title || (zh ? '未命名会话' : 'Untitled')}</span>
+                          <span className="time muted">{aiConvoRelTime(c.updatedAt, zh)}</span>
+                        </span>
+                      ),
+                    }))}
+                    activeKey={convoId || undefined}
+                    onActiveChange={(key) => { setConvoOpen(false); switchConvo(key) }}
+                    menu={(info) => ({
+                      items: [
+                        { key: 'rename', label: zh ? '重命名' : 'Rename' },
+                        { key: 'delete', label: zh ? '删除' : 'Delete', danger: true },
+                      ],
+                      onClick: ({ key: op }) => {
+                        const id = String(info.key)
+                        if (op === 'rename') {
+                          const cur = convos.find((c) => c.id === id)
+                          if (cur) setConvoEditing({ id: cur.id, draft: cur.title })
+                        } else if (op === 'delete') {
+                          deleteConvo(id)
+                        }
+                      },
+                    })}
+                  />
+                )}
                 <div className="ai-attach-state muted">
                   {zh ? '会话保存在本机（最近 30 个）' : 'Conversations are stored locally (latest 30)'}
                 </div>
@@ -2054,13 +2186,13 @@ export default function AIAssistant() {
             }
           >
             <Tooltip title={zh ? '历史会话（切换 / 重命名 / 删除）' : 'Conversation history (switch / rename / delete)'}>
-              <Button size="small" type="text" className="ai-conv-btn" aria-label={zh ? '历史会话' : 'Conversation history'}>
+              <Button size="small" type="text" className="aiax-head-btn" aria-label={zh ? '历史会话' : 'Conversation history'}>
                 <MessagesSquare size={14} strokeWidth={2} aria-hidden="true" />
               </Button>
             </Tooltip>
           </Popover>
           <Tooltip title={t(locale, 'aiAssistantNewChat')}>
-            <Button size="small" type="text" aria-label={t(locale, 'aiAssistantNewChat')} onClick={newChat}>
+            <Button size="small" type="text" className="aiax-head-btn" aria-label={t(locale, 'aiAssistantNewChat')} onClick={newChat}>
               <Plus size={14} strokeWidth={2} aria-hidden="true" />
             </Button>
           </Tooltip>
@@ -2070,7 +2202,7 @@ export default function AIAssistant() {
             <Button
               size="small"
               type="text"
-              className={`ai-pin-btn${pinned ? ' active' : ''}`}
+              className={`ai-pin-btn aiax-head-btn${pinned ? ' active' : ''}`}
               aria-label={zh ? '固定助手' : 'Pin assistant'}
               aria-pressed={pinned}
               onClick={togglePinned}
@@ -2082,10 +2214,195 @@ export default function AIAssistant() {
       }
       styles={{ header: { padding: '8px 16px' }, body: { padding: 0, display: 'flex', flexDirection: 'column' } }}
     >
-      <div className="ai-drawer">
+      <div className="aiax-root">
         {notice && <div className="ai-notice error-text">{notice}</div>}
-        {/* 会话列表。 */}
-        <div className="ai-thread" ref={listRef}>
+        {/* 顶部工具栏（单行 flex，溢出 wrap）：人设 + 智能|仅对话 + 工作目录（左）
+            + 记忆 / 清空会话 / 智能体任务（跳 /studio，右）。 */}
+        <div className="aiax-toolbar">
+          {/* 助手人设（三源合并：平台 plat: 前缀 → 内置 → 自定义）。 */}
+          <Select
+            className="aiax-persona"
+            size="small"
+            value={personaId}
+            aria-label={zh ? '助手人设' : 'Assistant persona'}
+            onChange={(v) => {
+              setPersonaId(v)
+              try {
+                window.localStorage.setItem(AI_PERSONA_KEY, v)
+              } catch {
+                /* ignore */
+              }
+            }}
+            options={[
+              ...platformPersonas.map((p) => ({
+                value: `${AI_PLATFORM_PERSONA_PREFIX}${p.id}`,
+                label: (
+                  <span className="aiax-persona-option">
+                    <span className="aiax-persona-option-name">{p.name}</span>
+                    <span className="aiax-persona-platform-tag">{zh ? '平台' : 'Platform'}</span>
+                  </span>
+                ),
+              })),
+              ...AI_PERSONAS.map((p) => ({ value: p.id, label: zh ? p.zhLabel : p.enLabel })),
+            ]}
+          />
+          {personaId === 'custom' && (
+            <Popover
+              trigger="click"
+              placement="bottomLeft"
+              arrow={false}
+              content={
+                <div className="aiax-persona-pop">
+                  <div className="muted">{zh ? '自定义 system 提示（保存在本机，随对话作为首条 system 语义发送）' : 'Custom system prompt (stored locally, sent as the leading system message)'}</div>
+                  <Input.TextArea
+                    rows={4}
+                    maxLength={2000}
+                    value={customPrompt}
+                    onChange={(e) => {
+                      setCustomPrompt(e.target.value)
+                      try {
+                        window.localStorage.setItem(AI_PERSONA_CUSTOM_KEY, e.target.value)
+                      } catch {
+                        /* ignore */
+                      }
+                    }}
+                    placeholder={zh ? '例如：你是一名严谨的财务分析助手，回答须给出数据来源与假设。' : 'e.g. You are a meticulous financial analyst…'}
+                  />
+                </div>
+              }
+            >
+              <Button size="small" type="text" className="aiax-head-btn" aria-label={zh ? '编辑自定义人设' : 'Edit custom persona'}>
+                <PencilLine size={13} strokeWidth={2} aria-hidden="true" />
+              </Button>
+            </Popover>
+          )}
+          {/* 助手模式：智能（文件工具等开关生效）| 仅对话（不修改/不操作文件：
+              use_files 恒 false + 文件工具 pill 隐藏 + 系统提示声明）。 */}
+          <Segmented
+            size="small"
+            value={aiMode}
+            onChange={changeAIMode}
+            options={[
+              { label: zh ? '智能' : 'Smart', value: 'smart' },
+              { label: zh ? '仅对话' : 'Chat only', value: 'chat' },
+            ]}
+          />
+          {/* 工作目录（df_* 文件工具基准）：手选（固定）> 跟随文件页当前位置 > 默认空间根。 */}
+          <AIWorkDirButton
+            value={workdir}
+            follow={!workdir && aiLoc ? { path: aiLoc.path } : null}
+            onFollow={() => selectWorkDir(null)}
+            onChange={selectWorkDir}
+            zh={zh}
+          />
+          <span className="aiax-toolbar-gap" />
+          {/* 长期记忆（手动版）：书签弹层管理本人记忆；服务不可用静默禁用。 */}
+          <Tooltip title={memoryUnavailable
+            ? (zh ? '记忆服务暂不可用' : 'Memory is unavailable')
+            : (zh ? '长期记忆：手动维护个人偏好要点，随每轮对话注入' : 'Long-term memory: manually maintained, injected into every chat')}>
+            <Popover
+              trigger="click"
+              placement="bottomRight"
+              arrow={false}
+              open={memoryOpen}
+              onOpenChange={(next) => {
+                // 编辑弹窗打开期间忽略外点关闭（Modal 挂载于 body，点击会命中 Popover 外部）。
+                if (!next && memoryEditing) return
+                setMemoryOpen(next)
+                if (!next) { setMemoryEditing(null); setMemoryNotice('') }
+              }}
+              content={
+                <div className="ai-memory-pop">
+                  {/* 自动记忆开关（prefs.memory_auto）：AI 自动从对话中提取长期偏好。 */}
+                  <div className="ai-memory-auto">
+                    <div className="ai-memory-auto-row">
+                      <Switch size="small" checked={memoryAuto} loading={memoryAutoSaving} onChange={(v) => void toggleMemoryAuto(v)} />
+                      <span>{zh ? '自动记忆' : 'Auto memory'}</span>
+                    </div>
+                    <span className="muted">{zh ? 'AI 自动从对话中提取长期偏好' : 'AI extracts long-term preferences from chats automatically'}</span>
+                  </div>
+                  <div className="muted">
+                    {zh ? '长期记忆（手动维护，仅本人可见）：对话时取最近 20 条注入，帮助 AI 记住你的偏好与要点。' : 'Long-term memory (manually maintained, private): the latest 20 items are injected into every chat.'}
+                  </div>
+                  <div className="ai-memory-list">
+                    {memoryLoading && <div className="ai-attach-state muted">{zh ? '加载中…' : 'Loading…'}</div>}
+                    {!memoryLoading && memoryItems.length === 0 && (
+                      <div className="ai-attach-state muted">{zh ? '暂无记忆，添加第一条吧' : 'No memories yet'}</div>
+                    )}
+                    {memoryItems.map((m) => (
+                      <div key={m.id} className="ai-memory-item">
+                        {/* 自动记忆（AI 从对话提取）标「自动」；manual 维持现状。 */}
+                        {m.kind === 'auto' && <Tag color="blue" className="ai-memory-auto-tag">{zh ? '自动' : 'Auto'}</Tag>}
+                        <span className="ai-memory-item-content" title={m.content}>{m.content}</span>
+                        <span className="ai-memory-item-actions">
+                          <Tooltip title={zh ? '编辑' : 'Edit'}>
+                            <Button size="small" type="text" aria-label={zh ? '编辑记忆' : 'Edit memory'} onClick={() => setMemoryEditing({ id: m.id, draft: m.content })}>
+                              <Pencil size={12} strokeWidth={2} aria-hidden="true" />
+                            </Button>
+                          </Tooltip>
+                          <Tooltip title={zh ? '删除' : 'Delete'}>
+                            <Button size="small" type="text" aria-label={zh ? '删除记忆' : 'Delete memory'} onClick={() => void removeMemory(m.id)}>
+                              <Trash2 size={12} strokeWidth={2} aria-hidden="true" />
+                            </Button>
+                          </Tooltip>
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                  <Input.TextArea
+                    autoSize={{ minRows: 2, maxRows: 4 }}
+                    maxLength={2000}
+                    value={memoryInput}
+                    onChange={(e) => setMemoryInput(e.target.value)}
+                    placeholder={zh ? '新增一条记忆（如：偏好简洁中文回答、术语表…）' : 'Add a memory (e.g. prefer concise answers…)'
+                    }
+                  />
+                  <div className="ai-memory-footer">
+                    <Popconfirm
+                      title={zh ? '清空全部记忆？' : 'Clear all memories?'}
+                      okText={zh ? '清空' : 'Clear'}
+                      cancelText={zh ? '取消' : 'Cancel'}
+                      disabled={memoryItems.length === 0 || memorySaving}
+                      onConfirm={() => void clearMemory()}
+                    >
+                      <Button size="small" danger disabled={memoryItems.length === 0 || memorySaving}>
+                        {zh ? '清空' : 'Clear all'}
+                      </Button>
+                    </Popconfirm>
+                    <Button size="small" type="primary" loading={memorySaving} disabled={!memoryInput.trim()} onClick={() => void addMemory()}>
+                      {zh ? '添加' : 'Add'}
+                    </Button>
+                  </div>
+                  {memoryNotice && <div className="ai-memory-notice error-text">{memoryNotice}</div>}
+                </div>
+              }
+            >
+              <Button
+                size="small"
+                type="text"
+                className="aiax-head-btn"
+                disabled={memoryUnavailable}
+                aria-label={zh ? '长期记忆' : 'Long-term memory'}
+              >
+                <BookMarked size={14} strokeWidth={2} aria-hidden="true" />
+              </Button>
+            </Popover>
+          </Tooltip>
+          {/* 清空当前会话消息（空会话时禁用）。 */}
+          <Tooltip title={t(locale, 'aiAssistantClear')}>
+            <Button size="small" type="text" className="aiax-head-btn" disabled={turns.length === 0} aria-label={t(locale, 'aiAssistantClear')} onClick={newChat}>
+              <Trash2 size={14} strokeWidth={2} aria-hidden="true" />
+            </Button>
+          </Tooltip>
+          {/* 智能体任务 → AI 创作空间（/studio；创作入口在顶部导航）。 */}
+          <Tooltip title={zh ? '智能体任务（AI 创作空间）' : 'Agent tasks (AI Studio)'}>
+            <Button size="small" type="text" className="aiax-head-btn" aria-label={zh ? '智能体任务' : 'Agent tasks'} onClick={() => { setOpen(false); navigate('/studio') }}>
+              <Bot size={14} strokeWidth={2} aria-hidden="true" />
+            </Button>
+          </Tooltip>
+        </div>
+        {/* 消息流（Bubble.List：用户右 / AI 左；autoScroll 底部跟随）。 */}
+        <div className="aiax-thread">
           {turns.length === 0 && (
             <div className="ai-empty">
               <div className="ai-empty-icon" aria-hidden="true">
@@ -2102,332 +2419,40 @@ export default function AIAssistant() {
               </div>
             </div>
           )}
-          {turns.map((turn, i) => {
-            const isLastTurn = i === turns.length - 1
-            return (
-              <div key={turn.id} className={`ai-turn ai-turn-${turn.role}`}>
-                {turn.role === 'user' ? (
-                  <div className="ai-bubble ai-bubble-user">
-                    {turn.content}
-                    {turn.files && turn.files.length > 0 && (
-                      <span className="ai-turn-files">
-                        {turn.files.map((f) => (
-                          <span key={f.fileId} className="ai-turn-file-chip" title={f.fileName}>
-                            <Paperclip size={10} strokeWidth={2} aria-hidden="true" />
-                            <span>{f.fileName}</span>
-                          </span>
-                        ))}
-                      </span>
-                    )}
-                  </div>
-                ) : (
-                  <>
-                    <div className="ai-avatar" aria-hidden="true">
+          {turns.length > 0 && (
+            <Bubble.List
+              className="aiax-bubbles"
+              items={bubbleItems}
+              autoScroll
+              role={{
+                // 用户：右侧胶囊气泡（主色底）。
+                user: {
+                  placement: 'end',
+                  variant: 'filled',
+                  shape: 'round',
+                  classNames: { content: 'aiax-bubble-user' },
+                },
+                // AI：左侧无底色全宽 markdown + Sparkles 头像。
+                assistant: {
+                  placement: 'start',
+                  variant: 'borderless',
+                  avatar: (
+                    <span className="ai-avatar" aria-hidden="true">
                       <Sparkles size={13} strokeWidth={2} />
-                    </div>
-                    <div className="ai-bubble ai-bubble-assistant">
-                      {turn.error ? (
-                        <div className="ai-error-bubble">
-                          <div className="ai-error-msg">{turn.error}</div>
-                          <Button size="small" danger onClick={retryLast}>
-                            {t(locale, 'aiAssistantRetry')}
-                          </Button>
-                        </div>
-                      ) : (
-                        <>
-                          {turn.content ? (
-                            <AIMarkdown text={turn.content} zh={zh} streaming={turn.streaming} />
-                          ) : turn.streaming ? (
-                            <span className="ai-thinking">{t(locale, 'aiAssistantGenerating')}</span>
-                          ) : turn.stopped ? (
-                            <span className="ai-thinking muted">{t(locale, 'aiAssistantStopped')}</span>
-                          ) : null}
-                          {turn.streaming && turn.content && <span className="ai-caret" aria-hidden="true" />}
-                          {turn.stopped && turn.content && <span className="ai-stopped-tag">{t(locale, 'aiAssistantStopped')}</span>}
-                          {/* 外部工具调用（MCP）：Wrench 小标签逐条列出（顺序保留）。 */}
-                          {turn.toolCalls && <AIToolCalls toolCalls={turn.toolCalls} zh={zh} />}
-                          {turn.sources && turn.sources.length > 0 && (
-                            <div className="ai-sources">
-                              <span className="ai-sources-label muted">{t(locale, 'aiAssistantSources')}：</span>
-                              {turn.sources.map((s) => (
-                                <a
-                                  key={s.file_id}
-                                  className="ai-source-link"
-                                  href={s.url}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  title={s.name}
-                                >
-                                  <FileText size={12} strokeWidth={2} aria-hidden="true" />
-                                  {s.name}
-                                </a>
-                              ))}
-                            </div>
-                          )}
-                          {/* 联网搜索来源：折叠列表（编号 + 标题超链接）。 */}
-                          {turn.webSources && <AIWebSources sources={turn.webSources} zh={zh} />}
-                          {/* hover 操作：复制（任意回答）/ 重新生成（仅最后一条）。 */}
-                          {!turn.streaming && !turn.error && (turn.content || turn.stopped) && (
-                            <div className="ai-message-actions">
-                              {turn.content && (
-                                <Tooltip title={copiedTurn === turn.id ? t(locale, 'aiAssistantCopied') : t(locale, 'aiAssistantCopy')}>
-                                  <Button size="small" type="text" aria-label={t(locale, 'aiAssistantCopy')} onClick={() => copyTurn(turn)}>
-                                    {copiedTurn === turn.id ? (
-                                      <Check size={13} strokeWidth={2} aria-hidden="true" />
-                                    ) : (
-                                      <Copy size={13} strokeWidth={2} aria-hidden="true" />
-                                    )}
-                                  </Button>
-                                </Tooltip>
-                              )}
-                              {isLastTurn && (
-                                <Tooltip title={t(locale, 'aiAssistantRegenerate')}>
-                                  <Button size="small" type="text" aria-label={t(locale, 'aiAssistantRegenerate')} onClick={retryLast}>
-                                    <RotateCcw size={13} strokeWidth={2} aria-hidden="true" />
-                                  </Button>
-                                </Tooltip>
-                              )}
-                            </div>
-                          )}
-                        </>
-                      )}
-                    </div>
-                  </>
-                )}
-              </div>
-            )
-          })}
-        </div>
-        {/* 底部输入区（ChatGPT 式紧凑）：输入框（自动增高 1-6 行）→ 工具行
-            （📎引用 / ⚡技能 / 📁工作目录 / 📄当前文档 / 🤖智能体 / 📖记忆 /
-             🗑清空 / 🔍文件检索）→ 选项行（模型+模式+人设 | 开关组+发送⇄停止）。 */}
-        <div className="ai-composer">
-          <div className="ai-input-box">
-            {attached.length > 0 && (
-              <div className="ai-attach-chips">
-                {attached.map((f) => (
-                  <span key={f.fileId} className="ai-attach-chip">
-                    <Paperclip size={10} strokeWidth={2} aria-hidden="true" />
-                    <span className="ai-attach-chip-name" title={f.fileName}>{f.fileName}</span>
-                    <button
-                      type="button"
-                      aria-label={zh ? '移除引用' : 'Remove reference'}
-                      onClick={() => setAttached((prev) => prev.filter((x) => x.fileId !== f.fileId))}
-                    >
-                      ×
-                    </button>
-                  </span>
-                ))}
-              </div>
-            )}
-            <Input.TextArea
-              autoSize={{ minRows: 1, maxRows: 6 }}
-              value={input}
-              placeholder={t(locale, 'aiAssistantPlaceholder')}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                // Enter 发送 / Shift+Enter 换行；输入法组合中 Enter 不发送。
-                if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-                  e.preventDefault()
-                  void send(input)
-                }
+                    </span>
+                  ),
+                  classNames: { content: 'aiax-bubble-ai' },
+                },
               }}
             />
-            <div className="ai-input-footer">
-              <span className="ai-input-tools">
-                <Popover
-                  trigger="click"
-                  placement="topLeft"
-                  arrow={false}
-                  open={attachOpen}
-                  onOpenChange={(next) => {
-                    setAttachOpen(next)
-                    if (next) setAttachQuery('')
-                  }}
-                  content={
-                    <div className="ai-attach-pop">
-                      <Input
-                        allowClear
-                        size="small"
-                        value={attachQuery}
-                        onChange={(e) => setAttachQuery(e.target.value)}
-                        placeholder={zh ? '搜索文件（留空 = 最近访问）' : 'Search files (empty = recent)'}
-                        prefix={<Paperclip size={12} strokeWidth={2} aria-hidden="true" />}
-                      />
-                      <div className="ai-attach-list">
-                        {attachLoading && <div className="ai-attach-state muted">{zh ? '加载中…' : 'Loading…'}</div>}
-                        {!attachLoading && attachItems.length === 0 && (
-                          <div className="ai-attach-state muted">{zh ? '没有匹配的文件' : 'No matching files'}</div>
-                        )}
-                        {attachItems.map((item) => {
-                          const selected = attached.some((f) => f.fileId === item.id)
-                          return (
-                            <button
-                              key={item.id}
-                              type="button"
-                              className={`ai-attach-item${selected ? ' selected' : ''}`}
-                              onClick={() => toggleAttach(item)}
-                            >
-                              <FileText size={13} strokeWidth={2} aria-hidden="true" />
-                              <span className="name" title={item.name}>{item.name}</span>
-                              <Check size={13} strokeWidth={2} aria-hidden="true" className="check" />
-                            </button>
-                          )
-                        })}
-                      </div>
-                      <div className="ai-attach-state muted">{zh ? '引用文件将作为本条消息的上下文发送' : 'Referenced files are sent as context'}</div>
-                    </div>
-                  }
-                >
-                  <Button
-                    size="small"
-                    type="text"
-                    className="ai-attach-btn"
-                    aria-label={zh ? '引用文件' : 'Attach files'}
-                    title={zh ? '引用文件' : 'Attach files'}
-                  >
-                    <Paperclip size={14} strokeWidth={2} aria-hidden="true" />
-                  </Button>
-                </Popover>
-                {/* 平台技能模板：全局助手无文件/选区语境，占位符置空后压缩空行填入。 */}
-                <AISkillButton zh={zh} onPick={(s) => setInput(renderSkillPrompt(s.prompt))} />
-                {/* 工作目录（df_* 文件工具基准）：手选（固定）> 跟随文件页
-                    当前位置 > 默认空间根。 */}
-                <AIWorkDirButton
-                  value={workdir}
-                  follow={!workdir && aiLoc ? { path: aiLoc.path } : null}
-                  onFollow={() => selectWorkDir(null)}
-                  onChange={selectWorkDir}
-                  zh={zh}
-                />
-                {/* 当前上下文文件 chip：点击快捷总结（查看/编辑页打开助手时注入）。 */}
-                {context && (
-                  <Tooltip title={`${t(locale, 'aiAssistantCurrentFile')}：${context.fileName} · ${t(locale, 'aiAssistantSummarizeDoc')}`}>
-                    <button type="button" className="ai-file-chip" disabled={busy} onClick={() => void summarizeCurrent()}>
-                      <FileText size={12} strokeWidth={2} aria-hidden="true" />
-                      <span className="ai-file-chip-name">{context.fileName}</span>
-                    </button>
-                  </Tooltip>
-                )}
-                <Tooltip title="智能体任务">
-                  <Button size="small" type="text" aria-label="智能体任务" onClick={() => { setOpen(false); navigate('/files') }}>
-                    <Bot size={14} strokeWidth={2} aria-hidden="true" />
-                  </Button>
-                </Tooltip>
-                {/* 长期记忆（手动版）：书签弹层管理本人记忆；服务不可用静默禁用。 */}
-                <Tooltip title={memoryUnavailable
-                  ? (zh ? '记忆服务暂不可用' : 'Memory is unavailable')
-                  : (zh ? '长期记忆：手动维护个人偏好要点，随每轮对话注入' : 'Long-term memory: manually maintained, injected into every chat')}>
-                  <Popover
-                    trigger="click"
-                    placement="topRight"
-                    arrow={false}
-                    open={memoryOpen}
-                    onOpenChange={(next) => {
-                      // 编辑弹窗打开期间忽略外点关闭（Modal 挂载于 body，点击会命中 Popover 外部）。
-                      if (!next && memoryEditing) return
-                      setMemoryOpen(next)
-                      if (!next) { setMemoryEditing(null); setMemoryNotice('') }
-                    }}
-                    content={
-                      <div className="ai-memory-pop">
-                        {/* 自动记忆开关（prefs.memory_auto）：AI 自动从对话中提取长期偏好。 */}
-                        <div className="ai-memory-auto">
-                          <div className="ai-memory-auto-row">
-                            <Switch size="small" checked={memoryAuto} loading={memoryAutoSaving} onChange={(v) => void toggleMemoryAuto(v)} />
-                            <span>{zh ? '自动记忆' : 'Auto memory'}</span>
-                          </div>
-                          <span className="muted">{zh ? 'AI 自动从对话中提取长期偏好' : 'AI extracts long-term preferences from chats automatically'}</span>
-                        </div>
-                        <div className="muted">
-                          {zh ? '长期记忆（手动维护，仅本人可见）：对话时取最近 20 条注入，帮助 AI 记住你的偏好与要点。' : 'Long-term memory (manually maintained, private): the latest 20 items are injected into every chat.'}
-                        </div>
-                        <div className="ai-memory-list">
-                          {memoryLoading && <div className="ai-attach-state muted">{zh ? '加载中…' : 'Loading…'}</div>}
-                          {!memoryLoading && memoryItems.length === 0 && (
-                            <div className="ai-attach-state muted">{zh ? '暂无记忆，添加第一条吧' : 'No memories yet'}</div>
-                          )}
-                          {memoryItems.map((m) => (
-                            <div key={m.id} className="ai-memory-item">
-                              {/* 自动记忆（AI 从对话提取）标「自动」；manual 维持现状。 */}
-                              {m.kind === 'auto' && <Tag color="blue" className="ai-memory-auto-tag">{zh ? '自动' : 'Auto'}</Tag>}
-                              <span className="ai-memory-item-content" title={m.content}>{m.content}</span>
-                              <span className="ai-memory-item-actions">
-                                <Tooltip title={zh ? '编辑' : 'Edit'}>
-                                  <Button size="small" type="text" aria-label={zh ? '编辑记忆' : 'Edit memory'} onClick={() => setMemoryEditing({ id: m.id, draft: m.content })}>
-                                    <Pencil size={12} strokeWidth={2} aria-hidden="true" />
-                                  </Button>
-                                </Tooltip>
-                                <Tooltip title={zh ? '删除' : 'Delete'}>
-                                  <Button size="small" type="text" aria-label={zh ? '删除记忆' : 'Delete memory'} onClick={() => void removeMemory(m.id)}>
-                                    <Trash2 size={12} strokeWidth={2} aria-hidden="true" />
-                                  </Button>
-                                </Tooltip>
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-                        <Input.TextArea
-                          autoSize={{ minRows: 2, maxRows: 4 }}
-                          maxLength={2000}
-                          value={memoryInput}
-                          onChange={(e) => setMemoryInput(e.target.value)}
-                          placeholder={zh ? '新增一条记忆（如：偏好简洁中文回答、术语表…）' : 'Add a memory (e.g. prefer concise answers…)'
-                          }
-                        />
-                        <div className="ai-memory-footer">
-                          <Popconfirm
-                            title={zh ? '清空全部记忆？' : 'Clear all memories?'}
-                            okText={zh ? '清空' : 'Clear'}
-                            cancelText={zh ? '取消' : 'Cancel'}
-                            disabled={memoryItems.length === 0 || memorySaving}
-                            onConfirm={() => void clearMemory()}
-                          >
-                            <Button size="small" danger disabled={memoryItems.length === 0 || memorySaving}>
-                              {zh ? '清空' : 'Clear all'}
-                            </Button>
-                          </Popconfirm>
-                          <Button size="small" type="primary" loading={memorySaving} disabled={!memoryInput.trim()} onClick={() => void addMemory()}>
-                            {zh ? '添加' : 'Add'}
-                          </Button>
-                        </div>
-                        {memoryNotice && <div className="ai-memory-notice error-text">{memoryNotice}</div>}
-                      </div>
-                    }
-                  >
-                    <Button
-                      size="small"
-                      type="text"
-                      disabled={memoryUnavailable}
-                      aria-label={zh ? '长期记忆' : 'Long-term memory'}
-                    >
-                      <BookMarked size={14} strokeWidth={2} aria-hidden="true" />
-                    </Button>
-                  </Popover>
-                </Tooltip>
-                {/* 清空当前会话消息（空会话时禁用）。 */}
-                <Tooltip title={t(locale, 'aiAssistantClear')}>
-                  <Button size="small" type="text" disabled={turns.length === 0} aria-label={t(locale, 'aiAssistantClear')} onClick={newChat}>
-                    <Trash2 size={14} strokeWidth={2} aria-hidden="true" />
-                  </Button>
-                </Tooltip>
-                {/* 文件检索（会话级检索增强，ragQuery 通道）：开启后整轮回答
-                    基于我可见文件的全文检索并附来源链接。与开关组的「联网搜索」
-                    （外部网络）/「我的文件（RAG）」（回答附带引用）语义不同。 */}
-                <Tooltip title={t(locale, 'aiAssistantRAGHint')}>
-                  <label className="ai-rag-toggle ai-toggle">
-                    <Search size={14} strokeWidth={2} aria-hidden="true" />
-                    <Switch size="small" checked={rag} onChange={setRag} />
-                    <span>{zh ? '文件检索' : 'File RAG'}</span>
-                  </label>
-                </Tooltip>
-                <span className="ai-input-hint muted">{t(locale, 'aiAssistantInputHint')}</span>
-              </span>
-            </div>
-          </div>
-          {/* 选项行：模型选择 / 模式 / 人设（左）+ 开关组（联网 / 我的文件RAG /
-              思考 / MCP / 文件操作）+ 发送⇄停止（右）。 */}
-          <div className="ai-input-opts">
+          )}
+        </div>
+        {/* 底部输入区：一行图标式开关 pill（模型选择 + 联网 / 文件RAG / 思考 /
+            MCP / 文件工具 / 文件检索，DeepSeek 式）→ Sender（autoSize 输入框 +
+            内嵌右下发送⇄停止按钮；header 区 = 引用/技能/当前文档工具行 +
+            引用文件 chips）。 */}
+        <div className="aiax-composer">
+          <div className="aiax-toggles">
             {models.length > 0 && (() => {
               // 命中默认模型且用户未显式选择：不显示选中值，以 placeholder
               // 「默认（Provider / 模型）」提示（modelKey 实际仍为默认键，
@@ -2469,120 +2494,171 @@ export default function AIAssistant() {
                 />
               )
             })()}
-            {/* 助手模式：智能（文件工具等开关生效）| 仅对话（不修改/不操作
-                文件：use_files 恒 false + 文件操作开关隐藏 + 系统提示声明）。 */}
-            <Segmented
-              size="small"
-              value={aiMode}
-              onChange={changeAIMode}
-              options={[
-                { label: zh ? '智能' : 'Smart', value: 'smart' },
-                { label: zh ? '仅对话' : 'Chat only', value: 'chat' },
-              ]}
+            {/* 联网搜索（外部互联网，附来源）。 */}
+            <AITogglePill
+              icon={<Globe size={14} strokeWidth={2} aria-hidden="true" />}
+              label={zh ? '联网' : 'Web'}
+              active={toggles.web}
+              title={aiWebTooltip(zh)}
+              onClick={() => toggles.setWeb(!toggles.web)}
             />
-            <Select
-              className="ai-persona-select"
-              size="small"
-              value={personaId}
-              aria-label={zh ? '助手人设' : 'Assistant persona'}
-              onChange={(v) => {
-                setPersonaId(v)
-                try {
-                  window.localStorage.setItem(AI_PERSONA_KEY, v)
-                } catch {
-                  /* ignore */
-                }
-              }}
-              options={[
-                // 三源合并：平台人设（plat: 前缀，标「平台」tag）→ 内置 → 自定义。
-                ...platformPersonas.map((p) => ({
-                  value: `${AI_PLATFORM_PERSONA_PREFIX}${p.id}`,
-                  label: (
-                    <span className="ai-persona-option">
-                      <span className="ai-persona-option-name">{p.name}</span>
-                      <span className="ai-persona-platform-tag">{zh ? '平台' : 'Platform'}</span>
-                    </span>
-                  ),
-                })),
-                ...AI_PERSONAS.map((p) => ({ value: p.id, label: zh ? p.zhLabel : p.enLabel })),
-              ]}
-            />
-            {personaId === 'custom' && (
-              <Popover
-                trigger="click"
-                placement="topLeft"
-                arrow={false}
-                content={
-                  <div className="ai-persona-pop">
-                    <div className="muted">{zh ? '自定义 system 提示（保存在本机，随对话作为首条 system 语义发送）' : 'Custom system prompt (stored locally, sent as the leading system message)'}</div>
-                    <Input.TextArea
-                      rows={4}
-                      maxLength={2000}
-                      value={customPrompt}
-                      onChange={(e) => {
-                        setCustomPrompt(e.target.value)
-                        try {
-                          window.localStorage.setItem(AI_PERSONA_CUSTOM_KEY, e.target.value)
-                        } catch {
-                          /* ignore */
-                        }
-                      }}
-                      placeholder={zh ? '例如：你是一名严谨的财务分析助手，回答须给出数据来源与假设。' : 'e.g. You are a meticulous financial analyst…'}
-                    />
-                  </div>
-                }
-              >
-                <Button size="small" type="text" aria-label={zh ? '编辑自定义人设' : 'Edit custom persona'}>
-                  <PencilLine size={13} strokeWidth={2} aria-hidden="true" />
-                </Button>
-              </Popover>
-            )}
-            <span className="ai-input-opts-right">
-              <AIChatToggleBar
-                compact
-                zh={zh}
-                web={toggles.web}
-                think={toggles.think}
-                thinkBlocked={toggles.thinkBlocked}
-                mcp={toggles.mcp}
-                mcpAvailable={toggles.mcpAvailable}
-                docs={toggles.docs}
-                docsAvailable={toggles.docsAvailable}
-                files={toggles.files}
-                filesDisabled={chatOnly}
-                onWeb={toggles.setWeb}
-                onThink={toggles.setThink}
-                onMcp={toggles.setMcp}
-                onDocs={toggles.setDocs}
-                onFiles={toggles.setFiles}
+            {/* 我的文件（RAG 引用平台内本人文档）；仅 RAG 可用时显示。 */}
+            {toggles.docsAvailable && (
+              <AITogglePill
+                icon={<FileSearch size={14} strokeWidth={2} aria-hidden="true" />}
+                label={zh ? '文件RAG' : 'RAG'}
+                active={toggles.docs}
+                title={aiDocsTooltip(zh)}
+                onClick={() => toggles.setDocs(!toggles.docs)}
               />
-              {busy ? (
-                <Button
-                  className="ai-stop-btn"
-                  shape="circle"
-                  size="small"
-                  aria-label={t(locale, 'aiAssistantStop')}
-                  title={t(locale, 'aiAssistantStop')}
-                  onClick={() => abortRef.current?.abort()}
-                >
-                  <Square size={10} fill="currentColor" strokeWidth={0} aria-hidden="true" />
-                </Button>
-              ) : (
-                <Button
-                  className="ai-send-btn"
-                  type="primary"
-                  shape="circle"
-                  size="small"
-                  disabled={!input.trim()}
-                  aria-label={t(locale, 'aiAssistantSend')}
-                  title={t(locale, 'aiAssistantSend')}
-                  onClick={() => void send(input)}
-                >
-                  <Send size={13} strokeWidth={2} aria-hidden="true" />
-                </Button>
-              )}
-            </span>
+            )}
+            {/* 深度思考：当前模型不支持推理时隐藏，未配置模型时禁用。 */}
+            {toggles.thinkBlocked !== 'unsupported' && (
+              <AITogglePill
+                icon={<Brain size={14} strokeWidth={2} aria-hidden="true" />}
+                label={zh ? '思考' : 'Think'}
+                active={toggles.think}
+                disabled={toggles.thinkBlocked !== null}
+                title={aiThinkTooltip(toggles.thinkBlocked, zh)}
+                onClick={() => toggles.setThink(!toggles.think)}
+              />
+            )}
+            {/* MCP 工具：仅平台存在启用中的 MCP 服务时显示。 */}
+            {toggles.mcpAvailable && (
+              <AITogglePill
+                icon={<Wrench size={14} strokeWidth={2} aria-hidden="true" />}
+                label="MCP"
+                active={toggles.mcp}
+                title={aiMCPTooltip(zh)}
+                onClick={() => toggles.setMcp(!toggles.mcp)}
+              />
+            )}
+            {/* 文件工具（df_* 平台文件工具，AI 可直接读写工作目录内文件）；
+                仅对话模式下隐藏（模式已含「不操作文件」语义）。 */}
+            {!chatOnly && (
+              <AITogglePill
+                icon={<FolderCog size={14} strokeWidth={2} aria-hidden="true" />}
+                label={zh ? '文件工具' : 'Files'}
+                active={toggles.files}
+                title={zh
+                  ? '文件工具：AI 可直接读写工作目录内的文件（自动留版本）'
+                  : 'File tools: AI can read and write files in the working directory directly (auto versioned)'}
+                onClick={() => toggles.setFiles(!toggles.files)}
+              />
+            )}
+            {/* 文件检索（会话级检索增强，ragQuery 通道）：开启后整轮回答
+                基于我可见文件的全文检索并附来源链接。与「联网」（外部网络）/
+                「文件RAG」（回答附带引用）语义不同。 */}
+            <AITogglePill
+              icon={<Search size={14} strokeWidth={2} aria-hidden="true" />}
+              label={zh ? '文件检索' : 'File RAG'}
+              active={rag}
+              title={t(locale, 'aiAssistantRAGHint')}
+              onClick={() => setRag(!rag)}
+            />
           </div>
+          <Sender
+            className="aiax-sender"
+            value={input}
+            onChange={setInput}
+            placeholder={t(locale, 'aiAssistantPlaceholder')}
+            autoSize={{ minRows: 1, maxRows: 6 }}
+            // busy：内嵌右下发送按钮自动变停止（onCancel = abort 流式请求）；
+            // Enter 发送 / Shift+Enter 换行（输入法组合中 Enter 不发送，组件内处理）。
+            loading={busy}
+            onSubmit={(message) => void send(message)}
+            onCancel={() => abortRef.current?.abort()}
+            header={
+              <div className="aiax-send-header">
+                <div className="aiax-send-tools">
+                  {/* 引用文件弹层（最近访问 / 全文搜索，多选为 chip）。 */}
+                  <Popover
+                    trigger="click"
+                    placement="topLeft"
+                    arrow={false}
+                    open={attachOpen}
+                    onOpenChange={(next) => {
+                      setAttachOpen(next)
+                      if (next) setAttachQuery('')
+                    }}
+                    content={
+                      <div className="ai-attach-pop">
+                        <Input
+                          allowClear
+                          size="small"
+                          value={attachQuery}
+                          onChange={(e) => setAttachQuery(e.target.value)}
+                          placeholder={zh ? '搜索文件（留空 = 最近访问）' : 'Search files (empty = recent)'}
+                          prefix={<Paperclip size={12} strokeWidth={2} aria-hidden="true" />}
+                        />
+                        <div className="ai-attach-list">
+                          {attachLoading && <div className="ai-attach-state muted">{zh ? '加载中…' : 'Loading…'}</div>}
+                          {!attachLoading && attachItems.length === 0 && (
+                            <div className="ai-attach-state muted">{zh ? '没有匹配的文件' : 'No matching files'}</div>
+                          )}
+                          {attachItems.map((item) => {
+                            const selected = attached.some((f) => f.fileId === item.id)
+                            return (
+                              <button
+                                key={item.id}
+                                type="button"
+                                className={`ai-attach-item${selected ? ' selected' : ''}`}
+                                onClick={() => toggleAttach(item)}
+                              >
+                                <FileText size={13} strokeWidth={2} aria-hidden="true" />
+                                <span className="name" title={item.name}>{item.name}</span>
+                                <Check size={13} strokeWidth={2} aria-hidden="true" className="check" />
+                              </button>
+                            )
+                          })}
+                        </div>
+                        <div className="ai-attach-state muted">{zh ? '引用文件将作为本条消息的上下文发送' : 'Referenced files are sent as context'}</div>
+                      </div>
+                    }
+                  >
+                    <Button
+                      size="small"
+                      type="text"
+                      className="ai-attach-btn"
+                      aria-label={zh ? '引用文件' : 'Attach files'}
+                      title={zh ? '引用文件' : 'Attach files'}
+                    >
+                      <Paperclip size={14} strokeWidth={2} aria-hidden="true" />
+                    </Button>
+                  </Popover>
+                  {/* 平台技能模板：全局助手无文件/选区语境，占位符置空后压缩空行填入。 */}
+                  <AISkillButton zh={zh} onPick={(s) => setInput(renderSkillPrompt(s.prompt))} />
+                  {/* 当前上下文文件 chip：点击快捷总结（查看/编辑页打开助手时注入）。 */}
+                  {context && (
+                    <Tooltip title={`${t(locale, 'aiAssistantCurrentFile')}：${context.fileName} · ${t(locale, 'aiAssistantSummarizeDoc')}`}>
+                      <button type="button" className="ai-file-chip" disabled={busy} onClick={() => void summarizeCurrent()}>
+                        <FileText size={12} strokeWidth={2} aria-hidden="true" />
+                        <span className="ai-file-chip-name">{context.fileName}</span>
+                      </button>
+                    </Tooltip>
+                  )}
+                </div>
+                {/* 已选引用文件 chips（发送前可移除）。 */}
+                {attached.length > 0 && (
+                  <div className="ai-attach-chips">
+                    {attached.map((f) => (
+                      <span key={f.fileId} className="ai-attach-chip">
+                        <Paperclip size={10} strokeWidth={2} aria-hidden="true" />
+                        <span className="ai-attach-chip-name" title={f.fileName}>{f.fileName}</span>
+                        <button
+                          type="button"
+                          aria-label={zh ? '移除引用' : 'Remove reference'}
+                          onClick={() => setAttached((prev) => prev.filter((x) => x.fileId !== f.fileId))}
+                        >
+                          ×
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            }
+          />
         </div>
       </div>
 
@@ -2622,6 +2698,7 @@ export default function AIAssistant() {
           </div>
         </Modal>
       )}
-    </Drawer>
+      </Drawer>
+    </XProvider>
   )
 }

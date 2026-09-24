@@ -13,16 +13,18 @@
 //   （版本保护），消息下记录修改点并支持一键撤销（restoreVersion 回退到
 //   应用前版本 + reload 刷新编辑器）；「仅对话」= 纯输出不改动文档。
 //   手动「插入到光标 / 替换选区」按钮已移除，仅保留「复制」。
-// - 应用通道 applyKind（默认 text 行为不变）：excalidraw-mermaid（白板页：
-//   AI 只回 mermaid 代码块，自动应用时提取源码交宿主转为白板图形插入）、
-//   drawio-xml（图表页：AI 回完整 drawio XML，自动应用时提取 XML 整体替换
-//   画布）；forceChatOnly=true 恒「仅对话」（隐藏模式切换，OnlyOffice 等
-//   无内容修改 API 的编辑页用）。
+// - 应用通道 applyKind（默认 text 行为不变）：excalidraw-json（白板页：
+//   AI 只回 excalidraw 元素 JSON 数组，自动应用时提取 JSON 交宿主经官方
+//   convertToExcalidrawElements 转为白板原生元素追加插入）、drawio-xml
+//   （图表页：AI 回完整 drawio XML，自动应用时提取 XML 整体替换画布）；
+//   forceChatOnly=true 恒「仅对话」（OnlyOffice 等无自动落盘 API 的编辑页
+//   用，可另传 officeInsert 挂点提供「应用到文档」按钮——经 DocFlow AI
+//   插件把回复插入文档）。
 import { useEffect, useRef, useState } from 'react'
 import { App as AntdApp, Button, Dropdown, Input, Segmented, Tooltip } from 'antd'
 import type { MenuProps } from 'antd'
 import type { TextAreaRef } from 'antd/es/input/TextArea'
-import { Copy, Send, Sparkles, Square, Trash2, X } from 'lucide-react'
+import { Copy, FileInput, Send, Sparkles, Square, Trash2, X } from 'lucide-react'
 import { aiChat, getFileMeta, restoreVersion } from '../api'
 import type { AIMessage } from '../api'
 import { AIChatToggleBar, AISkillButton, AIToolCalls, AIWebSources, AI_MODEL_STORAGE_KEY, defaultAIModelKey, getAIModels, normalizeWebSources, renderSkillPrompt, toolCallView, useAIChatToggles } from './AIAssistant'
@@ -48,37 +50,31 @@ type ChatMode = 'edit' | 'chat'
 
 /** 应用通道类型（默认 text 行为完全不变）：
  * - text：写作助手（回复=最终文本，选区替换/文末追加）；
- * - excalidraw-mermaid：白板页——AI 只回 mermaid 代码块，宿主经
- *   @excalidraw/mermaid-to-excalidraw 转换为白板图形插入画布；
+ * - excalidraw-json：白板页——AI 只回 excalidraw 元素 JSON 数组（骨架），
+ *   宿主经官方 convertToExcalidrawElements 补全为正式元素插入画布；
  * - drawio-xml：drawio 页——AI 基于当前 XML 回完整 drawio XML，宿主整体
- *   替换画布内容。两者均无选区概念，统一走 onApply('replace')。 */
-export type AIApplyKind = 'text' | 'excalidraw-mermaid' | 'drawio-xml'
+ *   替换画布内容。两者均无选区概念，统一走 onApply('replace')；
+ * - richtext-patch：富文本页——指令式编辑（Cursor/Notion AI 形态）：AI 回
+ *   ```docflow-edit 围栏内的 JSON 编辑指令数组（replace/insert/delete/
+ *   replaceAll），宿主执行器（DfdocEditorPage.applyRichTextPatch）在
+ *   ProseMirror 文档中按定位原文精确匹配逐条执行；围栏缺失时宿主回落
+ *   追加。回复原文经 onApply('replace') 透传，解析在宿主侧。 */
+export type AIApplyKind = 'text' | 'excalidraw-json' | 'drawio-xml' | 'richtext-patch'
 
-/** mermaid 图定义首行关键字（裸语法识别用，无 ```mermaid 围栏时兜底）。 */
-const MERMAID_FIRST_LINE =
-  /^\s*(graph|flowchart|sequenceDiagram|classDiagram|stateDiagram(-v2)?|erDiagram|journey|gantt|pie|mindmap|timeline|quadrantChart|gitGraph|sankey-beta|xychart-beta|block-beta|architecture-beta|requirementDiagram|C4Context|C4Container)\b/
-
-/** 从 AI 回复中提取 mermaid 源码：优先 ```mermaid 围栏；其次任意围栏代码块
- * 内容首行命中 mermaid 语法；最后裸语法（首行命中起、空行止）。 */
-function extractMermaidSource(reply: string): string {
-  const fenced = /```(?:mermaid|Mermaid)[^\n]*\n([\s\S]*?)```/.exec(reply)
-  if (fenced && fenced[1].trim()) return fenced[1].trim()
+/** 从 AI 回复中提取 excalidraw 元素 JSON 源码：优先 ```excalidraw-json 围栏；
+ * 其次任意围栏代码块内容以 [ 开头；最后裸数组（trim 后 [ 起 ] 止）。
+ * 只负责提取文本——JSON.parse 与元素合法性校验在宿主页（非法时回
+ * applyError，画布不动）。 */
+function extractExcalidrawJSON(reply: string): string {
+  const fenced = /```(?:excalidraw-json|excalidraw)[^\n]*\n([\s\S]*?)```/.exec(reply)
+  if (fenced && fenced[1].trim().startsWith('[')) return fenced[1].trim()
   const re = /```[^\n]*\n([\s\S]*?)```/g
   for (let m = re.exec(reply); m; m = re.exec(reply)) {
     const body = m[1].trim()
-    if (body && MERMAID_FIRST_LINE.test(body)) return body
+    if (body.startsWith('[')) return body
   }
-  const lines = reply.split('\n')
-  for (let i = 0; i < lines.length; i++) {
-    if (!MERMAID_FIRST_LINE.test(lines[i])) continue
-    const out: string[] = []
-    for (let j = i; j < lines.length; j++) {
-      if (!lines[j].trim()) break
-      out.push(lines[j])
-    }
-    const text = out.join('\n').trim()
-    if (text) return text
-  }
+  const trimmed = reply.trim()
+  if (trimmed.startsWith('[') && trimmed.endsWith(']')) return trimmed
   return ''
 }
 
@@ -113,6 +109,45 @@ const DRAWIO_XML_GUIDE = `drawio XML quick reference:
 - ids: incrementing numeric strings "2","3",...; keep id="0" (root) and id="1" (default parent) fixed; every cell gets parent="1" unless grouping.
 - Editing an existing diagram: keep the ids of unchanged elements and only modify their style/geometry/value, or add/remove cells; never renumber the whole model.
 - The XML must be well-formed; escape < > & " ' inside value attributes.`
+
+/** richtext-patch 通道 system 指令附加的「富文本编辑指令规范」（同
+ * DRAWIO_XML_GUIDE 模式：英文技术规范，双语 intro 按现有 locale 机制）。
+ * AI 输出 ```docflow-edit 围栏内的 JSON 指令数组；宿主执行器按 find/after
+ * 定位原文（纯文本精确匹配）逐条执行增删改插。 */
+const RICHTEXT_PATCH_GUIDE = `Rich text edit instruction protocol (mandatory output format):
+- Reply with exactly one fenced block starting with \`\`\`docflow-edit and ending with \`\`\`, containing ONLY a JSON array of edit operations. No explanations outside the fence.
+- Operations, executed in array order:
+  {"op":"replace","find":"<exact original snippet>","text":"<replacement, Markdown>"}
+  {"op":"insert","after":"<exact original snippet>","text":"<new content, Markdown, inserted right after that snippet>"}
+  {"op":"delete","find":"<exact original snippet to remove>"}
+  {"op":"replaceAll","text":"<entire new document, Markdown>"} — only when the edits affect most of the document.
+- Locating rules: "find"/"after" must be copied VERBATIM from the document text given in the user message (plain text only — bold/links/headings are invisible to the matcher). Pick a snippet of 10-80 characters that is unique in the document and taken from within a single paragraph/heading; never rewrite, shorten or fabricate the snippet.
+- Locate every operation against the ORIGINAL document text; a snippet that earlier operations already removed is skipped, so do not chain operations onto text you are replacing.
+- "text" values are Markdown (headings, lists, tables, code fences, bold, links, ...). The fence body must be valid JSON: escape " as \\" and newlines inside values as \\n.
+- Prefer several small precise operations over one huge replace; never output the whole document unless replaceAll is truly needed.`
+
+/** excalidraw-json 通道 system 指令附加的元素 JSON 生成规范（以本地
+ * @excalidraw/excalidraw 0.17.6 的 types/element/types.d.ts 字段定义与
+ * types/data/transform.d.ts 的骨架（ExcalidrawElementSkeleton）契约为准
+ * 精编：AI 只需输出骨架字段，前端经官方 convertToExcalidrawElements
+ * 自动补全 seed/versionNonce/文本量宽/绑定端点等派生字段）。技术规范
+ * 统一英文（同 DRAWIO_XML_GUIDE 约定）。 */
+const EXCALIDRAW_JSON_GUIDE = `Excalidraw elements JSON quick reference (element skeletons):
+- Output ONE \`\`\`excalidraw-json fenced block containing a JSON ARRAY of element objects; no text outside the fence.
+- Every element object MUST have "type" and numeric "x"/"y". Give each element a short unique string "id" (e.g. "n1","n2") so arrows can reference nodes; other elements may reference an id via start/end.
+- Shape types (all accept optional strokeColor/backgroundColor/fillStyle/roughness/strokeWidth/strokeStyle/opacity/roundness):
+  - {"type":"rectangle","id","x","y","width","height","label":{"text":"Centered label","fontSize":20}} — rounded box; label auto-centers inside.
+  - {"type":"diamond",...same fields} — decision diamond; use bigger width/height for long labels.
+  - {"type":"ellipse",...same fields} — oval/stadium node.
+  - {"type":"text","id","x","y","text":"Standalone note","fontSize":20,"strokeColor":"#868e96"} — plain label; do NOT set width/height (auto-measured).
+- Connector types:
+  - {"type":"arrow","id","x","y","start":{"id":"n1"},"end":{"id":"n2"},"strokeColor":"#1e1e1e","strokeWidth":2,"label":{"text":"Yes"}} — bind endpoints to node ids; x/y and points are computed automatically from bindings, do not hand-calculate them.
+  - {"type":"line","id","x","y","points":[[0,0],[120,0]]} — plain polyline with points RELATIVE to x/y, for underlines/separators only.
+- Field conventions: colors as hex strings (default strokeColor "#1e1e1e", backgroundColor "transparent"); fillStyle "solid"|"hachure"; roughness 0(architect)/1(default)/2; strokeWidth 2 default; roundness {"type":3} for rounded rectangles; font sizes 16-28.
+- Do NOT output seed/version/versionNonce/isDeleted/updated/groupIds/boundElements — they are generated automatically.
+- Layout: place the whole diagram inside a 1200x800 region starting at (0,0); pick one flow direction (top-down or left-right) and keep >=40px gaps between elements; process node 160-200 wide and 60-80 tall; align nodes on a grid; add a standalone {"type":"text"} title at the top-left of the group.
+- Accent sparingly: strokeColor+backgroundColor pairs like #1971c2/#a5d8ff (blue), #2f9e44/#d3f9d8 (green), #e8590c/#ffe8cc (orange), #c2255c/#ffdeeb (pink) to group related nodes; keep connectors neutral #1e1e1e or #868e96.
+- The output must be strictly valid JSON (double quotes, no trailing commas, no comments).`
 
 /** 头部下拉快捷指令：send=打开面板自动发送（editMode 指定以何种模式处理）；
  * focus=打开面板并聚焦输入框（自定义指令）。 */
@@ -153,7 +188,7 @@ interface ChatTurn {
 
 /** 编辑器页头部「AI 对话」按钮（主点击开面板；下拉=并入的 AIEditMenu 快捷
  * 指令，AI 未启用不渲染）。kind 定制下拉指令（默认 text 保持原文案）：
- * excalidraw-mermaid / drawio-xml / chat（仅对话页）分别给出契合场景的
+ * excalidraw-json / drawio-xml / chat（仅对话页）分别给出契合场景的
  * 快捷指令。 */
 export function AIEditChatButton({
   open,
@@ -184,16 +219,25 @@ export function AIEditChatButton({
       'divider',
       { key: 'custom', label: t(locale, 'aiEditCustom'), focus: true },
     ],
-    'excalidraw-mermaid': [
+    'excalidraw-json': [
       { key: 'flowchart', label: zh ? '生成流程图' : 'Flowchart', instruction: zh ? '画一个流程图（若白板上下文未给出主题，请生成一个通用的审批流程）' : 'Draw a flowchart (fall back to a generic approval flow if the whiteboard context has no topic)', editMode: true },
-      { key: 'sequence', label: zh ? '生成时序图' : 'Sequence diagram', instruction: zh ? '画一个时序图（若上下文未给出主题，请生成一个用户登录/下单示例）' : 'Draw a sequence diagram (fall back to a login/checkout example if no topic in context)', editMode: true },
-      { key: 'class', label: zh ? '生成类图' : 'Class diagram', instruction: zh ? '画一个类图（若上下文未给出主题，请生成一个订单领域模型示例）' : 'Draw a class diagram (fall back to an order domain model if no topic)', editMode: true },
+      { key: 'architecture', label: zh ? '生成架构图' : 'Architecture diagram', instruction: zh ? '画一个系统架构图（若上下文未给出主题，请生成一个前后端+数据库的三层架构示例）' : 'Draw an architecture diagram (fall back to a 3-tier web/database example if no topic in context)', editMode: true },
+      { key: 'mindmap', label: zh ? '生成概念图' : 'Concept map', instruction: zh ? '画一个概念/思维导图（若上下文未给出主题，请围绕「产品设计」发散）' : 'Draw a concept/mind map (fall back to a “product design” topic if no topic)', editMode: true },
       'divider',
       { key: 'custom', label: t(locale, 'aiEditCustom'), focus: true },
     ],
     'drawio-xml': [
       { key: 'flowchart', label: zh ? '生成流程图' : 'Flowchart', instruction: zh ? '生成一个流程图（若上下文未给出主题，请生成一个通用的审批流程）' : 'Generate a flowchart (fall back to a generic approval flow if no topic)', editMode: true },
       { key: 'architecture', label: zh ? '生成架构图' : 'Architecture diagram', instruction: zh ? '生成一个系统架构图（若上下文未给出主题，请生成一个前后端+数据库的三层架构示例）' : 'Generate an architecture diagram (fall back to a 3-tier web/database example if no topic)', editMode: true },
+      'divider',
+      { key: 'custom', label: t(locale, 'aiEditCustom'), focus: true },
+    ],
+    // 富文本指令式编辑：快捷指令提示词显式引导走 docflow-edit 指令模式。
+    'richtext-patch': [
+      { key: 'polish', label: t(locale, 'aiEditPolish'), instruction: zh ? '请润色当前文档：找出需要改写的句子，逐条输出 replace 编辑指令，保持原意' : 'Polish the document: emit one replace instruction per sentence that needs rewriting, keeping the meaning', editMode: true },
+      { key: 'rewrite', label: zh ? '重构全文' : 'Rewrite all', instruction: zh ? '请重构全文结构与措辞：若改动覆盖大半文档，输出 replaceAll 整篇替换；否则分条 replace' : 'Restructure the whole document: output a replaceAll operation if most of it changes, otherwise several replace operations', editMode: true },
+      { key: 'fix', label: zh ? '修正错别字' : 'Fix typos', instruction: zh ? '请找出并修正文档中的错别字与标点错误，逐条输出 replace 编辑指令' : 'Find and fix typos and punctuation errors, one replace instruction each', editMode: true },
+      { key: 'summary', label: t(locale, 'aiEditSummary'), instruction: zh ? '请总结当前文档' : 'Summarize the current document', editMode: false },
       'divider',
       { key: 'custom', label: t(locale, 'aiEditCustom'), focus: true },
     ],
@@ -252,6 +296,7 @@ export default function AIEditChat({
   applyKind = 'text',
   forceChatOnly = false,
   outputFormat = 'plaintext',
+  officeInsert,
 }: {
   open: boolean
   onClose: () => void
@@ -260,7 +305,7 @@ export default function AIEditChat({
   /** 全文（「全文」范围与无选区回退时的输入）。 */
   getAllText: () => string
   /** 应用结果（宿主页面负责编辑器落盘与 dirty 标记）。返回 string=应用
-   * 失败原因（文档未被修改，显示为 applyError）；Promise 版本供 mermaid
+   * 失败原因（文档未被修改，显示为 applyError）；Promise 版本供元素 JSON
    * 转换等异步落盘（text 场景维持同步 void，行为不变）。 */
   onApply: (mode: 'insert' | 'replace', output: string) => string | void | Promise<string | void>
   /** 无选区时追加到文档末尾（缺省回退 onApply('insert')）。 */
@@ -275,10 +320,19 @@ export default function AIEditChat({
   quickCommand?: AIQuickCommand | null
   /** 快捷指令执行后回调（宿主页清空 quickCommand）。 */
   onQuickConsumed?: () => void
-  /** 应用通道（默认 text；excalidraw-mermaid/drawio-xml 见 AIApplyKind）。 */
+  /** 应用通道（默认 text；excalidraw-json/drawio-xml 见 AIApplyKind）。 */
   applyKind?: AIApplyKind
-  /** 恒「仅对话」：隐藏模式切换（不支持改文档的宿主页，如 OnlyOffice）。 */
+  /** 恒「仅对话」：隐藏模式切换（不支持自动落盘的宿主页，如 OnlyOffice）。 */
   forceChatOnly?: boolean
+  /** Office 文档「应用到文档」挂点（OnlyOffice 页）：提供时每条助手回复
+   * 下方渲染「应用到文档」按钮——点击经宿主把回复插入编辑器（DocFlow AI
+   * 插件 postMessage 链路）；ready=false 时点击提示先打开插件面板。 */
+  officeInsert?: {
+    /** DocFlow AI 插件是否已就绪（插件面板已打开并上报）。 */
+    ready: boolean
+    /** 把一段回复内容插入文档（宿主负责 postMessage 与提示）。 */
+    onInsert: (text: string) => void
+  }
   /** text 通道输出格式（默认 plaintext=原样纯文本输出，Monaco 等用）；
    * markdown=富文本宿主（.dfrt 编辑页）：system 指令要求输出 Markdown，
    * 宿主经 marked 转富文本 HTML 插入。仅 applyKind='text' 生效。 */
@@ -426,8 +480,8 @@ export default function AIEditChat({
     const tgt = getTargetRef.current()
     const useSelection = scope === 'selection' && tgt.hasSelection
     const full = useSelection ? tgt.text : getAllTextRef.current()
-    // 空上下文：文本编辑页维持原拦截；mermaid/drawio/仅对话场景允许无上下文
-    // 发送（空白画布从零生成、Office 无转换文本时直接提问）。
+    // 空上下文：文本编辑页维持原拦截；excalidraw/drawio/仅对话场景允许无
+    // 上下文发送（空白画布从零生成、Office 无转换文本时直接提问）。
     if (!full.trim() && applyKind === 'text' && !forceChatOnly) {
       setNotice(zh ? '文档内容为空，无法作为上下文发送' : 'Nothing to send: the document is empty')
       return
@@ -443,22 +497,26 @@ export default function AIEditChat({
       .filter((x) => !x.error && x.content)
       .slice(-HISTORY_ROUNDS * 2)
       .map((x) => ({ role: x.role, content: x.content }))
-    const system = applyKind === 'excalidraw-mermaid'
+    const system = applyKind === 'excalidraw-json'
       ? (zh
-        ? '你是白板图表助手。请按用户需求生成 mermaid 图表定义（支持 flowchart、sequenceDiagram、classDiagram、stateDiagram-v2、erDiagram 等）。只输出一个 mermaid 代码块（```mermaid 开头、``` 结尾），代码块之外不要任何解释——该代码将被转换为白板图形插入画布。'
-        : 'You are a whiteboard diagram assistant. Generate a mermaid diagram definition per the request (flowchart, sequenceDiagram, classDiagram, stateDiagram-v2, erDiagram are supported). Output exactly one mermaid code block (starting with ```mermaid and ending with ```), with no explanations outside it — the code will be converted into whiteboard shapes.')
+        ? `你是白板图表助手。请按用户需求直接输出 Excalidraw 元素 JSON 数组（rectangle/ellipse/diamond/text/arrow/line 元素骨架），只输出一个 \`\`\`excalidraw-json 代码块（以 [ 开头、] 结尾），代码块之外不要任何解释——该 JSON 将被直接转换为白板原生元素插入画布。\n\n${EXCALIDRAW_JSON_GUIDE}`
+        : `You are a whiteboard diagram assistant. Output Excalidraw element JSON directly per the request (rectangle/ellipse/diamond/text/arrow/line skeletons) — exactly one \`\`\`excalidraw-json fenced block (starting with [ and ending with ]), no explanations outside it. The JSON is converted into native whiteboard elements and inserted onto the canvas.\n\n${EXCALIDRAW_JSON_GUIDE}`)
       : applyKind === 'drawio-xml'
         ? (zh
           ? `你是 draw.io 图表助手。基于给定的当前图表 XML，按指令输出修改后的完整 drawio XML（以 <mxGraphModel>...</mxGraphModel> 或 <mxfile>...</mxfile> 包裹）。只输出 XML 本身，不要解释。\n\n${DRAWIO_XML_GUIDE}`
           : `You are a draw.io diagram assistant. Based on the given current diagram XML, output the complete modified drawio XML (wrapped in <mxGraphModel>...</mxGraphModel> or <mxfile>...</mxfile>). Output only the XML itself, no explanations.\n\n${DRAWIO_XML_GUIDE}`)
-        : outputFormat === 'markdown'
+        : applyKind === 'richtext-patch'
+          ? (zh
+            ? `你是富文本文档编辑助手。请按用户指令对给定文档进行修改（新增、插入、删除、替换），修改以下述「编辑指令」表达——系统会自动定位并逐条执行，不要直接输出修改后的全文。\n\n${RICHTEXT_PATCH_GUIDE}`
+            : `You are a rich text document editing assistant. Apply the user's requested changes (add, insert, delete, replace) as edit instructions per the protocol below — they are located and executed automatically; do NOT output the whole modified document.\n\n${RICHTEXT_PATCH_GUIDE}`)
+          : outputFormat === 'markdown'
           ? (zh
             ? '你是富文本文档写作助手。请按指令处理给定文本，仅输出最终内容本身：不要解释、不要说明。请用 Markdown 输出结果（标题 #/##/###、有序与无序列表、表格、代码块、加粗、斜体、链接等）——内容将被转换为富文本样式插入文档。'
             : 'You are a rich text document writing assistant. Process the given text per the instruction and output only the final content itself: no explanations. Write the result in Markdown (headings #/##/###, ordered and unordered lists, tables, code blocks, bold, italic, links, etc.) — it will be converted into rich text styles and inserted into the document.')
           : zh
             ? '你是文档写作助手。请按指令处理给定文本，仅输出最终内容本身：不要解释、不要说明，不要使用代码围栏。可以输出 Markdown 格式。'
             : 'You are a writing assistant. Process the given text per the instruction and output only the final content itself: no explanations and no code fences. Markdown formatting is allowed.'
-    const contextLabel = applyKind === 'excalidraw-mermaid'
+    const contextLabel = applyKind === 'excalidraw-json'
       ? (zh ? '当前白板内容摘要' : 'Current whiteboard summary')
       : applyKind === 'drawio-xml'
         ? (zh ? '当前图表 XML' : 'Current diagram XML')
@@ -557,8 +615,8 @@ export default function AIEditChat({
   /** 自动应用回复到文档（版本保护）：
    * 1) 应用前先 ensureSaved——有未保存修改先保存，取「应用前版本」；
    * 2) 落盘：text 通道——有选区→替换选区（onApply replace）、无选区→追加
-   *    文档末尾（onAppend，缺省回退 onApply insert）；excalidraw-mermaid/
-   *    drawio-xml 通道——从回复提取 mermaid/drawio XML，统一 onApply
+   *    文档末尾（onAppend，缺省回退 onApply insert）；excalidraw-json/
+   *    drawio-xml 通道——从回复提取元素 JSON/drawio XML，统一 onApply
    *    ('replace', 提取结果)，宿主返回/抛出错误则显示 applyError（文档未被
    *    修改）；
    * 3) 在消息上记录修改点（版本/时间/摘要），供「撤销此修改」回退。 */
@@ -572,13 +630,15 @@ export default function AIEditChat({
       void message.error(zh ? '保存失败，本次回复未应用到文档' : 'Save failed; the reply was not applied')
       return
     }
-    // 应用摘要与内容：mermaid/drawio 通道先提取目标载荷，失败不动文档。
+    // 应用摘要与内容：excalidraw/drawio 通道先提取目标载荷，失败不动文档；
+    // richtext-patch 通道回复原文透传宿主执行器（docflow-edit 围栏解析、
+    // 定位执行、围栏缺失回落追加均在宿主 applyRichTextPatch 内完成）。
     let appliedContent = content
-    if (applyKind !== 'text') {
-      const extracted = applyKind === 'excalidraw-mermaid' ? extractMermaidSource(content) : extractDrawioXML(content)
+    if (applyKind === 'excalidraw-json' || applyKind === 'drawio-xml') {
+      const extracted = applyKind === 'excalidraw-json' ? extractExcalidrawJSON(content) : extractDrawioXML(content)
       if (!extracted) {
-        const why = applyKind === 'excalidraw-mermaid'
-          ? (zh ? '未识别到 mermaid 代码，文档未被修改' : 'No mermaid code detected; the document was left unchanged')
+        const why = applyKind === 'excalidraw-json'
+          ? (zh ? '未识别到 excalidraw 元素 JSON 数组，画布未被修改' : 'No excalidraw element JSON array detected; the canvas was left unchanged')
           : (zh ? '未识别到 drawio XML，文档未被修改' : 'No drawio XML detected; the document was left unchanged')
         setTurns((prev) => prev.map((x) => (x.id === turnId ? { ...x, applying: false, applyError: why } : x)))
         return
@@ -660,14 +720,16 @@ export default function AIEditChat({
 
   const chips = forceChatOnly
     ? (zh ? ['总结要点', '翻译成英文', '润色建议', '列表化'] : ['Summarize', 'Translate to English', 'Polish suggestions', 'Turn into lists'])
-    : applyKind === 'excalidraw-mermaid'
-      ? (zh ? ['画一个流程图', '画一个时序图', '生成类图', '生成状态图'] : ['Draw a flowchart', 'Draw a sequence diagram', 'Class diagram', 'State diagram'])
+    : applyKind === 'excalidraw-json'
+      ? (zh ? ['画一个流程图', '画一个架构图', '生成概念图', '画一个看板'] : ['Draw a flowchart', 'Architecture diagram', 'Concept map', 'Kanban board'])
       : applyKind === 'drawio-xml'
         ? (zh ? ['生成流程图', '生成架构图', '美化整体布局', '改为横向布局'] : ['Generate a flowchart', 'Architecture diagram', 'Clean up the layout', 'Switch to horizontal layout'])
-        : zh
-          ? ['续写', '扩写', '精简', '修正错别字', '翻译成英文']
-          : ['Continue writing', 'Expand', 'Shorten', 'Fix typos', 'Translate to English']
-  const scopeHint = applyKind === 'excalidraw-mermaid'
+        : applyKind === 'richtext-patch'
+          ? (zh ? ['润色全文', '修正错别字', '精简全文', '文末续写一段'] : ['Polish all', 'Fix typos', 'Shorten', 'Append a paragraph'])
+          : zh
+            ? ['续写', '扩写', '精简', '修正错别字', '翻译成英文']
+            : ['Continue writing', 'Expand', 'Shorten', 'Fix typos', 'Translate to English']
+  const scopeHint = applyKind === 'excalidraw-json'
     ? (zh ? '白板无选区，将使用画布内容摘要' : 'No selection; the whiteboard summary will be used')
     : applyKind === 'drawio-xml'
       ? (zh ? '图表无选区，将使用当前 XML' : 'No selection; the current XML will be used')
@@ -675,47 +737,65 @@ export default function AIEditChat({
         ? (zh ? `已选 ${selectionLen} 字符` : `${selectionLen} chars selected`)
         : (zh ? '未选中文本，将使用全文' : 'No selection; the whole document will be used')
   const modeHint = mode === 'edit'
-    ? (applyKind === 'excalidraw-mermaid'
-      ? (zh ? '回复自动转图形插入白板，可撤销' : 'Auto-insert as shapes, revertible')
+    ? (applyKind === 'excalidraw-json'
+      ? (zh ? '回复自动转为白板元素插入，可撤销' : 'Auto-insert as whiteboard elements, revertible')
       : applyKind === 'drawio-xml'
         ? (zh ? '回复自动替换图表内容，可撤销' : 'Auto-replace the diagram, revertible')
-        : (zh ? '回复自动应用，可撤销' : 'Auto-apply, revertible'))
-    : (zh ? '纯输出，不改文档' : 'Output only')
+        : applyKind === 'richtext-patch'
+          ? (zh ? '编辑指令自动定位并应用，可撤销' : 'Edit instructions auto-applied, revertible')
+          : (zh ? '回复自动应用，可撤销' : 'Auto-apply, revertible'))
+    : (officeInsert
+      ? (zh ? '对话+插入：回复可一键插入文档' : 'Chat + insert: replies can be inserted into the document')
+      : (zh ? '纯输出，不改文档' : 'Output only'))
   const modeTip = mode === 'edit'
-    ? (applyKind === 'excalidraw-mermaid'
+    ? (applyKind === 'excalidraw-json'
       ? (zh
-        ? '可修改：AI 回复完成后，其中的 mermaid 代码会被转换为白板图形并追加插入画布（不覆盖现有内容）。应用前会先保存新版本作为回退基线，可在消息下方一键撤销。'
-        : 'Can edit: when the reply finishes, its mermaid code is converted into whiteboard shapes and appended to the canvas (existing content is kept). A new version is saved first as the revert baseline.')
+        ? '可修改：AI 回复完成后，其中的 excalidraw 元素 JSON 会被转换为白板原生元素（矩形/椭圆/菱形/文本/箭头等）追加插入画布（不覆盖现有内容）。应用前会先保存新版本作为回退基线，可在消息下方一键撤销。'
+        : 'Can edit: when the reply finishes, its excalidraw element JSON is converted into native whiteboard elements (rectangles/ellipses/diamonds/text/arrows) and appended to the canvas (existing content is kept). A new version is saved first as the revert baseline.')
       : applyKind === 'drawio-xml'
         ? (zh
           ? '可修改：AI 回复完成后，生成的 drawio XML 将整体替换画布内容。应用前会先保存新版本作为回退基线，可在消息下方一键撤销。'
           : 'Can edit: when the reply finishes, the generated drawio XML replaces the whole canvas. A new version is saved first as the revert baseline.')
-        : (zh
-          ? '可修改：AI 回复完成后自动应用到文档（有选区替换选区，无选区追加到文档末尾）。应用前会先保存新版本作为回退基线，可在消息下方一键撤销。'
-          : 'Can edit: replies are applied automatically when finished (replace the selection, or append to the end without one). A new version is saved first as the revert baseline; each applied message can be reverted.'))
+        : applyKind === 'richtext-patch'
+          ? (zh
+            ? '可修改：AI 回复完成后，围栏内的编辑指令（替换/插入/删除/整篇重写）会按定位原文自动应用到文档。应用前会先保存新版本作为回退基线，可在消息下方一键撤销。'
+            : 'Can edit: when the reply finishes, the fenced edit instructions (replace/insert/delete/full rewrite) are located in the document and applied automatically. A new version is saved first as the revert baseline.')
+          : (zh
+            ? '可修改：AI 回复完成后自动应用到文档（有选区替换选区，无选区追加到文档末尾）。应用前会先保存新版本作为回退基线，可在消息下方一键撤销。'
+            : 'Can edit: replies are applied automatically when finished (replace the selection, or append to the end without one). A new version is saved first as the revert baseline; each applied message can be reverted.'))
     : (zh
       ? '仅对话：AI 回复只在对话中展示，不改动文档内容。'
       : 'Chat only: replies stay in the conversation; the document is never modified.')
-  const placeholder = applyKind === 'excalidraw-mermaid'
-    ? (zh ? '描述想要的图（AI 生成 mermaid 并转为白板图形），Enter 发送' : 'Describe the diagram you want (AI generates mermaid → whiteboard shapes), Enter to send')
+  const placeholder = applyKind === 'excalidraw-json'
+    ? (zh ? '描述想要的图（AI 生成白板原生元素插入画布），Enter 发送' : 'Describe the diagram you want (AI generates native whiteboard elements), Enter to send')
     : applyKind === 'drawio-xml'
       ? (zh ? '描述要生成的图表或修改（AI 输出 drawio XML），Enter 发送' : 'Describe the diagram or change (AI outputs drawio XML), Enter to send')
-      : (zh ? '输入指令，Enter 发送（Shift+Enter 换行）' : 'Type an instruction, Enter to send (Shift+Enter for newline)')
+      : applyKind === 'richtext-patch'
+        ? (zh ? '描述要做的修改（AI 输出编辑指令并自动应用），Enter 发送' : 'Describe the change (AI emits edit instructions, auto-applied), Enter to send')
+        : (zh ? '输入指令，Enter 发送（Shift+Enter 换行）' : 'Type an instruction, Enter to send (Shift+Enter for newline)')
   const emptyHint = forceChatOnly
-    ? (zh
-      ? '与 AI 对话讨论当前文档（仅对话，不改动文档）。文档文本经转换接口获取；暂不支持转换的格式将以无上下文对话。'
-      : 'Chat with the AI about the current document (chat only, never modified). Document text is fetched via conversion; unsupported formats chat without context.')
-    : applyKind === 'excalidraw-mermaid'
+    ? (officeInsert
       ? (zh
-        ? '描述想要的图，例如「画一个用户注册流程图」「订单状态流转时序图」。「可修改」模式下 AI 生成的 mermaid 会自动转换为白板图形插入画布（可撤销）。'
-        : 'Describe a diagram, e.g. “draw a user sign-up flowchart”. In “Can edit” mode the generated mermaid is converted into whiteboard shapes and inserted (revertible).')
+        ? '与 AI 对话讨论当前文档，回复可一键插入文档：点击回复下方的「应用到文档」，内容将经 DocFlow AI 插件插入编辑器光标处（有选区时替换选区）。文档文本经转换接口获取；暂不支持转换的格式将以无上下文对话。'
+        : 'Chat with the AI about the current document and insert replies with one click: press “Apply to document” under a reply to insert it at the editor caret via the DocFlow AI plugin (replaces the selection when there is one). Document text is fetched via conversion; unsupported formats chat without context.')
+      : (zh
+        ? '与 AI 对话讨论当前文档（仅对话，不改动文档）。文档文本经转换接口获取；暂不支持转换的格式将以无上下文对话。'
+        : 'Chat with the AI about the current document (chat only, never modified). Document text is fetched via conversion; unsupported formats chat without context.'))
+    : applyKind === 'excalidraw-json'
+      ? (zh
+        ? '描述想要的图，例如「画一个用户注册流程图」「画一个三层架构图」。「可修改」模式下 AI 生成的 excalidraw 元素 JSON 会自动转换为白板原生元素插入画布（可撤销）。'
+        : 'Describe a diagram, e.g. “draw a user sign-up flowchart”. In “Can edit” mode the generated excalidraw element JSON is converted into native whiteboard elements and inserted (revertible).')
       : applyKind === 'drawio-xml'
         ? (zh
           ? '描述想要的图表或修改，例如「生成一个微服务架构图」「把泳道改成三条」。「可修改」模式下 AI 生成的 drawio XML 会自动替换画布内容（可撤销）。'
           : 'Describe the diagram or change, e.g. “generate a microservice architecture diagram”. In “Can edit” mode the generated drawio XML replaces the canvas (revertible).')
-        : (zh
-          ? '输入指令让 AI 基于选区或全文创作/改写，例如「把选中的这段改得更简洁」「续写下一节」「生成一个对比表格」。「可修改」模式下回复会自动应用到文档（可撤销），「仅对话」模式只在对话中输出。'
-          : 'Ask the AI to write or rewrite the selection / whole document. In “Can edit” mode replies are applied automatically (revertible); “Chat only” never modifies the document.')
+        : applyKind === 'richtext-patch'
+          ? (zh
+            ? '描述要做的修改，例如「把第二段改得更简洁」「删除小结一节」「在开头插入一段引言」。「可修改」模式下 AI 输出编辑指令（替换/插入/删除/整篇重写），自动定位原文并应用到文档（可撤销）。'
+            : 'Describe the change, e.g. “make the second paragraph more concise”, “delete the summary section”. In “Can edit” mode the AI emits edit instructions (replace/insert/delete/full rewrite) that are located in the document and applied automatically (revertible).')
+          : (zh
+            ? '输入指令让 AI 基于选区或全文创作/改写，例如「把选中的这段改得更简洁」「续写下一节」「生成一个对比表格」。「可修改」模式下回复会自动应用到文档（可撤销），「仅对话」模式只在对话中输出。'
+            : 'Ask the AI to write or rewrite the selection / whole document. In “Can edit” mode replies are applied automatically (revertible); “Chat only” never modifies the document.')
 
   return (
     <aside className="ai-edit-chat-panel" aria-label={zh ? 'AI 对话' : 'AI chat'}>
@@ -776,9 +856,10 @@ export default function AIEditChat({
         </Tooltip>
       </div>
       {/* 上下文范围：选区（默认，无选区禁用）/ 全文；白板/drawio 无选区
-          概念（上下文恒为摘要/XML），仅展示提示不渲染切换。 */}
+          概念（上下文恒为摘要/XML），仅展示提示不渲染切换；richtext-patch
+          沿用选区/全文切换（仅影响送入模型的上下文范围）。 */}
       <div className="ai-edit-chat-scope">
-        {applyKind === 'text' && (
+        {(applyKind === 'text' || applyKind === 'richtext-patch') && (
           <Segmented
             size="small"
             value={scope}
@@ -824,6 +905,24 @@ export default function AIEditChat({
                       <Button size="small" type="text" icon={<Copy size={13} strokeWidth={2} />} onClick={() => copy(turn.content)}>
                         {zh ? '复制' : 'Copy'}
                       </Button>
+                      {/* Office「应用到文档」：经宿主页 → DocFlow AI 插件把整条
+                          回复插入编辑器光标处（有选区替换选区）。插件未就绪时
+                          按钮置灰并提示先打开插件面板。 */}
+                      {officeInsert && (
+                        <Tooltip title={officeInsert.ready
+                          ? (zh ? '把本条回复经 DocFlow AI 插件插入文档光标处（有选区时替换选区）' : 'Insert this reply at the document caret via the DocFlow AI plugin (replaces the selection when there is one)')
+                          : (zh ? 'DocFlow AI 插件面板未打开：请先点击编辑器左侧工具栏的插件图标打开「DocFlow AI」' : 'The DocFlow AI plugin panel is not open: click the plugin icon on the editor left toolbar to open “DocFlow AI” first')}>
+                          <Button
+                            size="small"
+                            type="text"
+                            icon={<FileInput size={13} strokeWidth={2} />}
+                            disabled={!officeInsert.ready}
+                            onClick={() => officeInsert.onInsert(turn.content)}
+                          >
+                            {zh ? '应用到文档' : 'Apply to document'}
+                          </Button>
+                        </Tooltip>
+                      )}
                     </div>
                   )}
                   {/* 自动应用状态：进行中 / 修改点（可撤销）/ 已撤销 / 失败。 */}

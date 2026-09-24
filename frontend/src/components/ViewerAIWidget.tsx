@@ -1,9 +1,15 @@
 // 查看页悬浮 AI 助理（替换查看页原 AI 摘要按钮行）：
-// - 收起态：右下角 56px 悬浮球（Sparkles，主色）；pointer 事件手写拖动
+// - 收起态：40px 悬浮球（Sparkles，主色）；pointer 事件手写拖动
 //   （位移 >4px 判定为拖动，否则视为点击展开/收起），位置记忆 localStorage
-//   （docflow.viewer-ai.pos），始终约束在视口内（resize 重夹取）；
-// - 展开态：360×520 卡片 = 头部（标题 + 文件名 + 收起按钮 + 拖动把手）+
-//   Segmented「对话 | 摘要」+ 内容区：
+//   （docflow.viewer-ai.pos），始终约束在可用边界内（resize 重夹取）；
+// - 边缘吸附：拖动结束时距左/右边界 <24px 时吸附贴边——悬浮球收成半嵌
+//   边缘的圆点（一半露出边界外），点击弹出完整悬浮球/卡片（脱离吸附态）；
+// - 弹窗内挂载：组件渲染点（FileBrowser 查看弹窗标题行 headExtra）在
+//   .ant-modal-container 内时，可用边界自动切换为弹窗容器矩形（悬浮球/
+//   卡片始终在弹窗内，z-index 高于弹窗）；独立查看页（ViewerPage）无弹窗
+//   祖先 → 边界为视口；
+// - 展开态：360×520（按边界收缩）卡片 = 头部（标题 + 文件名 + 收起按钮 +
+//   拖动把手）+ Segmented「对话 | 摘要」+ 内容区：
 //   · 对话：精简版多轮对话（aiChat SSE 流式；模型选择器 = 默认模型 + 下拉，
 //     复用 AIAssistant 的 getAIModels/AI_MODEL_STORAGE_KEY），系统提示注入
 //     当前文件上下文（文件名 + 全文截 12000 字，fetchFileText 现取缓存），
@@ -30,15 +36,18 @@ import {
 import { useAIEnabled } from '../aiFeature'
 import { t, useLocale } from '../i18n'
 
-/** 悬浮位置持久化 key（{x,y} 为悬浮球/卡片左上角）。 */
+/** 悬浮位置持久化 key（{x,y,snap}：x/y 为悬浮球/卡片左上角（视口坐标），
+ *  snap = 吸附边（'left' | 'right' | null，半嵌圆点态）。 */
 const WIDGET_POS_KEY = 'docflow.viewer-ai.pos'
-/** 悬浮球尺寸 / 卡片尺寸 / 视口边距。 */
-const BALL_SIZE = 56
+/** 悬浮球尺寸 / 卡片尺寸 / 边界内边距（px）。 */
+const BALL_SIZE = 40
 const CARD_W = 360
 const CARD_H = 520
 const VIEW_MARGIN = 8
 /** 拖动阈值：位移超过该值判定为拖动（否则视为点击）。 */
 const DRAG_THRESHOLD = 4
+/** 边缘吸附阈值：拖动结束时球心距左/右边界小于该值吸附贴边。 */
+const EDGE_SNAP = 24
 /** 对话上下文注入的文件全文截断长度。 */
 const CONTEXT_TEXT_LIMIT = 12000
 
@@ -48,23 +57,31 @@ interface DragPos {
   y: number
 }
 
-/** 读取记忆的悬浮位置（非法/缺失返回 null）。 */
-function loadPos(): DragPos | null {
+/** 可用边界（视口或弹窗容器矩形；坐标一律为视口坐标系）。 */
+interface Bounds {
+  left: number
+  top: number
+  width: number
+  height: number
+}
+
+/** 读取记忆的悬浮位置（非法/缺失返回 null；snap 宽松校验）。 */
+function loadPos(): (DragPos & { snap: 'left' | 'right' | null }) | null {
   try {
     const raw = window.localStorage.getItem(WIDGET_POS_KEY)
     if (!raw) return null
-    const v = JSON.parse(raw) as Partial<DragPos>
+    const v = JSON.parse(raw) as Partial<DragPos & { snap: unknown }>
     const x = Number(v.x)
     const y = Number(v.y)
     if (!Number.isFinite(x) || !Number.isFinite(y)) return null
-    return { x, y }
+    return { x, y, snap: v.snap === 'left' || v.snap === 'right' ? v.snap : null }
   } catch {
     return null
   }
 }
 
-/** 持久化悬浮位置（失败静默）。 */
-function persistPos(p: DragPos): void {
+/** 持久化悬浮位置与吸附边（失败静默）。 */
+function persistPos(p: DragPos & { snap: 'left' | 'right' | null }): void {
   try {
     window.localStorage.setItem(WIDGET_POS_KEY, JSON.stringify(p))
   } catch {
@@ -72,11 +89,34 @@ function persistPos(p: DragPos): void {
   }
 }
 
-/** 位置夹取进视口（按当前元素尺寸）。 */
-function clampPos(p: DragPos, w: number, h: number): DragPos {
+/** 视口边界。 */
+function viewportBounds(): Bounds {
+  return { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight }
+}
+
+/** 位置夹取进边界（按当前元素尺寸；边界过小时贴边界内缘）。 */
+function clampPos(p: DragPos, w: number, h: number, b: Bounds): DragPos {
   return {
-    x: Math.min(Math.max(p.x, VIEW_MARGIN), Math.max(VIEW_MARGIN, window.innerWidth - w - VIEW_MARGIN)),
-    y: Math.min(Math.max(p.y, VIEW_MARGIN), Math.max(VIEW_MARGIN, window.innerHeight - h - VIEW_MARGIN)),
+    x: Math.min(Math.max(p.x, b.left + VIEW_MARGIN), Math.max(b.left + VIEW_MARGIN, b.left + b.width - w - VIEW_MARGIN)),
+    y: Math.min(Math.max(p.y, b.top + VIEW_MARGIN), Math.max(b.top + VIEW_MARGIN, b.top + b.height - h - VIEW_MARGIN)),
+  }
+}
+
+/** 吸附态 x 坐标（半嵌：球一半露出边界外）。 */
+function snappedX(side: 'left' | 'right', b: Bounds): number {
+  return side === 'left' ? b.left - BALL_SIZE / 2 : b.left + b.width - BALL_SIZE / 2
+}
+
+/** 吸附态仅夹取 y（x 半嵌边界外，不参与夹取）。 */
+function clampSnappedY(y: number, b: Bounds): number {
+  return Math.min(Math.max(y, b.top + VIEW_MARGIN), Math.max(b.top + VIEW_MARGIN, b.top + b.height - BALL_SIZE - VIEW_MARGIN))
+}
+
+/** 卡片实际尺寸（按边界收缩：窄/矮视口或弹窗不超出）。 */
+function cardSize(b: Bounds): { w: number; h: number } {
+  return {
+    w: Math.min(CARD_W, Math.max(160, b.width - VIEW_MARGIN * 2)),
+    h: Math.min(CARD_H, Math.max(200, b.height - VIEW_MARGIN * 2)),
   }
 }
 
@@ -118,14 +158,30 @@ export default function ViewerAIWidget({
   const { message } = AntdApp.useApp()
   const textLike = isTextLike(fileName, '')
 
-  // ---- 悬浮球 / 卡片：位置与拖动 ----
+  // ---- 悬浮球 / 卡片：位置与拖动（边界 = 视口或弹窗容器）----
   const [open, setOpen] = useState(false)
+  // 隐藏锚点：挂在渲染点（弹窗标题行内），closest 向上探测是否在
+  // .ant-modal-container（antd v6 弹窗内容盒）内——在则边界为弹窗矩形。
+  const anchorRef = useRef<HTMLSpanElement | null>(null)
+  const boundsRef = useRef<Bounds>(viewportBounds())
+  const readBounds = (): Bounds => {
+    const host = anchorRef.current?.closest<HTMLElement>('.ant-modal-container, .ant-modal-content')
+    let next: Bounds | null = null
+    if (host) {
+      const r = host.getBoundingClientRect()
+      if (r.width > 0 && r.height > 0) next = { left: r.left, top: r.top, width: r.width, height: r.height }
+    }
+    boundsRef.current = next ?? viewportBounds()
+    return boundsRef.current
+  }
   const [pos, setPos] = useState<DragPos>(() => {
     const stored = loadPos()
-    if (stored) return clampPos(stored, BALL_SIZE, BALL_SIZE)
+    if (stored) return { x: stored.x, y: stored.y }
     return { x: window.innerWidth - BALL_SIZE - 24, y: window.innerHeight - BALL_SIZE - 24 }
   })
   const posRef = useRef(pos)
+  // 吸附边（'left' | 'right' | null）：非空 = 半嵌圆点态（仅收起态球）。
+  const [snap, setSnap] = useState<'left' | 'right' | null>(() => loadPos()?.snap ?? null)
   const [dragging, setDragging] = useState(false)
   const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number; moved: boolean; w: number; h: number } | null>(null)
   const suppressClickRef = useRef(false)
@@ -135,17 +191,36 @@ export default function ViewerAIWidget({
     setPos(p)
   }
 
+  // 挂载后按记忆/默认位置初始化（锚点此时已渲染，可探测弹窗边界）；
+  // 初始化前悬浮球隐藏，避免按视口默认位置在弹窗外闪现一帧。
+  const [inited, setInited] = useState(false)
+  useEffect(() => {
+    const b = readBounds()
+    const stored = loadPos()
+    if (stored?.snap) {
+      applyPos({ x: snappedX(stored.snap, b), y: clampSnappedY(stored.y, b) })
+    } else if (stored) {
+      applyPos(clampPos(stored, BALL_SIZE, BALL_SIZE, b))
+    } else {
+      applyPos({ x: b.left + b.width - BALL_SIZE - 24, y: b.top + b.height - BALL_SIZE - 24 })
+    }
+    setInited(true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   const startDrag = (e: ReactPointerEvent<HTMLElement>) => {
     if (e.button !== 0) return
     e.preventDefault()
+    const b = readBounds()
+    const size = open ? cardSize(b) : { w: BALL_SIZE, h: BALL_SIZE }
     dragRef.current = {
       startX: e.clientX,
       startY: e.clientY,
       origX: posRef.current.x,
       origY: posRef.current.y,
       moved: false,
-      w: open ? CARD_W : BALL_SIZE,
-      h: open ? CARD_H : BALL_SIZE,
+      w: size.w,
+      h: size.h,
     }
     try {
       e.currentTarget.setPointerCapture(e.pointerId)
@@ -162,7 +237,7 @@ export default function ViewerAIWidget({
     const dy = e.clientY - d.startY
     if (!d.moved && Math.abs(dx) <= DRAG_THRESHOLD && Math.abs(dy) <= DRAG_THRESHOLD) return
     d.moved = true
-    applyPos(clampPos({ x: d.origX + dx, y: d.origY + dy }, d.w, d.h))
+    applyPos(clampPos({ x: d.origX + dx, y: d.origY + dy }, d.w, d.h, boundsRef.current))
   }
 
   const endDrag = () => {
@@ -172,22 +247,50 @@ export default function ViewerAIWidget({
     if (!d) return
     if (d.moved) {
       suppressClickRef.current = true
-      persistPos(posRef.current)
+      // 边缘吸附：仅收起态球（卡片展开时保持完整在界内）；距边 <24px
+      // 吸附为半嵌圆点（x 一半露出边界外，y 保持）。
+      const b = boundsRef.current
+      let side: 'left' | 'right' | null = null
+      if (!open) {
+        if (posRef.current.x - b.left < EDGE_SNAP) side = 'left'
+        else if (b.left + b.width - (posRef.current.x + d.w) < EDGE_SNAP) side = 'right'
+      }
+      setSnap(side)
+      if (side) applyPos({ x: snappedX(side, b), y: clampSnappedY(posRef.current.y, b) })
+      persistPos({ ...posRef.current, snap: side })
     }
   }
 
   const toggleOpen = () => {
     const next = !open
+    const b = readBounds()
+    if (next) {
+      // 展开：脱离吸附态，回到边界内完整可见。
+      setSnap(null)
+      const size = cardSize(b)
+      applyPos(clampPos(posRef.current, size.w, size.h, b))
+    } else {
+      applyPos(clampPos(posRef.current, BALL_SIZE, BALL_SIZE, b))
+    }
     setOpen(next)
-    applyPos(clampPos(posRef.current, next ? CARD_W : BALL_SIZE, next ? CARD_H : BALL_SIZE))
+    persistPos({ ...posRef.current, snap: null })
   }
 
-  // 视口尺寸变化：按当前形态重新夹取位置。
+  // 边界尺寸变化（视口 resize）：按当前形态（含吸附态）重新夹取位置。
   useEffect(() => {
-    const onResize = () => applyPos(clampPos(posRef.current, open ? CARD_W : BALL_SIZE, open ? CARD_H : BALL_SIZE))
+    const onResize = () => {
+      const b = readBounds()
+      if (snap && !open) {
+        applyPos({ x: snappedX(snap, b), y: clampSnappedY(posRef.current.y, b) })
+        return
+      }
+      const size = open ? cardSize(b) : { w: BALL_SIZE, h: BALL_SIZE }
+      applyPos(clampPos(posRef.current, size.w, size.h, b))
+    }
     window.addEventListener('resize', onResize)
     return () => window.removeEventListener('resize', onResize)
-  }, [open])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, snap])
 
   // ---- 页签 / 对话会话 ----
   const [tab, setTab] = useState<'chat' | 'summary'>('chat')
@@ -423,12 +526,17 @@ export default function ViewerAIWidget({
     )
   }
 
+  // 卡片尺寸（按当前边界收缩；弹窗内挂载时随弹窗大小）。
+  const card = cardSize(boundsRef.current)
+
   return (
     <>
+      {/* 边界探测锚点（display:none 不参与布局，仅 closest 向上找弹窗容器）。 */}
+      <span ref={anchorRef} className="viewer-aiw-anchor" aria-hidden="true" />
       {open ? (
         <div
           className={`viewer-aiw-card${dragging ? ' dragging' : ''}`}
-          style={{ left: pos.x, top: pos.y, width: CARD_W, height: CARD_H }}
+          style={{ left: pos.x, top: pos.y, width: card.w, height: card.h }}
           role="dialog"
           aria-label={zh ? 'AI 助理' : 'AI assistant'}
         >
@@ -621,8 +729,8 @@ export default function ViewerAIWidget({
       ) : (
         <button
           type="button"
-          className={`viewer-aiw-ball${dragging ? ' dragging' : ''}`}
-          style={{ left: pos.x, top: pos.y }}
+          className={`viewer-aiw-ball${dragging ? ' dragging' : ''}${snap ? ' snapped' : ''}`}
+          style={{ left: pos.x, top: pos.y, visibility: inited ? undefined : 'hidden' }}
           onPointerDown={startDrag}
           onPointerMove={moveDrag}
           onPointerUp={endDrag}
@@ -637,7 +745,7 @@ export default function ViewerAIWidget({
           aria-label={zh ? 'AI 助理' : 'AI assistant'}
           title={zh ? 'AI 助理：摘要 / 对话 / 修改' : 'AI assistant: summary / chat / edit'}
         >
-          <Sparkles size={22} strokeWidth={2} aria-hidden="true" />
+          <Sparkles size={16} strokeWidth={2} aria-hidden="true" />
         </button>
       )}
     </>
