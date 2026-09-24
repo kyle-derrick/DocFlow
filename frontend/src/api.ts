@@ -3476,6 +3476,8 @@ export interface AISkillDef {
   name: string
   description?: string
   prompt: string
+  /** 停用后登录侧不可见（缺省视为启用，兼容旧数据）。 */
+  enabled?: boolean
 }
 
 /** 平台人设列表（管理员整块读）。 */

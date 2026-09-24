@@ -69,6 +69,110 @@ interface DrawioMessage {
  * 不可达/服务端配置了浏览器不可达的地址）即展示页面级错误卡。 */
 const DRAWIO_INIT_TIMEOUT_MS = 20000
 
+/** AI 生成 drawio XML 自动校正（应用前守门，吸收社区成熟 drawio skill 的
+ * 输出规整经验，修复模型常见问题——箭头引用悬空、节点缺几何、坐标漂移、
+ * 节点重叠）：
+ * 1) DOMParser 解析，失败抛错（调用方回落展示原文不应用）；
+ * 2) 找到 mxGraphModel/root（mxfile 自动下钻）；缺失抛错；
+ * 3) 确保基础单元格 id=0（parent=空）与 id=1（parent=0）存在；
+ * 4) 顶点（vertex=1）：补缺失/非法 mxGeometry（默认 40,40,160,60），坐标
+ *    钳制 [-500,20000]；
+ * 5) 边（edge=1）：source/target 指向不存在单元格 → 删除该引用（浮端，
+ *    避免 drawio 渲染异常）；补相对 mxGeometry；
+ * 6) 顶点包围盒两两重叠 → 后者按 40px 步进右下错开（≤100 步）。
+ * 返回规整后的 XML 字符串；幂等纯改写，不剔除合法单元格。 */
+function fixDrawioXML(xml: string): string {
+  const doc = new DOMParser().parseFromString(xml, 'application/xml')
+  if (doc.querySelector('parsererror')) throw new Error('invalid XML')
+  const root = doc.getElementsByTagName('mxGraphModel')[0]?.getElementsByTagName('root')[0]
+    ?? doc.getElementsByTagName('root')[0]
+  if (!root) throw new Error('missing mxGraphModel/root')
+  const cells = Array.from(root.getElementsByTagName('mxCell'))
+  const byId = new Map<string, Element>()
+  for (const c of cells) {
+    const id = c.getAttribute('id') ?? ''
+    if (id) byId.set(id, c)
+  }
+  // 基础单元格兜底（AI 偶发省略）。
+  if (!byId.has('0')) {
+    const c = doc.createElement('mxCell')
+    c.setAttribute('id', '0')
+    root.appendChild(c)
+    byId.set('0', c)
+  }
+  if (!byId.has('1')) {
+    const c = doc.createElement('mxCell')
+    c.setAttribute('id', '1')
+    c.setAttribute('parent', '0')
+    root.appendChild(c)
+    byId.set('1', c)
+  }
+  const clamp = (v: number) => Math.min(20000, Math.max(-500, v))
+  const geometry = (c: Element): Element => {
+    let g = Array.from(c.children).find((ch) => ch.tagName === 'mxGeometry')
+    if (!g) {
+      g = doc.createElement('mxGeometry')
+      g.setAttribute('as', 'geometry')
+      c.appendChild(g)
+    }
+    return g
+  }
+  const vertices: Element[] = []
+  for (const c of cells) {
+    const id = c.getAttribute('id') ?? ''
+    if (!id || id === '0' || id === '1') continue
+    if (c.getAttribute('vertex') === '1') {
+      const g = geometry(c)
+      const num = (name: string, def: number): number => {
+        const raw = g.getAttribute(name)
+        const v = raw == null ? NaN : Number(raw)
+        return Number.isFinite(v) && v >= 0 ? v : def
+      }
+      const x = clamp(num('x', 40))
+      const y = clamp(num('y', 40))
+      const w = num('width', 160)
+      const h = num('height', 60)
+      g.setAttribute('x', String(x))
+      g.setAttribute('y', String(y))
+      g.setAttribute('width', String(w))
+      g.setAttribute('height', String(h))
+      if (!g.getAttribute('as')) g.setAttribute('as', 'geometry')
+      if (!c.getAttribute('parent')) c.setAttribute('parent', '1')
+      vertices.push(g)
+    } else if (c.getAttribute('edge') === '1') {
+      for (const key of ['source', 'target'] as const) {
+        const ref = c.getAttribute(key)
+        if (ref && !byId.has(ref)) c.removeAttribute(key)
+      }
+      const g = geometry(c)
+      if (!g.getAttribute('relative')) g.setAttribute('relative', '1')
+      if (!c.getAttribute('parent')) c.setAttribute('parent', '1')
+    }
+  }
+  // 顶点两两重叠错开（后一个右下步进避让）。
+  const box = (g: Element) => ({
+    x1: Number(g.getAttribute('x')),
+    y1: Number(g.getAttribute('y')),
+    x2: Number(g.getAttribute('x')) + Number(g.getAttribute('width')),
+    y2: Number(g.getAttribute('y')) + Number(g.getAttribute('height')),
+  })
+  for (let i = 1; i < vertices.length; i++) {
+    let steps = 0
+    while (steps < 100) {
+      const me = box(vertices[i])
+      const hit = vertices.slice(0, i).some((prev) => {
+        const b = box(prev)
+        return me.x1 < b.x2 && b.x1 < me.x2 && me.y1 < b.y2 && b.y1 < me.y2
+      })
+      if (!hit) break
+      vertices[i].setAttribute('x', String(clamp(Number(vertices[i].getAttribute('x')) + 40)))
+      vertices[i].setAttribute('y', String(clamp(Number(vertices[i].getAttribute('y')) + 40)))
+      steps++
+    }
+  }
+  return new XMLSerializer().serializeToString(doc)
+}
+
 export default function DrawioPage({ mode, fileId: fileIdProp }: { mode?: 'edit' | 'view'; fileId?: string } = {}) {
   const { fileId: routeFileId = '' } = useParams()
   // by-path 路由经 prop 传入 resolve 得到的 file_id；缺省回退路由参数。
@@ -285,7 +389,14 @@ export default function DrawioPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
   const aiApply = (_mode: 'insert' | 'replace', xml: string): string | void => {
     const frame = frameRef.current?.contentWindow
     if (!frame) return '图表编辑器未就绪，未应用'
-    frame.postMessage(JSON.stringify({ action: 'load', xml, autosave: 1 }), '*')
+    // 应用前自动校正（悬空引用/缺几何/坐标漂移/重叠），失败回落原文不应用。
+    let fixed = xml
+    try {
+      fixed = fixDrawioXML(xml)
+    } catch (e) {
+      return e instanceof Error ? `XML 校正失败：${e.message}` : 'XML 校正失败'
+    }
+    frame.postMessage(JSON.stringify({ action: 'load', xml: fixed, autosave: 1 }), '*')
     dirtyRef.current = true
     frame.postMessage(JSON.stringify({ action: 'export', format: 'xml' }), '*')
   }

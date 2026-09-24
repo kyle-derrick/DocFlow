@@ -820,7 +820,8 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	// settings 包：≤50 条、id 唯一、name ≤64、prompt ≤4000）。
 	admin.GET("/settings/ai/personas", h.aiPersonasList)
 	admin.PUT("/settings/ai/personas", h.adminPutAIPersonas)
-	admin.GET("/settings/ai/skills", h.aiSkillsList)
+	// 管理端列表不过滤停用项（aiSkillsList 仅返回启用项给登录侧）。
+	admin.GET("/settings/ai/skills", h.adminAISkillsList)
 	admin.PUT("/settings/ai/skills", h.adminPutAISkills)
 	// 外部 MCP 服务器（system_settings 的 ai.mcp 键）：登录侧 GET /ai/mcp
 	// 读启用项；管理端整块读替（auth_header 只写不读、留空继承，回显

@@ -168,7 +168,54 @@ function parseExcalidrawSkeletons(raw: string, existingIds: Set<string>): Array<
   if (!out.length) {
     throw new Error('all connector elements reference unknown ids')
   }
+  autoFixSkeletons(out)
   return out
+}
+
+/** AI 骨架自动校正（convertToExcalidrawElements 前的兜底，吸收社区成熟
+ * skill 的输出规整经验，修复模型常见的「图标重叠 / 尺寸缺失 / 坐标漂移」）：
+ * 1) 形状（rectangle/ellipse/diamond）宽高缺失或非法 → 补 160×80 默认值；
+ * 2) 坐标归一化：所有元素 x/y 钳制到 [-500, 20000]（模型偶发输出 NaN/
+ *    巨大坐标导致元素飞出视口）；
+ * 3) 重叠错开：形状两两包围盒相交时，后一个元素按 40px 步进右下错开
+ *    （最多 100 步），保证每个节点在画布上独立可见。
+ * 全部为幂等纯改写，不剔除任何元素。 */
+function autoFixSkeletons(items: Array<Record<string, unknown>>): void {
+  const MIN = -500
+  const MAX = 20000
+  const clamp = (v: number) => Math.min(MAX, Math.max(MIN, v))
+  for (const el of items) {
+    const nx = typeof el.x === 'number' && Number.isFinite(el.x) ? el.x : 0
+    const ny = typeof el.y === 'number' && Number.isFinite(el.y) ? el.y : 0
+    el.x = clamp(nx)
+    el.y = clamp(ny)
+    if (el.type === 'rectangle' || el.type === 'ellipse' || el.type === 'diamond') {
+      if (typeof el.width !== 'number' || !Number.isFinite(el.width) || el.width <= 0) el.width = 160
+      if (typeof el.height !== 'number' || !Number.isFinite(el.height) || el.height <= 0) el.height = 80
+    }
+  }
+  // 形状包围盒两两错开（保留首个位置，后续元素右下步进避让）。
+  const shapes = items.filter((el) => el.type === 'rectangle' || el.type === 'ellipse' || el.type === 'diamond')
+  const bbox = (el: Record<string, unknown>) => ({
+    x1: el.x as number,
+    y1: el.y as number,
+    x2: (el.x as number) + (el.width as number),
+    y2: (el.y as number) + (el.height as number),
+  })
+  for (let i = 1; i < shapes.length; i++) {
+    let steps = 0
+    while (steps < 100) {
+      const me = bbox(shapes[i])
+      const hit = shapes.slice(0, i).some((prev) => {
+        const b = bbox(prev)
+        return me.x1 < b.x2 && b.x1 < me.x2 && me.y1 < b.y2 && b.y1 < me.y2
+      })
+      if (!hit) break
+      shapes[i].x = clamp((shapes[i].x as number) + 40)
+      shapes[i].y = clamp((shapes[i].y as number) + 40)
+      steps++
+    }
+  }
 }
 
 export default function ExcalidrawPage({

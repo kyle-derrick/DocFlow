@@ -146,8 +146,18 @@ interface SkillForm {
   name: string
   description: string
   prompt: string
+  enabled: boolean
   isNew: boolean
 }
+
+/** 常用官方 MCP 服务模板（Streamable HTTP 端点；新建弹窗一键预填，可改）：
+ * 仅收录官方托管、原生 HTTP/SSE 可直连的服务；需要本地部署网关（stdio）的
+ * 服务不在其列（后端 MCP 客户端仅支持 HTTP/SSE）。 */
+const MCP_OFFICIAL_TEMPLATES = [
+  { id: 'context7', name: 'Context7（最新代码文档检索）', url: 'https://mcp.context7.com/mcp' },
+  { id: 'deepwiki', name: 'DeepWiki（GitHub 仓库解读）', url: 'https://mcp.deepwiki.com/mcp' },
+  { id: 'mcp-get', name: 'MCP-Get（MCP 服务目录搜索）', url: 'https://mcp-get.com/mcp' },
+]
 
 /** 编辑中的 MCP 工具服务表单态（auth_header 草稿：空 = 保持现值）。 */
 interface MCPForm {
@@ -526,6 +536,7 @@ export default function AISettingsPanel({
       name: skillEditing.name.trim(),
       description: skillEditing.description.trim() || undefined,
       prompt: skillEditing.prompt,
+      enabled: skillEditing.enabled,
     }
     try {
       const saved = await putAISkills([...skills.filter((s) => s.id !== id), entry])
@@ -541,6 +552,15 @@ export default function AISettingsPanel({
   const removeSkill = async (id: string) => {
     try {
       setSkills(await putAISkills(skills.filter((s) => s.id !== id)))
+    } catch (err) {
+      onError(err instanceof Error ? err.message : t(locale, 'saveFailed'))
+    }
+  }
+
+  /** 技能启用开关（整块 PUT 原地替换该条）。 */
+  const toggleSkill = async (id: string, enabled: boolean) => {
+    try {
+      setSkills(await putAISkills(skills.map((s) => (s.id === id ? { ...s, enabled } : s))))
     } catch (err) {
       onError(err instanceof Error ? err.message : t(locale, 'saveFailed'))
     }
@@ -1068,7 +1088,7 @@ export default function AISettingsPanel({
 
       {/* 技能模板：快捷指令（独立端点整块读替）。 */}
       <Card size="small" title={zh ? '技能模板（快捷指令）' : 'Skill templates (quick commands)'} style={{ marginTop: 12 }} extra={!readOnly && (
-        <Button size="small" type="primary" onClick={() => setSkillEditing({ id: '', name: '', description: '', prompt: '', isNew: true })}>
+        <Button size="small" type="primary" onClick={() => setSkillEditing({ id: '', name: '', description: '', prompt: '', enabled: true, isNew: true })}>
           <Plus size={13} strokeWidth={2} aria-hidden="true" />
           <span>{t(locale, 'adminAINew')}</span>
         </Button>
@@ -1083,14 +1103,25 @@ export default function AISettingsPanel({
           {skills.map((s) => (
             <div className="ai-provider-card" key={s.id}>
               <div className="ai-provider-main">
-                <div className="ai-provider-name">{s.name}</div>
+                <div className="ai-provider-name">
+                  {s.name}
+                  {s.enabled === false && <Tag>{zh ? '已停用' : 'Disabled'}</Tag>}
+                </div>
                 {s.description && <div className="muted">{s.description}</div>}
                 <div className="muted" title={s.prompt}>{s.prompt.length > 120 ? `${s.prompt.slice(0, 120)}…` : s.prompt}</div>
               </div>
               {!readOnly && (
                 <div className="ai-provider-actions">
+                  <Tooltip title={s.enabled === false ? (zh ? '启用' : 'Enable') : (zh ? '停用' : 'Disable')}>
+                    <Switch size="small" checked={s.enabled !== false} onChange={(v) => void toggleSkill(s.id, v)} />
+                  </Tooltip>
+                  <Tooltip title={zh ? '复制 Prompt' : 'Copy prompt'}>
+                    <Button size="small" onClick={() => { void navigator.clipboard?.writeText(s.prompt); onNotice(zh ? '已复制' : 'Copied') }}>
+                      <Copy size={13} strokeWidth={2} aria-hidden="true" />
+                    </Button>
+                  </Tooltip>
                   <Tooltip title={t(locale, 'adminAIEdit')}>
-                    <Button size="small" onClick={() => setSkillEditing({ id: s.id, name: s.name, description: s.description ?? '', prompt: s.prompt, isNew: false })}>
+                    <Button size="small" onClick={() => setSkillEditing({ id: s.id, name: s.name, description: s.description ?? '', prompt: s.prompt, enabled: s.enabled !== false, isNew: false })}>
                       <Pencil size={13} strokeWidth={2} aria-hidden="true" />
                     </Button>
                   </Tooltip>
@@ -1371,6 +1402,10 @@ export default function AISettingsPanel({
               <span>{zh ? 'Prompt（≤4000；占位符 {selection}=编辑器选区、{file}=当前文件名）' : 'Prompt (≤4000; placeholders {selection} / {file})'}</span>
               <Input.TextArea rows={6} maxLength={4000} value={skillEditing.prompt} onChange={(e) => setSkillEditing({ ...skillEditing, prompt: e.target.value })} />
             </label>
+            <label className="field">
+              <span>{zh ? '启用（停用后用户侧不可见）' : 'Enabled (hidden from users when off)'}</span>
+              <Switch checked={skillEditing.enabled} onChange={(v) => setSkillEditing({ ...skillEditing, enabled: v })} />
+            </label>
           </div>
           <div className="modal-actions">
             <Button type="primary" onClick={() => void applySkillEdit()}>{t(locale, 'adminAISave')}</Button>
@@ -1388,6 +1423,21 @@ export default function AISettingsPanel({
           onClose={() => setMcpEditing(null)}
         >
           <div className="ai-provider-form">
+            {mcpEditing.isNew && (
+              <label className="field">
+                <span>{zh ? '官方模板（选中即预填，可再修改）' : 'Official templates (prefill, editable)'}</span>
+                <Select
+                  size="small"
+                  value={undefined}
+                  placeholder={zh ? '选择常用官方 MCP 服务…' : 'Pick a common official MCP server…'}
+                  onChange={(v) => {
+                    const tpl = MCP_OFFICIAL_TEMPLATES.find((x) => x.id === v)
+                    if (tpl) setMcpEditing({ ...mcpEditing, id: tpl.id, name: tpl.name, url: tpl.url })
+                  }}
+                  options={MCP_OFFICIAL_TEMPLATES.map((x) => ({ value: x.id, label: `${x.name} · ${x.url}` }))}
+                />
+              </label>
+            )}
             <label className="field">
               <span>ID{zh ? '（唯一标识，≤64，保存后不可改）' : ' (unique key, ≤64)'}</span>
               <Input value={mcpEditing.id} maxLength={64} disabled={!mcpEditing.isNew} onChange={(e) => setMcpEditing({ ...mcpEditing, id: e.target.value })} />

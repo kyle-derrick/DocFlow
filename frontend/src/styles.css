@@ -6199,6 +6199,41 @@ kbd {
   background: transparent;
   padding: 0;
 }
+/* 长代码块默认折叠：头部「展开 N 行」切换 + 折叠占位条。 */
+.ai-md-code-expand {
+  margin-left: auto;
+  color: var(--muted);
+  padding: 0 4px;
+}
+.ai-md-code-expand + .ai-md-code-actions { margin-left: 0; }
+.ai-md-code-folded {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  border: 0;
+  background: transparent;
+  font-size: 12px;
+  text-align: center;
+  cursor: pointer;
+}
+.ai-md-code-folded:hover { color: var(--text); background: var(--surface-2); }
+/* 自动应用成功后的 payload 折叠摘要卡片（AIEditChat）。 */
+.ai-applied-payload {
+  margin: 2px 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+.ai-applied-payload-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+}
+.ai-applied-payload-label { font-size: 12px; }
+.ai-applied-payload-toggle { margin-left: auto; padding: 0; font-size: 12px; }
+.ai-applied-payload .ai-markdown { padding: 0 4px 4px; }
 
 /* hljs 语法高亮（暗色默认；与 rich-text-content 同一套配色）。 */
 .ai-md .hljs-keyword, .ai-md .hljs-selector-tag, .ai-md .hljs-literal,
@@ -7229,7 +7264,18 @@ kbd {
   padding: 8px 12px;
   border-bottom: 1px solid var(--border);
 }
-.ai-edit-chat-mode-hint { font-size: 12px; }
+/* 模式说明悬浮图标（hover 弹出完整说明；替代平铺文案）。 */
+.ai-edit-chat-mode-hint {
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+  color: var(--muted, #888);
+  cursor: help;
+  border-radius: 50%;
+}
+.ai-edit-chat-mode-hint:hover { color: var(--accent, #1677ff); }
+.ai-edit-chat-mode-popover { max-width: 320px; line-height: 1.5; }
+.ai-edit-chat-mode-popover strong { display: block; margin-bottom: 4px; }
 /* 助手气泡内「已应用于文档 · vN · 时间 + 摘要」小字条与「撤销此修改」。 */
 .ai-applied-bar {
   display: flex;

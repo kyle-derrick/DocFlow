@@ -58,6 +58,7 @@ func (h *Handler) platformPersonas() []settings.AIPersonaDef {
 // aiSkillsList GET /api/v1/ai/skills（登录可用）：平台技能数组（语义同
 // personas；数组顺序即展示顺序）。
 func (h *Handler) aiSkillsList(c *gin.Context) {
+	// 登录侧仅返回启用技能（停用项管理端可见，用户侧隐藏）。
 	c.JSON(http.StatusOK, gin.H{"skills": h.platformSkills()})
 }
 
@@ -69,7 +70,28 @@ func (h *Handler) platformSkills() []settings.AISkillDef {
 	if err != nil || list == nil {
 		return []settings.AISkillDef{}
 	}
-	return list
+	enabled := make([]settings.AISkillDef, 0, len(list))
+	for _, s := range list {
+		if s.Enabled == nil || *s.Enabled {
+			enabled = append(enabled, s)
+		}
+	}
+	return enabled
+}
+
+// adminAISkillsList GET /api/v1/admin/settings/ai/skills：管理端全量列表
+// （含停用项，enabled 字段透传）。
+func (h *Handler) adminAISkillsList(c *gin.Context) {
+	if h.settings == nil {
+		c.JSON(http.StatusOK, gin.H{"skills": []settings.AISkillDef{}})
+		return
+	}
+	list, err := h.settings.AISkills()
+	if err != nil || list == nil {
+		c.JSON(http.StatusOK, gin.H{"skills": []settings.AISkillDef{}})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"skills": list})
 }
 
 // adminPutAIPersonas PUT /api/v1/admin/settings/ai/personas：整块替换平台

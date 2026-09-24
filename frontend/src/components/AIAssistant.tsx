@@ -83,6 +83,7 @@ import { useAILocation } from '../aiLocation'
 import type { AILocation } from '../aiLocation'
 import { Modal } from './FileBrowser'
 import AIMarkdown from './AIMarkdown'
+import AIModelSelect from './AIModelSelect'
 import { useAIEnabled, useAIFeatures } from '../aiFeature'
 import { t, useLocale } from '../i18n'
 
@@ -2453,47 +2454,18 @@ export default function AIAssistant() {
             引用文件 chips）。 */}
         <div className="aiax-composer">
           <div className="aiax-toggles">
-            {models.length > 0 && (() => {
-              // 命中默认模型且用户未显式选择：不显示选中值，以 placeholder
-              // 「默认（Provider / 模型）」提示（modelKey 实际仍为默认键，
-              // 发送/思考开关评估照常生效）。
-              const dkey = defaultAIModelKey()
-              const usingDefault = !modelExplicit && !!dkey && modelKey === dkey
-              const defModel = dkey ? models.find((m) => m.id === dkey) : undefined
-              const defLabel = defModel
-                ? `${defModel.providerName || defModel.providerId} / ${defModel.model}`
-                : dkey
-              return (
-                <Select
-                  className="ai-model-select"
-                  size="small"
-                  value={usingDefault ? undefined : (modelKey || undefined)}
-                  placeholder={usingDefault
-                    ? (zh ? `默认（${defLabel}）` : `Default (${defLabel})`)
-                    : (zh ? '默认模型' : 'Default model')}
-                  onChange={(v) => {
-                    setModelKey(v)
-                    setModelExplicit(true)
-                    try {
-                      window.localStorage.setItem(AI_MODEL_STORAGE_KEY, v)
-                    } catch {
-                      /* ignore */
-                    }
-                  }}
-                  options={models.map((m) => ({
-                    value: m.id,
-                    label: (
-                      <span className="ai-model-option">
-                        <span className="ai-model-option-name">{m.providerName || m.providerId} / {m.model}{m.id === dkey ? (zh ? '（默认）' : ' (default)') : ''}</span>
-                        {m.capabilities.map((c) => (
-                          <span key={c} className="ai-model-cap">{c}</span>
-                        ))}
-                      </span>
-                    ),
-                  }))}
-                />
-              )
-            })()}
+            {models.length > 0 && (
+              <AIModelSelect
+                models={models}
+                modelKey={modelKey}
+                modelExplicit={modelExplicit}
+                onSelect={(v) => {
+                  setModelKey(v)
+                  setModelExplicit(true)
+                }}
+                zh={zh}
+              />
+            )}
             {/* 联网搜索（外部互联网，附来源）。 */}
             <AITogglePill
               icon={<Globe size={14} strokeWidth={2} aria-hidden="true" />}

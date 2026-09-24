@@ -208,6 +208,14 @@ type AISkillDef struct {
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
 	Prompt      string `json:"prompt"`
+	// Enabled 控制技能对登录用户是否可见（false = 停用：不出现在技能
+	// 模板按钮；管理端始终可见可编辑）。缺省视为启用，兼容旧数据。
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
+// skillEnabled 判定技能是否启用（nil 视为启用，兼容旧数据）。
+func skillEnabled(s AISkillDef) bool {
+	return s.Enabled == nil || *s.Enabled
 }
 
 // ValidateAIPersonas 校验平台人设列表：≤50 条、id 去空白后 1..64 且唯一、
@@ -1872,7 +1880,12 @@ func (s *Store) AISkills() ([]AISkillDef, error) {
 func (s *Store) SetAISkills(in []AISkillDef, actor uuid.UUID) ([]AISkillDef, error) {
 	normalized := make([]AISkillDef, 0, len(in))
 	for _, sk := range in {
-		normalized = append(normalized, AISkillDef{ID: strings.TrimSpace(sk.ID), Name: strings.TrimSpace(sk.Name), Description: strings.TrimSpace(sk.Description), Prompt: sk.Prompt})
+		item := AISkillDef{ID: strings.TrimSpace(sk.ID), Name: strings.TrimSpace(sk.Name), Description: strings.TrimSpace(sk.Description), Prompt: sk.Prompt, Enabled: sk.Enabled}
+		if item.Enabled == nil {
+			enabled := true
+			item.Enabled = &enabled
+		}
+		normalized = append(normalized, item)
 	}
 	if err := ValidateAISkills(normalized); err != nil {
 		return nil, err

@@ -19,13 +19,12 @@ import type { TextAreaRef } from 'antd/es/input/TextArea'
 import {
   Bot, Check, ChevronDown, ChevronRight, Eraser, FilePlus2, FileText, FileType2, FolderClosed,
   FolderOpen, History, Package, Paperclip, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen,
-  Plus, RefreshCw, Send, Settings2, Sparkles, Square, Trash2, Upload, X,
+  Pencil, Plus, RefreshCw, Send, Settings2, Sparkles, Square, Trash2, Upload, X,
 } from 'lucide-react'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
+import AIMarkdown from '../components/AIMarkdown'
 import {
-  EMPTY_DFDOC_JSON, aiChat, currentUserId, getMe, listAgentTasks, listFiles, listSpaces,
-  listSpaceFiles, resolveFileById, searchFiles, uploadFile,
+  EMPTY_DFDOC_JSON, aiChat, currentUserId, deleteFile, getMe, listAgentTasks, listFiles, listSpaces,
+  listSpaceFiles, renameFile, resolveFileById, searchFiles, uploadFile,
 } from '../api'
 import type { AgentTask, AIMessage, AISource, FileItem, Space } from '../api'
 import { applyAgentTask, cancelAgentTask, createAgentTask, discardAgentTask, getAgentTask, rollbackAgentTask } from '../agentTasks'
@@ -206,7 +205,7 @@ function buildArtifactTree(diff: AgentDiff[]): ArtifactNode[] {
 
 function LazyTree({
   zh, spaceId, rootId, onlyFolders = false, rootPath = '', activeFolderId, activeFileId,
-  isRefFile, onFolder, onFile, onUploadFolder, onCreateDoc, onToggleRef,
+  isRefFile, onFolder, onFile, onUploadFolder, onCreateDoc, onToggleRef, onDeleteItem, onRenameItem,
 }: {
   zh: boolean
   spaceId: string; rootId: string | null; onlyFolders?: boolean; rootPath?: string
@@ -219,6 +218,9 @@ function LazyTree({
   /** 目录右键「新建文档」：目标目录 id + 目录名。 */
   onCreateDoc?: (kind: 'richtext' | 'markdown', folderId: string, folderName: string) => void
   onToggleRef?: (f: FileItem) => void
+  /** 右键「删除/重命名」（文件与目录通用；处理后由调用方刷新目录树）。 */
+  onDeleteItem?: (f: FileItem) => void
+  onRenameItem?: (f: FileItem) => void
 }) {
   const { message } = AntdApp.useApp()
   const [children, setChildren] = useState<Record<string, FileItem[]>>({})
@@ -283,6 +285,8 @@ function LazyTree({
         })
       }
       items.push({ key: 'refresh', label: zh ? '刷新' : 'Refresh' })
+      if (onRenameItem) items.push({ key: 'rename', label: zh ? '重命名' : 'Rename' })
+      if (onDeleteItem) items.push({ key: 'delete', label: zh ? '删除' : 'Delete', danger: true })
       items.push({ type: 'divider' })
       items.push({ key: 'copypath', label: zh ? '复制路径' : 'Copy path' })
       return items
@@ -293,6 +297,9 @@ function LazyTree({
       { key: 'edit', label: zh ? '编辑' : 'Edit' },
     ]
     if (onToggleRef) items.push({ key: 'ref', label: isRefFile?.(f) ? (zh ? '移除 AI 引用' : 'Remove AI reference') : (zh ? '加入 AI 引用' : 'Add AI reference') })
+    items.push({ type: 'divider' })
+    if (onRenameItem) items.push({ key: 'rename', label: zh ? '重命名' : 'Rename' })
+    if (onDeleteItem) items.push({ key: 'delete', label: zh ? '删除' : 'Delete', danger: true })
     items.push({ type: 'divider' })
     items.push({ key: 'copypath', label: zh ? '复制路径' : 'Copy path' })
     return items
@@ -320,6 +327,10 @@ function LazyTree({
       window.location.href = editHrefOf(f.name, f.id)
     } else if (key === 'ref') {
       onToggleRef?.(f)
+    } else if (key === 'rename') {
+      onRenameItem?.(f)
+    } else if (key === 'delete') {
+      onDeleteItem?.(f)
     } else if (key === 'copypath') {
       copyPath(fullPath)
     }
@@ -888,7 +899,7 @@ function StudioChat({ zh, engine, agentOn, onRefreshTasks, onChatSettled, projec
   /** 欢迎卡「让 AI 生成」等外部聚焦信号（递增触发 focus）。 */
   focusSignal: number
 }) {
-  const { message } = AntdApp.useApp()
+  const { message, modal } = AntdApp.useApp()
   const activeSession = sessions.find((s) => s.id === activeId) ?? sessions[0] ?? null
   const turns = activeSession?.messages ?? []
   // 模型选择：会话显式选择 > 项目默认 > 平台默认（''）；随会话持久化。
@@ -1174,6 +1185,23 @@ function StudioChat({ zh, engine, agentOn, onRefreshTasks, onChatSettled, projec
         <Tooltip title={zh ? '新会话' : 'New session'}>
           <Button size="small" type="text" aria-label={zh ? '新会话' : 'New session'} onClick={addSession}><Plus size={14} aria-hidden="true" /></Button>
         </Tooltip>
+        <Tooltip title={zh ? '重命名会话' : 'Rename session'}>
+          <Button size="small" type="text" aria-label={zh ? '重命名会话' : 'Rename session'} disabled={!activeSession} onClick={() => {
+            const s = activeSession
+            if (!s) return
+            let next = s.title
+            modal.confirm({
+              title: zh ? '重命名会话' : 'Rename session',
+              content: <Input defaultValue={s.title} onChange={(e) => { next = e.target.value }} />,
+              okText: zh ? '保存' : 'Save',
+              onOk: () => {
+                const title = next.trim()
+                if (!title || title === s.title) return
+                onSessions((prev) => prev.map((x) => (x.id === s.id ? { ...x, title } : x)))
+              },
+            })
+          }}><Pencil size={14} aria-hidden="true" /></Button>
+        </Tooltip>
         <Tooltip title={zh ? '删除当前会话' : 'Delete session'}>
           <Button size="small" type="text" aria-label={zh ? '删除当前会话' : 'Delete session'} disabled={sessions.length <= 1} onClick={() => removeSession(activeId)}><Trash2 size={14} aria-hidden="true" /></Button>
         </Tooltip>
@@ -1227,7 +1255,7 @@ function StudioChat({ zh, engine, agentOn, onRefreshTasks, onChatSettled, projec
                   ) : (
                     <>
                       {turn.content
-                        ? <div className="markdown-preview ai-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{turn.content}</ReactMarkdown></div>
+                        ? <AIMarkdown text={turn.content} zh={zh} streaming={turn.streaming} />
                         : turn.streaming ? <span className="ai-thinking">生成中…</span>
                           : turn.stopped ? <span className="ai-thinking muted">已停止</span>
                             : null}
@@ -1534,7 +1562,7 @@ export default function StudioPage() {
   const locale = useLocale()
   const zh = locale === 'zh-CN'
   const feats = useAIFeatures() // {enabled, agent, ...}：enabled=总开关；agent=智能体任务能力
-  const { message } = AntdApp.useApp()
+  const { message, modal } = AntdApp.useApp()
   const [uid, setUid] = useState('')
   const [projects, setProjects] = useState<StudioProject[]>([])
   const [pid, setPid] = useState('')
@@ -1739,6 +1767,62 @@ export default function StudioPage() {
     setReviewId(taskId)
   }
 
+  /** 树右键「删除」：软删（目录整树入回收站）；成功后刷新树/最近产物并清引用。 */
+  const deleteTreeItem = (f: { id: string; name: string; type?: string }) => {
+    const isFolder = f.type === 'folder'
+    modal.confirm({
+      title: zh ? `删除${isFolder ? '目录' : '文件'}「${f.name}」？` : `Delete ${isFolder ? 'folder' : 'file'} "${f.name}"?`,
+      content: zh
+        ? (isFolder ? '目录及其全部内容将移入回收站。' : '文件将移入回收站。')
+        : (isFolder ? 'The folder and all its contents will be moved to trash.' : 'The file will be moved to trash.'),
+      okText: zh ? '删除' : 'Delete',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        try {
+          await deleteFile(f.id)
+        } catch (err) {
+          message.error(err instanceof Error ? err.message : '删除失败')
+          return
+        }
+        if (viewFile?.id === f.id) setViewFile(null)
+        if (taskRoot === f.id) setTaskRoot(project?.rootFolderId ?? '')
+        setRefs((prev) => prev.filter((x) => x.fileId !== f.id))
+        setTreeTick((n) => n + 1)
+        setRecentTick((n) => n + 1)
+        message.success('已移入回收站')
+      },
+    })
+  }
+
+  /** 树右键「重命名」：弹窗输入新名（同名校验由后端）。 */
+  const renameTreeItem = (f: { id: string; name: string }) => {
+    let next = f.name
+    modal.confirm({
+      title: zh ? `重命名「${f.name}」` : `Rename "${f.name}"`,
+      content: (
+        <Input
+          defaultValue={f.name}
+          onChange={(e) => { next = e.target.value }}
+        />
+      ),
+      okText: zh ? '保存' : 'Save',
+      onOk: async () => {
+        const name = next.trim()
+        if (!name || name === f.name) return
+        try {
+          await renameFile(f.id, name)
+        } catch (err) {
+          message.error(err instanceof Error ? err.message : '重命名失败')
+          return
+        }
+        if (viewFile?.id === f.id) setViewFile({ id: f.id, name })
+        setRefs((prev) => prev.map((x) => (x.fileId === f.id ? { ...x, fileName: name } : x)))
+        setTreeTick((n) => n + 1)
+        message.success('已重命名')
+      },
+    })
+  }
+
   /** 快捷创建：复用上传管线在指定目录（默认项目根）建文档，建完新窗口打开编辑器。 */
   const createDoc = async (kind: 'richtext' | 'markdown', folderId?: string, folderName?: string) => {
     if (!project || creating) return
@@ -1931,6 +2015,8 @@ export default function StudioPage() {
                     onUploadFolder={(f) => openUpload({ id: f.id, name: f.name })}
                     onCreateDoc={(kind, folderId) => void createDoc(kind, folderId)}
                     onToggleRef={(f) => toggleRef({ fileId: f.id, fileName: f.name })}
+                    onDeleteItem={deleteTreeItem}
+                    onRenameItem={renameTreeItem}
                   />
                   {engine === 'docker' && (
                     <>

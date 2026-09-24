@@ -21,14 +21,15 @@
 //   用，可另传 officeInsert 挂点提供「应用到文档」按钮——经 DocFlow AI
 //   插件把回复插入文档）。
 import { useEffect, useRef, useState } from 'react'
-import { App as AntdApp, Button, Dropdown, Input, Segmented, Tooltip } from 'antd'
+import { App as AntdApp, Button, Dropdown, Input, Popover, Segmented, Tooltip } from 'antd'
 import type { MenuProps } from 'antd'
 import type { TextAreaRef } from 'antd/es/input/TextArea'
-import { Copy, FileInput, Send, Sparkles, Square, Trash2, X } from 'lucide-react'
+import { Check, Copy, FileInput, HelpCircle, Send, Sparkles, Square, Trash2, X } from 'lucide-react'
 import { aiChat, getFileMeta, restoreVersion } from '../api'
 import type { AIMessage } from '../api'
 import { AIChatToggleBar, AISkillButton, AIToolCalls, AIWebSources, AI_MODEL_STORAGE_KEY, defaultAIModelKey, getAIModels, normalizeWebSources, renderSkillPrompt, toolCallView, useAIChatToggles } from './AIAssistant'
 import type { AIModelOption, AIToolCallView, AIWebSource } from './AIAssistant'
+import AIModelSelect from './AIModelSelect'
 import AIMarkdown from './AIMarkdown'
 import { useAIEnabled } from '../aiFeature'
 import { t, useLocale } from '../i18n'
@@ -107,6 +108,8 @@ const DRAWIO_XML_GUIDE = `drawio XML quick reference:
 - Common styles: rounded=1;whiteSpace=wrap;html=1; (rounded box) / ellipse;whiteSpace=wrap;html=1; (oval) / rhombus;whiteSpace=wrap;html=1; (decision diamond) / text;html=1; (plain label); edges default to edgeStyle=orthogonalEdgeStyle;rounded=0;. Tune with fillColor / strokeColor / fontSize / fontStyle=1 (bold).
 - Layout: pick left-to-right or top-down flow; keep node gaps >=40; main-flow step 160-200, branch step 100 on the cross axis; put branch labels ("Yes"/"No") in the edge value.
 - ids: incrementing numeric strings "2","3",...; keep id="0" (root) and id="1" (default parent) fixed; every cell gets parent="1" unless grouping.
+- Edge integrity (mandatory): source/target MUST reference ids of cells defined in the SAME model, preferably defined BEFORE the edge; never invent or forward-reference missing ids; an edge with no valid endpoints must be omitted. Every vertex MUST carry an explicit <mxGeometry> with concrete x/y/width/height — never rely on defaults.
+- Overlap (mandatory): never let two node boxes intersect; align on a grid (x/y multiples of 20), keep >=40px spacing in both axes.
 - Editing an existing diagram: keep the ids of unchanged elements and only modify their style/geometry/value, or add/remove cells; never renumber the whole model.
 - The XML must be well-formed; escape < > & " ' inside value attributes.`
 
@@ -121,7 +124,8 @@ const RICHTEXT_PATCH_GUIDE = `Rich text edit instruction protocol (mandatory out
   {"op":"insert","after":"<exact original snippet>","text":"<new content, Markdown, inserted right after that snippet>"}
   {"op":"delete","find":"<exact original snippet to remove>"}
   {"op":"replaceAll","text":"<entire new document, Markdown>"} — only when the edits affect most of the document.
-- Locating rules: "find"/"after" must be copied VERBATIM from the document text given in the user message (plain text only — bold/links/headings are invisible to the matcher). Pick a snippet of 10-80 characters that is unique in the document and taken from within a single paragraph/heading; never rewrite, shorten or fabricate the snippet.
+- PROTECTED CONTENT: lines like [DocFlow-Embed kind="drawio" fileId="..." title="..."], [DocFlow-Image fileId="..." title="..."] and [DocFlow-File fileId="..." title="..."] in the document are embedded blocks (diagrams/whiteboards/images/file cards). They MUST be preserved VERBATIM — copy them character-for-character (all attributes unchanged) into the output "text" whenever the surrounding content is replaced or rewritten, as standalone lines at a sensible position. NEVER edit, reword, merge, split or drop them. When emitting a replaceAll you are expected to keep every placeholder line.
+- Locating rules: "find"/"after" must be copied VERBATIM from the document text given in the user message (plain text only — bold/links/headings are invisible to the matcher). Pick a snippet of 10-80 characters that is unique in the document and taken from within a single paragraph/heading; never rewrite, shorten or fabricate the snippet. Do not use placeholder lines (e.g. [DocFlow-Embed ...]) inside "find"/"after" — they are not plain text and cannot be located.
 - Locate every operation against the ORIGINAL document text; a snippet that earlier operations already removed is skipped, so do not chain operations onto text you are replacing.
 - "text" values are Markdown (headings, lists, tables, code fences, bold, links, ...). The fence body must be valid JSON: escape " as \\" and newlines inside values as \\n.
 - Prefer several small precise operations over one huge replace; never output the whole document unless replaceAll is truly needed.`
@@ -146,8 +150,29 @@ const EXCALIDRAW_JSON_GUIDE = `Excalidraw elements JSON quick reference (element
 - Field conventions: colors as hex strings (default strokeColor "#1e1e1e", backgroundColor "transparent"); fillStyle "solid"|"hachure"; roughness 0(architect)/1(default)/2; strokeWidth 2 default; roundness {"type":3} for rounded rectangles; font sizes 16-28.
 - Do NOT output seed/version/versionNonce/isDeleted/updated/groupIds/boundElements — they are generated automatically.
 - Layout: place the whole diagram inside a 1200x800 region starting at (0,0); pick one flow direction (top-down or left-right) and keep >=40px gaps between elements; process node 160-200 wide and 60-80 tall; align nodes on a grid; add a standalone {"type":"text"} title at the top-left of the group.
+- Binding integrity (mandatory): arrow start/end MUST reference ids of elements present in the SAME array, declared BEFORE the arrow; never invent ids; an arrow with no valid bound endpoint must be omitted. Shapes MUST carry explicit width/height — never rely on defaults.
+- Overlap (mandatory): no two shape bounding boxes may intersect; align on a 20px grid; if unsure, spread elements generously — the renderer nudges overlaps apart, so precise non-overlap layout is expected from you.
 - Accent sparingly: strokeColor+backgroundColor pairs like #1971c2/#a5d8ff (blue), #2f9e44/#d3f9d8 (green), #e8590c/#ffe8cc (orange), #c2255c/#ffdeeb (pink) to group related nodes; keep connectors neutral #1e1e1e or #868e96.
 - The output must be strictly valid JSON (double quotes, no trailing commas, no comments).`
+
+/** 已应用 payload 回复的折叠视图：自动应用成功后，回复正文（白板 JSON/
+ * drawio XML/编辑指令等大段 payload）不再整屏裸输出——摘要卡片 + 「查看
+ * 原始回复」按需展开（展开后长代码块仍受 AIMarkdown 折叠约束）。 */
+function AppliedReplyView({ content, zh, label }: { content: string; zh: boolean; label: string }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="ai-applied-payload">
+      <div className="ai-applied-payload-head">
+        <Check size={13} strokeWidth={2} className="ok-text" aria-hidden="true" />
+        <span className="ai-applied-payload-label">{label}</span>
+        <Button size="small" type="link" className="ai-applied-payload-toggle" onClick={() => setOpen((v) => !v)}>
+          {open ? (zh ? '收起原始回复' : 'Collapse raw reply') : (zh ? '查看原始回复' : 'View raw reply')}
+        </Button>
+      </div>
+      {open && <AIMarkdown text={content} zh={zh} />}
+    </div>
+  )
+}
 
 /** 头部下拉快捷指令：send=打开面板自动发送（editMode 指定以何种模式处理）；
  * focus=打开面板并聚焦输入框（自定义指令）。 */
@@ -234,8 +259,8 @@ export function AIEditChatButton({
     ],
     // 富文本指令式编辑：快捷指令提示词显式引导走 docflow-edit 指令模式。
     'richtext-patch': [
-      { key: 'polish', label: t(locale, 'aiEditPolish'), instruction: zh ? '请润色当前文档：找出需要改写的句子，逐条输出 replace 编辑指令，保持原意' : 'Polish the document: emit one replace instruction per sentence that needs rewriting, keeping the meaning', editMode: true },
-      { key: 'rewrite', label: zh ? '重构全文' : 'Rewrite all', instruction: zh ? '请重构全文结构与措辞：若改动覆盖大半文档，输出 replaceAll 整篇替换；否则分条 replace' : 'Restructure the whole document: output a replaceAll operation if most of it changes, otherwise several replace operations', editMode: true },
+      { key: 'polish', label: t(locale, 'aiEditPolish'), instruction: zh ? '请润色当前文档：找出需要改写的句子，逐条输出 replace 编辑指令，保持原意；[DocFlow-…] 占位行为受保护的嵌入内容，必须原样保留' : 'Polish the document: emit one replace instruction per sentence that needs rewriting, keeping the meaning; [DocFlow-...] placeholder lines are protected embeds and must be kept verbatim', editMode: true },
+      { key: 'rewrite', label: zh ? '重构全文' : 'Rewrite all', instruction: zh ? '请重构全文结构与措辞：若改动覆盖大半文档，输出 replaceAll 整篇替换，否则分条 replace。文档中的 [DocFlow-Embed / DocFlow-Image / DocFlow-File] 占位行是嵌入的图表/图片/文件，必须逐字保留在输出中，不得删改' : 'Restructure the whole document: output a replaceAll operation if most of it changes, otherwise several replace operations. [DocFlow-Embed / DocFlow-Image / DocFlow-File] placeholder lines are embedded diagrams/images/files and must be kept verbatim in the output', editMode: true },
       { key: 'fix', label: zh ? '修正错别字' : 'Fix typos', instruction: zh ? '请找出并修正文档中的错别字与标点错误，逐条输出 replace 编辑指令' : 'Find and fix typos and punctuation errors, one replace instruction each', editMode: true },
       { key: 'summary', label: t(locale, 'aiEditSummary'), instruction: zh ? '请总结当前文档' : 'Summarize the current document', editMode: false },
       'divider',
@@ -343,6 +368,36 @@ export default function AIEditChat({
   const aiOn = useAIEnabled()
   const { message } = AntdApp.useApp()
   const [turns, setTurns] = useState<ChatTurn[]>([])
+  // 会话持久化：按 fileId 存 localStorage（docflow.ai.edit.conv.{fileId}），
+  // 面板重开时恢复最近一次会话（无 fileId 不持久化）；保存时剥离流式/进行
+  // 中等瞬态字段并截断到最近 40 条，避免存储配额问题。
+  const convKey = fileId ? `docflow.ai.edit.conv.${fileId}` : ''
+  useEffect(() => {
+    if (!convKey) return
+    try {
+      const raw = window.localStorage.getItem(convKey)
+      if (raw) {
+        const saved = JSON.parse(raw) as ChatTurn[]
+        if (Array.isArray(saved) && saved.length > 0) setTurns(saved)
+      }
+    } catch {
+      /* 损坏的记录忽略 */
+    }
+    // 仅在挂载时恢复一次（convKey 变化=切换文件场景，恢复新文件会话）。
+  }, [convKey])
+  useEffect(() => {
+    if (!convKey) return
+    // 空会话也写入（清空后重开不再复活旧消息）；进行中的回合（流式/应用
+    // 中）不落盘，等完成后下一次更新再存。
+    const busyTurn = turns.some((x) => x.streaming || x.applying)
+    if (busyTurn) return
+    try {
+      const persist = turns.slice(-40).map((x) => ({ ...x, streaming: undefined, applying: undefined }))
+      window.localStorage.setItem(convKey, JSON.stringify(persist))
+    } catch {
+      /* 配额/序列化失败忽略 */
+    }
+  }, [convKey, turns])
   const [input, setInput] = useState('')
   const [scope, setScope] = useState<ChatScope>('selection')
   const [hasSelection, setHasSelection] = useState(false)
@@ -364,6 +419,14 @@ export default function AIEditChat({
       return window.localStorage.getItem(AI_MODEL_STORAGE_KEY) ?? ''
     } catch {
       return ''
+    }
+  })
+  // 用户是否显式选过模型（与全局助手同一 localStorage 记忆判定）。
+  const [modelExplicit, setModelExplicit] = useState(() => {
+    try {
+      return (window.localStorage.getItem(AI_MODEL_STORAGE_KEY) ?? '') !== ''
+    } catch {
+      return false
     }
   })
   const toggles = useAIChatToggles(models, modelKey)
@@ -507,8 +570,8 @@ export default function AIEditChat({
           : `You are a draw.io diagram assistant. Based on the given current diagram XML, output the complete modified drawio XML (wrapped in <mxGraphModel>...</mxGraphModel> or <mxfile>...</mxfile>). Output only the XML itself, no explanations.\n\n${DRAWIO_XML_GUIDE}`)
         : applyKind === 'richtext-patch'
           ? (zh
-            ? `你是富文本文档编辑助手。请按用户指令对给定文档进行修改（新增、插入、删除、替换），修改以下述「编辑指令」表达——系统会自动定位并逐条执行，不要直接输出修改后的全文。\n\n${RICHTEXT_PATCH_GUIDE}`
-            : `You are a rich text document editing assistant. Apply the user's requested changes (add, insert, delete, replace) as edit instructions per the protocol below — they are located and executed automatically; do NOT output the whole modified document.\n\n${RICHTEXT_PATCH_GUIDE}`)
+            ? `你是富文本文档编辑助手。请按用户指令对给定文档进行修改（新增、插入、删除、替换），修改以下述「编辑指令」表达——系统会自动定位并逐条执行，不要直接输出修改后的全文。文档中的 [DocFlow-Embed / DocFlow-Image / DocFlow-File] 占位行是嵌入的图表/白板/图片/文件块，属受保护内容，必须逐字保留在输出里。\n\n${RICHTEXT_PATCH_GUIDE}`
+            : `You are a rich text document editing assistant. Apply the user's requested changes (add, insert, delete, replace) as edit instructions per the protocol below — they are located and executed automatically; do NOT output the whole modified document. [DocFlow-Embed / DocFlow-Image / DocFlow-File] placeholder lines in the document are protected embedded blocks (diagrams/whiteboards/images/files) and must be preserved verbatim in your output.\n\n${RICHTEXT_PATCH_GUIDE}`)
           : outputFormat === 'markdown'
           ? (zh
             ? '你是富文本文档写作助手。请按指令处理给定文本，仅输出最终内容本身：不要解释、不要说明。请用 Markdown 输出结果（标题 #/##/###、有序与无序列表、表格、代码块、加粗、斜体、链接等）——内容将被转换为富文本样式插入文档。'
@@ -836,6 +899,18 @@ export default function AIEditChat({
             ]}
           />
         )}
+        {models.length > 0 && (
+          <AIModelSelect
+            models={models}
+            modelKey={modelKey}
+            modelExplicit={modelExplicit}
+            onSelect={(v) => {
+              setModelKey(v)
+              setModelExplicit(true)
+            }}
+            zh={zh}
+          />
+        )}
         <AIChatToggleBar
           compact
           zh={zh}
@@ -851,9 +926,16 @@ export default function AIEditChat({
           onMcp={toggles.setMcp}
           onDocs={toggles.setDocs}
         />
-        <Tooltip title={modeTip}>
-          <span className="muted ai-edit-chat-mode-hint">{modeHint}</span>
-        </Tooltip>
+        {/* 模式说明收起为悬浮图标（hover 显示完整说明），避免平铺文案占用输入区空间。 */}
+        <Popover
+          content={<div className="ai-edit-chat-mode-popover"><strong>{modeHint}</strong><div className="muted">{modeTip}</div></div>}
+          trigger="hover"
+          placement="topRight"
+        >
+          <span className="ai-edit-chat-mode-hint" role="button" tabIndex={0} aria-label={modeHint}>
+            <HelpCircle size={14} />
+          </span>
+        </Popover>
       </div>
       {/* 上下文范围：选区（默认，无选区禁用）/ 全文；白板/drawio 无选区
           概念（上下文恒为摘要/XML），仅展示提示不渲染切换；richtext-patch
@@ -891,7 +973,21 @@ export default function AIEditChat({
                 </div>
                 <div className="ai-bubble ai-bubble-assistant">
                   {turn.content ? (
-                    <AIMarkdown text={turn.content} zh={zh} streaming={turn.streaming} />
+                    // payload 通道自动应用成功后收起原始回复（大段 JSON/XML 不
+                    // 再整屏裸输出）；仅对话/失败/流式期间保持原样渲染。
+                    (applyKind === 'excalidraw-json' || applyKind === 'drawio-xml' || applyKind === 'richtext-patch') && turn.applied && !turn.streaming ? (
+                      <AppliedReplyView
+                        content={turn.content}
+                        zh={zh}
+                        label={applyKind === 'excalidraw-json'
+                          ? (zh ? '白板元素已生成并插入画布' : 'Whiteboard elements generated and inserted')
+                          : applyKind === 'drawio-xml'
+                            ? (zh ? '图表已生成并替换画布' : 'Diagram generated and applied to the canvas')
+                            : (zh ? '编辑指令已应用到文档' : 'Edit instructions applied to the document')}
+                      />
+                    ) : (
+                      <AIMarkdown text={turn.content} zh={zh} streaming={turn.streaming} />
+                    )
                   ) : turn.streaming ? (
                     <span className="ai-thinking">{t(locale, 'aiAssistantGenerating')}</span>
                   ) : null}
