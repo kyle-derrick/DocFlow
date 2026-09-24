@@ -43,6 +43,106 @@ function docflowEditFenceCandidates(raw: string): string[] {
   return out
 }
 
+// ---- AI 上下文占位行（受保护内容标记）----
+// 嵌入块（docflowEmbed）/文档图片（docflowImage）/文件卡片（docflowFileCard）
+// 是 atom 节点，纯文本序列化（getText）下对 AI 完全不可见——AI 一旦输出
+// replaceAll/大段 replace，这些节点即被 markdown HTML 整体覆盖丢失。
+// 方案：序列化时输出占位行（[DocFlow-Embed kind="…" fileId="…" title="…"] 等），
+// 提示词约束 AI 逐字保留；执行器把占位行还原为对应节点 HTML（Tiptap 按
+// parseHTML 约定重建节点）；replaceAll 后扫描缺失节点按原顺序追加文末保底。
+
+/** 占位行 title 值转义（" 与 \；还原侧配对）。 */
+function escapePlaceholderTitle(title: string): string {
+  return String(title ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+}
+
+/** 占位行 title 值反转义。 */
+function unescapePlaceholderTitle(title: string): string {
+  return String(title ?? '').replace(/\\(.)/g, '$1')
+}
+
+/** 特殊节点 → 占位行（非特殊节点返回 null）。 */
+function specialNodePlaceholder(node: ProseMirrorNode): string | null {
+  const attrs = node.attrs as { kind?: string; fileId?: string; title?: string }
+  const fid = String(attrs.fileId ?? '')
+  const title = escapePlaceholderTitle(attrs.title ?? '')
+  if (node.type.name === 'docflowEmbed') {
+    return `[DocFlow-Embed kind="${String(attrs.kind ?? 'file')}" fileId="${fid}" title="${title}"]`
+  }
+  if (node.type.name === 'docflowImage') {
+    return `[DocFlow-Image fileId="${fid}" title="${title}"]`
+  }
+  if (node.type.name === 'docflowFileCard') {
+    return `[DocFlow-File fileId="${fid}" title="${title}"]`
+  }
+  return null
+}
+
+/** 文档（或 [from,to] 选区范围）序列化为带占位行的 AI 上下文纯文本：
+ * 块边界以 '\n\n' 分隔（与 getText 一致），特殊节点占位行原样带出。 */
+function docToAIText(doc: ProseMirrorNode, from?: number, to?: number): string {
+  const lo = from ?? 0
+  const hi = to ?? doc.content.size
+  let out = ''
+  let lastBlock: ProseMirrorNode | null = null
+  doc.descendants((node, pos) => {
+    if (pos >= hi || pos + node.nodeSize <= lo) return false
+    const block = doc.resolve(pos).parent
+    if (out && lastBlock !== null && block !== lastBlock) out += '\n\n'
+    lastBlock = block
+    const ph = specialNodePlaceholder(node)
+    if (ph) {
+      out += ph
+      return false
+    }
+    if (node.isText && node.text) out += node.text
+    return true
+  })
+  return out
+}
+
+/** 特殊节点快照条目（replaceAll 保底找回用）。 */
+interface SpecialNodeSnapshot { type: string; attrs: Record<string, unknown> }
+
+/** 收集文档内全部特殊节点（docflowEmbed/Image/FileCard）按出现顺序。 */
+function collectSpecialNodes(doc: ProseMirrorNode): SpecialNodeSnapshot[] {
+  const out: SpecialNodeSnapshot[] = []
+  doc.descendants((node) => {
+    const ph = specialNodePlaceholder(node)
+    if (ph) out.push({ type: node.type.name, attrs: { ...node.attrs } as Record<string, unknown> })
+    return !ph
+  })
+  return out
+}
+
+/** 特殊节点去重键（type+fileId：同文件多处引用按存在性判断）。 */
+function specialNodeKey(n: SpecialNodeSnapshot): string {
+  return `${n.type}:${String((n.attrs as { fileId?: string }).fileId ?? '')}`
+}
+
+/** HTML 属性值转义。 */
+function escapeHTMLAttr(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+/** 把 AI 输出 markdown 中的占位行还原为对应节点的 HTML（marked 解析前）：
+ * - Embed/Image 为块级 div（data-docflow-embed / data-docflow-image 属性，
+ *   与 DocflowEmbed.ts / DocflowImage.ts 的 parseHTML 约定一致）；
+ * - FileCard 为内联 span（data-docflow-file）。 */
+function hydratePlaceholders(md: string): string {
+  const title = '((?:\\\\.|[^"\\\\])*)'
+  return md
+    .replace(new RegExp(`\\[DocFlow-Embed kind="([^"]*)" fileId="([^"]*)" title=${title}\\]`, 'g'),
+      (_m, kind: string, fid: string, t: string) =>
+        `<div data-docflow-embed="${escapeHTMLAttr(kind)}" data-file-id="${escapeHTMLAttr(fid)}" data-title="${escapeHTMLAttr(unescapePlaceholderTitle(t))}" data-width="100"></div>`)
+    .replace(new RegExp(`\\[DocFlow-Image fileId="([^"]*)" title=${title}\\]`, 'g'),
+      (_m, fid: string, t: string) =>
+        `<div data-docflow-image="1" data-file-id="${escapeHTMLAttr(fid)}" data-title="${escapeHTMLAttr(unescapePlaceholderTitle(t))}" data-width="100"></div>`)
+    .replace(new RegExp(`\\[DocFlow-File fileId="([^"]*)" title=${title}\\]`, 'g'),
+      (_m, fid: string, t: string) =>
+        `<span data-docflow-file="1" data-file-id="${escapeHTMLAttr(fid)}" data-title="${escapeHTMLAttr(unescapePlaceholderTitle(t))}"></span>`)
+}
+
 /** 在 ProseMirror 文档中按纯文本查找 needle（首个匹配，首尾空白不参与）：
  * 遍历 text 节点拼接连续纯文本并维护「字符偏移→文档位置」映射——同块内
  * 相邻 text 节点无缝拼接（支持跨加粗等格式节点的连续匹配），块边界插入
@@ -250,15 +350,16 @@ export default function DfdocEditorPage({
   // 撤销回退后的编辑器重挂 key（Tiptap initialJSON 仅挂载时生效）。
   const [editorReloadKey, setEditorReloadKey] = useState(0)
 
-  /** 选区读取：Tiptap state.selection（空选区回退全文 getText）。 */
+  /** 选区读取：Tiptap state.selection（空选区回退全文）；嵌入块/图片/文件
+   * 卡片经 docToAIText 序列化为占位行带出（AI 可见 + 提示词约束保留）。 */
   const aiGetTarget = (): AIEditTarget => {
     const ed = tiptapRef.current
     if (!ed) return { text: '', hasSelection: false }
     const { from, to } = ed.state.selection
     if (to > from) {
-      return { text: ed.state.doc.textBetween(from, to, '\n'), hasSelection: true }
+      return { text: docToAIText(ed.state.doc, from, to), hasSelection: true }
     }
-    return { text: ed.getText(), hasSelection: false }
+    return { text: docToAIText(ed.state.doc), hasSelection: false }
   }
 
   /** 剥掉模型给整段回复包上的单一外层围栏（```markdown / ```md / 裸 ```）：
@@ -272,13 +373,13 @@ export default function DfdocEditorPage({
     return m ? m[1] : t
   }
 
-  /** AI 输出（markdown）→ 富文本 HTML：marked 解析（GFM：表格/删除线等；
-   * breaks：段内单换行渲染为换行，更贴近对话式输出的排版预期），随后
-   * insertContent 按 Tiptap schema 将 HTML 解析为富文本节点——标题/列表/
-   * 表格/代码块/加粗斜体链接等标准 markdown 全部映射为富文本样式，而非
-   * 追加 markdown 纯文本。 */
+  /** AI 输出（markdown）→ 富文本 HTML：先经 hydratePlaceholders 把占位行
+   * 还原为嵌入节点 HTML，再 marked 解析（GFM：表格/删除线等；breaks：段内
+   * 单换行渲染为换行），随后 insertContent 按 Tiptap schema 将 HTML 解析为
+   * 富文本节点——标题/列表/表格/代码块/加粗斜体链接等标准 markdown 全部
+   * 映射为富文本样式，嵌入块/图片/文件卡片经占位行还原为原生节点。 */
   const aiMarkdownToHTML = (output: string): string =>
-    marked.parse(stripOuterMarkdownFence(output), { async: false, gfm: true, breaks: true })
+    marked.parse(hydratePlaceholders(stripOuterMarkdownFence(output)), { async: false, gfm: true, breaks: true })
 
   /** AI 编辑指令执行器（AIEditChat applyKind=richtext-patch 的 onApply 通道）：
    * - 解析回复中的 ```docflow-edit 围栏 → JSON 指令数组（非法 JSON 返回失败
@@ -332,7 +433,16 @@ export default function DfdocEditorPage({
           invalid++
           continue
         }
+        // 保底：replaceAll 整篇替换会把 AI 未保留占位行的嵌入块/图片/文件
+        // 卡片一并抹掉——替换前快照，替换后缺失的按原顺序追加文末（不丢内容）。
+        const before = collectSpecialNodes(ed.state.doc)
         ed.chain().focus().insertContentAt({ from: 0, to: ed.state.doc.content.size }, aiMarkdownToHTML(text)).run()
+        const afterKeys = new Set(collectSpecialNodes(ed.state.doc).map(specialNodeKey))
+        const lost = before.filter((n) => !afterKeys.has(specialNodeKey(n)))
+        if (lost.length > 0) {
+          ed.chain().focus().insertContentAt(ed.state.doc.content.size, lost.map((n) => ({ type: n.type, attrs: n.attrs }))).run()
+          void message.info(zh ? `已自动找回 ${lost.length} 个嵌入内容（AI 输出未保留其占位行）` : `Restored ${lost.length} embedded block(s) whose placeholders the AI dropped`)
+        }
         applied++
         continue
       }

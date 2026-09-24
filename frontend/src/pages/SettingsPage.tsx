@@ -2605,16 +2605,6 @@ export function SystemSettingsPanel({ onError, onNotice }: { onError: (msg: stri
   return (
     <>
       <div className="panel setting-group" style={{ padding: '12px 16px' }}>
-        {/* v2.9 去重指引：被排除的键分组不再出现，告知对应修改入口。 */}
-        <Alert
-          type="info"
-          showIcon
-          style={{ marginBottom: 12 }}
-          message={zh ? '部分配置已移至对应面板（此处不再重复展示）' : 'Some settings live in their own panels (not listed here)'}
-          description={zh
-            ? 'AI 检索与联网搜索（ai.*）请前往「AI 设置」；Agent 创作舱（agent.*）请前往「AI 创作舱」；登录防爆破、认证限流、扫描策略与 WebDAV 平台开关（security.* / webdav.*）请前往「安全与访问」；空间策略（space.*）请前往平台管理「空间」页；备份策略（backup.*）请前往「备份」页；审计日志保留期（audit.*）请前往「审计日志」页。'
-            : 'AI retrieval & web search (ai.*) → "AI settings"; agent keys (agent.*) → "AI agent studio"; login anti-bruteforce, auth rate limit, scan policy and the WebDAV platform toggle (security.* / webdav.*) → "Security & access"; space policy (space.*) → the "Spaces" admin page; backup policy (backup.*) → "Backup"; audit retention (audit.*) → "Audit log".'}
-        />
         <form className="team-create-row" style={{ marginBottom: 0 }} onSubmit={(e) => e.preventDefault()}>
           <label className="field" style={{ flex: 1 }}>
             <span>{zh ? '过滤设置项（按中文名 / key / 说明匹配；过滤时分组自动展开）' : 'Filter settings (by name / key / description; groups auto-expand while filtering)'}</span>
