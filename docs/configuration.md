@@ -1,5 +1,7 @@
 # 配置参考
 
+> 系统架构与设计取舍见 [architecture.md](architecture.md)；本文只讲配置项本身。
+
 DocFlow 采用**两级配置模型**：
 
 | 级别 | 载体 | 修改方式 | 生效方式 |
@@ -7,12 +9,14 @@ DocFlow 采用**两级配置模型**：
 | 启动级 | 环境变量（`.env` → docker compose 注入，`internal/config`） | 编辑 `.env` / 编排文件 | **改后需重启** backend（`docker compose up -d` 重建） |
 | 运行时 | 数据库表 `system_settings`（`internal/settings`） | 平台管理各面板在线修改 | 多数**即时生效**（消费方每次请求热读取）；个别键标注「须重启」 |
 
+> 注意：Go 进程只读环境变量，**不解析 `.env` 文件**——`.env` 仅由 docker compose 用于变量插值。裸机运行（`make run`）需自行导出环境变量。
+
 原则与边界：
 
 - **非密钥原则**：密钥类配置（JWT / S3 / OIDC 凭据等）只走环境变量，不入库、不暴露给管理 API。例外：SMTP 密码、AI Provider `api_key`、Tavily Key、MCP `auth_header` 允许经管理端入库，但**只写不读**（留空 = 保持现值，任何读路径均以掩码 `******` 回显）。
 - 与 env 重叠的运行时键（如 `upload.max_file_size`、`security.*`）优先取库值，读取失败回退 env 值。
 - 全部设置修改均写 `settings.update` 审计（密钥打码）。
-- 逐键注释模板见 [.env.example](../.env.example)（本地）与 [.env.production.example](../.env.production.example)（生产联动矩阵）。
+- 逐键注释模板见 [.env.example](../.env.example)（本地）与 [.env.production.example](../.env.production.example)（生产联动矩阵）；按场景选用见 [deploy/env/](../deploy/env/)。
 
 ---
 

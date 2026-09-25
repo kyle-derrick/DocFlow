@@ -2,6 +2,15 @@
 
 本项目的显著变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [Unreleased]
+
+### 文档
+- 新增 [docs/architecture.md](docs/architecture.md) 架构总览：总体形态、系统架构与部署拓扑、后端 35 个模块划分、数据模型（内容寻址/空间权限/演进史）、关键链路、前端架构、配置两级模型、设计取舍与已知局限
+- 新增 [deploy/env/](deploy/env/) 四套场景化 `.env` 模板（本地开发 / 单机验证 / 单机生产 / 多实例集群），并修正 README 中过时描述（draw.io 已无独立服务、自定义角色已移除、镜像清单与推送示例）
+
+### 修复
+- `frontend/Dockerfile` 补 `NODE_OPTIONS=--max-old-space-size=6144`：镜像内 `npm run build` 的 tsc + vite 阶段堆内存溢出（exit 134）导致 caddy 镜像构建失败，与 CI 保持一致
+
 ## [1.2.0] - 2026-09-22
 
 AI 全功能体系：多 Provider 网关、RAG 混合检索、联网搜索与思考推理、MCP 双向、AI 创作空间；安全加固与源码一键部署。

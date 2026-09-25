@@ -24,7 +24,8 @@
 - 网页包（zip）安全预览：严格 CSP 沙箱 + 解包限制 + 独立内容 origin
 
 **协作与分享**
-- 团队空间：目录级 ACL、自定义角色与权限范围
+- 空间（统一容器）：目录级 ACL、五级内置角色（owner/admin/member_share/member/guest）、用户组授权
+- 富文本多人实时协作（ProseMirror 权威排序；单实例或按文件粘性会话部署）
 - 外链分享：密码保护、有效期、水印、访问事件审计
 - WebSocket 实时通知（多实例经 Redis Pub/Sub 广播）
 
@@ -60,28 +61,35 @@
 | Profile | 服务 | 说明 |
 |---|---|---|
 | minimal | caddy + backend + postgres | 基础栈，`make up-minimal` |
-| full | + redis + onlyoffice + drawio | `make up-full`（队列 / WS 广播 / 在线编辑） |
+| full | + redis + onlyoffice | `make up-full`（队列 / WS 广播 / 在线编辑） |
 | antivirus | + clamav | 病毒扫描，叠加 `--profile antivirus` |
 | search | + meilisearch | 全文搜索，叠加 `--profile search` |
 | storage | + minio | S3 对象存储，叠加 `--profile storage` |
 | ai-vector | + qdrant | 混合检索向量库，`docker compose --profile ai-vector up -d` |
 | ai-search | + searxng | AI 联网搜索，`--profile ai-search` |
 
+draw.io 与前端 SPA 均无独立服务：静态层在构建期并入 caddy 镜像（`/srv/drawio`、`/srv/frontend`）。上述 search/storage/ai-* profile 需与 minimal/full 叠加启动。详见[架构总览](docs/architecture.md#7-部署与服务矩阵)。
+
 ## 打包
 
-两个自建镜像，均由 compose 构建（`docker compose build` 或随 `up --build`）：
+四个自建镜像，均由 compose / make 构建：
 
 | 镜像 | 构建上下文 | 内容 |
 |---|---|---|
 | `docflow/backend:1.0.0` | `./`（Dockerfile） | Go 多阶段构建：`/docflow` 服务、`/migrate`、`/seed`，含 migrations |
-| `docflow/caddy:1.0.0` | `./frontend`（frontend/Dockerfile） | 前端 Vite 构建产物 → Caddy 静态托管 + 反代（TLS 自动签发） |
+| `docflow/caddy:1.0.0` | `./frontend`（frontend/Dockerfile） | 前端 Vite 产物 → `/srv/frontend` + draw.io 静态层 → `/srv/drawio`，Caddy 托管 + 反代 |
+| `docflow/onlyoffice:8.2.3-cjk` | `./deploy/onlyoffice` | 官方 DocumentServer + 中文字体（`make up-full` 时构建） |
+| `docflow/agent:1.0.0` | `./`（Dockerfile.agent） | Agent 创作舱沙箱镜像，`make build-agent`（up/deploy 目标自动依赖） |
 
 推送到镜像仓库后即可在任意装了 docker compose 的主机部署：
 
 ```bash
-docker build -t <registry>/docflow-backend:1.0.0 .
-docker build -t <registry>/docflow-caddy:1.0.0 ./frontend
-docker push <registry>/docflow-backend:1.0.0 <registry>/docflow-caddy:1.0.0
+docker build -t <registry>/docflow/backend:1.0.0 .
+docker build -t <registry>/docflow/caddy:1.0.0 ./frontend
+docker build -t <registry>/docflow/agent:1.0.0 -f Dockerfile.agent .
+docker push <registry>/docflow/backend:1.0.0
+docker push <registry>/docflow/caddy:1.0.0
+docker push <registry>/docflow/agent:1.0.0
 ```
 
 ## 部署（生产）
@@ -164,7 +172,7 @@ WebDAV 默认关闭；管理员需要在部署配置中设置 `webdav.enabled=tr
 
 ### 部署文档位置
 
-部署入口、源码构建、Profile、网络镜像源和环境变量说明集中放在本 README；API 细节见 `docs/openapi.yaml`，运行配置见 `.env.example` 和 `.env.production.example`。
+部署入口、源码构建、Profile、网络镜像源和环境变量说明集中放在本 README；**系统架构、数据模型、关键链路与设计取舍见 [docs/architecture.md](docs/architecture.md)**；运行时配置见 `.env.example` 和 `.env.production.example`（场景化模板见 `deploy/env/`）；API 细节见 `docs/openapi.yaml`。
 
 ### 富文本多人实时协作
 
@@ -194,9 +202,11 @@ cd frontend && npm install && npm run dev
 
 ## 配置
 
+- 架构总览：[docs/architecture.md](docs/architecture.md)（模块划分、数据模型、关键链路、部署拓扑、设计取舍）
 - 全量配置参考：[docs/configuration.md](docs/configuration.md)（启动级环境变量 + 运行时设置键）
 - 全量键说明：[.env.example](.env.example)（逐键注释）
 - 生产推荐值：[.env.production.example](.env.production.example)（profile 联动矩阵）
+- MCP 能力：[docs/mcp.md](docs/mcp.md)
 - API 契约：[docs/openapi.yaml](docs/openapi.yaml)
 
 ### 场景化配置模板
@@ -216,12 +226,12 @@ cd frontend && npm install && npm run dev
 
 ```
 cmd/            server / migrate / seed / backup-verify / wscheck
-internal/       业务模块（auth/files/share/team/upload/search/oidc/...）
+internal/       业务模块（auth/files/space/share/upload/search/ai/agent/...）
 migrations/     增量 SQL（按文件名序执行，幂等）
 frontend/       React SPA 与 E2E
-deploy/         Caddyfile（TLS / 反代 / 子路径规则）
+deploy/         Caddyfile（TLS / 反代 / 子路径规则）+ env 场景模板
 scripts/        备份恢复、集成验证（meili/s3/smtp/clamav/onlyoffice/oidc）、冒烟
-docs/           OpenAPI
+docs/           架构总览、配置参考、MCP、OpenAPI 契约
 ```
 
 ## License
