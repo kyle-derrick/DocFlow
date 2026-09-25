@@ -199,6 +199,19 @@ cd frontend && npm install && npm run dev
 - 生产推荐值：[.env.production.example](.env.production.example)（profile 联动矩阵）
 - API 契约：[docs/openapi.yaml](docs/openapi.yaml)
 
+### 场景化配置模板
+
+按部署场景选择 `deploy/env/` 下的模板，复制为仓库根 `.env` 后按注释调整（模板内的密钥/域名占位符务必替换）：
+
+| 场景 | 模板 | 适用与要点 |
+| --- | --- | --- |
+| 本地开发 | [.env.dev.example](deploy/env/.env.dev.example) | 裸机 `make run` + vite，不经 Compose；导出为 shell 环境变量（后端不解析 .env 文件） |
+| 单机验证 | [.env.local-verify.example](deploy/env/.env.local-verify.example) | 单机 Compose，http://localhost/ HTTP 全功能栈；`full`+`search`+`storage` |
+| 单机生产 | [.env.single-node.example](deploy/env/.env.single-node.example) | 单机 + 真实域名 + 自动 HTTPS（`COOKIE_SECURE=true`） |
+| 多实例集群 | [.env.cluster.example](deploy/env/.env.cluster.example) | 副本 >1：必须 `QUEUE_DRIVER=redis` + `STORAGE_DRIVER=s3`，且协作需按文件粘性会话 |
+
+> 模板为既有点评式文件的场景化补充；`.env.example`（本地）与 `.env.production.example`（生产）保持为逐键/矩阵式参考。
+
 ## 目录结构
 
 ```
