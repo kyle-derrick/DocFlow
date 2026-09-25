@@ -7,6 +7,9 @@ ARG NPM_REGISTRY=https://registry.npmjs.org/
 COPY package*.json ./
 RUN npm config set registry "$NPM_REGISTRY" && npm ci
 COPY . .
+# tsc 类型检查 + vite 打包（antd6/monaco 等类型树）内存峰值高，默认堆会 OOM
+# （exit 134）；与 CI workflows 一致固定 6GB 堆。
+ENV NODE_OPTIONS=--max-old-space-size=6144
 RUN npm run build
 
 FROM jgraph/drawio:27.0.9 AS drawio
