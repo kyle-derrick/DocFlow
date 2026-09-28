@@ -190,9 +190,21 @@ paths:
   /admin/settings/agent:
     get:
       summary: Agent 配置状态
+      description: >-
+        读取创作舱全部配置键（system_settings agent.*）：enabled 总开关 /
+        runtime 运行时 / allowed_images 镜像白名单（回显数组）/ max_concurrent
+        并发任务上限 / default_timeout_seconds 默认超时 / max_cpu CPU 限额 /
+        max_memory_bytes 内存限额 / network_mode 容器网络模式（默认 none 断网）/
+        mcp_callback_base_url 回调基址 / allow_ai 容器 AI 能力 / ai_max_calls
+        每任务 AI 调用上限 / sync_mode 产物同步（git|scan）/ harness 执行引擎
+        （auto|claude-code|pi|builtin）。agent.enabled 关闭时仅回 {enabled:false}
+        （配置读取不被拦截，保证可重新开启）。
       responses: {'200': {description: OK}}
     put:
-      summary: 更新 Agent 配置（密钥不入库）
+      summary: 更新 Agent 配置（任意 agent.* 键，密钥不入库）
+      description: >-
+        载荷键自动加 agent. 前缀逐键写入 system_settings（PATCH 语义，
+        未带的键保持现值）；值经键级校验，非法 400。
       requestBody: {required: true, content: {application/json: {schema: {type: object}}}}
       responses: {'200': {description: OK}}
   /admin/settings/env:
@@ -5535,6 +5547,36 @@ paths:
                   temperature: { type: number }
                   max_tokens: { type: integer }
                   per_user_per_min: { type: integer }
+                  rag:
+                    type: object
+                    description: 检索增强配置（ai.rag 键整体块；见 PUT 同名块）
+                    properties:
+                      mode: { type: string, enum: [keyword, hybrid] }
+                      vector_enabled: { type: boolean }
+                      qdrant_url: { type: string }
+                      embedding_provider: { type: string }
+                      embedding_model: { type: string }
+                      rerank_provider: { type: string }
+                      rerank_model: { type: string }
+                      top_k: { type: integer }
+                      chunk_size: { type: integer }
+                      chunk_overlap: { type: integer }
+                  search:
+                    type: object
+                    description: 联网搜索配置（ai.search.* 键；tavily_api_key 只写不读，仅回显 configured）
+                    properties:
+                      provider: { type: string, enum: ["", searxng, tavily], description: '""=禁用（对话 web_search 静默忽略）' }
+                      searxng_url: { type: string }
+                      max_results: { type: integer, description: 1-20，默认 5 }
+                      tavily_api_key_configured: { type: boolean }
+                  ocr:
+                    type: object
+                    description: 图片 OCR 配置（ai.ocr 键整体块）
+                    properties:
+                      enabled: { type: boolean }
+                      provider_id: { type: string }
+                      model_id: { type: string }
+                      max_image_bytes: { type: integer }
                   personas:
                     type: array
                     description: 平台人设（ai.personas 键，非敏感明文回显）
@@ -5563,6 +5605,8 @@ paths:
         temperature 0-2、max_tokens 1-128000、per_user_per_min 0-10000。
         enabled（总开关）载荷缺省 = 保持现值；personas 载荷缺省 = 保持现值
         （非 nil 含空数组 = 整块替换，校验同 /admin/settings/ai/personas）。
+        rag/ocr 块随载荷整体覆盖；search 块中 tavily_api_key 留空 = 保持
+        现值（只写不读，provider/searxng_url/max_results 整体覆盖）。
         校验失败 400 INVALID_AI_SETTINGS；成功写 settings.update 审计（密钥打码）。
       requestBody:
         required: true
