@@ -9,6 +9,7 @@ import { Sparkles, X } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { aiSummarizeFileStream } from '../api'
+import { AIChatThinking } from './aichat'
 import { useAIEnabled } from '../aiFeature'
 import { t, useLocale } from '../i18n'
 
@@ -17,6 +18,9 @@ interface SummaryState {
   loading: boolean
   text: string
   error: string
+  /** 推理思考聚合（think 且摘要模型支持 reasoning 时有）。 */
+  thinking?: string
+  thinkingMS?: number
 }
 
 function useAISummary(fileId: string) {
@@ -24,14 +28,23 @@ function useAISummary(fileId: string) {
   const run = async () => {
     if (state.loading) return
     setState({ loading: true, text: '', error: '' })
+    const startedAt = Date.now()
+    let hasThinking = false
     try {
       await aiSummarizeFileStream(fileId, (chunk) => {
         setState((prev) => ({ ...prev, text: prev.text + chunk }))
+      }, undefined, (chunk) => {
+        hasThinking = true
+        setState((prev) => ({ ...prev, thinking: (prev.thinking ?? '') + chunk }))
       })
     } catch (err) {
       setState((prev) => ({ ...prev, error: err instanceof Error ? err.message : t('zh-CN', 'aiSummaryFailed') }))
     } finally {
-      setState((prev) => ({ ...prev, loading: false }))
+      setState((prev) => ({
+        ...prev,
+        loading: false,
+        thinkingMS: hasThinking ? Math.max(0, Date.now() - startedAt) : prev.thinkingMS,
+      }))
     }
   }
   return { state, run }
@@ -41,7 +54,8 @@ function SummaryCardBody({ state }: { state: SummaryState }) {
   const locale = useLocale()
   return (
     <>
-      {state.loading && !state.text && <div className="muted">{t(locale, 'aiSummaryLoading')}</div>}
+      <AIChatThinking text={state.thinking ?? ''} streaming={state.loading} thinkingMS={state.thinkingMS} zh={locale === 'zh-CN'} />
+      {state.loading && !state.text && !state.thinking && <div className="muted">{t(locale, 'aiSummaryLoading')}</div>}
       {state.text && (
         <div className="markdown-preview ai-summary-markdown">
           <ReactMarkdown remarkPlugins={[remarkGfm]}>{state.text}</ReactMarkdown>

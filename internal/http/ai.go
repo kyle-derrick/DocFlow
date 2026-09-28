@@ -678,7 +678,8 @@ func aiErrorJSON(c *gin.Context, err error) {
 
 // aiSummarize POST /api/v1/ai/summarize {fileId, stream?}：抽取全类型内容
 // （office/pdf/drawio/excalidraw/dfdoc/文本），交 ChatService 生成摘要；
-// stream=true 时 SSE 输出（event: meta/delta/done），否则 JSON。
+// stream=true 时 SSE 输出（event: thinking（think 且模型支持时有）/
+// delta/done），否则 JSON。
 func (h *Handler) aiSummarize(c *gin.Context) {
 	svc := h.aiRequireService(c)
 	if svc == nil {
@@ -720,6 +721,10 @@ func (h *Handler) aiSummarize(c *gin.Context) {
 		w := sseWriter{c}
 		summary, res, err := userSvc.SummarizeFileOpt(c.Request.Context(), user, src, fileID, think, func(text string) {
 			w.event("delta", gin.H{"text": text})
+		}, func(text string) {
+			// 推理思考增量（think=true 时模型支持 reasoning 才有）：
+			// 独立事件流出，前端折叠思考区展示。
+			w.event("thinking", gin.H{"text": text})
 		})
 		if err != nil {
 			w.event("error", gin.H{"error": summarizeErrorMessage(err), "code": summarizeErrorCode(err)})
@@ -729,7 +734,7 @@ func (h *Handler) aiSummarize(c *gin.Context) {
 		w.event("done", gin.H{"summary": summary, "usage": aiUsageJSON(res)})
 		return
 	}
-	summary, res, err := userSvc.SummarizeFileOpt(c.Request.Context(), user, src, fileID, think, nil)
+	summary, res, err := userSvc.SummarizeFileOpt(c.Request.Context(), user, src, fileID, think, nil, nil)
 	if err != nil {
 		if errors.Is(err, files.ErrNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})

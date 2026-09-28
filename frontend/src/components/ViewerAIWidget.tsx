@@ -328,7 +328,7 @@ export default function ViewerAIWidget({
   const [savedIds, setSavedIds] = useState<Set<number>>(() => new Set())
 
   // ---- 摘要（/ai/summarize 流式）----
-  const [summary, setSummary] = useState<{ loading: boolean; text: string; error: string }>({ loading: false, text: '', error: '' })
+  const [summary, setSummary] = useState<{ loading: boolean; text: string; error: string; thinking?: string; thinkingMS?: number }>({ loading: false, text: '', error: '' })
   const sumBusyRef = useRef(false)
   const sumAbortRef = useRef<AbortController | null>(null)
 
@@ -419,11 +419,13 @@ export default function ViewerAIWidget({
     }
   }
 
-  /** 生成/重新生成摘要（流式）。 */
+  /** 生成/重新生成摘要（流式；think 且模型支持时附思考折叠区）。 */
   const runSummary = async () => {
     if (sumBusyRef.current) return
     sumBusyRef.current = true
     setSummary({ loading: true, text: '', error: '' })
+    const startedAt = Date.now()
+    let hasThinking = false
     const ac = new AbortController()
     sumAbortRef.current = ac
     try {
@@ -431,13 +433,17 @@ export default function ViewerAIWidget({
         fileId,
         (chunk) => setSummary((p) => ({ ...p, text: p.text + chunk })),
         ac.signal,
+        (chunk) => {
+          hasThinking = true
+          setSummary((p) => ({ ...p, thinking: (p.thinking ?? '') + chunk }))
+        },
       )
     } catch (err) {
       if (!(err instanceof Error && err.name === 'AbortError')) {
         setSummary((p) => ({ ...p, error: err instanceof Error ? err.message : t(locale, 'aiSummaryFailed') }))
       }
     } finally {
-      setSummary((p) => ({ ...p, loading: false }))
+      setSummary((p) => ({ ...p, loading: false, thinkingMS: hasThinking ? Math.max(0, Date.now() - startedAt) : p.thinkingMS }))
       sumBusyRef.current = false
       if (sumAbortRef.current === ac) sumAbortRef.current = null
     }
@@ -646,7 +652,8 @@ export default function ViewerAIWidget({
               </>
             ) : (
               <>
-                {summary.loading && !summary.text && <div className="muted">{t(locale, 'aiSummaryLoading')}</div>}
+                <AIChatThinking text={summary.thinking ?? ''} streaming={summary.loading} thinkingMS={summary.thinkingMS} zh={zh} />
+                {summary.loading && !summary.text && !summary.thinking && <div className="muted">{t(locale, 'aiSummaryLoading')}</div>}
                 {summary.text && (
                   <AIMarkdown text={summary.text} zh={zh} streaming={summary.loading} />
                 )}

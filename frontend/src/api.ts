@@ -2986,9 +2986,10 @@ export async function aiSummarizeFile(fileId: string): Promise<{ summary: string
   return { summary: data.summary, providerName: data.provider_name, model: data.model }
 }
 
-/** AI 文件摘要（流式；onDelta 逐段回调；signal 用于「停止生成」，abort 抛 AbortError）。 */
-export async function aiSummarizeFileStream(fileId: string, onDelta: (text: string) => void, signal?: AbortSignal): Promise<string> {
-  const init = withCSRF(jsonInit('POST', { fileId, stream: true }))
+/** AI 文件摘要（流式；onDelta 逐段回调、onThinking 推理增量回调（think 开
+ *  启且模型支持时有）；signal 用于「停止生成」，abort 抛 AbortError）。 */
+export async function aiSummarizeFileStream(fileId: string, onDelta: (text: string) => void, signal?: AbortSignal, onThinking?: (text: string) => void, opts?: { think?: boolean }): Promise<string> {
+  const init = withCSRF(jsonInit('POST', { fileId, stream: true, think: opts?.think ?? true }))
   if (signal) init.signal = signal
   const res = await authFetch('/api/v1/ai/summarize', init)
   if (!res.ok) {
@@ -3018,7 +3019,10 @@ export async function aiSummarizeFileStream(fileId: string, onDelta: (text: stri
       if (!name) continue
       let payload: Record<string, unknown> = {}
       try { payload = JSON.parse(data) as Record<string, unknown> } catch { continue }
-      if (name === 'delta') {
+      if (name === 'thinking') {
+        const text = String(payload.text ?? '')
+        if (text) onThinking?.(text)
+      } else if (name === 'delta') {
         const text = String(payload.text ?? '')
         summary += text
         onDelta(text)

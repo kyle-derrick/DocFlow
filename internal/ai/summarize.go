@@ -41,23 +41,25 @@ type FileSource interface {
 // SummarizeFile 抽取文件文本并生成 AI 摘要（非流式；流式增量经 onDelta
 // 透传，nil = 纯非流式）。返回摘要与结果元数据。
 func (s *Service) SummarizeFile(ctx context.Context, user uuid.UUID, src FileSource, fileID uuid.UUID, onDelta func(string)) (string, ChatResult, error) {
-	return s.SummarizeFileOpt(ctx, user, src, fileID, false, onDelta)
+	return s.SummarizeFileOpt(ctx, user, src, fileID, false, onDelta, nil)
 }
 
 // SummarizeFileOpt 为 SummarizeFile 的带 think 版本（/ai/summarize 的
 // think 请求参数；模型不具备 reasoning 能力时 Chat 内静默忽略）。
-func (s *Service) SummarizeFileOpt(ctx context.Context, user uuid.UUID, src FileSource, fileID uuid.UUID, think bool, onDelta func(string)) (string, ChatResult, error) {
+// onThinking 转发推理思考增量（SSE event:thinking；不计入摘要正文）。
+func (s *Service) SummarizeFileOpt(ctx context.Context, user uuid.UUID, src FileSource, fileID uuid.UUID, think bool, onDelta func(string), onThinking func(string)) (string, ChatResult, error) {
 	meta, data, err := src.FileWithContent(user, fileID)
 	if err != nil {
 		return "", ChatResult{}, err
 	}
 	userContent := summarizeUserContent(meta, data)
 	res, err := s.Chat(ctx, ChatRequest{
-		Scenario: settings.AIScenarioSummary,
-		Messages: []Message{{Role: "user", Content: userContent}},
-		System:   summarizeV2SystemPrompt,
-		Think:    think,
-		Stream:   onDelta != nil,
+		Scenario:   settings.AIScenarioSummary,
+		Messages:   []Message{{Role: "user", Content: userContent}},
+		System:     summarizeV2SystemPrompt,
+		Think:      think,
+		Stream:     onDelta != nil,
+		OnThinking: onThinking,
 	}, onDelta)
 	if err != nil {
 		return "", res, err

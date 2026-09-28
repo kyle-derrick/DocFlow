@@ -5418,7 +5418,8 @@ paths:
         纯 Go 解析 zip+XML；pdf 简单字体流解析）后交 ChatService 生成摘要；
         不支持全文抽取的二进制类型按「标题+元信息+描述」占位如实标注。
         PAT 须 ai:chat scope；每用户限流同 /ai/chat。stream=true 时 SSE
-        输出（delta/done）；缺省 JSON。文件不存在 404。可选 think=true
+        输出（thinking（think 且模型支持时有，推理增量不计入摘要）/
+        delta/done）；缺省 JSON。文件不存在 404。可选 think=true
         开启推理思考（仅摘要场景默认模型勾选 capabilities.reasoning 时
         向 Provider 透传，模型不支持时静默忽略）。
       requestBody:
