@@ -27,8 +27,10 @@ import type { TextAreaRef } from 'antd/es/input/TextArea'
 import { Check, Copy, FileInput, HelpCircle, Send, Sparkles, Square, Trash2, X } from 'lucide-react'
 import { aiChat, getFileMeta, restoreVersion } from '../api'
 import type { AIMessage } from '../api'
-import { AIChatToggleBar, AISkillButton, AIToolCalls, AIWebSources, AI_MODEL_STORAGE_KEY, defaultAIModelKey, getAIModels, normalizeWebSources, renderSkillPrompt, toolCallView, useAIChatToggles } from './AIAssistant'
-import type { AIModelOption, AIToolCallView, AIWebSource } from './AIAssistant'
+import { AIChatToggleBar, AISkillButton, AIToolCalls, AIWebSources, AI_MODEL_STORAGE_KEY, defaultAIModelKey, getAIModels, normalizeWebSources, renderSkillPrompt, useAIChatToggles } from './AIAssistant'
+import { AIChatThinking, applyToolResult, toolEntryFrom } from './aichat'
+import type { AIToolCallEntry } from './aichat'
+import type { AIModelOption, AIWebSource } from './AIAssistant'
 import AIModelSelect from './AIModelSelect'
 import AIMarkdown from './AIMarkdown'
 import { useAIEnabled } from '../aiFeature'
@@ -199,10 +201,16 @@ interface ChatTurn {
   error?: string
   /** 附注：用户消息的上下文范围/长度/截断说明；助手消息的停止说明。 */
   note?: string
+  /** 推理思考聚合文本（SSE thinking 增量；折叠区展示，不计入正文）。 */
+  thinking?: string
+  /** 首个思考增量时间戳（ms；计算用时）。 */
+  thinkingStartedAt?: number
+  /** 思考耗时（ms；流结束后写入）。 */
+  thinkingMS?: number
   /** 联网搜索来源（SSE meta.sources 宽松归一化；底部折叠列表展示）。 */
   webSources?: AIWebSource[]
-  /** 外部工具调用（SSE event:tool 逐次追加，顺序保留；Wrench 小标签展示）。 */
-  toolCalls?: AIToolCallView[]
+  /** 外部工具调用（SSE tool/tool_result 生命周期合并；ThoughtChain 展示）。 */
+  toolCalls?: AIToolCallEntry[]
   /** 自动应用进行中（保存+落盘）。 */
   applying?: boolean
   /** 自动应用成功的修改点记录（可撤销）。 */
@@ -644,9 +652,25 @@ export default function AIEditChat({
               return next
             })
           },
-          // 外部工具（MCP）执行前逐次下发：追加到消息的工具调用列表（顺序保留）。
+          // 推理思考增量：聚合到独立折叠区（首个增量记录起始时间）。
+          onThinking: (text) => {
+            setTurns((prev) => {
+              const next = [...prev]
+              const last = next[next.length - 1]
+              next[next.length - 1] = {
+                ...last,
+                thinking: (last.thinking ?? '') + text,
+                thinkingStartedAt: last.thinkingStartedAt ?? Date.now(),
+              }
+              return next
+            })
+          },
+          // 工具调用生命周期：执行前追加 running 条目，执行后合并终态/摘要。
           onTool: (tool) => {
-            setTurns((prev) => prev.map((x) => (x.id === asstTurnId ? { ...x, toolCalls: [...(x.toolCalls ?? []), toolCallView(tool)] } : x)))
+            setTurns((prev) => prev.map((x) => (x.id === asstTurnId ? { ...x, toolCalls: [...(x.toolCalls ?? []), toolEntryFrom(tool)] } : x)))
+          },
+          onToolResult: (r) => {
+            setTurns((prev) => prev.map((x) => (x.id === asstTurnId ? { ...x, toolCalls: applyToolResult(x.toolCalls ?? [], r) } : x)))
           },
         },
         controller.signal,
@@ -668,7 +692,9 @@ export default function AIEditChat({
       setTurns((prev) => {
         const next = [...prev]
         const last = next[next.length - 1]
-        next[next.length - 1] = { ...last, streaming: false }
+        next[next.length - 1] = last.thinkingStartedAt
+          ? { ...last, streaming: false, thinkingMS: Math.max(0, Date.now() - last.thinkingStartedAt) }
+          : { ...last, streaming: false }
         return next
       })
       setBusy(false)
@@ -972,6 +998,8 @@ export default function AIEditChat({
                   <Sparkles size={13} strokeWidth={2} />
                 </div>
                 <div className="ai-bubble ai-bubble-assistant">
+                  {/* 推理思考折叠区（流式展开跟随、完成自动收起并展示用时）。 */}
+                  <AIChatThinking text={turn.thinking ?? ''} streaming={turn.streaming} thinkingMS={turn.thinkingMS} zh={zh} />
                   {turn.content ? (
                     // payload 通道自动应用成功后收起原始回复（大段 JSON/XML 不
                     // 再整屏裸输出）；仅对话/失败/流式期间保持原样渲染。

@@ -23,13 +23,26 @@ import (
 // mockChunkDelay 流式块间隔（模拟网络打字机节奏）。
 const mockChunkDelay = 20 * time.Millisecond
 
-// chatMock 生成 mock 回复并流式回调。
+// chatMock 生成 mock 回复并流式回调。think=true 时先经 onThinking 流出
+// 一段模拟推理（演示前端思考过程折叠区），再流出正文。
 func (s *Service) chatMock(_ context.Context, p settings.AIProvider, req ChatRequest, _ float64, _ int, onDelta func(string)) (ChatResult, error) {
 	var lastUser string
 	for i := len(req.Messages) - 1; i >= 0; i-- {
 		if req.Messages[i].Role == "user" {
 			lastUser = req.Messages[i].Content
 			break
+		}
+	}
+	if req.Think && req.OnThinking != nil {
+		const mockThinking = "（模拟思考）用户在请求演示回复；这是 Mock Provider 的推理过程展示：\n1. 解析用户意图 → echo 演示；\n2. 组织回复结构与说明尾注；\n3. 流式输出正文。\n"
+		runes := []rune(mockThinking)
+		for i := 0; i < len(runes); i += 8 {
+			end := i + 8
+			if end > len(runes) {
+				end = len(runes)
+			}
+			req.OnThinking(string(runes[i:end]))
+			time.Sleep(mockChunkDelay)
 		}
 	}
 	var b strings.Builder

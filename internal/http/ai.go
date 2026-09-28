@@ -282,7 +282,8 @@ func (s aiFileContentSource) FileWithContent(user, fileID uuid.UUID) (ai.FileMet
 // aiChat POST /api/v1/ai/chat（scope ai:chat；每用户限流按所选 Provider
 // 的 requests_per_min 执行，未配置回落全局 ai.per_user_per_min，另有
 // Provider 级 daily_quota 可选日限额）：SSE 流式对话（event: meta/
-// sources/delta/done/error）；stream=false 时返回 JSON。context.query
+// sources/thinking/tool/tool_result/delta/done/error）；stream=false 时
+// 返回 JSON。context.query
 // 触发检索增强（来源经 sources 事件与响应字段回传）；context.fileIds
 // 把指定文件抽取文本拼入系统上下文。可选 model {providerId, modelId}
 // 指定模型（须具备 chat 能力，未传用场景默认 chat 模型）。可选 think
@@ -519,15 +520,29 @@ func (h *Handler) aiChat(c *gin.Context) {
 		w.event("sources", gin.H{"sources": aiSourcesJSON(sources)})
 	}
 	// 工具事件（use_mcp 外部 MCP 工具与 use_files 内置平台工具共用）：
-	// 每次工具执行前发一行（照 meta.sources 的 SSE 事件机制，前端进度
-	// 提示格式冻结；内置工具 server 固定 docflow，tool 字段按名透传）：
-	//   event: tool / data: {"type":"tool","label":"<服务Name> / <工具name>","server":"<服务ID>","tool":"<工具name>"}
-	onTool := func(serverID, serverName, toolName string) {
-		w.event("tool", gin.H{"type": "tool", "label": serverName + " / " + toolName, "server": serverID, "tool": toolName})
+	// 执行前 event:tool（含参数摘要 input，前端思考链接为运行中状态）；
+	// 执行后 event:tool_result（ok/duration_ms/output|error，前端标记
+	// 成功/失败）。内置工具 server 固定 docflow，tool 字段按名透传：
+	//   event: tool        / data: {"type":"tool","label":"<服务Name> / <工具name>","server":"<服务ID>","tool":"<工具name>","input":"{...}"}
+	//   event: tool_result / data: {"server":"<服务ID>","tool":"<工具name>","ok":true,"duration_ms":12,"output":"..."}
+	onTool := func(ev ai.ToolCallEvent) {
+		switch ev.Status {
+		case ai.ToolStatusRunning:
+			w.event("tool", gin.H{"type": "tool", "label": ev.ServerName + " / " + ev.Tool, "server": ev.ServerID, "tool": ev.Tool, "input": ev.Input})
+		case ai.ToolStatusError:
+			w.event("tool_result", gin.H{"server": ev.ServerID, "tool": ev.Tool, "ok": false, "duration_ms": ev.DurationMS, "error": ev.Error})
+		default:
+			w.event("tool_result", gin.H{"server": ev.ServerID, "tool": ev.Tool, "ok": true, "duration_ms": ev.DurationMS, "output": ev.Output})
+		}
 	}
 	res, err := userSvc.Chat(c.Request.Context(), ai.ChatRequest{
 		ProviderID: provider.ID, Model: model, Messages: messages, Think: think, UseMCP: useMCP,
 		PlatformTools: platformTools, ToolExecutor: toolExec, Stream: true, OnTool: onTool,
+		// 推理思考增量（openai reasoning_content / anthropic thinking_delta）
+		// 独立流出，前端折叠思考区展示（不计入正文 delta）。
+		OnThinking: func(text string) {
+			w.event("thinking", gin.H{"text": text})
+		},
 	}, func(text string) {
 		w.event("delta", gin.H{"text": text})
 	})

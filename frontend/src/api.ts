@@ -2831,12 +2831,23 @@ export interface AIChatOptions {
   work_root?: string
 }
 
-/** SSE tool 事件条目：外部 MCP 工具执行前下发一次（label=「服务名 / 工具名」）。 */
+/** SSE tool 事件条目：工具执行前下发（label=「服务名 / 工具名」，input=参数摘要）。 */
 export interface AIToolCall {
   type: 'tool'
   label: string
   server?: string
   tool?: string
+  input?: string
+}
+
+/** SSE tool_result 事件条目：工具执行后下发（ok/duration_ms/output|error 摘要）。 */
+export interface AIToolResult {
+  server?: string
+  tool?: string
+  ok: boolean
+  duration_ms?: number
+  output?: string
+  error?: string
 }
 
 /** AI 对话流式回调集合。 */
@@ -2844,15 +2855,19 @@ export interface AIChatStreamHandlers {
   onMeta?: (meta: { provider_id: string; provider_name: string; model: string }) => void
   onSources?: (sources: AISource[]) => void
   onDelta?: (text: string) => void
+  onThinking?: (text: string) => void
   onDone?: (usage: AIUsage) => void
-  /** 外部工具（MCP）执行前逐次回调（顺序保留；渲染层追加「工具调用」展示）。 */
+  /** 外部工具（MCP/平台文件）执行前逐次回调（顺序保留；渲染层追加「工具调用」展示）。 */
   onTool?: (tool: AIToolCall) => void
+  /** 工具执行后回调（与 onTool 按 server+tool 顺序配对；渲染层更新状态/结果）。 */
+  onToolResult?: (result: AIToolResult) => void
 }
 
 /**
- * AI 对话补全：stream=true（缺省）解析 SSE 流（event: meta/sources/delta/
- * done/error）逐段回调；stream=false 返回完整结果。会话过期自动 refresh 重放。
- * signal 触发 abort 时读取流抛 AbortError（「停止生成」语义，非错误）。
+ * AI 对话补全：stream=true（缺省）解析 SSE 流（event: meta/sources/
+ * thinking/tool/tool_result/delta/done/error）逐段回调；stream=false 返回
+ * 完整结果。会话过期自动 refresh 重放。signal 触发 abort 时读取流抛
+ * AbortError（「停止生成」语义，非错误）。
  */
 export async function aiChat(opts: AIChatOptions, handlers: AIChatStreamHandlers = {}, signal?: AbortSignal): Promise<{ content: string; sources: AISource[]; providerName: string; usage: AIUsage | null }> {
   const stream = opts.stream !== false
@@ -2919,15 +2934,32 @@ export async function aiChat(opts: AIChatOptions, handlers: AIChatStreamHandlers
         const list = Array.isArray(payload.sources) ? (payload.sources as AISource[]) : []
         sources = list
         handlers.onSources?.(list)
+      } else if (name === 'thinking') {
+        // 推理思考增量（不计入正文 content，渲染层独立折叠区展示）。
+        const text = String(payload.text ?? '')
+        if (text) handlers.onThinking?.(text)
       } else if (name === 'tool') {
-        // 外部工具（MCP）执行前下发一次：label 为「服务名 / 工具名」展示文本。
+        // 外部工具（MCP/平台文件）执行前下发一次：label 为「服务名 / 工具名」
+        // 展示文本，input 为参数摘要。
         const call: AIToolCall = {
           type: 'tool',
           label: String(payload.label ?? ''),
           server: payload.server === undefined ? undefined : String(payload.server),
           tool: payload.tool === undefined ? undefined : String(payload.tool),
+          input: payload.input === undefined ? undefined : String(payload.input),
         }
         if (call.label) handlers.onTool?.(call)
+      } else if (name === 'tool_result') {
+        // 工具执行后下发：ok/duration_ms + output|error 摘要（与 tool 事件
+        // 按 server+tool 配对，渲染层更新对应条目状态）。
+        handlers.onToolResult?.({
+          server: payload.server === undefined ? undefined : String(payload.server),
+          tool: payload.tool === undefined ? undefined : String(payload.tool),
+          ok: payload.ok === true,
+          duration_ms: typeof payload.duration_ms === 'number' ? payload.duration_ms : undefined,
+          output: payload.output === undefined ? undefined : String(payload.output),
+          error: payload.error === undefined ? undefined : String(payload.error),
+        })
       } else if (name === 'delta') {
         const text = String(payload.text ?? '')
         content += text

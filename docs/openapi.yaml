@@ -4499,11 +4499,15 @@ paths:
         daily_quota 可选日限额，超限 429。
         stream=true（缺省）返回 text/event-stream：event: meta（provider
         元信息；web_search 生效时附 sources:[{title,url}] 或失败标注
-        search_failed:true）→ sources（检索增强来源，可选）→ tool
-        （use_mcp 外部 MCP 工具与 use_files 内置平台文件工具的执行前
-        进度事件，可选，多次）→ delta（增量
-        文本，多次）→ done（用量）；错误经 event: error。stream=false 返回
-        JSON（web_search 生效时附 web_sources/search_failed 可选字段）。
+        search_failed:true）→ sources（检索增强来源，可选）→ thinking
+        （推理思考增量，可选，多次；openai_compatible 的
+        delta.reasoning_content/delta.reasoning 与 anthropic 的
+        thinking_delta 逐段转发，不计入正文）→ tool（use_mcp 外部 MCP
+        工具与 use_files 内置平台文件工具的执行前进度事件，可选，多次，
+        含参数摘要 input）→ tool_result（工具执行结果事件，可选，多次：
+        ok/duration_ms/output|error）→ delta（增量文本，多次）→ done
+        （用量）；错误经 event: error。stream=false 返回 JSON（web_search
+        生效时附 web_sources/search_failed 可选字段）。
         请求体 context.query 触发检索增强（RAG-lite：全文检索 top-k 按当前
         用户权限过滤，来源带 /view/{id} 链接）；context.fileIds 把指定文件
         抽取文本（office/pdf/drawio/excalidraw/dfdoc/文本，单文件 8000 字符）
@@ -4561,8 +4565,12 @@ paths:
                     各服务工具供模型调用，模型请求工具时执行并把结果回喂
                     继续补全（上限 5 轮）。每次工具执行前经 SSE event: tool
                     下发 {"type":"tool","label":"<服务名> / <工具名>",
-                    "server":"<服务ID>","tool":"<工具名>"}。与 web_search
-                    可同开（互不干扰）；与 context.query 的 RAG 模式互斥。
+                    "server":"<服务ID>","tool":"<工具名>","input":"<参数
+                    摘要>"}，执行后经 event: tool_result 下发 {"server":..,
+                    "tool":..,"ok":true|false,"duration_ms":..,
+                    "output"|"error":"<结果/错误摘要>"}（摘要截 2000 字符）。
+                    与 web_search 可同开（互不干扰）；与 context.query 的
+                    RAG 模式互斥。
                 use_files:
                   type: boolean
                   default: true
@@ -4617,7 +4625,14 @@ paths:
             text/event-stream:
               schema:
                 type: object
-                description: SSE 事件流（meta/sources/delta/done/error）
+                description: >-
+                  SSE 事件流：meta（{provider_id,provider_name,model[,
+                  sources|search_failed]}）/ sources（{sources:[{file_id,
+                  name,url}]}）/ thinking（{text} 推理增量，多次）/ tool
+                  （{type:"tool",label,server,tool,input}）/ tool_result
+                  （{server,tool,ok,duration_ms,output|error}）/ delta
+                  （{text}，多次）/ done（{usage,content_length}）/ error
+                  （{error,code}）。
             application/json:
               schema:
                 type: object

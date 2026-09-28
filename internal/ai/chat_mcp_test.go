@@ -137,8 +137,8 @@ func TestChatOpenAIMCPToolLoop(t *testing.T) {
 	res, err := svc.Chat(context.Background(), ChatRequest{
 		Messages: []Message{{Role: "user", Content: "北京天气如何"}},
 		UseMCP:   true, Stream: true,
-		OnTool: func(serverID, serverName, toolName string) {
-			toolEvents = append(toolEvents, serverID+"|"+serverName+"|"+toolName)
+		OnTool: func(ev ToolCallEvent) {
+			toolEvents = append(toolEvents, ev.Status+":"+ev.ServerID+"|"+ev.ServerName+"|"+ev.Tool)
 		},
 	}, func(s string) { deltas = append(deltas, s) })
 	if err != nil {
@@ -151,8 +151,8 @@ func TestChatOpenAIMCPToolLoop(t *testing.T) {
 	if strings.Join(deltas, "") != "北京天气晴" {
 		t.Fatalf("deltas = %v", deltas)
 	}
-	// 工具事件：执行前回调（服务 ID/名称/工具名）。
-	if len(toolEvents) != 1 || toolEvents[0] != "test|测试服务|echo" {
+	// 工具生命周期事件：执行前 running + 执行后 success（各一次）。
+	if len(toolEvents) != 2 || toolEvents[0] != "running:test|测试服务|echo" || toolEvents[1] != "success:test|测试服务|echo" {
 		t.Fatalf("toolEvents = %v", toolEvents)
 	}
 	if atomic.LoadInt32(&mcpCalls) != 1 {
@@ -316,8 +316,8 @@ func TestChatAnthropicMCPToolLoop(t *testing.T) {
 	res, err := svc.Chat(context.Background(), ChatRequest{
 		Messages: []Message{{Role: "user", Content: "上海天气如何"}},
 		UseMCP:   true, Stream: true,
-		OnTool: func(serverID, serverName, toolName string) {
-			toolEvents = append(toolEvents, serverID+"|"+serverName+"|"+toolName)
+		OnTool: func(ev ToolCallEvent) {
+			toolEvents = append(toolEvents, ev.Status+":"+ev.ServerID+"|"+ev.ServerName+"|"+ev.Tool)
 		},
 	}, func(s string) { deltas = append(deltas, s) })
 	if err != nil {
@@ -330,7 +330,7 @@ func TestChatAnthropicMCPToolLoop(t *testing.T) {
 	if strings.Join(deltas, "") != res.Content {
 		t.Fatalf("deltas = %v", deltas)
 	}
-	if len(toolEvents) != 1 || toolEvents[0] != "test|测试服务|echo" {
+	if len(toolEvents) != 2 || toolEvents[0] != "running:test|测试服务|echo" || toolEvents[1] != "success:test|测试服务|echo" {
 		t.Fatalf("toolEvents = %v", toolEvents)
 	}
 	if atomic.LoadInt32(&mcpCalls) != 1 {
@@ -473,8 +473,8 @@ func TestChatMCPPlatformAndPersonalLoop(t *testing.T) {
 	res, err := clone.Chat(context.Background(), ChatRequest{
 		Messages: []Message{{Role: "user", Content: "北京天气如何"}},
 		UseMCP:   true, Stream: true,
-		OnTool: func(serverID, serverName, toolName string) {
-			toolEvents = append(toolEvents, serverID+"|"+serverName+"|"+toolName)
+		OnTool: func(ev ToolCallEvent) {
+			toolEvents = append(toolEvents, ev.Status+":"+ev.ServerID+"|"+ev.ServerName+"|"+ev.Tool)
 		},
 	}, nil)
 	if err != nil {
@@ -483,7 +483,7 @@ func TestChatMCPPlatformAndPersonalLoop(t *testing.T) {
 	if res.Content != "北京天气晴" {
 		t.Fatalf("content = %q", res.Content)
 	}
-	if len(toolEvents) != 1 || toolEvents[0] != "test|我的服务|echo" {
+	if len(toolEvents) != 2 || toolEvents[0] != "running:test|我的服务|echo" || toolEvents[1] != "success:test|我的服务|echo" {
 		t.Fatalf("toolEvents = %v", toolEvents)
 	}
 	if atomic.LoadInt32(&mcpCalls) != 1 {

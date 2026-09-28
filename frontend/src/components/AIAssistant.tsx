@@ -56,7 +56,6 @@ import {
   AIUsage,
   AISource,
   AIMessage,
-  AIToolCall,
   AIPersonalPrefsView,
   aiChat,
   aiSummarizeFileStream,
@@ -93,11 +92,9 @@ interface AIContextFile {
   fileName: string
 }
 
-/** 引用文件（随对话发送 fileIds；用户气泡 📎 chips 展示）。 */
-export interface AIAttachFile {
-  fileId: string
-  fileName: string
-}
+/** 引用文件（随对话发送 fileIds；用户气泡 📎 chips 展示；定义在 aichat
+ *  共享，此处保留导出兼容既有引用）。 */
+export type { AIAttachFile } from './aichat'
 
 // ---------- 可选模型列表（GET /api/v1/ai/models 由并行任务添加） ----------
 // api.ts 暂无封装（getAIModels 可能由并行任务加入），为解耦在此本地实现：
@@ -713,125 +710,23 @@ export function AIChatToggleBar({
 // ---------- 联网搜索来源（SSE meta.sources 宽松读取） ----------
 
 /** 联网搜索来源条目（后端字段名宽松归一化）。 */
-export interface AIWebSource {
-  title: string
-  url: string
-}
+// ---------- 网络来源 / 工具调用展示（共享 aichat 实现，此处保留兼容导出） ----------
 
-/** 宽松归一化网络来源数组（非数组/空元素静默跳过，至多 20 条）。 */
-export function normalizeWebSources(raw: unknown): AIWebSource[] {
-  if (!Array.isArray(raw)) return []
-  const out: AIWebSource[] = []
-  for (const item of raw) {
-    if (out.length >= 20) break
-    if (typeof item === 'string') {
-      const s = item.trim()
-      if (s) out.push({ title: s, url: '' })
-      continue
-    }
-    if (!item || typeof item !== 'object') continue
-    const e = item as Record<string, unknown>
-    const title = String(e.title ?? e.name ?? '').trim()
-    const url = String(e.url ?? e.link ?? '').trim()
-    if (title || url) out.push({ title: title || url, url })
-  }
-  return out
-}
+// 网络来源归一化与渲染、工具调用链迁至 components/aichat（三处对话共用），
+// 保留原导出名以兼容 AIEditChat / StudioPage 等既有引用。
+import { AIChatThinking, AIToolChain, AIWebSourcesView, applyToolResult, normalizeWebSources, toolEntryFrom } from './aichat'
+import type { AIToolCallEntry, AIAttachFile, AIWebSource } from './aichat'
 
-/** 「网络来源」折叠列表（编号 + 标题超链接；联网开关生效时展示）。 */
-export function AIWebSources({ sources, zh }: { sources: AIWebSource[]; zh: boolean }) {
-  if (sources.length === 0) return null
-  return (
-    <details className="ai-web-sources">
-      <summary>{zh ? `网络来源（${sources.length}）` : `Web sources (${sources.length})`}</summary>
-      <div className="ai-web-sources-list">
-        {sources.map((s, i) => {
-          const inner = (
-            <>
-              <span className="idx" aria-hidden="true">{i + 1}</span>
-              <span className="name">{s.title}</span>
-            </>
-          )
-          return s.url ? (
-            <a key={`${i}:${s.url}`} className="ai-web-source-link" href={s.url} target="_blank" rel="noopener noreferrer" title={s.title}>
-              {inner}
-            </a>
-          ) : (
-            <span key={`${i}:${s.title}`} className="ai-web-source-link" title={s.title}>{inner}</span>
-          )
-        })}
-      </div>
-    </details>
-  )
-}
+export { normalizeWebSources } from './aichat'
+export type { AIWebSource } from './aichat'
+export type { AIToolCallEntry as AIToolCallView } from './aichat'
+export { toolEntryFrom as toolCallView, applyToolResult } from './aichat'
+export { AIWebSourcesView as AIWebSources } from './aichat'
 
-// ---------- 工具调用展示（SSE event:tool，外部 MCP 与 df_* 平台文件工具共用） ----------
-
-/** 消息上的工具调用条目（随消息保存；label 为后端原始展示文本，
- *  server/tool 供渲染层做 df_* 双语映射）。 */
-export interface AIToolCallView {
-  label: string
-  server?: string
-  tool?: string
-}
-
-/** 由 SSE tool 事件归一化为展示条目。 */
-export function toolCallView(tool: AIToolCall): AIToolCallView {
-  return {
-    label: tool.label || [tool.server, tool.tool].filter(Boolean).join(' / '),
-    server: tool.server,
-    tool: tool.tool,
-  }
-}
-
-/** df_* 平台文件工具名 → 双语显示名（server=docflow 时替换后端原始 label）。 */
-const DF_TOOL_LABELS: Record<string, { zh: string; en: string }> = {
-  df_list_dir: { zh: '列目录', en: 'List directory' },
-  df_read_file: { zh: '读取文件', en: 'Read file' },
-  df_write_file: { zh: '写入文件', en: 'Write file' },
-  df_mkdir: { zh: '新建目录', en: 'Create folder' },
-  df_search: { zh: '搜索文件', en: 'Search files' },
-}
-
-/** 平台内置文件工具的 server 标识（后端固定 docflow，显示名「平台」）。 */
-const DF_SERVER = 'docflow'
-
-/**
- * 工具条目展示文本：server=docflow 的 df_* 平台文件工具映射为
- * 「平台 / 列目录」式双语文本（df_write_file 附「已保存（自动留版本）」
- * 小字标记；SSE 事件在执行前下发、无结果字段，故不带 path）。
- */
-function dfToolCallText(tc: AIToolCallView, zh: boolean): { text: string; saved: boolean } {
-  if (tc.server === DF_SERVER && tc.tool) {
-    const mapped = DF_TOOL_LABELS[tc.tool]
-    if (mapped) {
-      return {
-        text: `${zh ? '平台' : 'Platform'} / ${zh ? mapped.zh : mapped.en}`,
-        saved: tc.tool === 'df_write_file',
-      }
-    }
-  }
-  return { text: tc.label, saved: false }
-}
-
-/** 「工具调用」行（Wrench 小标签逐条列出，顺序保留；三处对话共用）。 */
-export function AIToolCalls({ toolCalls, zh }: { toolCalls: AIToolCallView[] | undefined; zh: boolean }) {
-  if (!toolCalls || toolCalls.length === 0) return null
-  return (
-    <div className="ai-tool-calls">
-      <span className="ai-tool-calls-label muted">{zh ? '工具调用' : 'Tools'}</span>
-      {toolCalls.map((tc, i) => {
-        const view = dfToolCallText(tc, zh)
-        return (
-          <span key={`${i}:${tc.label}`} className="ai-tool-call-chip" title={view.text}>
-            <Wrench size={12} strokeWidth={2} aria-hidden="true" />
-            <span>{view.text}</span>
-            {view.saved && <span className="ai-tool-call-saved">{zh ? '已保存（自动留版本）' : 'Saved (auto versioned)'}</span>}
-          </span>
-        )
-      })}
-    </div>
-  )
+/** 「工具调用」行（共享 ThoughtChain 渲染：running 旋转 → success/error
+ *  终态，可展开参数/结果摘要；三处对话共用）。 */
+export function AIToolCalls({ toolCalls, zh }: { toolCalls: AIToolCallEntry[] | undefined; zh: boolean }) {
+  return <AIToolChain toolCalls={toolCalls} zh={zh} />
 }
 
 // ---------- 工作目录选择（df_* 平台文件工具的相对路径基准） ----------
@@ -1155,11 +1050,17 @@ interface ChatTurn {
   kind?: 'chat' | 'summarize'
   /** 用户回合引用的文件（📎 chips 展示；发送时已随 fileIds 上送）。 */
   files?: AIAttachFile[]
+  /** 推理思考聚合文本（SSE thinking 增量；折叠区展示，不计入正文）。 */
+  thinking?: string
+  /** 首个思考增量时间戳（ms；计算用时）。 */
+  thinkingStartedAt?: number
+  /** 思考耗时（ms；流结束后写入）。 */
+  thinkingMS?: number
   sources?: AISource[]
   /** 联网搜索来源（SSE meta.sources 宽松归一化；底部折叠列表展示）。 */
   webSources?: AIWebSource[]
-  /** 外部工具调用（SSE event:tool 逐次追加，顺序保留；Wrench 小标签展示）。 */
-  toolCalls?: AIToolCallView[]
+  /** 外部工具调用（SSE tool/tool_result 生命周期合并；ThoughtChain 展示）。 */
+  toolCalls?: AIToolCallEntry[]
   error?: string
   usage?: AIUsage | null
 }
@@ -1877,8 +1778,14 @@ export default function AIAssistant() {
           },
           onDelta: (chunk) => updateTurn(assistantId, (x) => ({ content: x.content + chunk })),
           onSources: (sources) => updateTurn(assistantId, () => ({ sources })),
-          // 外部工具（MCP）执行前逐次下发：追加到消息的工具调用列表（顺序保留）。
-          onTool: (tool) => updateTurn(assistantId, (x) => ({ toolCalls: [...(x.toolCalls ?? []), toolCallView(tool)] })),
+          // 推理思考增量：聚合到独立折叠区（首个增量记录起始时间）。
+          onThinking: (text) => updateTurn(assistantId, (x) => ({
+            thinking: (x.thinking ?? '') + text,
+            thinkingStartedAt: x.thinkingStartedAt ?? Date.now(),
+          })),
+          // 工具调用生命周期：执行前追加 running 条目，执行后合并终态/摘要。
+          onTool: (tool) => updateTurn(assistantId, (x) => ({ toolCalls: [...(x.toolCalls ?? []), toolEntryFrom(tool)] })),
+          onToolResult: (result) => updateTurn(assistantId, (x) => ({ toolCalls: applyToolResult(x.toolCalls ?? [], result) })),
           onDone: (usage) => updateTurn(assistantId, () => ({ usage })),
         },
         ac.signal,
@@ -1892,6 +1799,8 @@ export default function AIAssistant() {
         updateTurn(assistantId, () => ({ error: message }))
       }
     } finally {
+      // 思考用时定稿（首个增量到流结束）。
+      updateTurn(assistantId, (x) => (x.thinkingStartedAt ? { thinkingMS: Math.max(0, Date.now() - x.thinkingStartedAt) } : {}))
       updateTurn(assistantId, () => ({ streaming: false }))
       setBusyState(false)
       if (abortRef.current === ac) abortRef.current = null
@@ -2028,6 +1937,8 @@ export default function AIAssistant() {
     }
     return (
       <div className="aiax-ai-msg">
+        {/* 推理思考折叠区（流式展开跟随、完成自动收起并展示用时）。 */}
+        <AIChatThinking text={turn.thinking ?? ''} streaming={turn.streaming} thinkingMS={turn.thinkingMS} zh={zh} />
         {turn.content ? (
           <AIMarkdown text={turn.content} zh={zh} streaming={turn.streaming} />
         ) : turn.streaming ? (
@@ -2058,7 +1969,7 @@ export default function AIAssistant() {
           </div>
         )}
         {/* 联网搜索来源：折叠列表（编号 + 标题超链接）。 */}
-        {turn.webSources && <AIWebSources sources={turn.webSources} zh={zh} />}
+        {turn.webSources && <AIWebSourcesView sources={turn.webSources} zh={zh} />}
         {/* 操作行：复制（任意回答）/ 重新生成（仅最后一条）。 */}
         {!turn.streaming && !turn.error && (turn.content || turn.stopped) && (
           <div className="aiax-msg-actions">

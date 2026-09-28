@@ -25,6 +25,8 @@ import { App as AntdApp, Button, Input, Popconfirm, Segmented, Select, Tooltip }
 import { Check, ChevronDown, Copy, RotateCcw, Save, Send, Sparkles, Square, Trash2 } from 'lucide-react'
 import AIMarkdown from './AIMarkdown'
 import { AIModelOption, AI_MODEL_STORAGE_KEY, defaultAIModelKey, getAIModels } from './AIAssistant'
+import { AIChatThinking, AIToolChain, applyToolResult, toolEntryFrom } from './aichat'
+import type { AIToolCallEntry } from './aichat'
 import {
   AIMessage,
   aiChat,
@@ -128,6 +130,12 @@ interface WidgetTurn {
   streaming?: boolean
   stopped?: boolean
   error?: string
+  /** 推理思考聚合文本（SSE thinking 增量；折叠区展示，不计入正文）。 */
+  thinking?: string
+  thinkingStartedAt?: number
+  thinkingMS?: number
+  /** 外部工具调用（SSE tool/tool_result 生命周期合并）。 */
+  toolCalls?: AIToolCallEntry[]
 }
 
 /** 从 AI 回答提取保存内容：优先最长的围栏代码块（```).+?```），无代码块时整段兜底。 */
@@ -386,6 +394,12 @@ export default function ViewerAIWidget({
         },
         {
           onDelta: (chunk) => updateTurn(assistantId, (x) => ({ content: x.content + chunk })),
+          onThinking: (chunk) => updateTurn(assistantId, (x) => ({
+            thinking: (x.thinking ?? '') + chunk,
+            thinkingStartedAt: x.thinkingStartedAt ?? Date.now(),
+          })),
+          onTool: (tool) => updateTurn(assistantId, (x) => ({ toolCalls: [...(x.toolCalls ?? []), toolEntryFrom(tool)] })),
+          onToolResult: (r) => updateTurn(assistantId, (x) => ({ toolCalls: applyToolResult(x.toolCalls ?? [], r) })),
           onDone: () => { /* 用量等元信息不展示 */ },
         },
         ac.signal,
@@ -397,6 +411,7 @@ export default function ViewerAIWidget({
         updateTurn(assistantId, () => ({ error: err instanceof Error ? err.message : t(locale, 'aiAssistantErr') }))
       }
     } finally {
+      updateTurn(assistantId, (x) => (x.thinkingStartedAt ? { thinkingMS: Math.max(0, Date.now() - x.thinkingStartedAt) } : {}))
       updateTurn(assistantId, () => ({ streaming: false }))
       busyRef.current = false
       setBusy(false)
@@ -591,6 +606,9 @@ export default function ViewerAIWidget({
                     <div key={turn.id} className="viewer-aiw-bubble user">{turn.content}</div>
                   ) : (
                     <div key={turn.id} className="viewer-aiw-bubble assistant">
+                      {/* 推理思考折叠区 + 工具调用链（与其他对话场景同款共享组件）。 */}
+                      <AIChatThinking text={turn.thinking ?? ''} streaming={turn.streaming} thinkingMS={turn.thinkingMS} zh={zh} />
+                      <AIToolChain toolCalls={turn.toolCalls} zh={zh} />
                       {turn.error ? (
                         <div className="error-text">{turn.error}</div>
                       ) : turn.content ? (

@@ -100,9 +100,15 @@ type ChatRequest struct {
 	// internal/http/ai_platform_tools.go 的 executePlatformTool）。仅当
 	// PlatformTools 非空时参与分发。
 	ToolExecutor ToolExecutorFunc
-	// OnTool 为工具执行前回调（serverID/服务名/工具名；HTTP 层经 SSE
-	// event:tool 下发前端进度提示）。可为 nil。
+	// OnTool 为工具调用生命周期回调（执行前 running 带参数摘要 / 执行后
+	// success|error 带结果摘要与耗时；HTTP 层经 SSE event:tool 与
+	// event:tool_result 下发前端思考链展示）。可为 nil。
 	OnTool ToolEventNotifier
+	// OnThinking 为推理思考增量回调（openai_compatible 的
+	// delta.reasoning_content / delta.reasoning、anthropic 的
+	// thinking_delta；HTTP 层经 SSE event:thinking 下发前端折叠思考区）。
+	// 推理文本不计入正文 Content。可为 nil。
+	OnThinking func(string)
 	// Stream true 时经 onDelta 流式回调增量。
 	Stream bool
 }
@@ -433,8 +439,12 @@ type openAIToolCallDelta struct {
 type openAIStreamChunk struct {
 	Choices []struct {
 		Delta struct {
-			Content   string                `json:"content"`
-			ToolCalls []openAIToolCallDelta `json:"tool_calls"`
+			Content string `json:"content"`
+			// ReasoningContent DeepSeek/Qwen/GLM 风格推理增量（部分兼容
+			// 网关命名 reasoning）：经 onThinking 转发前端，不计入正文。
+			ReasoningContent string                `json:"reasoning_content"`
+			Reasoning        string                `json:"reasoning"`
+			ToolCalls        []openAIToolCallDelta `json:"tool_calls"`
 		} `json:"delta"`
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
@@ -532,7 +542,7 @@ func (s *Service) chatOpenAI(ctx context.Context, p settings.AIProvider, model s
 			return ChatResult{}, fmt.Errorf("%w: status %d: %s", ErrUpstreamChat, resp.StatusCode, truncateBytes(raw, 200))
 		}
 		if stream {
-			return consumeOpenAISSE(resp.Body, onDelta)
+			return consumeOpenAISSE(resp.Body, onDelta, req.OnThinking)
 		}
 		raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 		if err != nil {
@@ -562,8 +572,10 @@ func (s *Service) chatOpenAI(ctx context.Context, p settings.AIProvider, model s
 	return res, err
 }
 
-// consumeOpenAISSE 解析 text/event-stream：逐 data: JSON 取 delta.content。
-func consumeOpenAISSE(r io.Reader, onDelta func(string)) (ChatResult, error) {
+// consumeOpenAISSE 解析 text/event-stream：逐 data: JSON 取 delta.content；
+// delta.reasoning_content / delta.reasoning 推理增量经 onThinking 转发
+// （不计入正文 content）。
+func consumeOpenAISSE(r io.Reader, onDelta, onThinking func(string)) (ChatResult, error) {
 	var res ChatResult
 	var content strings.Builder
 	scanner := bufio.NewScanner(r)
@@ -575,6 +587,11 @@ func consumeOpenAISSE(r io.Reader, onDelta func(string)) (ChatResult, error) {
 		content.WriteString(text)
 		if onDelta != nil {
 			onDelta(text)
+		}
+	}
+	think := func(text string) {
+		if text != "" && onThinking != nil {
+			onThinking(text)
 		}
 	}
 	for scanner.Scan() {
@@ -601,6 +618,8 @@ func consumeOpenAISSE(r io.Reader, onDelta func(string)) (ChatResult, error) {
 		}
 		for _, c := range chunk.Choices {
 			emit(c.Delta.Content)
+			think(c.Delta.ReasoningContent)
+			think(c.Delta.Reasoning)
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -631,6 +650,9 @@ type anthropicEvent struct {
 	Delta struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
+		// Thinking 为 thinking_delta 的推理文本增量（anthropic 官方
+		// 字段名 thinking，非 text）。
+		Thinking string `json:"thinking"`
 		// PartialJSON 为 input_json_delta 的参数分片（tool_use）。
 		PartialJSON string `json:"partial_json"`
 		// Signature 为 thinking 块的签名分片（anthropic 要求带 tool_use
@@ -734,7 +756,7 @@ func (s *Service) chatAnthropic(ctx context.Context, p settings.AIProvider, mode
 			return ChatResult{}, fmt.Errorf("%w: status %d: %s", ErrUpstreamChat, resp.StatusCode, truncateBytes(raw, 200))
 		}
 		if stream {
-			return consumeAnthropicSSE(resp.Body, onDelta)
+			return consumeAnthropicSSE(resp.Body, onDelta, req.OnThinking)
 		}
 		raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 		if err != nil {
@@ -766,9 +788,10 @@ func (s *Service) chatAnthropic(ctx context.Context, p settings.AIProvider, mode
 	return res, err
 }
 
-// consumeAnthropicSSE 解析 anthropic 流：content_block_delta 增量、
+// consumeAnthropicSSE 解析 anthropic 流：content_block_delta 增量（text
+// 经 onDelta；thinking 经 onThinking 转发，不计入正文）、
 // message_start/message_delta 汇总 usage。
-func consumeAnthropicSSE(r io.Reader, onDelta func(string)) (ChatResult, error) {
+func consumeAnthropicSSE(r io.Reader, onDelta, onThinking func(string)) (ChatResult, error) {
 	var res ChatResult
 	var content strings.Builder
 	scanner := bufio.NewScanner(r)
@@ -796,6 +819,9 @@ func consumeAnthropicSSE(r io.Reader, onDelta func(string)) (ChatResult, error) 
 				if onDelta != nil {
 					onDelta(ev.Delta.Text)
 				}
+			}
+			if ev.Delta.Type == "thinking_delta" && ev.Delta.Thinking != "" && onThinking != nil {
+				onThinking(ev.Delta.Thinking)
 			}
 		case "message_start":
 			res.PromptTokens = ev.Message.Usage.InputTokens
@@ -837,9 +863,45 @@ const (
 	mcpToolFnPrefix = "mcp_"
 )
 
-// ToolEventNotifier 为工具执行前回调（serverID/服务名/工具名）——HTTP
-// 层据此在每次工具执行前发 SSE event:tool（前端进度提示）。
-type ToolEventNotifier func(serverID, serverName, toolName string)
+// ToolCallStatus 工具调用事件阶段。
+const (
+	// ToolStatusRunning 执行前（附参数摘要）。
+	ToolStatusRunning = "running"
+	// ToolStatusSuccess 执行成功（附结果摘要与耗时）。
+	ToolStatusSuccess = "success"
+	// ToolStatusError 执行失败（附错误信息与耗时；错误文本同时回喂模型）。
+	ToolStatusError = "error"
+)
+
+// ToolEventSummaryMaxRunes 工具事件参数/结果摘要长度上限（rune 计）。
+const ToolEventSummaryMaxRunes = 2000
+
+// ToolCallEvent 为工具调用生命周期事件：Status=running（执行前，附参数
+// 摘要）/ success / error（执行后，附结果摘要与耗时）。HTTP 层据此发
+// SSE event:tool（running）与 event:tool_result（success/error）。
+type ToolCallEvent struct {
+	ServerID   string `json:"server"`
+	ServerName string `json:"server_name"`
+	Tool       string `json:"tool"`
+	Status     string `json:"status"`
+	Input      string `json:"input,omitempty"`
+	Output     string `json:"output,omitempty"`
+	Error      string `json:"error,omitempty"`
+	DurationMS int64  `json:"duration_ms,omitempty"`
+}
+
+// ToolEventNotifier 为工具调用生命周期回调——HTTP 层据此发 SSE
+// event:tool（执行前进度）与 event:tool_result（执行后结果）。
+type ToolEventNotifier func(ev ToolCallEvent)
+
+// toolEventSummary 生成工具事件摘要（压空白、截断超长）。
+func toolEventSummary(s string) string {
+	s = strings.TrimSpace(s)
+	if runes := []rune(s); len(runes) > ToolEventSummaryMaxRunes {
+		return string(runes[:ToolEventSummaryMaxRunes]) + "…"
+	}
+	return s
+}
 
 // mcpToolRef 为一个可调用工具的完整引用（归属服务 + 工具定义 + 客户端）。
 type mcpToolRef struct {
@@ -1001,18 +1063,29 @@ func (ts *mcpToolContext) anthropicTools() []map[string]any {
 
 // execMCPTool 执行一个工具调用并返回注入对话的结果字符串（永不因工具
 // 失败中断对话——错误文本作为结果回喂模型，由模型决定重试/换路/告知
-// 用户，agent 循环的标准鲁棒性做法）。结果截 8000 字符。
+// 用户，agent 循环的标准鲁棒性做法）。结果截 8000 字符。notify 收到
+// 执行前（running）与执行后（success/error）两阶段事件。
 func (s *Service) execMCPTool(ctx context.Context, ts *mcpToolContext, fn string, args json.RawMessage, notify ToolEventNotifier) string {
 	ref, ok := ts.byFn[fn]
 	if !ok {
 		return "错误：未知工具 " + fn + "（不在可用 MCP 工具集中）"
 	}
 	if notify != nil {
-		notify(ref.service.ID, ref.service.Name, ref.tool.Name)
+		notify(ToolCallEvent{ServerID: ref.service.ID, ServerName: ref.service.Name, Tool: ref.tool.Name, Status: ToolStatusRunning, Input: toolEventSummary(string(args))})
 	}
+	start := time.Now()
 	cctx, cancel := context.WithTimeout(ctx, mcpclient.RequestTimeout)
 	defer cancel()
 	result, err := ref.client.CallTool(cctx, ref.tool.Name, args)
+	if notify != nil {
+		ev := ToolCallEvent{ServerID: ref.service.ID, ServerName: ref.service.Name, Tool: ref.tool.Name, DurationMS: time.Since(start).Milliseconds()}
+		if err != nil {
+			ev.Status, ev.Error = ToolStatusError, err.Error()
+		} else {
+			ev.Status, ev.Output = ToolStatusSuccess, toolEventSummary(result)
+		}
+		notify(ev)
+	}
 	if err != nil {
 		log.Printf("ai mcp: 工具 %s 调用失败: %v", fn, err)
 		return "工具调用失败：" + err.Error()
@@ -1096,15 +1169,25 @@ func (tc *chatToolContext) anthropicTools() []map[string]any {
 // execTool 执行一次工具调用并返回注入对话的结果字符串：先查内置平台
 // 工具名（PlatformToolNames）走 ToolExecutor 回调，未命中回落 MCP 工具
 // 路径（execMCPTool）。与 MCP 一致的鲁棒性：工具失败不中断对话，错误
-// 文本作为结果回喂模型；结果截 MCPToolResultMaxRunes 字符。
+// 文本作为结果回喂模型；结果截 MCPToolResultMaxRunes 字符。notify 收到
+// 执行前（running，内置工具 server 固定 docflow/平台文件）与执行后
+// （success/error）两阶段事件。
 func (s *Service) execTool(ctx context.Context, tc *chatToolContext, fn string, args json.RawMessage, notify ToolEventNotifier) string {
 	if tc.exec != nil && PlatformToolNames()[fn] {
 		if notify != nil {
-			// 内置平台工具的进度事件：server 固定 docflow/平台文件，
-			// 前端 SSE tool 事件格式与 MCP 工具一致（tool 字段按名透传）。
-			notify("docflow", "平台文件", fn)
+			notify(ToolCallEvent{ServerID: "docflow", ServerName: "平台文件", Tool: fn, Status: ToolStatusRunning, Input: toolEventSummary(string(args))})
 		}
+		start := time.Now()
 		result, err := tc.exec(fn, args)
+		if notify != nil {
+			ev := ToolCallEvent{ServerID: "docflow", ServerName: "平台文件", Tool: fn, DurationMS: time.Since(start).Milliseconds()}
+			if err != nil {
+				ev.Status, ev.Error = ToolStatusError, err.Error()
+			} else {
+				ev.Status, ev.Output = ToolStatusSuccess, toolEventSummary(result)
+			}
+			notify(ev)
+		}
 		if err != nil {
 			log.Printf("ai platform tool: 工具 %s 调用失败: %v", fn, err)
 			return "工具调用失败：" + err.Error()
@@ -1257,7 +1340,7 @@ func (s *Service) openAIToolRound(ctx context.Context, p settings.AIProvider, mo
 			return openAIRound{}, fmt.Errorf("%w: status %d: %s", ErrUpstreamChat, resp.StatusCode, truncateBytes(raw, 200))
 		}
 		if stream {
-			return consumeOpenAISSETools(resp.Body, emit)
+			return consumeOpenAISSETools(resp.Body, emit, req.OnThinking)
 		}
 		raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 		if err != nil {
@@ -1292,9 +1375,10 @@ func (s *Service) openAIToolRound(ctx context.Context, p settings.AIProvider, mo
 
 // consumeOpenAISSETools 解析工具循环轮的 SSE 流：delta.content 照旧
 // 透传（有待定 tool_calls 聚合时不透传，防与工具参数交错乱序——文本
-// 仍累计）、delta.tool_calls 按 index 渐进聚合（id 首块全量、name/
+// 仍累计）、delta.reasoning_content / delta.reasoning 经 onThinking
+// 转发、delta.tool_calls 按 index 渐进聚合（id 首块全量、name/
 // arguments 分片拼接）。
-func consumeOpenAISSETools(r io.Reader, emit func(string)) (openAIRound, error) {
+func consumeOpenAISSETools(r io.Reader, emit func(string), onThinking func(string)) (openAIRound, error) {
 	var round openAIRound
 	var content strings.Builder
 	calls := make(map[int]*openAIToolCall)
@@ -1336,6 +1420,12 @@ func consumeOpenAISSETools(r io.Reader, emit func(string)) (openAIRound, error) 
 				if !pending {
 					emit(c.Delta.Content)
 				}
+			}
+			if c.Delta.ReasoningContent != "" && onThinking != nil {
+				onThinking(c.Delta.ReasoningContent)
+			}
+			if c.Delta.Reasoning != "" && onThinking != nil {
+				onThinking(c.Delta.Reasoning)
 			}
 			for _, tc := range c.Delta.ToolCalls {
 				pending = true
@@ -1496,7 +1586,7 @@ func (s *Service) anthropicToolRound(ctx context.Context, p settings.AIProvider,
 			return anthropicRound{}, fmt.Errorf("%w: status %d: %s", ErrUpstreamChat, resp.StatusCode, truncateBytes(raw, 200))
 		}
 		if stream {
-			return consumeAnthropicSSETools(resp.Body, emit)
+			return consumeAnthropicSSETools(resp.Body, emit, req.OnThinking)
 		}
 		raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 		if err != nil {
@@ -1530,9 +1620,9 @@ func (s *Service) anthropicToolRound(ctx context.Context, p settings.AIProvider,
 // consumeAnthropicSSETools 解析工具循环轮的 anthropic 流：text_delta 照旧
 // 透传；content_block_start 缓冲块（text/thinking/tool_use）、
 // input_json_delta 拼接工具参数、thinking_delta/signature_delta 聚合推理
-// 块（随 tool_use 回传满足 thinking 签名约束）、message_delta 取 usage
-// 与 stop_reason。
-func consumeAnthropicSSETools(r io.Reader, emit func(string)) (anthropicRound, error) {
+// 块（随 tool_use 回传满足 thinking 签名约束，文本增量同时经 onThinking
+// 转发前端）、message_delta 取 usage 与 stop_reason。
+func consumeAnthropicSSETools(r io.Reader, emit func(string), onThinking func(string)) (anthropicRound, error) {
 	var round anthropicRound
 	blocks := make(map[int]*anthropicContentBlock)
 	inputs := make(map[int]*strings.Builder)
@@ -1578,7 +1668,10 @@ func consumeAnthropicSSETools(r io.Reader, emit func(string)) (anthropicRound, e
 				b.Text += ev.Delta.Text
 				emit(ev.Delta.Text)
 			case "thinking_delta":
-				get(ev.Index, "thinking").Thinking += ev.Delta.Text
+				get(ev.Index, "thinking").Thinking += ev.Delta.Thinking
+				if ev.Delta.Thinking != "" && onThinking != nil {
+					onThinking(ev.Delta.Thinking)
+				}
 			case "signature_delta":
 				get(ev.Index, "thinking").Signature += ev.Delta.Signature
 			case "input_json_delta":
