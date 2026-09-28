@@ -1,0 +1,1098 @@
+﻿// 平台级设置面板（自个人设置页 SettingsPage 迁出，AdminPage 懒加载）：
+// - TlsPanel：HTTPS/TLS 证书与 ACME 状态（管理 tls 分区）；
+// - MailPanel：SMTP 邮件配置（发件测试）；
+// - SystemSettingsPanel + SystemSettingKeysCard + SETTING_KEY_META：运行时
+//   system_settings 键的控件化渲染（上传/分享/保留清理/批量目录/实时协作等
+//   分组；space.* / backup.* 键组卡片复用于「空间」「备份」分区）。
+// 仅管理员可达（AdminPage 403 守卫）；与个人设置（SettingsPage）物理分离，
+// 消除此前「管理面板定义在个人设置文件内导出复用」的职责倒挂。
+import { FormEvent, useEffect, useMemo, useState } from 'react'
+import { Alert, Button, Input, InputNumber, Radio, Select, Switch, Upload } from 'antd'
+import { ApiError, adminGetSettings, adminGetSmtpSettings, adminGetTls, adminPutSetting, adminPutSmtpSettings, adminPutTls, adminTestSmtp, adminUploadTlsCert } from '../../api'
+import type { AdminSettingsResult, SettingItem, SettingValue, SmtpSettingsView, TlsCert, TlsMode, TlsStatus } from '../../api'
+import { formatQuota, formatTime } from '../FileBrowser'
+import QuotaInput from '../QuotaInput'
+import { useLocale } from '../../i18n'
+// ---- admin 专属面板（v2.3 由管理页迁入设置页：邮件配置 / TLS / 系统设置） ----
+
+/** TLS 模式选项（值与后端 caddytls.Mode 对齐）。 */
+const tlsModeOptions: Array<{ value: TlsMode; label: string; desc: string }> = [
+  { value: 'http', label: 'HTTP（明文）', desc: '仅限本地/内网验证；127.0.0.1 等无域名场景' },
+  { value: 'auto', label: 'HTTPS（自动证书）', desc: '公网域名 DNS 指向本机，自动签发受信证书（Let\u0027s Encrypt）' },
+  { value: 'internal', label: 'HTTPS（自签）', desc: '内网域名或 IP 可用，流量加密但浏览器会提示不受信' },
+  { value: 'custom', label: 'HTTPS（自定义证书）', desc: '已有企业/自购证书：上传 PEM 证书+私钥，受信且无需公网 DNS' },
+]
+function TlsCertInfo({ cert }: { cert: TlsCert | null | undefined }) {
+  if (!cert) {
+    return <div className="setting-desc muted">尚未上传证书——选择「自定义证书」模式前请先在下方上传 PEM 证书与私钥</div>
+  }
+  return (
+    <div className="setting-desc">
+      <div>CN <code className="setting-value-mono">{cert.cn || '（无 CN，以 SAN 为准）'}</code></div>
+      {cert.dns_names && cert.dns_names.length > 0 && (
+        <div className="muted">SAN：{cert.dns_names.join('、')}</div>
+      )}
+      <div className="muted">有效期：{cert.not_before} ~ {cert.not_after}</div>
+    </div>
+  )
+}
+
+/** HTTPS 运行时切换卡片：模式选择 + 域名，保存后经 Caddy admin API 热下发
+ * （立即生效，无需重启容器；caddy 拒绝时原子回退）。未托管（managed=false）
+ * 时降级为提示。切换到 HTTPS 后提示 COOKIE_SECURE 联动。custom 模式附
+ * 证书上传（multipart cert/key，后端解析校验并落盘共享卷）与摘要展示。 */
+export function TlsPanel({ onNotice }: { onNotice: (msg: string) => void }) {
+  const [status, setStatus] = useState<TlsStatus | null>(null)
+  const [mode, setMode] = useState<TlsMode>('http')
+  const [domain, setDomain] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [rowError, setRowError] = useState('')
+  // 证书上传：文件选择 + 上传中标记。
+  const [certFile, setCertFile] = useState<File | null>(null)
+  const [keyFile, setKeyFile] = useState<File | null>(null)
+  const [uploading, setUploading] = useState(false)
+
+  useEffect(() => {
+    adminGetTls()
+      .then((st) => {
+        setStatus(st)
+        setMode(st.mode)
+        setDomain(st.domain)
+      })
+      .catch(() => setStatus(null))
+  }, [])
+
+  const uploadCert = async () => {
+    if (!certFile || !keyFile || uploading) return
+    setUploading(true)
+    setRowError('')
+    try {
+      const st = await adminUploadTlsCert(certFile, keyFile)
+      setStatus(st)
+      setCertFile(null)
+      setKeyFile(null)
+      onNotice(`证书已上传（CN：${st.cert?.cn ?? '未知'}，到期 ${st.cert?.not_after ?? '?'}）；如需启用请在上方选择「自定义证书」并保存`)
+    } catch (err) {
+      setRowError(err instanceof Error ? err.message : '证书上传失败')
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault()
+    setRowError('')
+    setSaving(true)
+    try {
+      const st = await adminPutTls(mode, domain.trim())
+      setStatus(st)
+      const notice =
+        st.mode === 'http'
+          ? '已切换为 HTTP 明文模式'
+          : `HTTPS 已生效（${st.mode === 'auto' ? '自动证书' : st.mode === 'internal' ? '自签证书' : '自定义证书'}：${st.domain || '默认'}）`
+      onNotice(`${notice}。若 .env 的 COOKIE_SECURE 与当前模式不符，请调整后重启 backend。`)
+    } catch (err) {
+      setRowError(err instanceof Error ? err.message : '保存失败')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="panel setting-group">
+      <h3>HTTPS / TLS</h3>
+      {status === null ? (
+        <div className="hint">TLS 状态加载失败</div>
+      ) : !status.managed ? (
+        <div className="setting-desc muted">
+          当前部署未接入运行时切换（CADDY_ADMIN_ADDR 未配置）。TLS 由部署配置决定：
+          .env 设置 APP_DOMAIN 为域名时入口自动启用 HTTPS（ACME 自动签发），
+          未设置时为 HTTP 明文（本地验证）。
+        </div>
+      ) : (
+        <form className="setting-edit" onSubmit={submit} style={{ flexDirection: 'column', alignItems: 'stretch', gap: 8 }}>
+          <div className="setting-row" style={{ width: '100%' }}>
+            <div className="setting-main">
+              <div className="setting-key">当前模式</div>
+              <div className="setting-desc muted">
+                {status.mode === 'http'
+                  ? 'HTTP 明文'
+                  : status.mode === 'auto'
+                    ? `HTTPS 自动证书${status.domain ? `（${status.domain}）` : ''}`
+                    : status.mode === 'internal'
+                      ? `HTTPS 自签${status.domain ? `（${status.domain}）` : ''}`
+                      : `HTTPS 自定义证书${status.domain ? `（${status.domain}）` : ''}`}
+              </div>
+            </div>
+          </div>
+          <Radio.Group
+            value={mode}
+            onChange={(e) => setMode(e.target.value as TlsMode)}
+            style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 6 }}
+          >
+            {tlsModeOptions.map((opt) => (
+              <Radio key={opt.value} value={opt.value}>
+                {opt.label}
+                <span className="muted" style={{ marginLeft: 6 }}>{opt.desc}</span>
+              </Radio>
+            ))}
+          </Radio.Group>
+          {mode !== 'http' && (
+            <label className="field">
+              <span>站点域名或 IP</span>
+              <Input
+                placeholder="如 docflow.example.com / 192.168.1.10"
+                value={domain}
+                onChange={(e) => setDomain(e.target.value)}
+              />
+            </label>
+          )}
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <Button type="primary" size="small" htmlType="submit" loading={saving}>
+              {saving ? '下发中…' : '保存并立即生效'}
+            </Button>
+            {rowError && <span className="badge failed">{rowError}</span>}
+          </div>
+          {(mode === 'custom' || status.cert) && (
+            <div className="tls-cert-box">
+              <div className="setting-key">自定义证书（custom 模式）</div>
+              <TlsCertInfo cert={status.cert} />
+              {mode === 'custom' && (
+                <div className="tls-cert-upload">
+                  <label className="field">
+                    <span>证书 PEM（.pem / .crt，可含中间证书链）</span>
+                    <Upload
+                      accept=".pem,.crt,.cer"
+                      maxCount={1}
+                      showUploadList={false}
+                      beforeUpload={(file) => {
+                        setCertFile(file)
+                        return false
+                      }}
+                    >
+                      <Button size="small">
+                        {certFile ? `已选择：${certFile.name}` : '选择证书文件'}
+                      </Button>
+                    </Upload>
+                  </label>
+                  <label className="field">
+                    <span>私钥 PEM（.key / .pem）</span>
+                    <Upload
+                      accept=".key,.pem"
+                      maxCount={1}
+                      showUploadList={false}
+                      beforeUpload={(file) => {
+                        setKeyFile(file)
+                        return false
+                      }}
+                    >
+                      <Button size="small">
+                        {keyFile ? `已选择：${keyFile.name}` : '选择私钥文件'}
+                      </Button>
+                    </Upload>
+                  </label>
+                  <Button
+                    size="small"
+                    type="primary"
+                    disabled={!certFile || !keyFile || uploading}
+                    loading={uploading}
+                    onClick={() => void uploadCert()}
+                  >
+                    {uploading ? '上传校验中…' : '上传证书'}
+                  </Button>
+                  <span className="setting-desc muted" style={{ marginLeft: 8 }}>
+                    服务端校验 PEM 可解析且私钥匹配后原子落盘（替换旧证书）
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+        </form>
+      )}
+    </div>
+  )
+}
+
+/** 邮件（SMTP）卡片：可编辑表单。GET/PUT /admin/settings/smtp —— 后端已
+ * 支持运行时修改（DB 覆盖 → env 回退合并，保存即时生效：邮件发送处每次
+ * 读库）；pass 留空 = 保持现值（任何读路径不回显，仅报 configured），
+ * env 基线（.env 部署值）作对照展示，PUBLIC_BASE_URL 仍为 env-only。 */
+export function MailPanel({ onNotice, onError }: { onNotice: (m: string) => void; onError: (m: string) => void }) {
+  const [view, setView] = useState<SmtpSettingsView | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [formError, setFormError] = useState('')
+  const [form, setForm] = useState<{ enabled: boolean; host: string; port: number | null; user: string; pass: string; from: string; tls_mode: string }>({
+    enabled: false, host: '', port: 587, user: '', pass: '', from: '', tls_mode: 'auto',
+  })
+  // 测试邮件：收件邮箱 + 发送中标记 + 最近一次结果（Alert 展示，含错误详情）。
+  const [testTo, setTestTo] = useState('')
+  const [testing, setTesting] = useState(false)
+  const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null)
+
+  const load = async () => {
+    setLoading(true)
+    try {
+      const v = await adminGetSmtpSettings()
+      setView(v)
+      setForm({
+        enabled: v.enabled, host: v.host, port: v.port, user: v.user, pass: '',
+        from: v.from, tls_mode: v.tls_mode || 'auto',
+      })
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'SMTP 配置加载失败')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const handleSave = async (e: FormEvent) => {
+    e.preventDefault()
+    const host = form.host.trim()
+    const from = form.from.trim()
+    const port = form.port ?? 0
+    if (form.enabled && (!host || !from)) {
+      setFormError('启用 SMTP 时服务器地址与发件人必填')
+      return
+    }
+    if (port < 1 || port > 65535) {
+      setFormError('端口须为 1-65535')
+      return
+    }
+    setSaving(true)
+    setFormError('')
+    try {
+      const v = await adminPutSmtpSettings({
+        enabled: form.enabled, host, port, user: form.user.trim(), pass: form.pass, from, tls_mode: form.tls_mode,
+      })
+      setView(v)
+      setForm((prev) => ({ ...prev, pass: '' }))
+      onNotice('SMTP 配置已保存（即时生效）')
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : '保存失败')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  /** 发送测试邮件（POST /admin/settings/smtp/test）：用当前**生效**配置投递；
+   * 注意表单未保存的草稿不生效——提示先保存。失败错误详情经 Alert 展示。 */
+  const sendTest = async () => {
+    const to = testTo.trim()
+    if (to === '' || testing) return
+    setTesting(true)
+    setTestResult(null)
+    try {
+      const r = await adminTestSmtp(to)
+      setTestResult({ ok: true, message: r.message || `测试邮件已发送至 ${to}` })
+    } catch (err) {
+      setTestResult({ ok: false, message: err instanceof Error ? err.message : '发送失败' })
+    } finally {
+      setTesting(false)
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="panel setting-group">
+        <h3>邮件配置（SMTP）</h3>
+        <div className="empty">SMTP 配置加载中…</div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="panel setting-group">
+      <h3>邮件配置（SMTP）</h3>
+      <div className="setting-desc muted" style={{ marginBottom: 12 }}>
+        邮件通道（邀请注册、密码重置、通知副本）在此保存即时生效：表单值即为
+        生效配置（输入框占位符提示 .env 基线值）；密码留空表示保持现值
+        （不回显）；未启用时使用日志通道（链接输出到 backend 日志，不发送邮件）。
+      </div>
+      {view && (
+        <form className="smtp-form" onSubmit={handleSave}>
+          <div className="setting-row" style={{ borderBottom: 0, paddingBottom: 0 }}>
+            <div className="setting-main">
+              <div className="setting-key">通道状态 <code className="setting-desc muted">smtp.enabled</code></div>
+              <div className="setting-desc muted">启用时经 SMTP 投递；未启用为 Noop 日志通道（env 基线：{view.env.enabled ? '启用' : '未启用'}）</div>
+            </div>
+            <div className="setting-control">
+              <span className="setting-bool">
+                <Switch size="small" checked={form.enabled} onChange={(v) => setForm((prev) => ({ ...prev, enabled: v }))} />
+                <span>{form.enabled ? '开启' : '关闭'}</span>
+              </span>
+            </div>
+          </div>
+          <div className="smtp-grid">
+            <label className="field">
+              <span>服务器地址（SMTP_HOST）</span>
+              <Input
+                value={form.host}
+                onChange={(e) => setForm((prev) => ({ ...prev, host: e.target.value }))}
+                placeholder={view.env.host || '如 smtp.example.com'}
+              />
+            </label>
+            <label className="field">
+              <span>端口（SMTP_PORT）</span>
+              <InputNumber
+                min={1}
+                max={65535}
+                value={form.port}
+                onChange={(v) => setForm((prev) => ({ ...prev, port: v }))}
+                placeholder={String(view.env.port || 587)}
+                style={{ width: '100%' }}
+              />
+            </label>
+            <label className="field">
+              <span>加密方式（smtp.tls_mode）</span>
+              <Select
+                value={form.tls_mode}
+                onChange={(v) => setForm((prev) => ({ ...prev, tls_mode: v }))}
+                options={[
+                  { value: 'auto', label: 'auto（STARTTLS 自动协商，默认）' },
+                  { value: 'ssl', label: 'ssl（隐式 TLS / SMTPS，465 常见）' },
+                  { value: 'none', label: 'none（不协商，仅内网中继）' },
+                ]}
+              />
+            </label>
+            <label className="field">
+              <span>发件人（SMTP_FROM，启用时必填）</span>
+              <Input
+                value={form.from}
+                onChange={(e) => setForm((prev) => ({ ...prev, from: e.target.value }))}
+                placeholder={view.env.from || '如 docflow@example.com'}
+              />
+            </label>
+            <label className="field">
+              <span>认证用户名（SMTP_USER，空 = 匿名投递）</span>
+              <Input
+                value={form.user}
+                onChange={(e) => setForm((prev) => ({ ...prev, user: e.target.value }))}
+                placeholder={view.env.user || '匿名投递'}
+              />
+            </label>
+            <label className="field">
+              <span>认证密码（SMTP_PASS，留空保持现值）</span>
+              <Input.Password
+                value={form.pass}
+                onChange={(e) => setForm((prev) => ({ ...prev, pass: e.target.value }))}
+                placeholder={view.password_configured ? '已配置（留空保持不变）' : '未配置'}
+                autoComplete="new-password"
+              />
+            </label>
+          </div>
+          {formError && <div className="error-text">{formError}</div>}
+          <div className="modal-actions" style={{ marginTop: 4 }}>
+            <Button disabled={saving} onClick={() => void load()}>重置</Button>
+            <Button type="primary" htmlType="submit" loading={saving}>
+              {saving ? '保存中…' : '保存（即时生效）'}
+            </Button>
+          </div>
+        </form>
+      )}
+      <div className="setting-row" style={{ marginTop: 12 }}>
+        <div className="setting-main">
+          <div className="setting-key">站点地址 <code className="setting-desc muted">PUBLIC_BASE_URL</code></div>
+          <div className="setting-desc muted">邮件内邀请/重置链接的前缀（env-only，不可在此修改）；为空时链接退化为相对路径（仅日志可见）</div>
+        </div>
+        <div className="setting-control">
+          {view?.public_base_url ? <span className="setting-value-mono">{view.public_base_url}</span> : <span className="badge">未设置</span>}
+        </div>
+      </div>
+      {/* 发送测试邮件：用当前生效配置投递一封测试邮件；错误详情回显。
+          v2.6 双线修复：上方「站点地址」setting-row 自带 border-bottom，
+          本块不再叠加 borderTop（此前两条分隔线相距 12px）。 */}
+      <div className="panel-inner" style={{ marginTop: 12, paddingTop: 12 }}>
+        <div className="setting-key" style={{ marginBottom: 4 }}>发送测试邮件</div>
+        <div className="setting-desc muted" style={{ marginBottom: 8 }}>
+          用当前生效配置（DB 覆盖 → env 回退）投递一封测试邮件验证连通性；
+          表单修改后须先「保存（即时生效）」再测试。失败时下方展示服务端错误详情（网络/认证/拒收等）。
+        </div>
+        <div className="team-create-row" style={{ marginBottom: testResult ? 8 : 0 }}>
+          <label className="field" style={{ flex: 1 }}>
+            <span>收件邮箱</span>
+            <Input
+              type="email"
+              allowClear
+              value={testTo}
+              onChange={(e) => setTestTo(e.target.value)}
+              placeholder="you@example.com"
+              onPressEnter={() => void sendTest()}
+            />
+          </label>
+          <Button
+            type="primary"
+            loading={testing}
+            disabled={testing || testTo.trim() === ''}
+            onClick={() => void sendTest()}
+          >
+            {testing ? '发送中…' : '发送测试邮件'}
+          </Button>
+        </div>
+        {testResult && (
+          <Alert
+            type={testResult.ok ? 'success' : 'error'}
+            showIcon
+            closable
+            message={testResult.ok ? '发送成功' : '发送失败'}
+            description={testResult.message}
+            onClose={() => setTestResult(null)}
+          />
+        )}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * 系统设置分组（v3 表单化；v3.1 归并去重）：每组一张折叠卡片，组内逐项
+ * 控件化编辑，「保存本组」批量提交组内已修改键（PUT /admin/settings/:key
+ * 逐键循环，无后端改动）。归组说明：folder.* 并入「批量与目录」（同为
+ * 操作规模上限）；已有专属管理页的域不在此设组——audit.*（保留期）随
+ *「审计日志」页、backup.* 随「备份」页、space.* 随「空间」页管理（见
+ * HIDDEN_SETTING_PREFIXES 与导出的 SystemSettingKeysCard）；collab.* 键
+ * 数 < 3，不单设管理 tag，以独立「实时协作」分组卡片留在本面板（单一
+ * 编辑入口原则，与 security/webdav 收敛方式一致）。
+ */
+const SYSTEM_SETTING_GROUPS: Array<{ id: string; prefixes: string[]; title: { zh: string; en: string } }> = [
+  { id: 'upload', prefixes: ['upload'], title: { zh: '上传', en: 'Upload' } },
+  { id: 'share', prefixes: ['share'], title: { zh: '分享', en: 'Share' } },
+  { id: 'retention', prefixes: ['retention'], title: { zh: '保留与清理', en: 'Retention & cleanup' } },
+  { id: 'batch', prefixes: ['batch', 'folder'], title: { zh: '批量与目录', en: 'Batch & folders' } },
+  { id: 'collab', prefixes: ['collab'], title: { zh: '实时协作', en: 'Collaboration' } },
+]
+
+/** int 键取值范围（镜像后端 settings.Definitions 的 Min/Max——SettingView
+ * 不下发范围，前端自带以渲染 InputNumber 的 min/max 并在组保存前本地
+ * 校验；未收录的 int 键不设范围，仍由后端最终校验）。 */
+const INT_RANGES: Record<string, { min: number; max: number }> = {
+  'upload.max_versions_per_file': { min: 1, max: 1000 },
+  'upload.version_retention_days': { min: 0, max: 3650 },
+  'upload.max_file_size': { min: 1, max: 1 << 40 },
+  'upload.default_quota': { min: 1, max: 1 << 50 },
+  'upload.max_concurrent_uploads_per_user': { min: 1, max: 100 },
+  'share.default_expiry_hours': { min: 1, max: 8760 },
+  'retention.trash_days': { min: 1, max: 3650 },
+  'retention.access_events_days': { min: 1, max: 3650 },
+  'batch.max_items': { min: 1, max: 1000 },
+  'folder.max_depth': { min: 1, max: 1000 },
+  'backup.retention_days': { min: 1, max: 3650 },
+  'audit.retention_days': { min: 0, max: 3650 },
+  'space.default_quota': { min: 0, max: 1 << 50 },
+  'space.max_quota': { min: 0, max: 1 << 50 },
+  'space.max_per_user': { min: 1, max: 1000 },
+}
+
+/** int 键展示单位（InputNumber 的 addonAfter，随界面语言切换；仅装饰，
+ * 不参与取值）。 */
+const INT_UNITS: Record<string, { zh: string; en: string }> = {
+  'upload.version_retention_days': { zh: '天', en: 'days' },
+  'share.default_expiry_hours': { zh: '小时', en: 'hours' },
+  'retention.trash_days': { zh: '天', en: 'days' },
+  'retention.access_events_days': { zh: '天', en: 'days' },
+  'backup.retention_days': { zh: '天', en: 'days' },
+  'audit.retention_days': { zh: '天', en: 'days' },
+}
+
+/** string 枚举键选项（按后端 Definitions 描述的合法取值渲染 Select；
+ * 未收录的 string 键渲染普通 Input）。security.scan_quarantine_policy
+ * 当前属「安全与访问」面板（隐藏前缀），保留映射以备前缀调整时复用。 */
+const ENUM_OPTIONS: Record<string, Array<{ value: string; label: string }>> = {
+  'security.scan_quarantine_policy': [
+    { value: 'quarantine', label: 'quarantine（隔离，可经管理端处置）' },
+    { value: 'reject', label: 'reject（直接拒绝上传）' },
+  ],
+}
+
+/** 设置生效方式徽章文案（effect 字段，随界面语言切换）。 */
+const effectText: Record<string, { zh: string; en: string }> = {
+  immediate: { zh: '立即生效', en: 'Immediate' },
+  new_session: { zh: '新会话生效', en: 'New session' },
+  restart: { zh: '需重启生效', en: 'Restart required' },
+}
+
+/** 字节量设置键（配额/大小上限类，值以字节存储；v2.6 展示层统一人类可读）。 */
+const QUOTA_BYTE_KEYS = new Set([
+  'upload.default_quota',
+  'space.default_quota',
+  'space.max_quota',
+  'upload.max_file_size',
+  'agent.max_memory_bytes',
+])
+
+/** 本面板不展示的键前缀（v2.9 反馈 9/10 去重，v3.1 归并扩充）：ai.* 属
+ *「AI 设置」面板、agent.* 属「AI 创作舱」面板、security.* 与 webdav.*
+ *（防爆破/限流/扫描策略/WebDAV 平台开关）属「安全与访问」面板；space.*
+ * 属平台管理「空间」页、backup.* 属「备份」页、audit.*（保留期）属
+ *「审计日志」页——同一键保持单一编辑入口，避免双入口漂移；过滤在渲染
+ * 层做（读取后 filter，仍一次拉全量）。 */
+const HIDDEN_SETTING_PREFIXES = new Set(['ai', 'agent', 'security', 'webdav', 'space', 'backup', 'audit'])
+
+/** 全部内置设置键的双语名称与简短说明（v2.7 反馈 14：此前仅部分键有
+ * 中文名、其余裸显 key，且不随界面语言切换）。清单与后端 settings
+ * Definitions 一一对应（admin settings 端点只输出内置键，smtp 与 ai 的
+ * 运行时行不进此列表）；未收录的 key 回退显示原 key（不硬造）。
+ * dzh/den 为简短说明：优先于后端 description 展示（后端描述中英混杂）。
+ * 导出（v2.8）：供「配置总览」面板（ConfigOverviewPanel）复用分组索引。 */
+export const SETTING_KEY_META: Record<string, { zh: string; en: string; dzh: string; den: string }> = {
+  // ---- ai.rag.*（RAG 检索） ----
+  'ai.rag.mode': { zh: 'RAG 检索模式', en: 'RAG mode', dzh: 'keyword（关键词）或 hybrid（混合检索）', den: 'keyword or hybrid' },
+  'ai.rag.vector_enabled': { zh: '启用向量检索', en: 'Vector RAG enabled', dzh: '开启后问答检索额外走向量召回（需 Qdrant）', den: 'Enable optional vector retrieval (requires Qdrant)' },
+  'ai.rag.qdrant_url': { zh: 'Qdrant 服务地址', en: 'Qdrant URL', dzh: '向量库访问地址（容器内网名或服务地址）', den: 'Qdrant vector store address' },
+  'ai.rag.collection_prefix': { zh: '向量集合前缀', en: 'Collection prefix', dzh: 'Qdrant 集合名前缀', den: 'Qdrant collection name prefix' },
+  'ai.rag.embedding_provider': { zh: '向量化提供方', en: 'Embedding provider', dzh: '生成向量的服务提供方', den: 'Provider for embedding vectors' },
+  'ai.rag.embedding_model': { zh: '向量化模型', en: 'Embedding model', dzh: '向量化使用的模型名', den: 'Model used for embeddings' },
+  'ai.rag.top_k': { zh: '向量召回条数', en: 'Vector top K', dzh: '向量检索每次召回的片段数上限', den: 'Max chunks fetched per vector query' },
+  'ai.rag.chunk_size': { zh: 'RAG 分块大小', en: 'RAG chunk size', dzh: '文档切分为片段的目标大小（字符）', den: 'Target chunk size in characters' },
+  'ai.rag.chunk_overlap': { zh: 'RAG 分块重叠', en: 'RAG chunk overlap', dzh: '相邻片段重叠字符数（提高边界连续性）', den: 'Overlap between adjacent chunks' },
+  // ---- ai.search.*（联网搜索） ----
+  'ai.search.provider': { zh: '联网搜索提供方', en: 'Web search provider', dzh: '空 = 关闭；可选 searxng 或 tavily', den: 'Empty (disabled), searxng or tavily' },
+  'ai.search.searxng_url': { zh: 'SearXNG 地址', en: 'SearXNG URL', dzh: 'SearXNG 基地址（需启用 JSON API）', den: 'SearXNG base URL (JSON API enabled)' },
+  'ai.search.max_results': { zh: '搜索结果条数上限', en: 'Search max results', dzh: '每次联网搜索返回的结果数上限', den: 'Max results per web search query' },
+  // ---- upload.* ----
+  'upload.max_versions_per_file': { zh: '每文件版本数上限', en: 'Max versions per file', dzh: '覆盖上传后按版本号裁剪历史版本', den: 'Trim history versions above this count after overwrites' },
+  'upload.version_retention_days': { zh: '版本保留时间窗', en: 'Version retention window', dzh: '窗口内的版本不因数量裁剪删除；0 = 不启用', den: 'Versions inside the window survive count trims; 0 = disabled' },
+  'upload.blocked_extensions': { zh: '上传扩展名黑名单', en: 'Blocked extensions', dzh: '逗号分隔（如 exe,bat,sh）；空 = 不拦截', den: 'Comma-separated (e.g. exe,bat,sh); empty = allow all' },
+  'upload.max_file_size': { zh: '单文件上传大小上限', en: 'Max file size', dzh: '单文件上传的字节上限', den: 'Per-file upload size limit in bytes' },
+  'upload.default_quota': { zh: '新用户默认存储配额', en: 'Default user quota', dzh: '仅对新创建用户生效；存量用户经管理端调整', den: 'Applies to newly created users only' },
+  'upload.max_concurrent_uploads_per_user': { zh: '每用户并发上传上限', en: 'Concurrent uploads per user', dzh: '非终态上传会话达到上限时新建返回 429', den: 'New sessions get 429 when active sessions hit the cap' },
+  // ---- share.* ----
+  'share.default_expiry_hours': { zh: '分享默认有效期', en: 'Default share expiry', dzh: '新建公开分享的默认有效时长（小时）', den: 'Default validity for new public shares (hours)' },
+  'share.default_watermark': { zh: '分享默认启用水印', en: 'Default watermark', dzh: '创建分享未显式指定水印时采用', den: 'Applied when share creation omits watermark flag' },
+  'share.watermark_text': { zh: '水印默认模板', en: 'Watermark template', dzh: '支持 {email}/{date}/{name} 占位符', den: 'Supports {email}/{date}/{name} placeholders' },
+  'share.public_enabled': { zh: '允许公开分享', en: 'Public shares allowed', dzh: '关闭后不允许创建公开分享链接', den: 'When off, public share links cannot be created' },
+  // ---- retention.* ----
+  'retention.trash_days': { zh: '回收站保留天数', en: 'Trash retention days', dzh: '软删除超过该天数后由后台任务彻底删除', den: 'Background job purges soft-deleted items beyond this' },
+  'retention.access_events_days': { zh: '访问事件保留天数', en: 'Access event retention', dzh: '文件访问事件超过该天数后删除', den: 'Access events older than this are deleted' },
+  // ---- security.* ----
+  'security.rate_limit_per_minute': { zh: '认证 API 每分钟限流', en: 'Auth API rate limit', dzh: '每分钟请求上限（须重启生效：限流器启动时装配）', den: 'Requests per minute (restart required: limiter built at startup)' },
+  'security.login_max_retries': { zh: '登录失败锁定阈值', en: 'Login lockout threshold', dzh: '同一用户名+IP 连续失败达到阈值后锁定，覆盖登录与 WebDAV', den: 'Lock after N consecutive failures per username+IP; covers login and WebDAV' },
+  'security.login_lock_minutes': { zh: '登录锁定时长', en: 'Login lockout duration', dzh: '触发锁定后的锁定分钟数，到期自动解除', den: 'Lockout duration in minutes; lifts automatically on expiry' },
+  'security.scan_quarantine_policy': { zh: '扫描失败处理策略', en: 'Scan failure policy', dzh: 'quarantine（隔离）或 reject（拒绝）', den: 'quarantine or reject' },
+  // ---- batch / folder ----
+  'batch.max_items': { zh: '批量操作单次上限', en: 'Batch max items', dzh: '批量操作单次可处理的最大项目数', den: 'Max items per batch operation' },
+  'folder.max_depth': { zh: '目录最大深度', en: 'Max folder depth', dzh: '根为 1；创建/移动超过上限拒绝', den: 'Root is 1; deeper create/move is rejected' },
+  // ---- backup.* ----
+  'backup.enabled': { zh: '启用备份任务', en: 'Backup enabled', dzh: '是否启用定时备份任务（须重启生效）', den: 'Enable scheduled backup jobs (restart required)' },
+  'backup.retention_days': { zh: '备份保留天数', en: 'Backup retention days', dzh: '备份文件超过该天数后清理（须重启生效）', den: 'Backups older than this are pruned (restart required)' },
+  'backup.encryption_required': { zh: '要求备份加密', en: 'Backup encryption required', dzh: '开启后未加密的备份将被拒绝（须重启生效）', den: 'Reject unencrypted backups when on (restart required)' },
+  'backup.last_verify': { zh: '最近备份校验时间', en: 'Last backup verify', dzh: '最近一次备份校验的时间戳（须重启生效）', den: 'Timestamp of last backup verification (restart required)' },
+  // ---- audit / space ----
+  'audit.retention_days': { zh: '审计日志保留期', en: 'Audit retention days', dzh: '0 = 永久保留；后台任务每日清理过期记录', den: '0 = keep forever; daily job prunes expired records' },
+  'space.default_quota': { zh: '新空间默认配额', en: 'Default space quota', dzh: '新建空间的初始配额；0 = 不限', den: 'Initial quota for new spaces; 0 = unlimited' },
+  'space.max_quota': { zh: '空间配额上限', en: 'Max space quota', dzh: 'owner/admin 调整配额不得超过；0 = 不限', den: 'Cap for owner/admin quota changes; 0 = unlimited' },
+  'space.max_per_user': { zh: '每用户空间数上限', en: 'Max spaces per user', dzh: 'owner 维度计数，含默认空间', den: 'Counted per owner, including the default space' },
+  // ---- webdav / collab ----
+  'webdav.enabled': { zh: '启用 WebDAV 访问', en: 'WebDAV enabled', dzh: '开启后可经 /webdav 以个人令牌挂载文件', den: 'Mount files via /webdav with personal tokens' },
+  'collab.enabled': { zh: '启用富文本实时协作', en: 'Rich-text collaboration', dzh: '协作 WebSocket 房间（关闭时端点 404）', den: 'Collab WebSocket rooms (endpoint 404s when off)' },
+  // ---- agent.* ----
+  'agent.enabled': { zh: '启用 Docker Agent 创作舱', en: 'Agent studio enabled', dzh: '关闭时 API 不可用且不启动容器', den: 'API disabled and no containers when off' },
+  'agent.runtime': { zh: 'Agent 运行时', en: 'Agent runtime', dzh: '当前仅支持 docker（须重启生效）', den: 'Currently docker only (restart required)' },
+  'agent.allowed_images': { zh: 'Agent 镜像白名单', en: 'Allowed agent images', dzh: '逗号分隔的容器镜像列表', den: 'Comma-separated container image list' },
+  'agent.max_concurrent': { zh: 'Agent 最大并发任务数', en: 'Agent max concurrency', dzh: '同时运行的 Agent 任务上限', den: 'Max concurrently running agent tasks' },
+  'agent.default_timeout_seconds': { zh: 'Agent 默认超时（秒）', en: 'Agent default timeout', dzh: '单个任务的默认超时秒数', den: 'Default per-task timeout in seconds' },
+  'agent.max_cpu': { zh: 'Agent 最大 CPU 数', en: 'Agent max CPU', dzh: '单容器可用 CPU 上限', den: 'CPU limit per container' },
+  'agent.max_memory_bytes': { zh: 'Agent 最大内存', en: 'Agent max memory', dzh: '单容器内存上限（字节）', den: 'Memory limit per container (bytes)' },
+  'agent.network_mode': { zh: 'Agent 网络模式', en: 'Agent network mode', dzh: 'none 或 restricted（受限出网）', den: 'none or restricted' },
+  'agent.mcp_callback_base_url': { zh: '受限 MCP 回调基地址', en: 'MCP callback base URL', dzh: '不含凭据的回调地址前缀', den: 'Credential-free callback URL prefix' },
+  'agent.allow_ai': { zh: '允许 Agent 调用平台 AI', en: 'Agent AI over IPC', dzh: '容器保持断网，经 IPC socket 调用平台默认对话模型', den: 'Containers stay offline; platform AI reached over an IPC socket' },
+  'agent.ai_max_calls': { zh: 'Agent 单任务 AI 调用上限', en: 'Agent AI call limit', dzh: '单个任务经 IPC 调用平台 AI 的次数上限（超出 429）', den: 'Per-task platform AI calls over IPC (429 beyond)' },
+  'agent.sync_mode': { zh: 'Agent 产物同步模式', en: 'Agent sync mode', dzh: 'git（按变更清单同步，推荐）或 scan（全量扫描）', den: 'git (change-list based, recommended) or scan (full scan)' },
+}
+
+/** 按键取当前语言的名称；未收录回退空串（行内仅显示原 key，不硬造）。
+ *（v3.1 抽出共享：SystemSettingsPanel 与迁入专属管理页的
+ * SystemSettingKeysCard 共用一套名称/说明/控件化渲染。） */
+function settingKeyLabel(key: string, zh: boolean): string {
+  const meta = SETTING_KEY_META[key]
+  return meta ? (zh ? meta.zh : meta.en) : ''
+}
+
+/** 按键取当前语言的简短说明；未收录回退后端 description。 */
+function settingKeyDesc(key: string, fallback: string, zh: boolean): string {
+  const meta = SETTING_KEY_META[key]
+  return meta ? (zh ? meta.dzh : meta.den) : fallback
+}
+
+/** 按类型渲染单项控件（bool→Switch / int→InputNumber（min/max 按后端定义）
+ * 或配额字节键→QuotaInput / string 枚举→Select / 普通 string→Input）；
+ * 草稿受控（setDraft 单键写入），切换/输入即改草稿，随「保存本组」提交。 */
+function renderSettingControl(
+  item: SettingItem,
+  draft: SettingValue | null | undefined,
+  setDraft: (v: SettingValue | null) => void,
+  zh: boolean,
+) {
+  if (item.type === 'bool') {
+    return (
+      <span className="setting-bool" title={zh ? '切换后须经「保存本组」提交' : 'Toggle takes effect via "Save group"'}>
+        <Switch
+          size="small"
+          checked={Boolean(draft)}
+          onChange={(v) => setDraft(v)}
+        />
+        <span>{draft ? (zh ? '开启' : 'On') : (zh ? '关闭' : 'Off')}</span>
+      </span>
+    )
+  }
+  if (item.type === 'int') {
+    // 配额/字节量键：数值 + 单位选择器（1024 进制；0 = 不限——下限为 1 的
+    // 键选「不限」会被本地范围校验拦截）。
+    if (QUOTA_BYTE_KEYS.has(item.key)) {
+      return (
+        <QuotaInput
+          value={typeof draft === 'number' ? draft : 0}
+          onChange={(bytes) => setDraft(bytes)}
+        />
+      )
+    }
+    const range = INT_RANGES[item.key]
+    const unit = INT_UNITS[item.key]
+    return (
+      <InputNumber
+        min={range?.min}
+        max={range?.max}
+        step={1}
+        precision={0}
+        style={{ width: 200 }}
+        value={typeof draft === 'number' ? draft : null}
+        onChange={(v) => setDraft(v ?? null)}
+        addonAfter={unit ? (zh ? unit.zh : unit.en) : undefined}
+      />
+    )
+  }
+  const options = ENUM_OPTIONS[item.key]
+  if (options) {
+    return (
+      <Select
+        style={{ width: 260 }}
+        value={typeof draft === 'string' ? draft : String(draft ?? '')}
+        onChange={(v) => setDraft(v)}
+        options={options}
+      />
+    )
+  }
+  return (
+    <Input
+      allowClear
+      style={{ width: 280 }}
+      value={typeof draft === 'string' ? draft : String(draft ?? '')}
+      onChange={(e) => setDraft(e.target.value)}
+      placeholder={item.key === 'upload.blocked_extensions' ? (zh ? '如 exe,bat,sh（空 = 不拦截）' : 'e.g. exe,bat,sh (empty = allow all)') : undefined}
+    />
+  )
+}
+
+/** 单项设置行：中文名（悬浮提示原 key）+ effect 徽章（立即生效/需重启）+
+ * 一句说明 + 默认值/更新时间 + 按类型控件。SystemSettingsPanel 的分组
+ * 卡片与 SystemSettingKeysCard（迁入专属管理页的键组）共用本行渲染。 */
+function SettingItemRow({
+  item,
+  draft,
+  setDraft,
+  zh,
+}: {
+  item: SettingItem
+  draft: SettingValue | null | undefined
+  setDraft: (v: SettingValue | null) => void
+  zh: boolean
+}) {
+  return (
+    <div className="setting-row">
+      <div className="setting-main">
+        {/* 中文名为主标识（悬浮提示原 key），不再裸显 key 行。 */}
+        <div className="setting-key" title={item.key}>
+          {settingKeyLabel(item.key, zh) || item.key}
+          {item.effect && (
+            <span className="badge" style={{ marginLeft: 8 }} title={zh ? '变更生效方式' : 'How changes take effect'}>
+              {(() => {
+                const text = effectText[item.effect]
+                return text ? (zh ? text.zh : text.en) : item.effect
+              })()}
+            </span>
+          )}
+        </div>
+        <div className="setting-desc muted">{settingKeyDesc(item.key, item.description, zh)}</div>
+        <div className="setting-meta muted">
+          {zh ? '默认值' : 'Default'} {QUOTA_BYTE_KEYS.has(item.key) ? formatQuota(Number(item.default)) : String(item.default)}
+          {item.updated_at && ` · ${zh ? '更新于' : 'updated'} ${formatTime(item.updated_at)}`}
+        </div>
+      </div>
+      <div className="setting-control">{renderSettingControl(item, draft, setDraft, zh)}</div>
+    </div>
+  )
+}
+
+/** 组保存共通逻辑（v3.1 抽出）：int 空值/超范围先在本地拦截（后端兜底），
+ * 再逐键 PUT 已修改项（无批量端点，不改后端）；失败抛 Error（message 为
+ * 组级文案，含 403/400 语义转译）。返回提交键数。 */
+async function saveSettingItems(
+  changed: SettingItem[],
+  drafts: Record<string, SettingValue | null>,
+  zh: boolean,
+): Promise<number> {
+  for (const it of changed) {
+    const label = settingKeyLabel(it.key, zh) || it.key
+    if (it.type === 'int') {
+      const n = drafts[it.key]
+      if (typeof n !== 'number' || !Number.isInteger(n)) {
+        throw new Error(zh ? `「${label}」须填写整数` : `"${label}" requires an integer`)
+      }
+      const range = INT_RANGES[it.key]
+      if (range && (n < range.min || n > range.max)) {
+        throw new Error(zh ? `「${label}」须在 ${range.min} ~ ${range.max} 之间` : `"${label}" must be between ${range.min} and ${range.max}`)
+      }
+    }
+  }
+  try {
+    for (const it of changed) {
+      await adminPutSetting(it.key, drafts[it.key] as SettingValue)
+    }
+  } catch (err) {
+    throw new Error(
+      err instanceof ApiError && err.status === 403 ? (zh ? '无权限' : 'Forbidden')
+        : err instanceof ApiError && err.status === 400 ? (zh ? '取值超出允许范围' : 'Value out of allowed range')
+          : err instanceof Error ? err.message
+            : (zh ? '保存失败' : 'Save failed'),
+    )
+  }
+  return changed.length
+}
+
+/**
+ * 迁入专属管理页的系统设置键组卡片（v3.1 归并，AdminPage 懒加载本导出）：
+ * 按前缀过滤 /admin/settings 输出渲染单组表单，复用 SystemSettingsPanel
+ * 的控件化代码模式与常量（SETTING_KEY_META 双语名 / effect 徽章 / 按类型
+ * 控件 /「保存本组」逐键 PUT 已修改项 +「重置」回退草稿）。当前用于平台
+ * 管理「空间」页（space.*）与「备份」页（backup.*）——这些键自系统设置
+ * 面板移除后在此保持单一编辑入口。
+ */
+export function SystemSettingKeysCard({
+  prefixes,
+  title,
+  onError,
+  onNotice,
+}: {
+  prefixes: string[]
+  title: { zh: string; en: string }
+  onError: (msg: string) => void
+  onNotice: (msg: string) => void
+}) {
+  const locale = useLocale()
+  const zh = locale === 'zh-CN'
+  const [items, setItems] = useState<SettingItem[]>([])
+  // 组表单草稿（key → 当前编辑值；null = 数值被清空等待补填）。
+  const [drafts, setDrafts] = useState<Record<string, SettingValue | null>>({})
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  /** 载入响应并重置草稿（保存成功后的刷新也走这里，拿回归一化值）。 */
+  const apply = (r: AdminSettingsResult) => {
+    const filtered = r.settings.filter((it) => prefixes.includes(it.key.split('.')[0]))
+    setItems(filtered)
+    const next: Record<string, SettingValue | null> = {}
+    for (const it of filtered) next[it.key] = it.value
+    setDrafts(next)
+    setError('')
+  }
+
+  const load = async () => {
+    setLoading(true)
+    try {
+      apply(await adminGetSettings())
+    } catch (err) {
+      onError(err instanceof Error ? err.message : (zh ? '系统设置加载失败' : 'Failed to load system settings'))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const cardTitle = zh ? title.zh : title.en
+  /** 组内是否有未保存修改（草稿 ≠ 服务端当前值）。 */
+  const dirty = items.some((it) => drafts[it.key] !== undefined && drafts[it.key] !== it.value)
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault()
+    if (saving) return
+    const changed = items.filter((it) => drafts[it.key] !== undefined && drafts[it.key] !== it.value)
+    if (changed.length === 0) return
+    setSaving(true)
+    try {
+      const saved = await saveSettingItems(changed, drafts, zh)
+      onNotice(zh ? `已保存「${cardTitle}」（${saved} 项）` : `Saved "${cardTitle}" (${saved} item${saved > 1 ? 's' : ''})`)
+      try {
+        apply(await adminGetSettings())
+      } catch {
+        // 列表刷新失败不打断（草稿保持已提交值展示）
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : (zh ? '保存失败' : 'Save failed'))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  /** 重置：把组内草稿回退为服务端当前值。 */
+  const reset = () => {
+    setDrafts((prev) => {
+      const next = { ...prev }
+      for (const it of items) next[it.key] = it.value
+      return next
+    })
+  }
+
+  if (loading) {
+    return (
+      <div className="panel setting-group">
+        <h3>{cardTitle}</h3>
+        <div className="hint">{zh ? '加载中…' : 'Loading…'}</div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="panel setting-group">
+      <h3 style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        {cardTitle}
+        <span className="setting-meta muted">{zh ? `（${items.length} 项）` : `(${items.length})`}</span>
+        {dirty && !saving && <span className="badge">{zh ? '有未保存修改' : 'Unsaved changes'}</span>}
+      </h3>
+      <form onSubmit={submit}>
+        {items.map((item) => (
+          <SettingItemRow
+            key={item.key}
+            item={item}
+            draft={drafts[item.key]}
+            setDraft={(v) => setDrafts((prev) => ({ ...prev, [item.key]: v }))}
+            zh={zh}
+          />
+        ))}
+        <div className="modal-actions" style={{ marginTop: 4 }}>
+          <Button disabled={saving || !dirty} onClick={reset}>
+            {zh ? '重置' : 'Reset'}
+          </Button>
+          <Button type="primary" htmlType="submit" loading={saving} disabled={!dirty}>
+            {saving ? (zh ? '保存中…' : 'Saving…') : (zh ? '保存本组' : 'Save group')}
+          </Button>
+        </div>
+        {error && <div className="error-text" style={{ marginTop: 4 }}>{error}</div>}
+      </form>
+    </div>
+  )
+}
+
+/**
+ * 系统设置面板（v3 表单化重构，仅 admin）：system_settings 系统类内置键的
+ * 分组表单入口——按 SYSTEM_SETTING_GROUPS 渲染折叠卡片，每项中文名 + 一句
+ * 说明 + 按类型控件化（bool→Switch / int→InputNumber（min/max 按后端定义）
+ * 或配额数值+单位选择器 / string 枚举→Select / 普通 string→Input），组内
+ * 「保存本组」批量 PUT 已修改键（逐键循环，不改后端）、「重置」回退草稿；
+ * 顶部搜索按 key / 中文名 / 说明过滤（过滤时分组自动展开），每项保留
+ * effect 徽章（立即生效 / 需重启）。行渲染与保存逻辑经 SettingItemRow /
+ * saveSettingItems 与 SystemSettingKeysCard（迁入专属管理页的键组）共享。
+ * ai.* / agent.* / security.* / webdav.* / space.* / backup.* / audit.*
+ * 不在此展示（分属「AI 设置」「AI 创作舱」「安全与访问」与平台管理
+ *「空间」「备份」「审计日志」页，见 HIDDEN_SETTING_PREFIXES），面板顶部
+ * 以 notice 指引对应位置。
+ */
+export function SystemSettingsPanel({ onError, onNotice }: { onError: (msg: string) => void; onNotice: (msg: string) => void }) {
+  const locale = useLocale()
+  const zh = locale === 'zh-CN'
+  const [result, setResult] = useState<AdminSettingsResult | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [forbidden, setForbidden] = useState(false)
+  // 组表单草稿（key → 当前编辑值；null = 数值被清空等待补填）。
+  const [drafts, setDrafts] = useState<Record<string, SettingValue | null>>({})
+  // 正在保存的分组 id（null = 无保存进行中）与分组级错误文案。
+  const [savingGroup, setSavingGroup] = useState<string | null>(null)
+  const [groupErrors, setGroupErrors] = useState<Record<string, string>>({})
+  // 搜索框过滤键 + 分组折叠状态（组 id → 折叠；过滤时自动展开）。
+  const [settingsQuery, setSettingsQuery] = useState('')
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
+
+  /** 载入响应并重置草稿（保存成功后的刷新也走这里，拿回归一化值）。 */
+  const applyResult = (r: AdminSettingsResult) => {
+    setResult(r)
+    const next: Record<string, SettingValue | null> = {}
+    for (const item of r.settings) next[item.key] = item.value
+    setDrafts(next)
+    setGroupErrors({})
+  }
+
+  const load = async () => {
+    setLoading(true)
+    try {
+      applyResult(await adminGetSettings())
+      setForbidden(false)
+      onError('')
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 403) setForbidden(true)
+      else onError(err instanceof Error ? err.message : (zh ? '系统设置加载失败' : 'Failed to load system settings'))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const settings = result?.settings ?? []
+
+  /** 分组（SYSTEM_SETTING_GROUPS 顺序，组内保持 Definitions 输出顺序）：
+   * 隐藏前缀排除 + 搜索过滤（key / 双语名称 / 说明，中英文界面行为一致）。 */
+  const settingGroups = useMemo(() => {
+    const needle = settingsQuery.trim().toLowerCase()
+    const visible = settings.filter((item) => {
+      if (HIDDEN_SETTING_PREFIXES.has(item.key.split('.')[0])) return false
+      if (needle === '') return true
+      const meta = SETTING_KEY_META[item.key]
+      const haystack = meta
+        ? `${item.key} ${meta.zh} ${meta.en} ${meta.dzh} ${meta.den}`.toLowerCase()
+        : `${item.key} ${item.description}`.toLowerCase()
+      return haystack.includes(needle)
+    })
+    return SYSTEM_SETTING_GROUPS
+      .map((group) => ({ group, items: visible.filter((it) => group.prefixes.includes(it.key.split('.')[0])) }))
+      .filter((entry) => entry.items.length > 0)
+  }, [settings, settingsQuery])
+
+  /** 组内是否有未保存修改（草稿 ≠ 服务端当前值）。 */
+  const groupDirty = (items: SettingItem[]) =>
+    items.some((it) => drafts[it.key] !== undefined && drafts[it.key] !== it.value)
+
+  /** 组保存：共通校验 + 逐键 PUT 已修改项（见 saveSettingItems；int 空值/
+   * 超范围先在本地拦截，后端兜底），错误经分组级文案展示。 */
+  const saveGroup = async (groupId: string, items: SettingItem[], title: string) => {
+    if (savingGroup !== null) return
+    const changed = items.filter((it) => drafts[it.key] !== undefined && drafts[it.key] !== it.value)
+    if (changed.length === 0) return
+    setSavingGroup(groupId)
+    setGroupErrors((prev) => ({ ...prev, [groupId]: '' }))
+    try {
+      const saved = await saveSettingItems(changed, drafts, zh)
+      onNotice(zh ? `已保存「${title}」（${saved} 项）` : `Saved "${title}" (${saved} item${saved > 1 ? 's' : ''})`)
+      try {
+        applyResult(await adminGetSettings())
+      } catch {
+        // 列表刷新失败不打断（草稿保持已提交值展示）
+      }
+    } catch (err) {
+      setGroupErrors((prev) => ({ ...prev, [groupId]: err instanceof Error ? err.message : (zh ? '保存失败' : 'Save failed') }))
+    } finally {
+      setSavingGroup(null)
+    }
+  }
+
+  /** 组重置：把组内草稿回退为服务端当前值。 */
+  const resetGroup = (items: SettingItem[]) => {
+    setDrafts((prev) => {
+      const next = { ...prev }
+      for (const it of items) next[it.key] = it.value
+      return next
+    })
+  }
+
+  if (forbidden) {
+    return (
+      <div className="panel setting-group">
+        <h3>{zh ? '系统设置' : 'System settings'}</h3>
+        <div className="empty">{zh ? '仅系统管理员可访问' : 'Administrators only'}</div>
+      </div>
+    )
+  }
+
+  return (
+    <>
+      <div className="panel setting-group" style={{ padding: '12px 16px' }}>
+        <form className="team-create-row" style={{ marginBottom: 0 }} onSubmit={(e) => e.preventDefault()}>
+          <label className="field" style={{ flex: 1 }}>
+            <span>{zh ? '过滤设置项（按中文名 / key / 说明匹配；过滤时分组自动展开）' : 'Filter settings (by name / key / description; groups auto-expand while filtering)'}</span>
+            <Input
+              allowClear
+              autoCapitalize="none"
+              spellCheck={false}
+              value={settingsQuery}
+              onChange={(e) => setSettingsQuery(e.target.value)}
+              placeholder={zh ? '如：上传、配额 或 upload' : 'e.g. upload, quota or "upload"'}
+            />
+          </label>
+          {settingsQuery && (
+            <Button style={{ alignSelf: 'flex-end' }} onClick={() => setSettingsQuery('')}>{zh ? '清除' : 'Clear'}</Button>
+          )}
+        </form>
+      </div>
+
+      {loading && <div className="hint">{zh ? '加载中…' : 'Loading…'}</div>}
+      {!loading && settingGroups.length === 0 && <div className="empty">{zh ? '没有匹配的设置项' : 'No matching settings'}</div>}
+
+      {settingGroups.map(({ group, items }) => {
+        const searching = settingsQuery.trim() !== ''
+        const isCollapsed = !searching && collapsed[group.id]
+        const title = zh ? group.title.zh : group.title.en
+        const dirty = groupDirty(items)
+        const saving = savingGroup === group.id
+        return (
+          <div key={group.id} className="panel setting-group">
+            <h3 style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <Button
+                type="text"
+                size="small"
+                title={isCollapsed ? (zh ? '展开分组' : 'Expand group') : (zh ? '折叠分组' : 'Collapse group')}
+                onClick={() => setCollapsed((prev) => ({ ...prev, [group.id]: !isCollapsed }))}
+              >
+                {isCollapsed ? '▸' : '▾'}
+              </Button>
+              {title}
+              <span className="setting-meta muted">{zh ? `（${items.length} 项）` : `(${items.length})`}</span>
+              {dirty && !saving && <span className="badge">{zh ? '有未保存修改' : 'Unsaved changes'}</span>}
+            </h3>
+            {!isCollapsed && (
+              <form onSubmit={(e) => { e.preventDefault(); void saveGroup(group.id, items, title) }}>
+                {items.map((item) => (
+                  <SettingItemRow
+                    key={item.key}
+                    item={item}
+                    draft={drafts[item.key]}
+                    setDraft={(v) => setDrafts((prev) => ({ ...prev, [item.key]: v }))}
+                    zh={zh}
+                  />
+                ))}
+                <div className="modal-actions" style={{ marginTop: 4 }}>
+                  <Button disabled={savingGroup !== null || !dirty} onClick={() => resetGroup(items)}>
+                    {zh ? '重置' : 'Reset'}
+                  </Button>
+                  <Button
+                    type="primary"
+                    htmlType="submit"
+                    loading={saving}
+                    disabled={!dirty || (savingGroup !== null && !saving)}
+                  >
+                    {saving ? (zh ? '保存中…' : 'Saving…') : (zh ? '保存本组' : 'Save group')}
+                  </Button>
+                </div>
+                {groupErrors[group.id] && <div className="error-text" style={{ marginTop: 4 }}>{groupErrors[group.id]}</div>}
+              </form>
+            )}
+          </div>
+        )
+      })}
+    </>
+  )
+}
+
+
+
+

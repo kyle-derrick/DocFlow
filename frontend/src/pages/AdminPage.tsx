@@ -1,4 +1,4 @@
-// 管理页（仅 admin 角色，v2.3 重分配）：概览 / 人员与组（合并：左组树 +
+﻿// 管理页（仅 admin 角色，v2.3 重分配）：概览 / 人员与组（合并：左组树 +
 // 右成员表 + 批量跨组移动/移出组/改角色/禁用 + 组 CRUD + 邀请记录弹窗）/
 // 空间（含「已解散」筛选与彻底删除；v3.1 归并：space.* 策略键自「系统
 // 设置」迁入本页顶部）/ 审计日志（含保留期设置，audit.* 唯一入口）/
@@ -57,21 +57,21 @@ import {
 import { Modal, confirmDialog, formatQuota, formatTime, promptViaModal } from '../components/FileBrowser'
 import QuotaInput from '../components/QuotaInput'
 import { MessageKey, t, useLocale } from '../i18n'
-/* 平台设置分区（个人/平台分离）：平台级面板自 SettingsPage 导出复用。 */
+/* 平台设置分区（个人/平台分离）：Mail/TLS/系统设置面板位于 components/settings/PlatformPanels。 */
 // 平台设置五面板懒加载（v2.7 页面偶现卡死治理）：AISettingsPanel 与
-// SettingsPage 导出的四面板体量可观（SettingsPage 100KB+ 源码及其依赖），
+// 平台面板体量可观（PlatformPanels 100KB 级源码及其依赖），
 // 直 import 会全部进入管理页首屏 chunk，tag 切换前也常驻渲染压力。改
 // React.lazy 后 vite 自动分包，进入对应 tag 才拉取并挂载（Suspense 兜底
-// loading）；SettingsPage 的面板为命名导出，经 then 映射为 default。
+// loading）；面板为命名导出，经 then 映射为 default。
 const AISettingsPanel = lazy(() => import('../components/AISettingsPanel'))
 const AgentPanel = lazy(() => import('../components/AgentPanel'))
 const ConfigOverviewPanel = lazy(() => import('../components/ConfigOverviewPanel'))
-const MailPanel = lazy(() => import('./SettingsPage').then((m) => ({ default: m.MailPanel })))
-const TlsPanel = lazy(() => import('./SettingsPage').then((m) => ({ default: m.TlsPanel })))
-const SystemSettingsPanel = lazy(() => import('./SettingsPage').then((m) => ({ default: m.SystemSettingsPanel })))
+const MailPanel = lazy(() => import('../components/settings/PlatformPanels').then((m) => ({ default: m.MailPanel })))
+const TlsPanel = lazy(() => import('../components/settings/PlatformPanels').then((m) => ({ default: m.TlsPanel })))
+const SystemSettingsPanel = lazy(() => import('../components/settings/PlatformPanels').then((m) => ({ default: m.SystemSettingsPanel })))
 // v3.1 归并：space.* / backup.* 键组卡片（迁入「空间」「备份」页，复用
 // 系统设置面板的控件化渲染），同样经 SettingsPage 命名导出懒加载。
-const SystemSettingKeysCard = lazy(() => import('./SettingsPage').then((m) => ({ default: m.SystemSettingKeysCard })))
+const SystemSettingKeysCard = lazy(() => import('../components/settings/PlatformPanels').then((m) => ({ default: m.SystemSettingKeysCard })))
 const SecurityPanel = lazy(() => import('../components/SecurityPanel'))
 
 /** 凭据状态卡的语义键 → 环境变量名展示（值绝不回显，仅展示配置状态）。 */
@@ -2486,3 +2486,5 @@ export default function AdminPage() {
     </div>
   )
 }
+
+

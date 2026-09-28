@@ -1,4 +1,4 @@
-// 平台管理「配置总览」面板（v2.8，AdminPage 第六个设置 tag 懒加载）：
+﻿// 平台管理「配置总览」面板（v2.8，AdminPage 第六个设置 tag 懒加载）：
 // a) 启动级环境变量（只读）：GET /admin/settings/env 分组渲染（key+value+
 //    note；sensitive 值显示掩码 +「已脱敏」提示）；此类配置在部署文件
 //    （.env / docker-compose.yml）中修改并重启生效。端点由后端并行任务
@@ -11,7 +11,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Collapse, Tag, Tooltip } from 'antd'
 import type { CollapseProps } from 'antd'
 import { EnvGroup, adminGetSettings, getAdminEnv } from '../api'
-import { SETTING_KEY_META } from '../pages/SettingsPage'
+import { SETTING_KEY_META } from './settings/PlatformPanels'
 import { useAIFeatures } from '../aiFeature'
 import { useLocale } from '../i18n'
 
@@ -237,3 +237,4 @@ export default function ConfigOverviewPanel({ onError }: { onError: (m: string) 
     </div>
   )
 }
+

@@ -1,4 +1,4 @@
-// 平台管理「安全与访问」面板（v2.9 第七个平台设置 tag，AdminPage 懒加载）：
+﻿// 平台管理「安全与访问」面板（v2.9 第七个平台设置 tag，AdminPage 懒加载）：
 // - 登录防爆破：security.login_max_retries / security.login_lock_minutes ——
 //   同一「用户名 + IP」连续失败 N 次锁定 M 分钟，覆盖 Web 登录与 WebDAV
 //   Basic Auth，锁定到期自动解除；
@@ -12,7 +12,7 @@
 import { useEffect, useState } from 'react'
 import { Button, InputNumber, Select, Switch } from 'antd'
 import { ApiError, SettingItem, adminGetSettings, adminPutSetting } from '../api'
-import { SETTING_KEY_META } from '../pages/SettingsPage'
+import { SETTING_KEY_META } from './settings/PlatformPanels'
 import { useLocale } from '../i18n'
 
 /** 本面板管理的键与后端默认值/范围（GET 缺键或后端未收录时按默认展示；
@@ -281,3 +281,4 @@ export default function SecurityPanel({ onError, onNotice }: { onError: (m: stri
     </>
   )
 }
+
