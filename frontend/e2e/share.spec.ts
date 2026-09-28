@@ -19,14 +19,14 @@ test.describe.serial('公开分享', () => {
       mimeType: 'text/plain',
       buffer: Buffer.from(fileBody, 'utf8'),
     })
-    await expect(
-      page.locator('.upload-row').filter({ hasText: fileName }).locator('.badge'),
-    ).toHaveText('已完成', { timeout: 60_000 })
+    // v2.6 上传进度移入顶栏「传输任务」弹窗（.upload-row 不再常驻 DOM）；
+    // 以列表行出现为上传完成信号（完成后列表自动刷新）。
+    await expect(fileRow(page, fileName)).toBeVisible({ timeout: 60_000 })
     await expect(fileRow(page, fileName)).toBeVisible()
 
     // 创建公开分享（默认：公开链接 + 可下载 + 永久）。操作在「⋯」菜单内。
     await fileRow(page, fileName).getByRole('button', { name: '操作' }).click()
-    await page.locator('.ctx-menu').getByRole('button', { name: '分享', exact: true }).click()
+    await page.locator('.ctx-menu').getByRole('menuitem', { name: /分\s*享/ }).click()
     await page.getByRole('button', { name: '创建链接', exact: true }).click()
     const linkInput = page.locator('.share-link input')
     const link = await linkInput.inputValue()
@@ -38,7 +38,7 @@ test.describe.serial('公开分享', () => {
     // 「已复制 ✓」断言失败时仅 CI 下宽容跳过（console.warn），本地保持严格
     // 失败——shareToken 已从输入框取到，后续用例不受影响。
     await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
-    await page.getByRole('button', { name: '复制', exact: true }).click()
+    await page.getByRole('button', { name: /复\s*制/ }).click()
     try {
       await expect(page.getByRole('button', { name: '已复制 ✓' })).toBeVisible()
     } catch (err) {
@@ -46,7 +46,8 @@ test.describe.serial('公开分享', () => {
       console.warn(`[e2e] CI 无头环境：clipboard 复制反馈断言失败，跳过（本地严格）：${String(err)}`)
     }
 
-    await page.getByRole('button', { name: '关闭', exact: true }).click()
+    // 底部「关 闭」按钮（exact 避开右上角 modal 关闭 X 的 aria-label「关闭」）。
+    await page.getByRole('button', { name: '关 闭', exact: true }).click()
     await logoutViaUI(page)
   })
 
@@ -57,7 +58,7 @@ test.describe.serial('公开分享', () => {
 
     const [download] = await Promise.all([
       page.waitForEvent('download'),
-      page.getByRole('link', { name: '下载', exact: true }).click(),
+      page.getByRole('link', { name: /下\s*载/ }).click(),
     ])
     expect(download.suggestedFilename()).toBe(fileName)
   })
@@ -69,7 +70,10 @@ test.describe.serial('公开分享', () => {
     // 「我的分享」行：文件名列由 file_id 异步解析为文件名。
     const row = page.locator('.share-table tbody tr').filter({ hasText: fileName })
     await expect(row).toBeVisible()
-    await row.getByRole('button', { name: '撤销', exact: true }).click()
+    await row.getByRole('button', { name: /撤\s*销/ }).click()
+    // 撤销确认走 antd Modal.confirm（okText 为「撤销」而非「确定」；
+    // autoAcceptDialogs 的 window.confirm 不适用），在确认弹层内再点一次撤销。
+    await page.locator('.ant-modal-confirm').getByRole('button', { name: /撤\s*销/ }).click()
     await expect(page.locator('.banner.ok')).toContainText('分享已撤销')
 
     // 撤销后公开接口返回 410，前端渲染友好失效页。

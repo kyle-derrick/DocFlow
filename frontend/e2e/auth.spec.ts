@@ -11,11 +11,12 @@ test.describe('认证', () => {
 
     await page.getByLabel('邮箱').fill(email)
     await page.getByLabel('密码').fill(password)
-    await page.getByRole('button', { name: '登录', exact: true }).click()
+    await page.getByRole('button', { name: /登\s*录/ }).click()
 
     await expect(page).toHaveURL(/\/$/)
-    await expect(page.getByRole('button', { name: '退出登录' })).toBeVisible()
-    await expect(page.getByRole('heading', { name: '文件' })).toBeVisible()
+    await expect(page.locator('.user-menu-trigger')).toBeVisible()
+    // v2.x 文件页无页首 heading（工具栏+表格布局），以文件表为落点断言。
+    await expect(page.locator('.file-table')).toBeVisible()
   })
 
   test('错误密码提示 401 错误信息', async ({ page }) => {
@@ -23,7 +24,7 @@ test.describe('认证', () => {
     await page.goto('/login')
     await page.getByLabel('邮箱').fill(email)
     await page.getByLabel('密码').fill('WrongPassword123!')
-    await page.getByRole('button', { name: '登录', exact: true }).click()
+    await page.getByRole('button', { name: /登\s*录/ }).click()
 
     // 后端 401 契约：{"error":"invalid credentials"}，登录页原样展示。
     await expect(page.locator('.error-text')).toHaveText('invalid credentials')
@@ -42,8 +43,9 @@ test.describe('认证', () => {
     // access token 静默恢复会话，不应被踢回登录页。
     await page.reload()
     await expect(page).toHaveURL(/\/$/)
-    await expect(page.getByRole('button', { name: '退出登录' })).toBeVisible()
-    await expect(page.getByRole('heading', { name: '文件' })).toBeVisible()
+    await expect(page.locator('.user-menu-trigger')).toBeVisible()
+    // v2.x 文件页无页首 heading（工具栏+表格布局），以文件表为落点断言。
+    await expect(page.locator('.file-table')).toBeVisible()
   })
 
   test('两个标签页并发恢复会话不会触发 refresh token 重放', async ({ page, context }) => {
@@ -52,7 +54,7 @@ test.describe('认证', () => {
     await Promise.all([page.reload(), second.goto('/')])
     await expect(page).toHaveURL(/\/$/)
     await expect(second).toHaveURL(/\/$/)
-    await expect(page.getByRole('button', { name: '退出登录' })).toBeVisible()
-    await expect(second.getByRole('button', { name: '退出登录' })).toBeVisible()
+    await expect(page.locator('.user-menu-trigger')).toBeVisible()
+    await expect(second.locator('.user-menu-trigger')).toBeVisible()
   })
 })

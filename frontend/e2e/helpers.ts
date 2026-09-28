@@ -12,20 +12,23 @@ export function e2eSeed(): { email: string; password: string } {
   }
 }
 
-/** 通过登录页 UI 登录种子管理员，等待跳转文件页。 */
+/** 通过登录页 UI 登录种子管理员，等待跳转文件页。
+ *  v2.2 顶栏重组后「退出登录」在用户下拉菜单内（顶栏无独立按钮），
+ *  登录成功断言改用稳定的用户菜单触发器（.user-menu-trigger）。 */
 export async function loginViaUI(page: Page): Promise<void> {
   const { email, password } = e2eSeed()
   await page.goto('/login')
   await page.getByLabel('邮箱').fill(email)
   await page.getByLabel('密码').fill(password)
-  await page.getByRole('button', { name: '登录', exact: true }).click()
+  await page.getByRole('button', { name: /登\s*录/ }).click()
   await expect(page).toHaveURL(`${cfg.frontendBaseURL}/`)
-  await expect(page.getByRole('button', { name: '退出登录' })).toBeVisible()
+  await expect(page.locator('.user-menu-trigger')).toBeVisible()
 }
 
-/** 退出登录（顶栏按钮），等待回到登录页。 */
+/** 退出登录（用户下拉菜单 → 退出登录），等待回到登录页。 */
 export async function logoutViaUI(page: Page): Promise<void> {
-  await page.getByRole('button', { name: '退出登录' }).click()
+  await page.locator('.user-menu-trigger').click()
+  await page.getByRole('menuitem', { name: /退\s*出\s*登\s*录/ }).click()
   await expect(page).toHaveURL(/\/login$/)
 }
 
