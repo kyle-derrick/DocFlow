@@ -24,6 +24,7 @@ import {
   AIMCPInput,
   AIMCPTestResult,
   AIOCRSettings,
+  AISearchSettings,
   AIPersonaDef,
   AIModelCapabilities,
   AIModelItem,
@@ -249,6 +250,10 @@ export default function AISettingsPanel({
   const [rag, setRag] = useState<AIRAGSettings>({ mode: 'keyword', vector_enabled: false, qdrant_url: 'http://qdrant:6333', collection_prefix: 'docflow_', embedding_provider: 'mock', embedding_model: 'text-embedding-3-small', rerank_provider: '', rerank_model: '', top_k: 8, chunk_size: 1000, chunk_overlap: 100 })
   // 图片 OCR（随 ai 主设置一并 PUT；旧后端无 ocr 块时保持缺省值）。
   const [ocr, setOcr] = useState<AIOCRSettings>({ enabled: false, provider_id: '', model_id: '', max_image_bytes: 8 * 1024 * 1024 })
+  // 联网搜索（随 ai 主设置一并 PUT；旧后端无 search 块时保持缺省值；
+  // tavily_api_key 只写不读——GET 只回 configured 标志，输入留空 = 保持）。
+  const [search, setSearch] = useState<AISearchSettings>({ provider: '', searxng_url: '', max_results: 5 })
+  const [tavilyConfigured, setTavilyConfigured] = useState(false)
   // 平台人设 / 技能模板（各自独立 PUT 整块保存，不入 putAISettings）。
   const [personas, setPersonas] = useState<AIPersonaDef[]>([])
   const [personaEditing, setPersonaEditing] = useState<PersonaForm | null>(null)
@@ -282,6 +287,10 @@ export default function AISettingsPanel({
       setAIEnabled(d.enabled)
       if (d.rag) setRag({ rerank_provider: '', rerank_model: '', ...d.rag })
       if (d.ocr) setOcr({ ...d.ocr, max_image_bytes: d.ocr.max_image_bytes || 8 * 1024 * 1024 })
+      if (d.search) {
+        setSearch({ provider: d.search.provider ?? '', searxng_url: d.search.searxng_url ?? '', max_results: d.search.max_results > 0 ? d.search.max_results : 5, tavily_api_key: '' })
+        setTavilyConfigured(d.search.tavily_api_key_configured === true)
+      }
       setDefaultProvider(d.default_provider || (d.providers.find((p) => p.enabled)?.id ?? ''))
       setDefaultModels(d.default_models ?? {})
       setTemperature(d.temperature)
@@ -356,12 +365,17 @@ export default function AISettingsPanel({
         per_user_per_min: perUserPerMin,
         rag,
         ocr,
+        search,
       })
       setData(merged)
       setAIEnabled(merged.enabled)
       setDefaultProvider(merged.default_provider)
       if (merged.default_models) setDefaultModels(merged.default_models)
       if (merged.ocr) setOcr({ ...merged.ocr, max_image_bytes: merged.ocr.max_image_bytes || 8 * 1024 * 1024 })
+      if (merged.search) {
+        setSearch((prev) => ({ provider: merged.search!.provider ?? '', searxng_url: merged.search!.searxng_url ?? '', max_results: merged.search!.max_results > 0 ? merged.search!.max_results : 5, tavily_api_key: merged.search!.tavily_api_key_configured ? prev.tavily_api_key : '' }))
+        setTavilyConfigured(merged.search.tavily_api_key_configured === true)
+      }
       refreshAIFeature()
       onNotice(zh ? 'AI 设置已保存' : 'AI settings saved')
     } catch (err) {
@@ -1039,6 +1053,78 @@ export default function AISettingsPanel({
               value={Math.round(ocr.max_image_bytes / 1024 / 1024)}
               disabled={readOnly}
               onChange={(v) => setOcr({ ...ocr, max_image_bytes: Math.max(1, Number(v ?? 8)) * 1024 * 1024 })}
+            />
+          </label>
+        </div>
+        <div className="modal-actions" style={{ marginTop: 8 }}>
+          {!readOnly && <Button type="primary" loading={saving} onClick={() => void save()}>{t(locale, 'adminAISave')}</Button>}
+        </div>
+      </Card>
+
+      {/* 联网搜索：对话 web_search 增强（SearXNG / Tavily；随 ai 主设置保存）。 */}
+      <Card size="small" title={zh ? '联网搜索（对话 web_search 增强）' : 'Web search (chat web_search boost)'} style={{ marginTop: 12 }}>
+        {!aiEnabled && <p className="hint">{zh ? 'AI 已关闭；联网搜索配置将保留，启用 AI 后生效。' : 'AI is off; web search settings are retained until AI is enabled.'}</p>}
+        <p className="hint">
+          {zh
+            ? '配置后用户对话中的「联网」开关生效：回答前先检索网络并把结果注入上下文，来源经消息的「网络来源」折叠区回显；未配置时该开关静默忽略。'
+            : 'Once configured, the chat "Web" toggle takes effect: searches run before answering and sources are shown in the message web-sources section; without a provider the toggle is silently ignored.'}
+        </p>
+        <div className="ai-defaults-form">
+          <label className="field">
+            <span>{zh ? '搜索引擎' : 'Search provider'}</span>
+            <Select
+              value={search.provider || ''}
+              disabled={readOnly}
+              onChange={(provider) => setSearch({ ...search, provider })}
+              options={[
+                { value: '', label: zh ? '未启用（web_search 静默忽略）' : 'Disabled (web_search ignored)' },
+                { value: 'searxng', label: zh ? 'SearXNG（自建元搜索）' : 'SearXNG (self-hosted metasearch)' },
+                { value: 'tavily', label: 'Tavily API' },
+              ]}
+              style={{ minWidth: 220 }}
+            />
+          </label>
+          {search.provider === 'searxng' && (
+            <label className="field">
+              <span>{zh ? 'SearXNG 地址' : 'SearXNG URL'}</span>
+              <Input
+                value={search.searxng_url}
+                disabled={readOnly}
+                placeholder="http://searxng:8080"
+                onChange={(e) => setSearch({ ...search, searxng_url: e.target.value })}
+                style={{ minWidth: 260 }}
+              />
+            </label>
+          )}
+          {search.provider === 'tavily' && (
+            <label className="field">
+              <span>
+                {zh ? 'Tavily API Key' : 'Tavily API key'}
+                {tavilyConfigured && <Tag color="green" style={{ marginLeft: 6 }}>{zh ? '已配置' : 'configured'}</Tag>}
+              </span>
+              <Input.Password
+                value={search.tavily_api_key ?? ''}
+                disabled={readOnly}
+                placeholder={tavilyConfigured ? (zh ? '已配置（留空 = 保持现值）' : 'Configured (empty = keep)') : 'tvly-…'}
+                onChange={(e) => setSearch({ ...search, tavily_api_key: e.target.value })}
+                style={{ minWidth: 260 }}
+              />
+            </label>
+          )}
+          <label className="field">
+            <span>
+              {zh ? '结果条数上限' : 'Max results'}
+              <Tooltip title={zh ? '单次检索注入上下文的最大结果数（1-20）。' : 'Max results injected per search (1-20).'}>
+                <QuestionCircleOutlined style={{ marginLeft: 4, color: '#888' }} />
+              </Tooltip>
+            </span>
+            <InputNumber
+              min={1}
+              max={20}
+              precision={0}
+              value={search.max_results}
+              disabled={readOnly || !search.provider}
+              onChange={(v) => setSearch({ ...search, max_results: Number(v ?? 5) })}
             />
           </label>
         </div>

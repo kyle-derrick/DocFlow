@@ -437,6 +437,21 @@ body {
 .section-sidebar h3 { margin: 0 0 8px; }
 .section-sidebar a { padding: 8px 12px; border-radius: 6px; color: var(--muted); text-decoration: none; }
 .section-sidebar a.active, .section-sidebar a:hover { color: var(--text); background: var(--surface-2); }
+/* 分组导航（管理后台运营/平台设置两组）：组标题小字 + 组间距。 */
+.section-sidebar-group { display: flex; flex-direction: column; gap: 2px; }
+.section-sidebar-group + .section-sidebar-group { margin-top: 10px; }
+.section-sidebar-group-title {
+  padding: 2px 12px 4px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+@media (max-width: 860px) {
+  .section-sidebar .section-sidebar-group { flex-direction: row; }
+  .section-sidebar .section-sidebar-group-title { display: none; }
+  .section-sidebar .section-sidebar-group + .section-sidebar-group { margin-top: 0; }
+}
 .section-content { min-width: 0; flex: 1; }
 /* 空间切换控件组（文件页全宽顶栏最左的内联组，经 toolbarPrefix 注入）：
    仅横向排布其内部控件，右侧细分隔线与后续控件分区（v2.4：竖分隔线规格

@@ -540,13 +540,16 @@ export default function AIPersonalPanel({ onError, onNotice }: { onError: (msg: 
         </div>
       </div>
 
-      {/* 自动记忆开关：AI 自动从对话中提取长期偏好（prefs.memory_auto）。 */}
+      {/* 自动记忆开关：AI 自动从对话中提取长期偏好（prefs.memory_auto）。
+          记忆条目管理入口在 AI 助手 Drawer 的「记忆」按钮（两处开关实时
+          共享同一 prefs 存储）；此处为集中设置入口。 */}
       <div className="setting-row" style={{ borderBottom: 'none', paddingBottom: 0 }}>
         <div className="setting-main">
           <div className="setting-key">自动记忆</div>
           <div className="setting-desc muted">
-            AI 自动从对话中提取长期偏好：开启后对话产生的偏好要点会以「自动」记忆保存（在 AI 助手的记忆面板查看），
+            AI 自动从对话中提取长期偏好：开启后对话产生的偏好要点会以「自动」记忆保存，
             与手动记忆一同注入后续对话；关闭后仅保留手动维护的记忆。
+            记忆条目的查看/编辑/删除在顶栏 AI 助手 →「记忆」面板；该处另有同名快捷开关（与本开关同源实时生效）。
           </div>
         </div>
         <div className="setting-control">

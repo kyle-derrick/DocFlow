@@ -3114,6 +3114,16 @@ export interface AIPlatformPersona {
   system_prompt: string
 }
 
+/** 联网搜索配置（对话 web_search 增强）：provider ''=禁用 / searxng / tavily；
+ *  tavily_api_key 只写不读（空 = 保持现值），GET 回显 tavily_api_key_configured。 */
+export interface AISearchSettings {
+  provider: string
+  searxng_url: string
+  max_results: number
+  tavily_api_key?: string
+  tavily_api_key_configured?: boolean
+}
+
 export interface AISettingsData {
   enabled: boolean
   rag: AIRAGSettings
@@ -3127,6 +3137,8 @@ export interface AISettingsData {
   personas?: AIPlatformPersona[]
   /** 图片 OCR（GET/PUT /admin/settings/ai 响应字段；旧后端缺省）。 */
   ocr?: AIOCRSettings
+  /** 联网搜索（GET/PUT /admin/settings/ai 响应字段；旧后端缺省）。 */
+  search?: AISearchSettings
   env: { enabled: boolean; base_url: string; model: string }
 }
 
@@ -3161,6 +3173,7 @@ export async function putAISettings(input: {
   rag: AIRAGSettings
   personas?: AIPlatformPersona[]
   ocr?: AIOCRSettings
+  search?: AISearchSettings
 }): Promise<AISettingsData> {
   return api<AISettingsData>('/api/v1/admin/settings/ai', jsonInit('PUT', input))
 }

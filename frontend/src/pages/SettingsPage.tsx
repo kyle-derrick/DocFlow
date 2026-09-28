@@ -70,8 +70,6 @@ import {
   createWebDAVToken,
   revokeWebDAVToken,
   WebDAVToken,
-  getAgentSettings,
-  putAgentSettings,
 } from '../api'
 import {
   ALL_EDIT_METHODS,
@@ -2684,10 +2682,17 @@ export function SystemSettingsPanel({ onError, onNotice }: { onError: (msg: stri
 /** 设置页分区（v2.x 个人/平台分离）：设置页只保留**个人**配置——外观/
  * 打开方式/账号安全/通知/开发者（PAT/Webhook/MCP）/WebDAV 个人令牌。
  * 平台级配置（AI 全局/创作舱/邮件/TLS/系统设置）全部迁往「平台管理」
- *（AdminPage /admin/platform），仅管理员可见。 */
-const baseSettingsSections = [['appearance', '外观'], ['openers', '打开方式'], ['security', '账号安全'], ['notifications', '通知'], ['developer', '开发者'], ['webdav', 'WebDAV'], ['aipersonal', 'AI 个人配置']] as const
-export function AgentPanel({ onError, onNotice }: { onError: (m: string) => void; onNotice: (m: string) => void }) { const [cfg,setCfg]=useState<Record<string,unknown>|null>(null); const [busy,setBusy]=useState(false); useEffect(()=>{void getAgentSettings().then(setCfg).catch(e=>onError(e instanceof Error?e.message:'Agent 配置加载失败'))},[]); if(!cfg)return <div className="panel setting-group"><h3>AI 创作舱</h3><div className="hint">加载中…</div></div>; const save=async(enabled:boolean)=>{setBusy(true);try{const next=await putAgentSettings({enabled});setCfg(next);onNotice(enabled?'Agent 已开启':'Agent 已关闭')}catch(e){onError(e instanceof Error?e.message:'保存失败')}finally{setBusy(false)}}; return <div className="panel setting-group"><h3>Docker Agent 创作舱</h3><div className="setting-desc muted">安全边界：关闭时 API 不可用且不启动容器；任务会先创建目录快照；Agent 产物必须经过差异预览和用户确认后才会写回平台，Docker runtime 按需启用。</div><div className="setting-row"><div className="setting-main"><div className="setting-key">Agent 开关</div><div className="setting-desc muted">默认关闭；开启后仍需配置镜像白名单。</div></div><div className="setting-control"><Switch checked={Boolean(cfg.enabled)} disabled={busy} onChange={(v)=>void save(v)} /></div></div></div> }
-export function WebDAVPanel({ onError, onNotice }: { onError: (m: string) => void; onNotice: (m: string) => void }) { const [items,setItems]=useState<WebDAVToken[]>([]); const [name,setName]=useState(''); const [token,setToken]=useState(''); const load=async()=>{try{setItems(await listWebDAVTokens())}catch(e){onError(e instanceof Error?e.message:'加载失败')}}; useEffect(()=>{void load()},[]); const create=async()=>{try{const x=await createWebDAVToken(name,90);setToken(x.token);setName('');await load();onNotice('令牌已创建，请立即复制') }catch(e){onError(e instanceof Error?e.message:'创建失败')}}; return <div className="panel setting-group"><h3>WebDAV 文件挂载（个人令牌）</h3><div className="setting-desc muted">URL：{window.location.origin}/webdav；Windows 映射网络驱动器，Linux 使用 davfs2，macOS 使用 Finder“连接服务器”。WebDAV 使用 Basic Auth：用户名为平台邮箱/用户名，密码为下方一次性令牌；服务端开关由管理员在「平台管理 → 平台设置」配置。</div>{token&&<div className="share-link"><Input readOnly value={token}/><Button onClick={()=>void navigator.clipboard.writeText(token)}>复制令牌</Button></div>} {items.map(x=><div className="setting-row" key={x.id}><div className="setting-main"><b>{x.name}</b><div className="muted">最后使用：{x.last_used_at||'未使用'} · 过期：{x.expires_at||'永不过期'}</div></div><Button danger onClick={()=>void revokeWebDAVToken(x.id).then(load)}>吊销</Button></div>)}<div className="team-create-row"><Input placeholder="令牌名称（如：我的电脑）" style={{ maxWidth: 240 }} value={name} onChange={e=>setName(e.target.value)}/><Button type="primary" disabled={!name.trim()} onClick={()=>void create()}>创建令牌</Button></div></div>}
+ *（AdminPage /admin），仅管理员可见。「AI 个人配置」仅 AI 启用时显示。 */
+const baseSettingsSections: ReadonlyArray<readonly [string, string, string]> = [
+  ['appearance', '外观', 'Appearance'],
+  ['openers', '打开方式', 'Open with'],
+  ['security', '账号安全', 'Security'],
+  ['notifications', '通知', 'Notifications'],
+  ['developer', '开发者', 'Developer'],
+  ['webdav', 'WebDAV', 'WebDAV'],
+  ['aipersonal', 'AI 个人配置', 'AI personal'],
+]
+export function WebDAVPanel({ onError, onNotice }: { onError: (m: string) => void; onNotice: (m: string) => void }) { const [items,setItems]=useState<WebDAVToken[]>([]); const [name,setName]=useState(''); const [token,setToken]=useState(''); const load=async()=>{try{setItems(await listWebDAVTokens())}catch(e){onError(e instanceof Error?e.message:'加载失败')}}; useEffect(()=>{void load()},[]); const create=async()=>{try{const x=await createWebDAVToken(name,90);setToken(x.token);setName('');await load();onNotice('令牌已创建，请立即复制') }catch(e){onError(e instanceof Error?e.message:'创建失败')}}; return <div className="panel setting-group"><h3>WebDAV 文件挂载（个人令牌）</h3><div className="setting-desc muted">URL：{window.location.origin}/webdav；Windows 映射网络驱动器，Linux 使用 davfs2，macOS 使用 Finder“连接服务器”。WebDAV 使用 Basic Auth：用户名为平台邮箱/用户名，密码为下方一次性令牌；服务端开关由管理员在「管理 → 安全与访问」中配置。</div>{token&&<div className="share-link"><Input readOnly value={token}/><Button onClick={()=>void navigator.clipboard.writeText(token)}>复制令牌</Button></div>} {items.map(x=><div className="setting-row" key={x.id}><div className="setting-main"><b>{x.name}</b><div className="muted">最后使用：{x.last_used_at||'未使用'} · 过期：{x.expires_at||'永不过期'}</div></div><Button danger onClick={()=>void revokeWebDAVToken(x.id).then(load)}>吊销</Button></div>)}<div className="team-create-row"><Input placeholder="令牌名称（如：我的电脑）" style={{ maxWidth: 240 }} value={name} onChange={e=>setName(e.target.value)}/><Button type="primary" disabled={!name.trim()} onClick={()=>void create()}>创建令牌</Button></div></div>}
 
 export default function SettingsPage() {
   const { section = 'appearance' } = useParams()
@@ -2695,6 +2700,8 @@ export default function SettingsPage() {
   const msg = (key: MessageKey) => t(locale, key)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  // AI 能力门控：「AI 个人配置」分区仅 AI 启用时显示（与顶栏 AI 入口同口径）。
+  const aiOn = useAIEnabled()
   // admin 探测（与顶栏「管理」入口同法）：admin 专属分区（邮件/TLS/系统设置）。
   // v2.5 三态（null = 探测中）：isAdmin() 异步返回前不重定向——旧实现首渲染
   // 恒为 false，直接访问 /settings/mail 等分区会在探测完成前被 Navigate 弹回
@@ -2718,15 +2725,15 @@ export default function SettingsPage() {
     )
   }
   // 个人/平台分离（v2.x）：设置页不再区分 admin 分区——平台级配置全部
-  // 位于「平台管理」（/admin/platform）；此处仅个人分区，admin 探测仅用于
+  // 位于「平台管理」（/admin）；此处仅个人分区，admin 探测仅用于
   // 旧地址（/settings/mail|tls|system|ai|agent）平滑弹回个人「外观」。
-  const sections = baseSettingsSections
+  const sections = aiOn ? baseSettingsSections : baseSettingsSections.filter(([key]) => key !== 'aipersonal')
   if (!sections.some(([key]) => key === section)) {
     return <Navigate to="/settings/appearance" replace />
   }
   return (
     <div className="page section-page">
-      <aside className="section-sidebar"><h3>设置</h3>{sections.map(([key, label]) => <NavLink key={key} to={`/settings/${key}`} className={({ isActive }) => isActive ? 'active' : ''}>{label}</NavLink>)}</aside>
+      <aside className="section-sidebar"><h3>{msg('settings')}</h3>{sections.map(([key, label, labelEn]) => <NavLink key={key} to={`/settings/${key}`} className={({ isActive }) => isActive ? 'active' : ''}>{locale === 'zh-CN' ? label : labelEn}</NavLink>)}</aside>
       <div className="section-content">
       <div className="page-head">
         <h2>{msg('settings')}</h2>
@@ -2754,26 +2761,27 @@ export default function SettingsPage() {
         </>
       )}
       {section === 'developer' && (
-        <div className="panel setting-group" style={{ padding: '12px 16px' }}>
-          <div className="setting-desc muted" style={{ marginBottom: 0 }}>
-            开发者工具：个人访问令牌（PAT，供脚本/CI 以 Bearer dfpat_… 调用 API）与
-            Webhook（事件发生时向回调 URL 推送 HMAC 签名的 JSON）。两者均为本人维度，
-            一次性凭据仅在创建时展示一次。
+        <>
+          <div className="panel setting-group" style={{ padding: '12px 16px' }}>
+            <div className="setting-desc muted" style={{ marginBottom: 0 }}>
+              开发者工具：MCP 服务接入（DocFlow 内置 MCP 服务端的连接指引）、
+              Webhook（事件发生时向回调 URL 推送 HMAC 签名的 JSON）与个人访问令牌
+              （PAT，供脚本/CI 以 Bearer dfpat_… 调用 API，可申请 ai:chat 等权限）。
+              三者均为本人维度，一次性凭据仅在创建时展示一次。
+            </div>
           </div>
-        </div>
+          <McpPanel onNotice={(m) => { setNotice(m); setError('') }} />
+          <WebhooksPanel
+            onError={(msg) => { setError(msg); setNotice('') }}
+            onNotice={(msg) => { setNotice(msg); setError('') }}
+          />
+          <TokensPanel
+            onError={(msg) => { setError(msg); setNotice('') }}
+            onNotice={(msg) => { setNotice(msg); setError('') }}
+          />
+        </>
       )}
-      {section === 'developer' && (
-        <McpPanel onNotice={(m) => { setNotice(m); setError('') }} />
-      )}
-      {section === 'developer' && <WebhooksPanel
-        onError={(msg) => { setError(msg); setNotice('') }}
-        onNotice={(msg) => { setNotice(msg); setError('') }}
-      />}
       {section === 'security' && <SessionsPanel
-        onError={(msg) => { setError(msg); setNotice('') }}
-        onNotice={(msg) => { setNotice(msg); setError('') }}
-      />}
-      {section === 'developer' && <TokensPanel
         onError={(msg) => { setError(msg); setNotice('') }}
         onNotice={(msg) => { setNotice(msg); setError('') }}
       />}

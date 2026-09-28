@@ -2250,15 +2250,22 @@ function SpacesPanel({ onError, onNotice }: { onError: (msg: string) => void; on
   )
 }
 
-const adminSections = [
-  ['overview', '概览'], ['people', '人员与组'], ['spaces', '空间'], ['audit', '审计日志'], ['threat', '威胁防护'], ['backup', '备份'],
-  // 平台设置拆分（v2.x）：AI / 创作舱 / 邮件 / TLS / 系统设置 各自独立分区，
-  // 不再堆一个大 tag（用户反馈）；v2.8 增第六个 tag「配置总览」
-  //（ConfigOverviewPanel：启动级 env / 运行时设置索引 / AI 能力状态）；
-  // v2.9 增第七个 tag「安全与访问」（SecurityPanel：防爆破 / 限流 / 扫描
-  // 策略 / WebDAV 平台开关与接入指引，对应 security.* / webdav.* 键）。
-  ['ai', 'AI 设置'], ['agent', 'AI 创作舱'], ['mail', '邮件'], ['tls', 'TLS'], ['system', '系统设置'], ['security', '安全与访问'], ['config', '配置总览'],
-] as const
+/** 管理后台分区（v2.x 平台设置拆分 + v2.9 导航分组）：运营域（概览/人员/
+ * 空间/审计/威胁/备份）与平台设置域（AI/创作舱/邮件/TLS/系统/安全/配置
+ * 总览）分两组展示，避免 13 项平铺。 */
+const adminSectionGroups: Array<{ title: string; titleEn: string; items: ReadonlyArray<readonly [string, string]> }> = [
+  {
+    title: '运营',
+    titleEn: 'Operations',
+    items: [['overview', '概览'], ['people', '人员与组'], ['spaces', '空间'], ['audit', '审计日志'], ['threat', '威胁防护'], ['backup', '备份']],
+  },
+  {
+    title: '平台设置',
+    titleEn: 'Platform settings',
+    items: [['ai', 'AI 设置'], ['agent', 'AI 创作舱'], ['mail', '邮件'], ['tls', 'TLS'], ['system', '系统设置'], ['security', '安全与访问'], ['config', '配置总览']],
+  },
+]
+const adminSections = adminSectionGroups.flatMap((g) => g.items)
 
 export default function AdminPage() {
   const { section = 'overview' } = useParams()
@@ -2330,7 +2337,17 @@ export default function AdminPage() {
 
   return (
     <div className="page wide-page admin-page">
-      <aside className="section-sidebar"><h3>管理</h3>{adminSections.map(([key, label]) => <NavLink key={key} to={`/admin/${key}`} className={({ isActive }) => isActive ? 'active' : ''}>{label}</NavLink>)}</aside>
+      <aside className="section-sidebar">
+        <h3>{msg('adminTitle')}</h3>
+        {adminSectionGroups.map((group) => (
+          <div key={group.title} className="section-sidebar-group">
+            <div className="section-sidebar-group-title muted">{locale === 'zh-CN' ? group.title : group.titleEn}</div>
+            {group.items.map(([key, label]) => (
+              <NavLink key={key} to={`/admin/${key}`} className={({ isActive }) => (isActive ? 'active' : '')}>{label}</NavLink>
+            ))}
+          </div>
+        ))}
+      </aside>
       <div className="section-content">
       <div className="page-head">
         <h2>{msg('adminTitle')}</h2>
