@@ -1,24 +1,24 @@
-// 文件管理左侧目录树（替代 Wiki 视图的空间内导航价值）：
-// - FolderTreeNav：当前空间的目录树 UI（根 = 空间根；子目录懒加载，
-//   目录下同时展示文件叶子节点——不可展开、点击经 fileOpenSignal 触发
-//   FileBrowser 查看弹窗（不再新窗口）；当前目录高亮 + 自动展开祖先；
-//   点击目录节点切换 FileBrowser 当前目录；文件/目录节点右键菜单与
-//   文件列表行菜单统一（查看（方式名）/ 编辑（方式名）/ 打开方式 > 分组，
-//   复用 .ctx-menu 视觉，见 FileBrowser itemMenuItems 同构结构）。
+﻿// 文件管理左侧目录树（替代 Wiki 视图的空间内导航价值）：
+// - FolderTreeNav：当前空间的目录树 UI（antd Tree 目录模式，与 Studio 左栏
+//   同一视觉体系）——根 = 空间根；子目录懒加载，目录下同时展示文件叶子
+//   节点；单击目录名 = 进入（onSelect 驱动中间列表切换）、单击文件 = 查看弹
+//   窗（fileOpenSignal）、展开/收起只经左侧箭头；当前目录高亮 + 自动展开
+//   祖先；文件/目录右键菜单与文件列表行菜单统一（查看（方式名）/ 编辑（方
+//   式名）/ 打开方式 > 分组 + 目录进入/作为网页打开/展开收起/刷新）。
 // - FileBrowserWithTree：FilesPage 布局层包装器——在
 //   FileBrowser 外面包左侧树栏（240px，可折叠），不修改 FileBrowser 内部
 //   实现；树点击目录经 folderNavSignal 受控信号驱动：FileBrowser 在同一
 //   实例内直接把面包屑切到目标链并加载目标目录（不重挂载、不先回根，
-//   一次列表请求，无根目录闪现——v2.5 重构，替代旧「key 重挂载回根 +
-//   逐段点击其目录行」实现）；同时经注入的 listItems 包装感知每次目录
-//   列表结果，完成树节点登记、当前目录高亮同步（用户在 FileBrowser 内
-//   点击目录/面包屑时树跟随）。文件节点点击经 fileOpenSignal 受控信号
-//   触达 FileBrowser 的查看弹窗。
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+//   一次列表请求，无根目录闪现——v2.5 重构）；同时经注入的 listItems 包装
+//   感知每次目录列表结果，完成树节点登记、当前目录高亮同步（用户在
+//   FileBrowser 内点击目录/面包屑时树跟随）。文件节点点击经 fileOpenSignal
+//   受控信号触达 FileBrowser 的查看弹窗。
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { ChevronDown, ChevronRight, FileText, Folder, Home } from 'lucide-react'
-import { Menu } from 'antd'
+import { Dropdown, Tree } from 'antd'
 import type { MenuProps } from 'antd'
+import type { DataNode } from 'antd/es/tree'
+import { Folder, FolderOpen, Globe, Home } from 'lucide-react'
 import { FileItem, FileQueryOptions, OpenWithPrefs, drawioStatus, encodePathSegments, listOpenWith, onlyOfficeStatus } from '../api'
 import {
   allEditEntries,
@@ -31,8 +31,9 @@ import {
   viewMethodLabel,
   viewOptionsFor,
 } from '../openers'
-import FileBrowser, { clampFixedMenu } from './FileBrowser'
+import FileBrowser from './FileBrowser'
 import type { FileBrowserProps } from './FileBrowser'
+import { fileIcon } from './fileIcon'
 import { useLocale } from '../i18n'
 
 /** 根节点 key（面包屑 id=null 的映射；UUID 目录 id 不会与之冲突）。 */
@@ -131,26 +132,6 @@ export default function FolderTreeNav({
 }) {
   const locale = useLocale()
   const zh = locale === 'zh-CN'
-  // 右键菜单：目标节点 key + 视口坐标（null = 关闭）；点击外部/动作后收口
-  //（「打开方式」内联子菜单弹层挂 body，一并豁免，否则子菜单点击即被吞）。
-  const [ctx, setCtx] = useState<{ key: string; x: number; y: number } | null>(null)
-  const ctxRef = useRef<HTMLDivElement | null>(null)
-  const ctxNode = ctx ? nodes[ctx.key] : undefined
-  useEffect(() => {
-    if (!ctx) return
-    const onDown = (e: MouseEvent) => {
-      const el = e.target as HTMLElement | null
-      if (el?.closest?.('.ctx-menu, .ant-menu-submenu-popup')) return
-      setCtx(null)
-    }
-    document.addEventListener('mousedown', onDown)
-    return () => document.removeEventListener('mousedown', onDown)
-  }, [ctx])
-  // 渲染后按实测尺寸把菜单收进视口（复用 FileBrowser 的收缩定位）。
-  useLayoutEffect(() => {
-    if (!ctx || !ctxRef.current) return
-    clampFixedMenu(ctxRef.current, ctx.x, ctx.y)
-  }, [ctx])
 
   /** 集成可用性对方式的门槛（与 FileBrowser.methodEnabled 一致）。 */
   const methodEnabled = (m: string): boolean =>
@@ -220,6 +201,7 @@ export default function FolderTreeNav({
       if (caretStateOf(node, false) === 'toggle') {
         entries.push({ key: 'toggle', label: expanded.has(node.id) ? (zh ? '收起' : 'Collapse') : zh ? '展开' : 'Expand' })
       }
+      entries.push({ key: 'refresh', label: zh ? '刷新' : 'Refresh' })
     }
     return entries
   }
@@ -231,97 +213,48 @@ export default function FolderTreeNav({
     else if (action === 'enter') onSelect(key)
     else if (action === 'open-web') onOpenFolderAsWebsite?.(key)
     else if (action === 'toggle') onToggleExpand(key)
+    else if (action === 'refresh') onToggleExpand(key, true)
     else if (action.startsWith('openview:')) onOpenFileWith?.(key, 'view', action.slice('openview:'.length))
     else if (action.startsWith('openedit:')) onOpenFileWith?.(key, 'edit', action.slice('openedit:'.length))
   }
 
-  const renderRow = (key: string, depth: number): ReactNode => {
+  /** 树节点（antd Tree DataNode）：title 行 = 图标 + 名称 + 加载标记，外层
+   *  Dropdown 提供右键菜单（与文件列表行菜单同构）；未加载目录
+   *  children=undefined（显示可展开箭头），确认空目录 isLeaf（无箭头，
+   *  右键「刷新」可恢复），文件叶子恒 isLeaf。 */
+  const nodeToData = (key: string): DataNode => {
     const node = nodes[key]
-    if (!node) return null
-    // 文件叶子：不可展开，点击触发查看弹窗（onSelectFile → fileOpenSignal）。
-    if (node.type === 'file') {
-      const clickable = Boolean(onSelectFile)
-      return (
-        <div
-          key={key}
-          className="folder-tree-row file-leaf"
-          style={{ paddingLeft: 4 + depth * 14 }}
-          onContextMenu={(e) => {
-            if (!clickable && !onOpenFileWith) return
-            e.preventDefault()
-            setCtx({ key, x: e.clientX, y: e.clientY })
-          }}
-        >
-          <span className="folder-tree-caret" aria-hidden="true" />
-          <button
-            type="button"
-            className="folder-tree-name"
-            title={clickable ? (zh ? '查看' : 'View') : node.name}
-            disabled={!clickable}
-            onClick={() => onSelectFile?.(key)}
-          >
-            <span className="folder-tree-file-icon" aria-hidden="true"><FileText size={14} strokeWidth={2} aria-hidden="true" /></span>
-            <span className="folder-tree-name-text">{node.name}</span>
-          </button>
-        </div>
-      )
-    }
+    const isRoot = key === ROOT_KEY
+    const label = isRoot ? rootLabel : node.name
     const isExpanded = expanded.has(key)
-    const isLoading = loadingKeys.has(key)
-    // caret 状态唯一判定（见 caretStateOf 注释）：loading=⋯ / toggle=箭头
-    //（未加载或确有子级，可展开收起）/ empty=确认空的「·」占位。
-    const caret = caretStateOf(node, isLoading)
-    // 「·」占位也可点击：强制重新加载（目录在别处新建子项后可恢复），
-    // 杜绝「·」死状态；仅 loading 中不可点（防并发重复请求）。
-    const caretClickable = caret !== 'loading'
-    return (
-      <div key={key}>
-        <div
-          className={`folder-tree-row${key === currentKey ? ' active' : ''}`}
-          style={{ paddingLeft: 4 + depth * 14 }}
-          onContextMenu={(e) => {
-            e.preventDefault()
-            setCtx({ key, x: e.clientX, y: e.clientY })
-          }}
+    const fileClickable = node.type === 'file' && Boolean(onSelectFile)
+    const title = (
+      <Dropdown trigger={['contextMenu']} menu={{ items: ctxMenuItems(node), onClick: ({ key: act }) => runCtxAction(key, String(act)) }}>
+        <span
+          className={`ftree-row${key === currentKey ? ' active' : ''}${fileClickable ? ' clickable' : ''}`}
+          title={node.type === 'file' ? (fileClickable ? (zh ? '查看' : 'View') : node.name) : (isRoot || !zh ? label : `${label}（进入）`)}
         >
-          <button
-            type="button"
-            className={`folder-tree-caret${caret === 'empty' ? ' caret-empty' : ''}`}
-            aria-label={isExpanded ? '收起' : '展开'}
-            aria-disabled={!caretClickable}
-            title={caret === 'empty' ? (zh ? '空目录（点击重新加载）' : 'Empty folder (click to reload)') : undefined}
-            onClick={() => caretClickable && onToggleExpand(key, caret === 'empty')}
-          >
-            {caret === 'loading'
-              ? '⋯'
-              : caret === 'empty'
-                ? '·'
-                : isExpanded
-                  ? <ChevronDown size={14} strokeWidth={2} aria-hidden="true" />
-                  : <ChevronRight size={14} strokeWidth={2} aria-hidden="true" />}
-          </button>
-          {/* v1.6.1 交互（用户明确）：单击目录名 = 进入该目录（onSelect 驱动
-              中间列表切换）；展开/收起只经左侧 caret 箭头。根节点同理：单击
-              根名回到空间根目录。 */}
-          <button
-            type="button"
-            className="folder-tree-name"
-            title={zh ? `${node.name}（进入）` : node.name}
-            onClick={() => onSelect(key)}
-          >
-            <span aria-hidden="true">{key === ROOT_KEY
-              ? <Home size={14} strokeWidth={2} aria-hidden="true" />
-              : <Folder size={14} strokeWidth={2} aria-hidden="true" />}</span>
-            <span className="folder-tree-name-text">{key === ROOT_KEY ? rootLabel : node.name}</span>
-          </button>
-        </div>
-        {/* 子目录与文件叶子同为 depth+1 缩进（文件行也带 paddingLeft，修复
-            文件与目录同级显示的问题）。 */}
-        {isExpanded && node.childIds?.map((id) => renderRow(id, depth + 1))}
-        {isExpanded && node.fileIds.map((id) => renderRow(id, depth + 1))}
-      </div>
+          {node.type === 'folder'
+            ? (node.hasIndexWeb
+              ? <Globe size={14} strokeWidth={2} aria-hidden="true" />
+              : isRoot
+                ? <Home size={14} strokeWidth={2} aria-hidden="true" />
+                : isExpanded ? <FolderOpen size={14} strokeWidth={2} aria-hidden="true" /> : <Folder size={14} strokeWidth={2} aria-hidden="true" />)
+            : fileIcon(node.name)}
+          <span className="name">{label}</span>
+          {loadingKeys.has(key) && <span className="ftree-loading" aria-hidden="true">⋯</span>}
+        </span>
+      </Dropdown>
     )
+    if (node.type === 'file') return { key, title, isLeaf: true }
+    const confirmedEmpty = node.childIds !== null && node.childIds.length === 0 && node.fileIds.length === 0
+    const children = node.childIds === null
+      ? undefined
+      : [...node.childIds, ...node.fileIds].filter((id) => nodes[id]).map(nodeToData)
+    return { key, title, isLeaf: confirmedEmpty, children }
   }
+
+  const treeData: DataNode[] = [nodeToData(ROOT_KEY)]
 
   // v2.2：去掉折叠按钮——左栏始终显示（原折叠功能有状态串扰问题，且 240px
   // 常驻栏对导航价值大于偶尔让出的宽度）。
@@ -331,31 +264,31 @@ export default function FolderTreeNav({
         <span>{zh ? '目录' : 'Folders'}</span>
       </div>
       {errorText && <div className="folder-tree-error">{errorText}</div>}
-      {renderRow(ROOT_KEY, 0)}
-      {/* 节点右键菜单：与文件列表行菜单同构（查看（方式名）/ 编辑（方式名）/
-          打开方式 > 分组；目录 = 作为网页打开 + 展开/收起），动作经包装器
-          onOpenFileWith 等回调分发。 */}
-      {ctx && ctxNode && (
-        <div
-          ref={ctxRef}
-          className="ctx-menu"
-          role="menu"
-          style={{ left: `${ctx.x}px`, top: `${ctx.y}px` }}
-          onClick={() => setCtx(null)}
-        >
-          <Menu
-            className="ctx-antd-menu"
-            mode="vertical"
-            selectable={false}
-            onClick={({ key }) => runCtxAction(ctx.key, key)}
-            items={ctxMenuItems(ctxNode)}
-          />
-        </div>
-      )}
+      {/* v1.6.1 交互（用户明确）：单击目录名 = 进入（onSelect 驱动中间列表
+          切换）、单击文件 = 查看弹窗（onSelectFile）；展开/收起只经左侧箭头
+          （expandAction=false，箭头点击切换并经 onToggleExpand 懒加载）。 */}
+      <div className="folder-tree-body ftree">
+        <Tree
+          blockNode
+          showIcon
+          className="ftree-antd"
+          treeData={treeData}
+          expandedKeys={[...expanded]}
+          expandAction={false}
+          onExpand={(_keys, info) => onToggleExpand(String(info.node.key))}
+          selectedKeys={[currentKey]}
+          onSelect={(_keys, info) => {
+            const key = String(info.node.key)
+            const node = nodes[key]
+            if (!node) return
+            if (node.type === 'folder') onSelect(key)
+            else onSelectFile?.(key)
+          }}
+        />
+      </div>
     </aside>
   )
 }
-
 /**
  * FileBrowser + 左侧目录树三栏布局包装器（props 透传 FileBrowser）：
  * - 顶栏宿主（.files-topbar）：FileBrowser 的工具行经 toolbarHost portal

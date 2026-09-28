@@ -3161,8 +3161,8 @@ div.mxTooltip {
 /* 布局骨架（.files-tree-layout/.files-tree-main/.workspace-aside 三栏 grid）
    已上移至「空间视图」节统一维护：默认空间与空间视图同一布局组件。 */
 
-/* 目录树：240px 宽、grid 拉伸填满列高，超高时内部滚动；
-   行 min-width:max-content 支持横向滚动查看长文件名。 */
+/* 目录树（antd Tree 目录模式，与 Studio 左栏同一视觉体系）：240px 宽、
+   grid 拉伸填满列高，超高时内部滚动。 */
 .folder-tree-nav {
   max-height: 100%;
   overflow: auto;
@@ -3170,6 +3170,8 @@ div.mxTooltip {
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 8px 6px;
+  display: flex;
+  flex-direction: column;
 }
 
 .folder-tree-nav.collapsed {
@@ -3188,6 +3190,7 @@ div.mxTooltip {
   padding: 2px 8px 8px;
   color: var(--muted);
   font-size: 12px;
+  flex-shrink: 0;
 }
 
 .folder-tree-collapse-btn {
@@ -3199,97 +3202,11 @@ div.mxTooltip {
   font-size: 12px;
   padding: 2px 8px 6px;
   word-break: break-all;
+  flex-shrink: 0;
 }
 
-/* 行高加大（padding 5px + 行间距 2px）；hover 高亮加强（主色淡染）；
-   width:max-content + min-width:100% 支持容器横向滚动且行铺满可视宽。 */
-.folder-tree-row {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  margin: 2px 0;
-  border-radius: 6px;
-  font-size: 13px;
-  width: max-content;
-  min-width: 100%;
-}
-
-.folder-tree-row:hover {
-  background: color-mix(in srgb, var(--primary) 12%, var(--surface));
-}
-
-.folder-tree-row.active {
-  background: color-mix(in srgb, var(--primary) 14%, var(--surface));
-  box-shadow: inset 2px 0 0 var(--primary);
-}
-
-/* 文件叶子：淡色展示，可点（点击弹窗查看）。 */
-.folder-tree-row.file-leaf {
-  color: var(--muted);
-}
-
-.folder-tree-row.file-leaf .folder-tree-name:disabled {
-  cursor: default;
-  opacity: 0.6;
-}
-
-.folder-tree-row.file-leaf:hover .folder-tree-name:not(:disabled) {
-  color: var(--text);
-}
-
-.folder-tree-file-icon {
-  opacity: 0.7;
-}
-
-/* 展开/收起箭头（▶/▼）：加大热区与字号，点击更易命中。 */
-.folder-tree-caret {
-  flex: 0 0 auto;
-  width: 22px;
-  height: 22px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  background: none;
-  border: none;
-  border-radius: 4px;
-  color: var(--muted);
-  cursor: pointer;
-  font-size: 12px;
-  line-height: 1;
-}
-
-.folder-tree-caret:hover {
-  color: var(--text);
-  background: var(--surface-2);
-}
-
-/* 确认空目录的「·」占位（caretStateOf='empty'）：极淡展示但保持可点击
-   （点击强制重载，数据变化后可恢复——杜绝死状态）。 */
-.folder-tree-caret.caret-empty {
-  opacity: 0.45;
-}
-
-.folder-tree-name {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 6px 5px 0;
-  background: none;
-  border: none;
-  color: inherit;
-  cursor: pointer;
-  text-align: left;
-  font-size: inherit;
-}
-
-.folder-tree-name-text {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+/* 树主体（antd Tree 承担行渲染/缩进/展开箭头；.ftree-* 与 Studio 共用）。 */
+.folder-tree-body { flex: 1; min-height: 0; overflow: auto; }
 
 @media (max-width: 860px) {
   /* 文件页解除视口锁定：随页面自然滚动，三栏退化为纵向堆叠。 */
@@ -7296,6 +7213,9 @@ kbd {
 .ftree-row .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ftree-row.workroot .name { color: var(--primary); font-weight: 600; }
 .ftree-row.file-active .name { color: var(--primary); font-weight: 600; }
+.ftree-row.active .name { color: var(--primary); font-weight: 600; }
+.ftree-row.clickable { cursor: pointer; }
+.ftree-loading { color: var(--muted); font-size: 11px; flex-shrink: 0; }
 .ftree-refdot {
   width: 6px;
   height: 6px;
