@@ -10,7 +10,7 @@
 //	200 {"results":[{"index":0,"relevance_score":0.9}, ...]}
 //
 // 降级语义：重排是检索质量的增强而非关键路径——未配置、Provider 不可用
-//（不存在/禁用/anthropic 无 rerank API/mock 不走网络）、请求失败、超时、
+// （不存在/禁用/anthropic 无 rerank API/mock 不走网络）、请求失败、超时、
 // 响应异常（index 越界/长度不符——防恶意响应）一律静默返回原序，仅记
 // log，绝不阻断问答链路。
 package ai

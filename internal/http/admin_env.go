@@ -38,7 +38,7 @@ func envSensitiveKey(key string) bool {
 }
 
 // envCatalog 静态分组清单：key / 代码默认值 / 中文说明。仅收录核心键
-//（完整清单见 docs/configuration.md）；默认值与 config.Load 保持一致。
+// （完整清单见 docs/configuration.md）；默认值与 config.Load 保持一致。
 var envCatalog = []struct {
 	Name  string
 	Items [][2]string // {key, 默认值或 ""}
@@ -79,9 +79,9 @@ var envCatalog = []struct {
 		{"AI_RAG_VECTOR_ENABLED", "false"}, {"AI_RAG_QDRANT_URL", "http://qdrant:6333"},
 		{"AI_RAG_MODE", "keyword"},
 	}, map[string]string{
-		"SEARCH_DRIVER":          "pg | meilisearch",
-		"AI_RAG_VECTOR_ENABLED":  "向量检索开关（Qdrant profile）",
-		"AI_RAG_QDRANT_URL":      "Qdrant 地址",
+		"SEARCH_DRIVER":         "pg | meilisearch",
+		"AI_RAG_VECTOR_ENABLED": "向量检索开关（Qdrant profile）",
+		"AI_RAG_QDRANT_URL":     "Qdrant 地址",
 	}},
 	{"Office 与图表", [][2]string{
 		{"ONLYOFFICE_ENABLED", "false"}, {"ONLYOFFICE_SERVER_URL", "http://onlyoffice:80"},
@@ -125,7 +125,7 @@ var envCatalog = []struct {
 }
 
 // adminGetEnv GET /api/v1/admin/settings/env：启动级环境变量只读总览
-//（敏感值脱敏）。仅管理员组。
+// （敏感值脱敏）。仅管理员组。
 func (h *Handler) adminGetEnv(c *gin.Context) {
 	groups := make([]envGroupView, 0, len(envCatalog))
 	for _, g := range envCatalog {

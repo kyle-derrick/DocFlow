@@ -137,7 +137,7 @@ func postMCPTest(r *gin.Engine, body string) (int, mcpTestResponse) {
 }
 
 // TestAdminAIMCPTestEndpoint 成功（ok/tools/names/latency_ms）与失败
-//（上游 500、拒绝连接）路径：失败仍 200，ok=false + 中文 error 非空。
+// （上游 500、拒绝连接）路径：失败仍 200，ok=false + 中文 error 非空。
 // 超时路径（10s 总预算）不单独覆盖：拒绝连接同为 mcpclient 传输层错误。
 func TestAdminAIMCPTestEndpoint(t *testing.T) {
 	mcp := httptest.NewServer(http.HandlerFunc(fakeMCPHTTPEcho))

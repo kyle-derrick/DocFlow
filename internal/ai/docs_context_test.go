@@ -1,5 +1,5 @@
 // Package ai —— docs_context_test.go：DocsContextBlock（include_docs 的
-//「我的文件」上下文拼装）单测——file 过滤/编号/去高亮标记/空结果空串。
+// 「我的文件」上下文拼装）单测——file 过滤/编号/去高亮标记/空结果空串。
 package ai
 
 import (

@@ -1,13 +1,13 @@
 // ai_lookup.go：模型能力自动识别（Cherry Studio 语义）。
 //
 // GET /api/v1/admin/settings/ai/models/lookup?model=<模型id>&provider=<provider名或kind>
-//（登录侧别名 GET /api/v1/ai/models/lookup——个人池模型编辑复用，models.dev
+// （登录侧别名 GET /api/v1/ai/models/lookup——个人池模型编辑复用，models.dev
 // 为公开元数据、无敏感信息）：服务端查询 https://models.dev/api.json
-//（开源 LLM 元数据目录，含各模型类型与能力标记）匹配模型 id（大小写与
+// （开源 LLM 元数据目录，含各模型类型与能力标记）匹配模型 id（大小写与
 // -_.:/ 等分隔符宽松匹配），返回类型（chat/embedding/rerank/image 互斥）
 // 与能力并集（reasoning/vision/audio/video）。上游 5s 超时、内存缓存
 // 10 分钟（失败保留旧快照降级）；未命中/网络失败一律 found:false
-//（前端静默回退手动选择）。端点不依赖 AI 总开关——管理员正在配置
+// （前端静默回退手动选择）。端点不依赖 AI 总开关——管理员正在配置
 // Provider（AI 尚未启用）时恰是识别最需要的时刻。
 package http
 
@@ -53,7 +53,7 @@ type modelsDevModel struct {
 }
 
 // modelsDevSnapshot 为一次抓取的内存快照：byID 以规范化模型 id 为键
-//（目录键、完整 id 与 id 尾段都入索引，冲突保留首个）；byProvider 以
+// （目录键、完整 id 与 id 尾段都入索引，冲突保留首个）；byProvider 以
 // 规范化目录 slug/名称为键支持 provider 参数优先匹配。
 type modelsDevSnapshot struct {
 	fetched    time.Time
@@ -227,7 +227,7 @@ func (s *modelsDevSnapshot) lookup(modelID, provider string) (modelsDevModel, bo
 }
 
 // aiModelLookup GET /api/v1/admin/settings/ai/models/lookup?model=&provider=
-//（别名 /api/v1/ai/models/lookup）：查询 models.dev 匹配模型 id，返回
+// （别名 /api/v1/ai/models/lookup）：查询 models.dev 匹配模型 id，返回
 // {found, kind, reasoning, vision, audio, video, display_name?}；未命中/
 // 网络失败 found:false（200，前端静默手动）。model 缺失 400。
 func (h *Handler) aiModelLookup(c *gin.Context) {
