@@ -1,4 +1,4 @@
-// draw.io 图表编辑页（/drawio/:fileId）：
+﻿// draw.io 图表编辑页（/drawio/:fileId）：
 // - GET /drawio/config 探测集成，取 url 以 iframe embed 模式加载编辑器
 //   （URL 参数 embed=1&proto=json&spin=1&saveAndExit=1&noSaveBtn=0&libraries=1）；
 // - postMessage JSON 协议：receive {event:"init"} → send {action:"load",
@@ -24,7 +24,7 @@ import {
 } from '../api'
 import DrawioViewer from '../components/DrawioViewer'
 import { EditorLoadError } from '../components/EditorLoadError'
-import type { AIEditTarget } from '../components/AIEdit'
+import type { AIEditTarget } from '../components/AIEditChat'
 import AIEditChat, { AIEditChatButton } from '../components/AIEditChat'
 import type { AIQuickCommand } from '../components/AIEditChat'
 import { useAIEnabled } from '../aiFeature'
@@ -554,3 +554,4 @@ export default function DrawioPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
     </div>
   )
 }
+

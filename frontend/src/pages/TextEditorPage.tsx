@@ -1,4 +1,4 @@
-import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+﻿import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { isValidElement } from 'react'
 import { App as AntdApp, Button, Segmented } from 'antd'
@@ -9,7 +9,7 @@ import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { fetchFileText, getFileMeta, uploadFileVersion } from '../api'
 import MarkmapDiagram from '../components/MarkmapDiagram'
 import MermaidDiagram from '../components/MermaidDiagram'
-import type { AIEditTarget } from '../components/AIEdit'
+import type { AIEditTarget } from '../components/AIEditChat'
 import AIEditChat, { AIEditChatButton } from '../components/AIEditChat'
 import type { AIQuickCommand } from '../components/AIEditChat'
 import { closeEditorWithFallback, safeReturnTo } from '../editorNavigation'
@@ -647,3 +647,4 @@ export default function TextEditorPage({
     </main>
   )
 }
+

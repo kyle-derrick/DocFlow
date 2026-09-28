@@ -1,4 +1,4 @@
-/* DocFlow 全局样式（v1.1 主题系统）
+﻿/* DocFlow 全局样式（v1.1 主题系统）
    - 暗色为基础（默认，data-mode 缺省即 dark）；
    - data-theme 切换 accent 色系：indigo（默认）|violet|emerald|rose|amber，
      仅覆盖 --primary/--primary-hover，背景/前景不变；
@@ -792,7 +792,6 @@ td.name-cell {
   gap: 8px;
 }
 /* 弹性撑满由 antd 适配层（.tag-create .ant-input-affix-wrapper flex:1）承担。 */
-
 
 .crumb .sep {
   margin: 0 6px;
@@ -3677,7 +3676,6 @@ kbd {
 .share-tree-preview-head .ant-btn {
   margin-left: auto;
 }
-
 
 /* ---------- 富文本编辑器（Tiptap v2，.rich-text-*） ---------- */
 
@@ -6794,43 +6792,13 @@ kbd {
   background: var(--surface);
 }
 .studio-card-title { display: flex; align-items: center; gap: 6px; font-weight: 600; color: var(--primary); }
-.studio-title-btn { margin-left: auto; }
 /* 左栏：项目列表（上限高度内部滚动）+ 目录/任务主区。 */
 .studio-projects { flex-shrink: 0; max-height: 30%; overflow-y: auto; }
-.studio-proj-item {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 8px;
-  border-radius: 8px;
-  cursor: pointer;
-  font-size: 13px;
-}
-.studio-proj-item:hover { background: var(--surface-2); }
-.studio-proj-item.active { background: var(--primary-bg, rgba(59, 130, 246, 0.12)); color: var(--primary); font-weight: 600; }
-.studio-proj-item .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .studio-proj-item .x,
-.studio-tab .x {
-  flex-shrink: 0;
-  width: 18px;
-  height: 18px;
-  line-height: 1;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-  opacity: 0;
-}
 .studio-proj-item:hover .x,
-.studio-tab:hover .x { opacity: 1; }
 .studio-proj-item .x:hover,
-.studio-tab .x:hover { background: var(--surface-2); color: var(--danger, #dc2626); }
 /* 项目搜索框（列表头部；按名称过滤）。 */
-.studio-proj-search { margin: 4px 0 6px; }
 /* 项目条目两行：名称 + 绑定路径（muted 小字）。 */
-.studio-proj-item .meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-.studio-proj-item .meta .name { flex: 0 0 auto; width: 100%; }
 .studio-proj-path {
   font-size: 11px;
   font-weight: 400;
@@ -6839,7 +6807,6 @@ kbd {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.studio-left-main { flex: 1; }
 .studio-left { padding: 8px 6px 8px 10px; }
 .studio-left-head {
   display: flex;
@@ -6881,19 +6848,6 @@ kbd {
 .studio-art-row .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .studio-tree-hint { padding: 4px 8px; font-size: 12px; }
 /* 左栏任务列表。 */
-.studio-task-item {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 6px;
-  border-radius: 8px;
-  cursor: pointer;
-  font-size: 12.5px;
-}
-.studio-task-item:hover { background: var(--surface-2); }
-.studio-task-item.active { background: var(--primary-bg, rgba(59, 130, 246, 0.12)); }
-.studio-task-item .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.studio-task-item .time { flex-shrink: 0; font-size: 11px; color: var(--muted); }
 /* 任务状态徽标。 */
 .studio-badge {
   flex-shrink: 0;
@@ -6973,8 +6927,6 @@ kbd {
 .stab-body { flex: 1; min-height: 0; overflow: auto; }
 .stab-edit-body { display: flex; flex-direction: column; }
 .stab-empty { flex: 1; display: flex; align-items: center; justify-content: center; }
-.studio-empty { flex: 1; align-items: center; justify-content: center; text-align: center; color: var(--muted); gap: 10px; }
-.studio-empty p { margin: 0; font-size: 13px; }
 /* Skill 模板 chips（创作任务模式）。 */
 .studio-tpl-row { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 2px 6px; }
 .studio-tpl-chip {
@@ -7443,18 +7395,6 @@ kbd {
 .aic-mention-item .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .aic-mention-state { font-size: 12px; padding: 6px 8px; }
 /* Agent 能力未启用：中栏顶部黄条提示。 */
-.studio-agent-off {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin: 8px 10px 0;
-  padding: 6px 10px;
-  border: 1px solid rgba(217, 119, 6, 0.45);
-  border-radius: 8px;
-  background: rgba(245, 158, 11, 0.14);
-  color: #b45309;
-  font-size: 12px;
-}
 
 /* ==================== AI 编辑对话：模式开关 + 自动应用/撤销（版本保护） ==================== */
 /* 面板头部下方的「可修改 / 仅对话」模式行（与范围行同款分隔）。 */
@@ -7539,76 +7479,10 @@ kbd {
 .ai-edit-chat-mode .ai-toggle-row { margin-left: auto; }
 
 /* 「网络来源」折叠列表（联网开关生效时后端 SSE meta.sources 宽松读取）。 */
-.ai-web-sources { margin-top: 8px; font-size: 12px; }
-.ai-web-sources > summary {
-  cursor: pointer;
-  color: var(--muted);
-  user-select: none;
-}
-.ai-web-sources > summary:hover { color: var(--primary); }
-.ai-web-sources[open] > summary { margin-bottom: 2px; }
-.ai-web-sources-list {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 3px;
-  padding: 4px 0 2px 2px;
-}
-.ai-web-source-link {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  max-width: 100%;
-  color: var(--primary);
-  text-decoration: none;
-  font-size: 12px;
-}
-a.ai-web-source-link:hover { text-decoration: underline; }
-.ai-web-source-link .idx {
-  flex-shrink: 0;
-  min-width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  border: 1px solid var(--border);
-  background: var(--surface-2);
-  color: var(--muted);
-  font-size: 10px;
-  line-height: 14px;
-  text-align: center;
-}
-.ai-web-source-link .name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 
 /* 「工具调用」行（SSE event:tool，外部 MCP 工具执行前逐次下发；
    Wrench 小标签逐条列出，顺序保留；三处对话共用）。 */
-.ai-tool-calls {
-  margin-top: 8px;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  align-items: center;
-  font-size: 12px;
-}
-.ai-tool-calls-label { flex-shrink: 0; }
-.ai-tool-call-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 8px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--bg);
-  color: var(--muted);
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 /* df_write_file 条目「已保存（自动留版本）」小字。 */
-.ai-tool-call-saved { color: var(--primary); font-size: 11px; }
 /* 记忆面板「自动」小 Tag（kind=auto；不挤压内容列）。 */
 .ai-memory-auto-tag { flex-shrink: 0; margin: 0; line-height: 18px; }
 
@@ -7967,3 +7841,4 @@ a.ai-web-source-link:hover { text-decoration: underline; }
 .viewer-aiw-ball.snapped { box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4); }
 :root[data-mode='light'] .viewer-aiw-ball.snapped { box-shadow: 0 4px 12px rgba(24, 30, 42, 0.28); }
 .viewer-aiw-ball.snapped:hover { transform: scale(1.1); }
+

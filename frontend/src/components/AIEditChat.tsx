@@ -35,7 +35,11 @@ import AIModelSelect from './AIModelSelect'
 import AIMarkdown from './AIMarkdown'
 import { useAIEnabled } from '../aiFeature'
 import { t, useLocale } from '../i18n'
-import type { AIEditTarget } from './AIEdit'
+/** 选区描述（无选区 = 全文模式；原独立 AIEdit.tsx 移除后迁此）。 */
+export interface AIEditTarget {
+  text: string
+  hasSelection: boolean
+}
 
 /** 上下文（选区/全文）送入模型的最大长度（超限截取头部并在消息中注明）。 */
 const MAX_CONTEXT_CHARS = 6000

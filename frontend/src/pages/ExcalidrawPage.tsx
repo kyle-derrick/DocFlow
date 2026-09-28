@@ -1,4 +1,4 @@
-// Excalidraw 白板编辑页（/excalidraw/:fileId）：
+﻿// Excalidraw 白板编辑页（/excalidraw/:fileId）：
 // - @excalidraw/excalidraw 经 React.lazy 动态加载（产物 1MB+，拆出独立
 //   chunk 避免首包膨胀；包入口按 process.env 分发构建产物，见 vite.config
 //   的 define 注释）；
@@ -18,7 +18,7 @@ import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { FileWithVersion, fetchFileText, getFileMeta, uploadFileVersion } from '../api'
 import ExcalidrawViewer from '../components/ExcalidrawViewer'
 import { EditorLoadError, EditorLoadErrorBoundary } from '../components/EditorLoadError'
-import type { AIEditTarget } from '../components/AIEdit'
+import type { AIEditTarget } from '../components/AIEditChat'
 import AIEditChat, { AIEditChatButton } from '../components/AIEditChat'
 import type { AIQuickCommand } from '../components/AIEditChat'
 import { closeEditorWithFallback, safeReturnTo } from '../editorNavigation'
@@ -613,3 +613,4 @@ export default function ExcalidrawPage({
     </div>
   )
 }
+

@@ -1,4 +1,4 @@
-// 富文本文档页（.dfrt 主后缀 / .dfdoc 兼容别名；路由 /dfdoc/:fileId）：
+﻿// 富文本文档页（.dfrt 主后缀 / .dfdoc 兼容别名；路由 /dfdoc/:fileId）：
 // DocFlow 专属富文本格式，Tiptap JSON 存储（见 RichTextEditor）——编辑态
 // 加载 JSON 进 Tiptap，保存整篇回写新版本；查看态 readonly 渲染同一编辑器
 //（嵌入块内联渲染 drawio/白板/图片等）。by-path 路由经 prop 传入 file_id。
@@ -8,7 +8,7 @@ import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { marked } from 'marked'
 import { fetchFileText, getFileMeta, listDocumentComments, uploadFileVersion } from '../api'
 import type { DocumentComment } from '../api'
-import type { AIEditTarget } from '../components/AIEdit'
+import type { AIEditTarget } from '../components/AIEditChat'
 import AIEditChat, { AIEditChatButton } from '../components/AIEditChat'
 import type { AIQuickCommand } from '../components/AIEditChat'
 import { closeEditorWithFallback, safeReturnTo } from '../editorNavigation'
@@ -614,3 +614,4 @@ export default function DfdocEditorPage({
     </main>
   )
 }
+
