@@ -231,7 +231,7 @@ export default function SharedPage() {
     return 'active'
   }
 
-  const reloadCurrent = () => void load(page, pageSize, query, typeFilter, statusFilter)
+  const reloadCurrent = () => load(page, pageSize, query, typeFilter, statusFilter)
 
   const toggleStats = async (s: ShareItem, expanded: boolean) => {
     if (!expanded) {
@@ -278,14 +278,16 @@ export default function SharedPage() {
         setError('')
         try {
           await revokeShare(s.id)
-          setNotice(msg('shareRevoked'))
           setStatsOpen((prev) => {
             const next = { ...prev }
             delete next[s.id]
             return next
           })
           setSelected((prev) => prev.filter((k) => k !== s.id))
-          reloadCurrent()
+          // 先刷新列表再提示：load() 会重置 notice（修复「分享已撤销」横幅
+          // 被紧随的列表刷新立即清除、用户永远看不到的问题）。
+          await reloadCurrent()
+          setNotice(msg('shareRevoked'))
         } catch (err) {
           setNotice('')
           setError(err instanceof Error ? err.message : msg('revokeFailed'))
@@ -312,9 +314,10 @@ export default function SharedPage() {
         setError('')
         try {
           await purgeShare(s.id)
-          setNotice(zh ? '记录已清除' : 'Record purged')
           setSelected((prev) => prev.filter((k) => k !== s.id))
-          reloadCurrent()
+          // 同撤销：先刷新列表再提示（load() 会重置 notice）。
+          await reloadCurrent()
+          setNotice(zh ? '记录已清除' : 'Record purged')
         } catch (err) {
           setError(err instanceof Error ? err.message : zh ? '清除记录失败' : 'Failed to purge record')
         }
@@ -340,13 +343,14 @@ export default function SharedPage() {
         try {
           const results = await Promise.allSettled(targets.map((id) => revokeShare(id)))
           const failed = results.filter((r) => r.status === 'rejected').length
+          setSelected([])
+          // 同撤销：先刷新列表再提示（load() 会重置 notice）。
+          await reloadCurrent()
           setNotice(failed === 0
             ? (zh ? `已撤销 ${targets.length} 个分享` : `Revoked ${targets.length} shares`)
             : (zh
               ? `已撤销 ${targets.length - failed} 个，${failed} 个失败（列表已刷新，可重试剩余项）`
               : `${targets.length - failed} revoked, ${failed} failed`))
-          setSelected([])
-          reloadCurrent()
         } finally {
           setBatchBusy(false)
         }

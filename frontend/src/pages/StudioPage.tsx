@@ -1450,12 +1450,28 @@ export default function StudioPage() {
   /** 快捷创建：复用上传管线在指定目录（默认项目根）建文档，建完新窗口打开编辑器。 */
   const createDoc = async (kind: 'richtext' | 'markdown', folderId?: string, folderName?: string) => {
     if (!project || creating) return
+    // 目标目录现有名集合：默认名「新文档.md/.dfrt」被占用时自动加 -2/-3… 后缀
+    //（上传管道对同名不同文件返回 409，固定名会导致二次点击必然失败）。
+    const targetId = folderId || project.rootFolderId
+    let taken = new Set<string>()
+    try {
+      const items = await listFiles(targetId, { spaceId: project.spaceId, limit: 500 })
+      taken = new Set(items.filter((f) => !f.is_root).map((f) => f.name.toLowerCase()))
+    } catch {
+      // 列举失败不阻断创建（沿用默认名，冲突时由错误提示兜底）。
+    }
+    const baseName = kind === 'markdown' ? '新文档.md' : '新文档.dfrt'
+    const dot = baseName.lastIndexOf('.')
+    const stem = dot > 0 ? baseName.slice(0, dot) : baseName
+    const ext = dot > 0 ? baseName.slice(dot) : ''
+    let docName = baseName
+    for (let n = 2; taken.has(docName.toLowerCase()); n++) docName = `${stem}-${n}${ext}`
     const spec = kind === 'markdown'
-      ? { name: '新文档.md', content: '# 新文档\n\n', mime: 'text/markdown', route: 'markdown' }
-      : { name: '新文档.dfrt', content: EMPTY_DFDOC_JSON, mime: 'application/json', route: 'dfdoc' }
+      ? { name: docName, content: '# 新文档\n\n', mime: 'text/markdown', route: 'markdown' }
+      : { name: docName, content: EMPTY_DFDOC_JSON, mime: 'application/json', route: 'dfdoc' }
     setCreating(kind)
     try {
-      const session = await uploadFile(new File([spec.content], spec.name, { type: spec.mime }), folderId || project.rootFolderId, () => {})
+      const session = await uploadFile(new File([spec.content], spec.name, { type: spec.mime }), targetId, () => {})
       setTreeTick((n) => n + 1)
       setRecentTick((n) => n + 1)
       if (session.file_id && session.file_id !== NIL_UUID) {

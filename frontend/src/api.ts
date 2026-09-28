@@ -88,10 +88,13 @@ async function rawFetch(path: string, init: RequestInit): Promise<Response> {
   return fetch(path, { ...init, headers, credentials: 'same-origin' })
 }
 
-/** 认证请求：401 时自动 refresh 一次并重放原请求（body 需可重放：File/Blob/string）。 */
+/** 认证请求：401 时自动 refresh 一次并重放原请求（body 需可重放：File/Blob/string）。
+ *  auth 端点（/auth/*）豁免：登录凭据错误的 401 与「会话过期」语义无关，
+ *  走 refresh 只会在无 refresh cookie 的全新浏览器上把后端原文
+ *  （如 invalid credentials）吞成误导性的「会话已过期，请重新登录」。 */
 export async function authFetch(path: string, init: RequestInit = {}): Promise<Response> {
   let res = await rawFetch(path, init)
-  if (res.status === 401) {
+  if (res.status === 401 && !path.startsWith('/api/v1/auth/')) {
     const ok = await refreshSession()
     if (!ok) {
       accessToken = null
