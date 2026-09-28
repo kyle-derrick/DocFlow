@@ -1,4 +1,4 @@
-.PHONY: run test fmt seed migrate e2e build-frontend sync-frontend build-agent validate-compose deploy deploy-minimal deploy-full up-minimal up-full down backup backup-verify backup-windows backup-windows-verify
+.PHONY: run test fmt seed migrate e2e build-frontend sync-frontend build-agent validate-compose deploy deploy-minimal deploy-full deploy-auto up-minimal up-full down backup backup-verify backup-windows backup-windows-verify init-env
 
 run:
 	go run ./cmd/server
@@ -33,6 +33,12 @@ migrate:
 #   frontend/e2e/setup-backend.mjs）与 vite dev server（:5173），结束后自动回收。
 e2e:
 	cd frontend && npm run e2e
+
+# 一键生成 .env：交互式为 PG 密码/JWT/初始管理员等提供「随机生成/手动输入」
+#（Linux/macOS 用 scripts/gen-env.sh，支持 --auto 全自动）。deploy.ps1 在
+# .env 缺失或含占位符时也会自动调用（-Auto 无人值守）。
+init-env:
+	powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gen-env.ps1
 
 # 构建 caddy 入口镜像（多阶段：前端 vite 构建产物并入 caddy 镜像，
 # 见 frontend/Dockerfile；即 docker compose 中 caddy 服务所用的镜像）。

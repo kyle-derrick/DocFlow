@@ -1,7 +1,9 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [ValidateSet('minimal', 'full')]
-    [string]$Profile = 'minimal'
+    [string]$Profile = 'minimal',
+    # -Auto：无人值守部署——.env 缺失/含占位符时全部密钥随机生成（交互提示关闭）。
+    [switch]$Auto
 )
 
 $ErrorActionPreference = 'Stop'
@@ -18,17 +20,42 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
 }
 Invoke-Checked 'docker' @('compose', 'version')
 
+$genEnv = Join-Path $PSScriptRoot 'gen-env.ps1'
 if (-not (Test-Path '.env')) {
-    Copy-Item '.env.example' '.env'
-    Write-Warning '已从 .env.example 创建 .env。请先设置 JWT_SECRET、SEED_ADMIN_PASSWORD 和 POSTGRES_PASSWORD 等密钥后重新运行。'
-    exit 1
+    if ($Auto) {
+        # -Auto：无人值守——.env 缺失时全部密钥随机生成后继续部署。
+        Invoke-Checked 'powershell' @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $genEnv, '-Auto')
+    } elseif (Test-Path $genEnv) {
+        # 交互式初始化（每项可选生成/手动输入）；完成後继续本次部署。
+        Invoke-Checked 'powershell' @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $genEnv)
+    } else {
+        Copy-Item '.env.example' '.env'
+        Write-Warning '已从 .env.example 创建 .env。请先设置 JWT_SECRET、SEED_ADMIN_PASSWORD 和 POSTGRES_PASSWORD 等密钥后重新运行。'
+        exit 1
+    }
 }
 
-$envText = Get-Content '.env' -Raw
+$envText = Get-Content '.env' -Raw -Encoding UTF8
 $placeholders = @('replace-with-at-least-32-random-bytes', 'change-this-password', 'CHANGE_ME', 'CHANGE_ME_')
 $missing = $placeholders | Where-Object { $envText -match [regex]::Escape($_) }
 if ($missing) {
-    throw '检测到 .env 仍含模板密钥占位符，请设置 JWT_SECRET、SEED_ADMIN_PASSWORD、POSTGRES_PASSWORD 等密钥后重试。已有 .env 不会被覆盖。'
+    # 占位符残留：交互式下提供「自动生成替换」选项（-Auto 直接替换），避免手动编辑。
+    $patch = $true
+    if (-not $Auto) {
+        Write-Warning '检测到 .env 仍含模板密钥占位符。'
+        $ans = Read-Host '回车 = 自动生成并替换全部占位密钥 / m = 我自己改完后重试'
+        $patch = ($ans -ne 'm')
+    }
+    if ($patch -and (Test-Path $genEnv)) {
+        $autoArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $genEnv, '-Patch')
+        if ($Auto) { $autoArgs += '-Auto' }
+        Invoke-Checked 'powershell' $autoArgs
+        $envText = Get-Content '.env' -Raw -Encoding UTF8
+        $missing = $placeholders | Where-Object { $envText -match [regex]::Escape($_) }
+        if ($missing) { throw "替换后仍有占位符残留：$($missing -join ', ')。请手动检查 .env。" }
+    } else {
+        throw '请设置 JWT_SECRET、SEED_ADMIN_PASSWORD、POSTGRES_PASSWORD 等密钥后重试。已有 .env 不会被覆盖。'
+    }
 }
 
 $profileArgs = @('--profile', $Profile)
