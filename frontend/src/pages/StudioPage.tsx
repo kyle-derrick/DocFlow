@@ -23,10 +23,11 @@ import {
   PanelRightClose, PanelRightOpen, Pencil, Plus, RefreshCw, Settings2, Sparkles, Upload, X,
 } from 'lucide-react'
 import {
-  EMPTY_DFDOC_JSON, aiChat, currentUserId, deleteFile, getMe, listAgentTasks, listFiles, listSpaces,
-  listSpaceFiles, renameFile, searchFiles, uploadFile,
+  EMPTY_DFDOC_JSON, aiChat, createStudioProject, currentUserId, deleteFile, deleteStudioProject,
+  getMe, listAgentTasks, listFiles, listSpaces, listSpaceFiles, listStudioProjects, renameFile,
+  searchFiles, updateStudioProject, uploadFile,
 } from '../api'
-import type { AgentTask, AIMessage, FileItem, Space } from '../api'
+import type { AgentTask, AIMessage, FileItem, Space, StudioProjectItem } from '../api'
 import { applyAgentTask, cancelAgentTask, createAgentTask, discardAgentTask, getAgentTask, rollbackAgentTask } from '../agentTasks'
 import type { AgentDiff } from '../agentTasks'
 import { Modal, formatTime } from '../components/FileBrowser'
@@ -49,21 +50,10 @@ export type StudioEngine = 'platform' | 'docker'
 /** 项目执行引擎归一（localStorage 旧数据缺省 engine = 'platform' 默认语义）。 */
 const projEngine = (p?: StudioProject | null): StudioEngine => (p?.engine === 'docker' ? 'docker' : 'platform')
 
-/** 项目条目（localStorage）：spaceName/folderPath 创建时记录（旧数据缺省，
- *  展示侧惰性解析空间名兜底）。 */
-interface StudioProject {
-  id: string; name: string; spaceId: string; rootFolderId: string; createdAt: string
-  /** 绑定空间名（创建时快照；旧项目缺省）。 */
-  spaceName?: string
-  /** 绑定路径「空间名/目录名」（空间根项目 = 空间名；旧项目缺省）。 */
-  folderPath?: string
-  /** 执行引擎（'platform' 默认 | 'docker' 沙箱；缺省视为 'platform'）。 */
-  engine?: StudioEngine
-  /** Docker 沙箱执行引擎（新建项目时选择；''/缺省 = 跟随平台 auto，任务请求不下发）。 */
-  harness?: string
-  /** 默认模型（`${providerId}/${model}` 键；''/缺省 = 平台默认）。 */
-  model?: string
-}
+/** 项目条目（服务端 studio_projects 行；v3.2 服务端化——旧版仅存浏览器
+ *  localStorage，换浏览器/清存储即丢入口）。spaceName/folderPath 为创建时
+ *  快照（展示用；空缺时惰性解析空间名兜底）。 */
+type StudioProject = StudioProjectItem
 
 /** 会话消息（统一共享展示模型 + docker 任务卡扩展）。 */
 interface StudioTurn extends AIChatTurnData {
@@ -76,7 +66,6 @@ interface StudioSession {
   model?: string
 }
 
-const projectsKey = (uid: string) => `docflow.studio.projects.${uid}`
 const sessionsKey = (uid: string, pid: string) => `docflow.studio.sessions.${uid}.${pid}`
 const taskIdsKey = (uid: string) => `docflow.studio.taskids.${uid}`
 const tabsKey = (uid: string, pid: string) => `docflow.studio.tabs.${uid}.${pid}`
@@ -232,9 +221,9 @@ function ArtifactTree({ zh, taskId, status, project, onOpenFile, onSummary }: {
   /** 已 apply 的产物：按相对路径在项目根目录下逐层定位平台文件。 */
   const resolvePlatformFile = async (relPath: string): Promise<FileItem | null> => {
     const segs = relPath.split('/').filter(Boolean)
-    let parent: string | null = project.rootFolderId
+    let parent: string | null = project.root_folder_id
     for (let i = 0; i < segs.length && parent !== null; i++) {
-      const items = await listFiles(parent, { spaceId: project.spaceId, limit: 500 })
+      const items = await listFiles(parent, { spaceId: project.space_id, limit: 500 })
       const hit = items.find((x) => x.name === segs[i])
       if (!hit) return null
       if (i === segs.length - 1) return hit.type === 'folder' ? null : hit
@@ -342,8 +331,8 @@ function ProjectFormModal({ zh, agentOn, initial, onClose, onSubmit }: {
     void listSpaces()
       .then(async (list) => {
         setSpaces(list)
-        const def = initial?.spaceId
-          ? (list.find((s) => s.id === initial.spaceId) ?? list.find((s) => s.is_default) ?? list[0])
+        const def = initial?.space_id
+          ? (list.find((s) => s.id === initial.space_id) ?? list.find((s) => s.is_default) ?? list[0])
           : (list.find((s) => s.is_default) ?? list[0])
         if (!def) return
         setSpaceId(def.id)
@@ -351,9 +340,9 @@ function ProjectFormModal({ zh, agentOn, initial, onClose, onSubmit }: {
           // 编辑模式：初始绑定非空间根时预选该目录（空间根保持「空间根目录」态）。
           try {
             const rootId = (await listSpaceFiles(def.id, null)).parent_id
-            if (initial.rootFolderId && initial.rootFolderId !== rootId) {
-              setFolderId(initial.rootFolderId)
-              setFolderName(initial.folderPath?.includes('/') ? (initial.folderPath.split('/').pop() ?? '') : '')
+            if (initial.root_folder_id && initial.root_folder_id !== rootId) {
+              setFolderId(initial.root_folder_id)
+              setFolderName(initial.folder_path?.includes('/') ? (initial.folder_path.split('/').pop() ?? '') : '')
             }
           } catch {
             /* 空间根解析失败：保持空（提交时按空间根处理） */
@@ -505,7 +494,7 @@ function ManageProjectsModal({ zh, projects, currentId, pathText, onClose, onNew
             </span>
             <span><EngineTag engine={projEngine(p)} zh={zh} /></span>
             <span className="path" title={pathText(p)}>{pathText(p)}</span>
-            <span className="time">{formatTime(p.createdAt)}</span>
+            <span className="time">{p.created_at ? formatTime(p.created_at) : ''}</span>
             <span className="ops">
               <Button size="small" type="text" onClick={() => onEdit(p)}>{zh ? '编辑' : 'Edit'}</Button>
               <Button size="small" type="text" danger onClick={() => onDelete(p)}>{zh ? '删除' : 'Delete'}</Button>
@@ -561,7 +550,7 @@ function RecentArtifacts({ zh, project, tick, onView }: {
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const files = await listFiles(project.rootFolderId, { spaceId: project.spaceId, sort: 'updated_at', order: 'desc', limit: 100 })
+      const files = await listFiles(project.root_folder_id, { spaceId: project.space_id, sort: 'updated_at', order: 'desc', limit: 100 })
       setItems(files.filter((f) => f.type === 'file').slice(0, 20))
       setErr('')
     } catch (e) {
@@ -569,7 +558,7 @@ function RecentArtifacts({ zh, project, tick, onView }: {
     } finally {
       setLoading(false)
     }
-  }, [project.rootFolderId, project.spaceId])
+  }, [project.root_folder_id, project.space_id])
 
   useEffect(() => { void load() }, [load, tick])
 
@@ -708,7 +697,7 @@ function StudioChat({ zh, engine, agentOn, onRefreshTasks, onChatSettled, projec
           // 平台引擎主路径：df_* 平台文件工具注入 + 工作目录 = 项目根
           //（树右键「设为 AI 工作目录」时跟随，AI 直接读写、自动留版本）。
           use_files: true,
-          work_root: taskRoot || project.rootFolderId,
+          work_root: taskRoot || project.root_folder_id,
         },
         {
           onMeta: (meta) => {
@@ -761,7 +750,7 @@ function StudioChat({ zh, engine, agentOn, onRefreshTasks, onChatSettled, projec
     const modelOpt = models.find((m) => m.id === modelKey) ?? null
     patchSession((m) => [...m, { id: ++seq.current, role: 'user', content: text, files: refs.length > 0 ? refs : undefined }], text.slice(0, 16))
     try {
-      const task = await createAgentTask(taskRoot || project.rootFolderId, prompt, '', 900, {
+      const task = await createAgentTask(taskRoot || project.root_folder_id, prompt, '', 900, {
         harness: project.harness || undefined,
         model: modelOpt && modelOpt.model ? { provider_id: modelOpt.providerId, model_id: modelOpt.model } : undefined,
       })
@@ -1006,7 +995,7 @@ function StudioChat({ zh, engine, agentOn, onRefreshTasks, onChatSettled, projec
           ? (zh ? '描述任务，Enter 发送给 Agent…' : 'Describe the task; Enter to send to the agent…')
           : (zh ? '描述任务，AI 将直接写入项目目录，Enter 发送…' : 'Describe the task; AI writes into the project folder. Enter to send…')}
         header={composerHeader}
-        mentionRoot={taskRoot || project.rootFolderId}
+        mentionRoot={taskRoot || project.root_folder_id}
         onMentionPick={(f) => { if (!refs.some((r) => r.fileId === f.id)) onToggleRef({ fileId: f.id, fileName: f.name }) }}
         focusSignal={focusSignal}
       />
@@ -1193,18 +1182,23 @@ export default function StudioPage() {
     void getMe().then((m) => setUid(m.id)).catch(() => setUid(currentUserId() ?? 'anon'))
   }, [])
 
+  // 项目清单自服务端拉取（v3.2 服务端化；随账号走，换浏览器不丢）。任务
+  // 追踪映射仍为浏览器本地态（按 uid 键）。
   useEffect(() => {
     if (!uid) return
-    const list = loadJSON<StudioProject[]>(projectsKey(uid), [])
-    setProjects(list)
+    void listStudioProjects()
+      .then((list) => {
+        setProjects(list)
+        setPid((cur) => (list.some((p) => p.id === cur) ? cur : (list[0]?.id ?? '')))
+      })
+      .catch(() => message.error(zh ? '项目列表加载失败' : 'Failed to load projects'))
     setTaskIds(loadJSON(taskIdsKey(uid), {}))
-    setPid(list[0]?.id ?? '')
   }, [uid])
 
   // 旧项目缺 spaceName 时惰性解析一次空间名（listSpaces 查名；失败静默，
   // 展示兜底「未记录路径」）。
   useEffect(() => {
-    if (spaceNamesFetchedRef.current || projects.length === 0 || projects.every((p) => p.spaceName)) return
+    if (spaceNamesFetchedRef.current || projects.length === 0 || projects.every((p) => p.space_name)) return
     spaceNamesFetchedRef.current = true
     void listSpaces()
       .then((list) => setSpaceNameById(Object.fromEntries(list.map((s) => [s.id, s.name]))))
@@ -1213,9 +1207,9 @@ export default function StudioPage() {
 
   /** 项目路径文案：新项目用创建时快照；旧项目惰性空间名兜底。 */
   const projPathText = (p: StudioProject): string => {
-    if (p.folderPath) return p.folderPath
-    if (p.spaceName) return p.spaceName
-    const sn = spaceNameById[p.spaceId]
+    if (p.folder_path) return p.folder_path
+    if (p.space_name) return p.space_name
+    const sn = spaceNameById[p.space_id]
     return sn ? `${sn}（未记录目录）` : '未记录路径'
   }
 
@@ -1235,24 +1229,22 @@ export default function StudioPage() {
     const tabs = loadJSON<OpenTab[]>(tabsKey(uid, pid), []).filter((x) => x && x.id && x.name)
     setOpenTabs(tabs)
     setActiveTab(tabs[0]?.id ?? null)
-    setTaskRoot(projects.find((p) => p.id === pid)?.rootFolderId ?? '')
+    setTaskRoot(projects.find((p) => p.id === pid)?.root_folder_id ?? '')
     setRefs([])
     setReviewId('')
     setAiTab('chat')
   }, [uid, pid]) // projects 读取为当前值即可，切换语义由 pid 驱动
 
-  // 持久化写透：会话防抖 400ms（避免流式逐 token 落盘），项目/任务映射/Tab 直接写。
+  // 持久化写透：会话防抖 400ms（避免流式逐 token 落盘），任务映射/Tab 直接写。
+  //（项目清单为服务端态，由 CRUD 流程各自写透，不再本地落盘。）
   useEffect(() => {
     if (!uid || !pid) return
     const timer = window.setTimeout(() => saveJSON(sessionsKey(uid, pid), sessions), 400)
     return () => window.clearTimeout(timer)
   }, [uid, pid, sessions])
   useEffect(() => {
-    if (uid) {
-      saveJSON(projectsKey(uid), projects)
-      saveJSON(taskIdsKey(uid), taskIds)
-    }
-  }, [uid, projects, taskIds])
+    if (uid) saveJSON(taskIdsKey(uid), taskIds)
+  }, [uid, taskIds])
   useEffect(() => {
     if (uid && pid) saveJSON(tabsKey(uid, pid), openTabs)
   }, [uid, pid, openTabs])
@@ -1280,7 +1272,7 @@ export default function StudioPage() {
     if (!project) return []
     const ids = new Set(taskIds[project.id] ?? [])
     return tasks
-      .filter((x) => x.root_folder_id === project.rootFolderId || ids.has(x.id))
+      .filter((x) => x.root_folder_id === project.root_folder_id || ids.has(x.id))
       .sort((a, b) => b.created_at.localeCompare(a.created_at))
   }, [tasks, taskIds, project])
 
@@ -1318,16 +1310,22 @@ export default function StudioPage() {
     const rootFolderId = data.folderId || (await listSpaceFiles(data.spaceId, null)).parent_id
     // 绑定路径快照：空间根项目 = 空间名；子目录 = 空间名/目录名。
     const folderPath = data.folderId && data.folderName ? `${data.spaceName}/${data.folderName}` : data.spaceName
-    const proj: StudioProject = {
-      id: localId(), name: data.name, spaceId: data.spaceId, rootFolderId, createdAt: new Date().toISOString(),
-      spaceName: data.spaceName, folderPath,
-      // 执行引擎（缺省 = 'platform' 默认主路径）+ 沙箱 harness/默认模型
-      //（'' = 跟随平台/平台默认；旧项目缺省字段兼容）。
-      engine: data.engine === 'docker' ? 'docker' : 'platform',
-      harness: data.harness, model: data.model,
+    try {
+      // 服务端注册（id 服务端生成；失败弹错不落本地）。
+      const proj = await createStudioProject({
+        name: data.name, space_id: data.spaceId, root_folder_id: rootFolderId,
+        space_name: data.spaceName, folder_path: folderPath,
+        // 执行引擎（缺省 = 'platform' 默认主路径）+ 沙箱 harness/默认模型
+        //（'' = 跟随平台/平台默认）。
+        engine: data.engine === 'docker' ? 'docker' : 'platform',
+        harness: data.harness, model: data.model,
+      })
+      setProjects((p) => [...p, proj])
+      setPid(proj.id)
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : (zh ? '创建失败' : 'Failed to create'))
+      throw err
     }
-    setProjects((p) => [...p, proj])
-    setPid(proj.id)
   }
 
   /** 编辑项目：名称/空间/绑定目录/引擎/harness/模型（会话与任务映射随
@@ -1336,11 +1334,19 @@ export default function StudioPage() {
     const prev = projects.find((p) => p.id === id)
     const rootFolderId = data.folderId || (await listSpaceFiles(data.spaceId, null)).parent_id
     const folderPath = data.folderId && data.folderName ? `${data.spaceName}/${data.folderName}` : data.spaceName
-    setProjects((p) => p.map((x) => x.id === id ? {
-      ...x, name: data.name, spaceId: data.spaceId, rootFolderId, spaceName: data.spaceName, folderPath,
-      engine: data.engine === 'docker' ? 'docker' : 'platform', harness: data.harness, model: data.model,
-    } : x))
-    if (prev && (prev.rootFolderId !== rootFolderId || prev.spaceId !== data.spaceId)) {
+    try {
+      const updated = await updateStudioProject(id, {
+        name: data.name, space_id: data.spaceId, root_folder_id: rootFolderId,
+        space_name: data.spaceName, folder_path: folderPath,
+        engine: data.engine === 'docker' ? 'docker' : 'platform',
+        harness: data.harness, model: data.model,
+      })
+      setProjects((p) => p.map((x) => (x.id === id ? updated : x)))
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : (zh ? '保存失败' : 'Failed to save'))
+      throw err
+    }
+    if (prev && (prev.root_folder_id !== rootFolderId || prev.space_id !== data.spaceId)) {
       setTaskRoot(rootFolderId)
       setOpenTabs([])
       setActiveTab(null)
@@ -1349,12 +1355,18 @@ export default function StudioPage() {
     }
   }
 
-  // 删除项目：清理该项目的任务追踪，并异步作废其未决 Agent 任务
-  //（discard 后平台回收任务工作区与临时导出，容器产物即「删除 Docker
-  // 空间数据」的落地语义；已 apply/done 的历史记录一并弃置）。空间内
-  // 文件不受影响。
+  // 删除项目：服务端删记录 + 清理该项目的任务追踪，并异步作废其未决 Agent
+  // 任务（discard 后平台回收任务工作区与临时导出，容器产物即「删除 Docker
+  // 空间数据」的落地语义；已 apply/done 的历史记录一并弃置）。空间内文件
+  // 不受影响。
   const deleteProject = async (id: string) => {
     const proj = projects.find((p) => p.id === id)
+    try {
+      await deleteStudioProject(id)
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : (zh ? '删除失败' : 'Failed to delete'))
+      return
+    }
     setProjects((p) => p.filter((x) => x.id !== id))
     if (pid === id) setPid('')
     message.success('项目已删除（不影响云端文件）')
@@ -1409,7 +1421,7 @@ export default function StudioPage() {
         }
         setOpenTabs((prev) => prev.filter((x) => x.id !== f.id))
         if (activeTab === f.id) setActiveTab((cur) => (cur === f.id ? null : cur))
-        if (taskRoot === f.id) setTaskRoot(project?.rootFolderId ?? '')
+        if (taskRoot === f.id) setTaskRoot(project?.root_folder_id ?? '')
         setRefs((prev) => prev.filter((x) => x.fileId !== f.id))
         setTreeTick((n) => n + 1)
         setRecentTick((n) => n + 1)
@@ -1452,10 +1464,10 @@ export default function StudioPage() {
     if (!project || creating) return
     // 目标目录现有名集合：默认名「新文档.md/.dfrt」被占用时自动加 -2/-3… 后缀
     //（上传管道对同名不同文件返回 409，固定名会导致二次点击必然失败）。
-    const targetId = folderId || project.rootFolderId
+    const targetId = folderId || project.root_folder_id
     let taken = new Set<string>()
     try {
-      const items = await listFiles(targetId, { spaceId: project.spaceId, limit: 500 })
+      const items = await listFiles(targetId, { spaceId: project.space_id, limit: 500 })
       taken = new Set(items.filter((f) => !f.is_root).map((f) => f.name.toLowerCase()))
     } catch {
       // 列举失败不阻断创建（沿用默认名，冲突时由错误提示兜底）。
@@ -1585,7 +1597,7 @@ export default function StudioPage() {
         </Tooltip>
         {project && (
           <Tooltip title={zh ? `在文件页打开「${projPathText(project)}」所在空间` : 'Open the space in Files'}>
-            <Button size="small" onClick={() => { window.location.href = `/files?space=${project.spaceId}` }}>
+            <Button size="small" onClick={() => { window.location.href = `/files?space=${project.space_id}` }}>
               <FolderClosed size={13} aria-hidden="true" />{zh ? '定位到目录' : 'Locate folder'}
             </Button>
           </Tooltip>
@@ -1607,7 +1619,7 @@ export default function StudioPage() {
             </Tooltip>
             <Tooltip title={zh ? '上传文件' : 'Upload files'}>
               <Button size="small" type="text" aria-label={zh ? '上传文件' : 'Upload files'} loading={uploading}
-                onClick={() => openUpload({ id: taskRoot || project.rootFolderId, name: taskRoot && taskRoot !== project.rootFolderId ? (zh ? '工作目录' : 'working root') : project.name })}>
+                onClick={() => openUpload({ id: taskRoot || project.root_folder_id, name: taskRoot && taskRoot !== project.root_folder_id ? (zh ? '工作目录' : 'working root') : project.name })}>
                 <Upload size={13} aria-hidden="true" />
               </Button>
             </Tooltip>
@@ -1653,8 +1665,8 @@ export default function StudioPage() {
                 <FileTreePanel
                   key={`${project.id}:${treeTick}`}
                   zh={zh}
-                  spaceId={project.spaceId}
-                  rootId={project.rootFolderId}
+                  spaceId={project.space_id}
+                  rootId={project.root_folder_id}
                   rootTitle={projPathText(project)}
                   activeFolderId={taskRoot}
                   activeFileId={activeTab}

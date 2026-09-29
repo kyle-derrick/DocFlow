@@ -243,6 +243,89 @@ paths:
       summary: 创建 WebDAV 令牌（明文仅返回一次）
       security: [{bearerAuth: []}]
       responses: {"201": {description: Created}}
+  /studio/projects:
+    get:
+      tags: [AI]
+      operationId: listStudioProjects
+      summary: Studio 项目列表（本人）
+      description: >-
+        AI 创作空间的项目注册表（studio_projects，migration 051）：项目 =
+        空间 + 根目录 + 执行引擎的绑定，本人维度，updated_at 倒序。
+        空间名/路径为创建时快照（展示用弱引用）。服务端化替代旧版浏览器
+        localStorage 存储（换浏览器/清存储不再丢项目入口）。
+      security: [{bearerAuth: []}]
+      responses:
+        '200':
+          description: 项目列表
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [projects]
+                properties:
+                  projects:
+                    type: array
+                    items: { $ref: '#/components/schemas/StudioProject' }
+    post:
+      tags: [AI]
+      operationId: createStudioProject
+      summary: 新建 Studio 项目
+      description: >-
+        载荷校验：name 去空白 1-100 字符；space_id/root_folder_id 须合法
+        UUID；engine 空=platform（白名单外归一 platform）；harness ≤32、
+        model ≤160 字符。id 服务端生成。PAT 须 files:write scope。
+      security: [{bearerAuth: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StudioProjectInput' }
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StudioProject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /studio/projects/{id}:
+    put:
+      tags: [AI]
+      operationId: updateStudioProject
+      summary: 覆盖式更新 Studio 项目
+      description: >-
+        全字段覆盖更新（名称/绑定/引擎等由客户端整体提交）；校验同
+        POST。不存在与非属主一律 404（不区分，避免探测他人项目 id）。
+        PAT 须 files:write scope。
+      security: [{bearerAuth: []}]
+      parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StudioProjectInput' }
+      responses:
+        '200':
+          description: 已更新
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StudioProject' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [AI]
+      operationId: deleteStudioProject
+      summary: 删除 Studio 项目
+      description: >-
+        仅删项目记录（文件本体不受影响）。不存在与非属主一律 404。
+        PAT 须 files:write scope。
+      security: [{bearerAuth: []}]
+      parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
+      responses:
+        '204': {description: 已删除}
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
   /webdav/tokens/{id}:
     delete:
       summary: 撤销 WebDAV 令牌
@@ -7482,6 +7565,34 @@ components:
 
   schemas:
     Error:
+    # Studio 项目注册表（/studio/projects；migration 051）
+    StudioProject:
+      type: object
+      description: AI 创作空间项目（本人维度；space_name/folder_path 为创建时快照）
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, description: 1-100 字符 }
+        space_id: { type: string, format: uuid }
+        root_folder_id: { type: string, format: uuid, description: 项目根目录（工作目录绑定） }
+        space_name: { type: string, description: 绑定空间名快照（展示用） }
+        folder_path: { type: string, description: 绑定路径「空间名/目录名」快照 }
+        engine: { type: string, enum: [platform, docker], description: platform=平台直读写（默认）；docker=Agent 沙箱 }
+        harness: { type: string, description: docker 沙箱执行引擎（空 = 跟随平台 auto） }
+        model: { type: string, description: 默认模型 `${providerId}/${model}`（空 = 平台默认） }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    StudioProjectInput:
+      type: object
+      required: [name, space_id, root_folder_id]
+      properties:
+        name: { type: string, description: 1-100 字符（去空白） }
+        space_id: { type: string, format: uuid }
+        root_folder_id: { type: string, format: uuid }
+        space_name: { type: string }
+        folder_path: { type: string }
+        engine: { type: string, enum: [platform, docker] }
+        harness: { type: string, maxLength: 32 }
+        model: { type: string, maxLength: 160 }
       type: object
       required: [error]
       properties:

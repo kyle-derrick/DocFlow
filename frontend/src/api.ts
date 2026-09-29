@@ -1515,6 +1515,56 @@ export interface SpaceMembersResult {
   group_users: SpaceGroupUser[]
 }
 
+// ---------- Studio 项目注册表（服务端化；migration 051） ----------
+
+/** Studio 项目条目（服务端 studio_projects 行；字段与后端契约一致）。 */
+export interface StudioProjectItem {
+  id: string
+  name: string
+  space_id: string
+  root_folder_id: string
+  space_name?: string
+  folder_path?: string
+  engine?: 'platform' | 'docker'
+  harness?: string
+  model?: string
+  created_at?: string
+  updated_at?: string
+}
+
+/** 新建/更新项目载荷（id 由服务端生成；更新为全字段覆盖）。 */
+export interface StudioProjectInput {
+  name: string
+  space_id: string
+  root_folder_id: string
+  space_name?: string
+  folder_path?: string
+  engine?: 'platform' | 'docker'
+  harness?: string
+  model?: string
+}
+
+/** 本人项目列表（updated_at 倒序）。 */
+export async function listStudioProjects(): Promise<StudioProjectItem[]> {
+  const data = await api<{ projects: StudioProjectItem[] }>('/api/v1/studio/projects')
+  return data.projects ?? []
+}
+
+/** 新建项目（服务端生成 id；name 1-100 字符等校验见后端）。 */
+export async function createStudioProject(input: StudioProjectInput): Promise<StudioProjectItem> {
+  return api<StudioProjectItem>('/api/v1/studio/projects', jsonInit('POST', input))
+}
+
+/** 覆盖式更新项目（非属主/不存在 404）。 */
+export async function updateStudioProject(id: string, input: StudioProjectInput): Promise<StudioProjectItem> {
+  return api<StudioProjectItem>(`/api/v1/studio/projects/${id}`, jsonInit('PUT', input))
+}
+
+/** 删除项目（仅删记录；文件本体不受影响）。 */
+export async function deleteStudioProject(id: string): Promise<void> {
+  await api<void>(`/api/v1/studio/projects/${id}`, { method: 'DELETE' })
+}
+
 /** 创建空间：创建者自动成为 owner 成员并生成空间根目录；新空间配额 = space.default_quota。 */
 export async function createSpace(name: string, description: string): Promise<CreatedSpace> {
   return api<CreatedSpace>('/api/v1/spaces', jsonInit('POST', { name, description }))

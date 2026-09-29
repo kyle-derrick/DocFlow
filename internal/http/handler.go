@@ -148,6 +148,9 @@ type Handler struct {
 	// dashboard 为个人仪表盘聚合源（SetDashboardSource 注入）；nil 时
 	// GET /api/v1/dashboard 返回 500（生产恒注入）。
 	dashboard dashboardSource
+	// studioProjects 为 Studio 项目注册表存储（SetStudioStore 注入）；
+	// nil 时 /studio/projects 返回 503（生产恒注入）。
+	studioProjects studioStore
 	// invites 为邀请制注册服务、mailer 为邮件通道（邀请/重置链接），
 	// publicBaseURL 用于拼接邮件里的绝对链接；SetInvites 注入，未注入时
 	// 邀请与注册/重置端点返回 503。
@@ -608,6 +611,12 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	api.GET("/search", h.searchFiles)
 	// 个人仪表盘概览统计（admin 附加全局统计，见 dashboard.go）。
 	api.GET("/dashboard", h.dashboardStats)
+	// Studio 项目注册表（服务端化，migration 051）：本人维度 CRUD；写入类
+	// 须 PAT files:write scope（与文件夹/Agent 任务写路径同口径）。
+	api.GET("/studio/projects", h.studioProjectsList)
+	api.POST("/studio/projects", auth.RequireScope("files:write"), h.studioProjectsCreate)
+	api.PUT("/studio/projects/:id", auth.RequireScope("files:write"), h.studioProjectsUpdate)
+	api.DELETE("/studio/projects/:id", auth.RequireScope("files:write"), h.studioProjectsDelete)
 	api.POST("/folders", h.createFolder)
 	api.POST("/folders/:id/agent-tasks", auth.RequireScope("files:write"), h.createAgentTask)
 	api.GET("/agent-tasks", h.listAgentTasks)

@@ -40,6 +40,7 @@ import (
 	"github.com/docflow/docflow/internal/settings"
 	"github.com/docflow/docflow/internal/share"
 	"github.com/docflow/docflow/internal/space"
+	"github.com/docflow/docflow/internal/studio"
 	"github.com/docflow/docflow/internal/tagging"
 	"github.com/docflow/docflow/internal/tasks"
 	"github.com/docflow/docflow/internal/upload"
@@ -696,6 +697,8 @@ func main() {
 	handler.SetWebDAV(auth.NewWebDAVStore(db))
 	handler.SetStatsSource(httpapi.NewAdminStats(db))
 	handler.SetRoleLookup(userStore)
+	// Studio 项目注册表（migration 051）：本人维度 CRUD 存储。
+	handler.SetStudioStore(studio.NewStore(db))
 	// 用户组管理（migration 035）：组 CRUD 与成员维护（仅 admin 路由组）。
 	handler.SetGroups(group.NewService(group.NewGormStore(db)))
 	// HTTPS 运行时切换（管理页面）：CADDY_ADMIN_ADDR 配置时经 Caddy admin

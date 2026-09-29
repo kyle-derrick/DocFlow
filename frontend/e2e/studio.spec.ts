@@ -54,33 +54,37 @@ async function loginWithAI(page: Page): Promise<void> {
   await expect(page.locator('.user-menu-trigger')).toBeVisible()
 }
 
-/** 新建项目（项目清单为浏览器 localStorage 态——`docflow.studio.projects.<uid>`，
- *  不跨用例上下文共享，故每个用例独立创建；服务端产物为空间目录与文件）。 */
-async function createProject(page: Page, name: string): Promise<void> {
-  await page.getByRole('button', { name: '新建项目', exact: true }).click()
-  await page.getByPlaceholder('如：产品官网').fill(name)
-  await page.getByRole('button', { name: /创\s*建/ }).click()
+/** 确保项目可用：服务端注册表跨用例/跨运行累积（v3.2 服务端化）——下拉里
+ *  已有同名项目直接选用；否则经顶栏下拉「新建项目…」创建（不再依赖首进
+ *  空态——历史运行的项目已使空态消失）。 */
+async function ensureProject(page: Page, name: string): Promise<void> {
+  await expect(page.locator('.studio-topbar')).toBeVisible()
+  await page.locator('.studio-proj-dd').click()
+  const item = page.getByRole('menuitem', { name: new RegExp(name) })
+  try {
+    await item.waitFor({ state: 'visible', timeout: 3000 })
+    await item.click()
+  } catch {
+    await page.getByRole('menuitem', { name: /新建项目/ }).click()
+    await page.getByPlaceholder('如：产品官网').fill(name)
+    await page.getByRole('button', { name: /创\s*建/ }).click()
+  }
   await expect(page.locator('.studio-topbar .studio-proj-dd .name')).toHaveText(name)
   await expect(page.locator('.studio-left .ftree')).toBeVisible()
 }
 
 test.describe.serial('AI 创作空间冒烟', () => {
-  test('启用 AI 后可进入创作空间并新建项目', async ({ page }) => {
+  test('进入创作空间并新建项目（服务端注册表）', async ({ page }) => {
     await loginWithAI(page)
     await page.goto('/studio')
-    // 无项目：右栏引导新建。
-    await page.getByRole('button', { name: '新建项目', exact: true }).click()
-    await page.getByPlaceholder('如：产品官网').fill(projectName)
-    await page.getByRole('button', { name: /创\s*建/ }).click()
-    // 顶栏出现项目名；左栏目录树挂载（项目根）。
-    await expect(page.locator('.studio-topbar .studio-proj-dd .name')).toHaveText(projectName)
-    await expect(page.locator('.studio-left .ftree')).toBeVisible()
+    // 经顶栏下拉「新建项目…」创建（服务端化后历史项目累积，不依赖首进空态）。
+    await ensureProject(page, projectName)
   })
 
   test('AI 对话一轮：mock 回复与思考过程折叠区', async ({ page }) => {
     await loginWithAI(page)
     await page.goto('/studio')
-    await createProject(page, `${projectName}-chat`)
+    await ensureProject(page, `${projectName}-chat`)
     // 输入框在；Enter 发送（IME 语义由组件处理，测试环境直接回车）。
     const box = page.getByPlaceholder(/描述任务|Describe the task/)
     await box.fill(`e2e 打招呼 ${stamp}`)
@@ -93,7 +97,7 @@ test.describe.serial('AI 创作空间冒烟', () => {
   test('新建 Markdown 在中栏 Tab 打开编辑并可切换查看', async ({ page }) => {
     await loginWithAI(page)
     await page.goto('/studio')
-    await createProject(page, `${projectName}-md`)
+    await ensureProject(page, `${projectName}-md`)
     // 顶栏快捷「新建 Markdown」。
     await page.getByRole('button', { name: '新建 Markdown', exact: true }).click()
     // 中栏出现编辑 Tab（Monaco 编辑器挂载）。
