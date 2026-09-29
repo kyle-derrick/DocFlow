@@ -218,6 +218,10 @@ export default function ViewerAIWidget({
 
   const startDrag = (e: ReactPointerEvent<HTMLElement>) => {
     if (e.button !== 0) return
+    // 头部内交互控件（收起按钮等）不进入拖拽：setPointerCapture 会把后续
+    // 点击事件重定向到把手元素，按钮的 click 被吞（v3.3 修复「下箭头点不
+    // 动」的根因）。
+    if ((e.target as HTMLElement).closest('button, a, input, .ant-segmented, [role="button"]')) return
     e.preventDefault()
     const b = readBounds()
     const size = open ? cardSize(b) : { w: BALL_SIZE, h: BALL_SIZE }
