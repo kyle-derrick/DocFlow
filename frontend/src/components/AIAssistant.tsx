@@ -2327,21 +2327,40 @@ export default function AIAssistant() {
             </div>
           )}
         </div>
-        {/* 底部输入区：v3.4 工具行/chips 移出 Sender（输入框独立边框）。 */}
-        <div className="aiax-composer">
-          <div className="aiax-toggles">
-            {models.length > 0 && (
-              <AIModelSelect
-                models={models}
-                modelKey={modelKey}
-                modelExplicit={modelExplicit}
-                onSelect={(v) => {
-                  setModelKey(v)
-                  setModelExplicit(true)
-                }}
-                zh={zh}
-              />
-            )}
+        {/* 底部输入区（v3.7 Cherry Studio 式统一框：输入+单行工具栏）。
+            DOM 重排：引用 chips → 统一框（Sender → 单行工具栏）。
+            工具栏左=引用/技能/开关，右=模型选择。 */}
+        <div className="chat-input-wrap">
+          {attached.length > 0 && (
+            <div className="ai-attach-chips">
+              {attached.map((f) => (
+                <span key={f.fileId} className="ai-attach-chip">
+                  <Paperclip size={10} strokeWidth={2} aria-hidden="true" />
+                  <span className="ai-attach-chip-name" title={f.fileName}>{f.fileName}</span>
+                  <button
+                    type="button"
+                    aria-label={zh ? '移除引用' : 'Remove reference'}
+                    onClick={() => setAttached((prev) => prev.filter((x) => x.fileId !== f.fileId))}
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+          <div className="chat-input-box">
+            <Sender
+              className="aiax-sender"
+              value={input}
+              onChange={setInput}
+              placeholder={t(locale, 'aiAssistantPlaceholder')}
+              autoSize={{ minRows: 1, maxRows: 6 }}
+              loading={busy}
+              onSubmit={(message) => void send(message)}
+              onCancel={() => abortRef.current?.abort()}
+            />
+            <div className="chat-tools-bar">
+              {/* 左：引用/技能/开关（一行，Cherry Studio 式）。 */}
             {/* 联网搜索（外部互联网，附来源）。 */}
             <AITogglePill
               icon={<Globe size={14} strokeWidth={2} aria-hidden="true" />}
@@ -2404,119 +2423,90 @@ export default function AIAssistant() {
               title={t(locale, 'aiAssistantRAGHint')}
               onClick={() => setRag(!rag)}
             />
-          </div>
-          {/* v3.4：工具行 + 引用 chips 移出 Sender（输入框独立边框，边界清晰）。
-              引用弹层：有词 = 全文搜索平铺；留空 = 目录树浏览（树根随文件页
-              位置/工作目录联动）。 */}
-          <div className="aiax-send-header">
-            <div className="aiax-send-tools">
-              <Popover
-                trigger="click"
-                placement="topLeft"
-                arrow={false}
-                open={attachOpen}
-                onOpenChange={(next) => {
-                  setAttachOpen(next)
-                  if (next) setAttachQuery('')
-                }}
-                content={
-                  <div className="ai-attach-pop">
-                    <Input
-                      allowClear
-                      size="small"
-                      value={attachQuery}
-                      onChange={(e) => setAttachQuery(e.target.value)}
-                      placeholder={zh ? '搜索文件（留空 = 目录树浏览）' : 'Search files (blank = browse tree)'}
-                      prefix={<Paperclip size={12} strokeWidth={2} aria-hidden="true" />}
+            {/* 引用文件（原 send-header 工具，v3.7 并入同一行）。 */}
+            <Popover
+              trigger="click"
+              placement="topLeft"
+              arrow={false}
+              open={attachOpen}
+              onOpenChange={(next) => {
+                setAttachOpen(next)
+                if (next) setAttachQuery('')
+              }}
+              content={
+                <div className="ai-attach-pop">
+                  <Input
+                    allowClear
+                    size="small"
+                    value={attachQuery}
+                    onChange={(e) => setAttachQuery(e.target.value)}
+                    placeholder={zh ? '搜索文件（留空 = 目录树浏览）' : 'Search files (blank = browse tree)'}
+                    prefix={<Paperclip size={12} strokeWidth={2} aria-hidden="true" />}
+                  />
+                  {attachQuery.trim() ? (
+                    <div className="ai-attach-list">
+                      {attachLoading && <div className="ai-attach-state muted">{zh ? '加载中…' : 'Loading…'}</div>}
+                      {!attachLoading && attachItems.length === 0 && (
+                        <div className="ai-attach-state muted">{zh ? '没有匹配的文件' : 'No matching files'}</div>
+                      )}
+                      {attachItems.map((item) => {
+                        const selected = attached.some((f) => f.fileId === item.id)
+                        return (
+                          <button
+                            key={item.id}
+                            type="button"
+                            className={`ai-attach-item${selected ? ' selected' : ''}`}
+                            onClick={() => toggleAttach(item)}
+                          >
+                            <FileText size={13} strokeWidth={2} aria-hidden="true" />
+                            <span className="name" title={item.name}>{item.name}</span>
+                            <Check size={13} strokeWidth={2} aria-hidden="true" className="check" />
+                          </button>
+                        )
+                      })}
+                    </div>
+                  ) : (
+                    <AIAttachTree
+                      zh={zh}
+                      spaceId={(workdir?.spaceId ?? aiLoc?.spaceId) || ''}
+                      rootFolderId={workdir?.folderId ?? aiLoc?.folderId ?? null}
+                      selected={attached}
+                      onToggle={(f) => toggleAttach({ id: f.fileId, name: f.fileName })}
                     />
-                    {attachQuery.trim() ? (
-                      <div className="ai-attach-list">
-                        {attachLoading && <div className="ai-attach-state muted">{zh ? '加载中…' : 'Loading…'}</div>}
-                        {!attachLoading && attachItems.length === 0 && (
-                          <div className="ai-attach-state muted">{zh ? '没有匹配的文件' : 'No matching files'}</div>
-                        )}
-                        {attachItems.map((item) => {
-                          const selected = attached.some((f) => f.fileId === item.id)
-                          return (
-                            <button
-                              key={item.id}
-                              type="button"
-                              className={`ai-attach-item${selected ? ' selected' : ''}`}
-                              onClick={() => toggleAttach(item)}
-                            >
-                              <FileText size={13} strokeWidth={2} aria-hidden="true" />
-                              <span className="name" title={item.name}>{item.name}</span>
-                              <Check size={13} strokeWidth={2} aria-hidden="true" className="check" />
-                            </button>
-                          )
-                        })}
-                      </div>
-                    ) : (
-                      <AIAttachTree
-                        zh={zh}
-                        spaceId={(workdir?.spaceId ?? aiLoc?.spaceId) || ''}
-                        rootFolderId={workdir?.folderId ?? aiLoc?.folderId ?? null}
-                        selected={attached}
-                        onToggle={(f) => toggleAttach({ id: f.fileId, name: f.fileName })}
-                      />
-                    )}
-                    <div className="ai-attach-state muted">{zh ? '引用文件将作为本条消息的上下文发送' : 'Referenced files are sent as context'}</div>
-                  </div>
-                }
+                  )}
+                  <div className="ai-attach-state muted">{zh ? '引用文件将作为本条消息的上下文发送' : 'Referenced files are sent as context'}</div>
+                </div>
+              }
+            >
+              <Button
+                size="small"
+                type="text"
+                className="ai-attach-btn"
+                aria-label={zh ? '引用文件' : 'Attach files'}
+                title={zh ? '引用文件' : 'Attach files'}
               >
-                <Button
-                  size="small"
-                  type="text"
-                  className="ai-attach-btn"
-                  aria-label={zh ? '引用文件' : 'Attach files'}
-                  title={zh ? '引用文件' : 'Attach files'}
-                >
-                  <Paperclip size={14} strokeWidth={2} aria-hidden="true" />
-                </Button>
-              </Popover>
-              {/* 平台技能模板：全局助手无文件/选区语境，占位符置空后压缩空行填入。 */}
-              <AISkillButton zh={zh} onPick={(s) => setInput(renderSkillPrompt(s.prompt))} />
-              {/* 当前上下文文件 chip：点击快捷总结（查看/编辑页打开助手时注入）。 */}
-              {context && (
-                <Tooltip title={`${t(locale, 'aiAssistantCurrentFile')}：${context.fileName} · ${t(locale, 'aiAssistantSummarizeDoc')}`}>
-                  <button type="button" className="ai-file-chip" disabled={busy} onClick={() => void summarizeCurrent()}>
-                    <FileText size={12} strokeWidth={2} aria-hidden="true" />
-                    <span className="ai-file-chip-name">{context.fileName}</span>
-                  </button>
-                </Tooltip>
+                <Paperclip size={14} strokeWidth={2} aria-hidden="true" />
+              </Button>
+            </Popover>
+            {/* 平台技能模板。 */}
+            <AISkillButton zh={zh} onPick={(s) => setInput(renderSkillPrompt(s.prompt))} />
+            {/* 右：模型选择（margin-left: auto 推到右端）。 */}
+            <div className="chat-tools-right">
+              {models.length > 0 && (
+                <AIModelSelect
+                  models={models}
+                  modelKey={modelKey}
+                  modelExplicit={modelExplicit}
+                  onSelect={(v) => {
+                    setModelKey(v)
+                    setModelExplicit(true)
+                  }}
+                  zh={zh}
+                />
               )}
             </div>
-            {/* 已选引用文件 chips（发送前可移除）。 */}
-            {attached.length > 0 && (
-              <div className="ai-attach-chips">
-                {attached.map((f) => (
-                  <span key={f.fileId} className="ai-attach-chip">
-                    <Paperclip size={10} strokeWidth={2} aria-hidden="true" />
-                    <span className="ai-attach-chip-name" title={f.fileName}>{f.fileName}</span>
-                    <button
-                      type="button"
-                      aria-label={zh ? '移除引用' : 'Remove reference'}
-                      onClick={() => setAttached((prev) => prev.filter((x) => x.fileId !== f.fileId))}
-                    >
-                      ×
-                    </button>
-                  </span>
-                ))}
-              </div>
-            )}
+            </div>
           </div>
-          <Sender
-            className="aiax-sender"
-            value={input}
-            onChange={setInput}
-            placeholder={t(locale, 'aiAssistantPlaceholder')}
-            autoSize={{ minRows: 1, maxRows: 6 }}
-            // busy：内嵌右下发送按钮自动变停止（onCancel = abort 流式请求）；
-            // Enter 发送 / Shift+Enter 换行（输入法组合中 Enter 不发送，组件内处理）。
-            loading={busy}
-            onSubmit={(message) => void send(message)}
-            onCancel={() => abortRef.current?.abort()}
-          />
         </div>
       </div>
 

@@ -163,6 +163,12 @@ func (h *Handler) executeAgentTask(taskID uuid.UUID, aiToken, harness, model str
 		expires = time.Time{}
 	}
 	h.agentDB.Table("agent_tasks").Where("id = ? AND status = ?", taskID, agent.StatusRunning).Updates(map[string]any{"status": agent.StatusSucceeded, "finished_at": time.Now().UTC(), "error": "", "workspace_path": result.Workspace, "workspace_expires_at": expires, "diff_json": string(diffJSON)})
+	// v3.6：runner stderr 日志逐行写入任务日志（AI 轮次/错误/进度可见）。
+	for _, line := range strings.Split(strings.TrimSpace(result.Logs), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			h.appendAgentLog(taskID, "stderr", line)
+		}
+	}
 	h.appendAgentLog(taskID, "stdout", result.Detail)
 }
 

@@ -138,12 +138,32 @@ func (d DockerRuntime) Run(ctx context.Context, req RuntimeRequest) (RuntimeResu
 	if wait.Error != nil || wait.StatusCode != 0 {
 		return RuntimeResult{}, fmt.Errorf("agent container exited with status %d", wait.StatusCode)
 	}
-	// Collect and discard logs so the Engine stream is closed, but never persist
-	// their contents: container output may contain prompt material or secrets.
-	if err := api.call(ctx, http.MethodGet, "/v1.41/containers/"+id+"/logs?stdout=1&stderr=1&timestamps=0", nil, nil); err != nil {
-		return RuntimeResult{}, err
+	// v3.6：捕获容器 stderr 作为任务日志（runner 的进度/AI 轮次日志走
+	// stderr；stdout 可能含 echo 的文件内容不采集）——替代旧的「collect
+	// and discard」策略。tail=200 行截断防超大日志。
+	var logBuf bytes.Buffer
+	if err := api.call(ctx, http.MethodGet, "/v1.41/containers/"+id+"/logs?stdout=0&stderr=1&timestamps=0&tail=200", nil, &logBuf); err != nil {
+		// 日志读取失败不阻断结果（容器已正常退出）。
+		logBuf.Reset()
 	}
-	return RuntimeResult{Detail: "container completed; outputs discarded with temporary workspace; platform files were not updated"}, nil
+	containerLogs := stripDockerLogHeader(logBuf.Bytes())
+	return RuntimeResult{Detail: "container completed", Logs: containerLogs}, nil
+}
+
+// stripDockerLogHeader 剥离 Docker multiplexed stream 的 8 字节帧头
+//（stream type 1B + 0x00 0x00 0x00 + payload length 4B big-endian），
+// 返回纯文本行。
+func stripDockerLogHeader(data []byte) string {
+	var out []byte
+	for len(data) >= 8 {
+		payloadLen := int(data[4])<<24 | int(data[5])<<16 | int(data[6])<<8 | int(data[7])
+		if payloadLen > len(data)-8 {
+			break
+		}
+		out = append(out, data[8:8+payloadLen]...)
+		data = data[8+payloadLen:]
+	}
+	return string(out)
 }
 
 type dockerAPI struct{ client *http.Client }

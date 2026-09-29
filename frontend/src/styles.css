@@ -6628,10 +6628,10 @@ kbd {
 /* 引用文件弹层（最近访问 / 搜索，多选）。 */
 .ai-attach-pop { width: 292px; display: flex; flex-direction: column; gap: 8px; }
 .ai-attach-list { max-height: 236px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
-/* 引用文件目录树浏览（v3.4）：与平铺列表同尺寸节奏。 */
-.ai-attach-tree { display: flex; flex-direction: column; gap: 4px; }
-.ai-attach-tree-panel { max-height: 236px; }
-.ai-attach-tree-hint { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; }
+/* 引用文件列表（v3.7：文件名+目录路径，替代目录树）。 */
+.ai-attach-filelist { max-height: 260px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+.ai-attach-item .ai-attach-name { font-weight: 500; flex-shrink: 0; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ai-attach-item .ai-attach-dir { display: inline-flex; align-items: center; gap: 3px; color: var(--muted); font-size: 11px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 工作目录按钮（df_* 文件工具基准）：显示完整路径「空间名/目录/…」；
    跟随态（未手选且有文件页位置）路径前加「跟随」Tag 并高亮。 */
 .ai-workdir-btn.ant-btn { gap: 4px; max-width: 224px; }
@@ -7961,46 +7961,48 @@ kbd {
 .aiax-msg-actions .ant-btn { padding: 0 4px; color: var(--muted); }
 .aiax-msg-actions .ant-btn:hover { color: var(--primary); }
 
-/* ---- 底部输入区（v3.6 ChatGPT 式统一框：输入+工具一体，
-   纯 CSS column-reverse 实现——DOM 不动，Sender 视觉置顶、工具沉底） ---- */
-.aiax-composer {
+/* ---- 底部输入区（v3.7 Cherry Studio 式统一框：输入+单行工具栏） ---- */
+/* 外层包装（引用 chips 在框外上方）。 */
+.chat-input-wrap {
   border-top: 1px solid var(--border);
   padding: 8px 10px 10px;
   flex-shrink: 0;
   display: flex;
-  flex-direction: column-reverse;
-  gap: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+.chat-input-wrap .ai-attach-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+/* 统一输入框（圆角边框，内含输入区+工具栏）。 */
+.chat-input-box {
+  display: flex;
+  flex-direction: column;
   border: 1px solid var(--border);
   border-radius: 14px;
   background: var(--surface-2);
   transition: border-color 0.15s;
   overflow: hidden;
-  min-height: 0;
 }
-.aiax-composer:focus-within { border-color: var(--primary); }
-/* Sender 置顶：自身边框去除（外层统一框）。 */
-.aiax-composer .aiax-sender.ant-sender {
+.chat-input-box:focus-within { border-color: var(--primary); }
+/* 输入区（Sender）：自身边框去除。 */
+.chat-input-box .aiax-sender.ant-sender,
+.chat-input-box .ant-sender {
   border: none !important;
   background: transparent !important;
   border-radius: 14px 14px 0 0;
-  order: 99; /* column-reverse 下最大 order = 视觉最顶 */
 }
-/* 工具行沉底。 */
-.aiax-composer .aiax-send-header {
-  order: 1; /* 视觉底部 */
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 2px 6px 4px;
-  border-top: 1px solid var(--border);
-  min-height: 0;
-}
-.aiax-composer .aiax-send-tools { display: flex; align-items: center; gap: 2px; flex-wrap: wrap; }
-/* 开关行在工具行上方。 */
-.aiax-composer .aiax-toggles {
-  order: 2;
+/* 单行工具栏：左=引用/技能/开关，右=模型选择。 */
+.chat-tools-bar {
   display: flex;
   align-items: center;
+  gap: 2px;
+  padding: 2px 6px 6px;
+  min-height: 32px;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+}
+.chat-tools-right { margin-left: auto; flex-shrink: 0; display: flex; align-items: center; }
+/* 旧 aiax-composer 类保留兼容（不再使用统一框样式）。 */
+.aiax-composer { border-top: 1px solid var(--border); padding: 8px 10px 10px; flex-shrink: 0; }
   gap: 2px;
   flex-wrap: wrap;
   min-width: 0;

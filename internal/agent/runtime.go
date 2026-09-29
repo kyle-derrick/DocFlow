@@ -46,6 +46,9 @@ type RuntimeResult struct {
 	Detail    string
 	Workspace string
 	Diff      []WorkspaceDiff
+	// Logs 为容器 stderr 输出（runner 进度/AI 轮次日志；Docker 多路流
+	// 帧头已剥离，纯文本）。
+	Logs string
 }
 
 type WorkspaceDiff struct {
