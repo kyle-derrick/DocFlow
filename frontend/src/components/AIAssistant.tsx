@@ -111,6 +111,8 @@ export interface AIModelOption {
   capabilities: string[]
   /** 模型支持推理（宽松读取 capabilities 中的 reasoning/think 标记）。 */
   reasoning?: boolean
+  /** Provider 协议（openai_compatible / anthropic / mock；harness 兼容过滤用）。 */
+  providerKind?: string
 }
 
 /** 选定模型持久化 key（助手与 StudioPage 内嵌对话共用）。 */
@@ -232,7 +234,11 @@ function normalizeAIModel(entry: unknown): AIModelOption | null {
   if (!model) return null
   const providerName = String(e.provider_name ?? e.providerName ?? providerId)
   const caps = normalizeCapabilities(e.capabilities)
-  return { id: `${providerId}/${model}`, providerId, providerName, model, capabilities: caps.labels, reasoning: caps.reasoning }
+  return {
+    id: `${providerId}/${model}`, providerId, providerName, model,
+    capabilities: caps.labels, reasoning: caps.reasoning,
+    providerKind: String(e.provider_kind ?? e.providerKind ?? '') || undefined,
+  }
 }
 
 /** 拉取可选模型列表（失败返回空数组；成功后按会话缓存；同时缓存
@@ -276,14 +282,15 @@ export async function getAIModels(force = false): Promise<AIModelOption[]> {
     } else if (Array.isArray(d?.models)) {
       raw = d.models
     } else if (Array.isArray(d?.providers)) {
-      // 后端实际格式：{providers:[{id,name,models:[{id,label,capabilities}]}], default_models:{...}}
+      // 后端实际格式：{providers:[{id,name,kind,models:[{id,label,capabilities}]}], default_models:{...}}
       raw = (d.providers as Array<Record<string, unknown>>).flatMap((p) => {
         if (!Array.isArray(p.models)) return []
         const pid = String(p.provider_id ?? p.id ?? '')
         const pname = String(p.provider_name ?? p.name ?? pid)
+        const pkind = String(p.kind ?? '')
         return (p.models as unknown[]).map((m) => {
           const mo = (m && typeof m === 'object' ? m : {}) as Record<string, unknown>
-          return { provider_id: pid, provider_name: pname, model: mo.model ?? mo.model_id ?? mo.id ?? mo.name ?? '', capabilities: mo.capabilities }
+          return { provider_id: pid, provider_name: pname, provider_kind: pkind, model: mo.model ?? mo.model_id ?? mo.id ?? mo.name ?? '', capabilities: mo.capabilities }
         })
       })
     } else {
@@ -622,7 +629,6 @@ export function AIChatToggleBar({
   onFiles,
   /** 仅对话模式下隐藏文件操作开关（模式已含其语义；不传 = 正常可用）。 */
   filesDisabled = false,
-  compact = false,
 }: {
   zh: boolean
   web: boolean
@@ -648,61 +654,46 @@ export function AIChatToggleBar({
   filesDisabled?: boolean
   compact?: boolean
 }) {
+  // v3.3 图标化：文字全部移入 tooltip（ChatGPT/豆包式工具按钮），激活态
+  // primary 染色；aria-label 保留可访问性。签名不变（三处对话 UI 无感）。
+  const iconBtn = (
+    label: string,
+    Icon: typeof Globe,
+    on: boolean,
+    toggle: () => void,
+    tip: ReactNode,
+    opts?: { disabled?: boolean; hidden?: boolean },
+  ) =>
+    opts?.hidden ? null : (
+      <Tooltip title={<>{tip}{on ? <div className="ai-tool-tip-state">{zh ? '当前：开' : 'On'}</div> : null}</>}>
+        <button
+          type="button"
+          className={`ai-tool-icon${on ? ' on' : ''}`}
+          aria-pressed={on}
+          aria-label={label}
+          disabled={opts?.disabled}
+          onClick={toggle}
+        >
+          <Icon size={15} strokeWidth={2} aria-hidden="true" />
+        </button>
+      </Tooltip>
+    )
   return (
     <span className="ai-toggle-row">
-      <Tooltip title={aiWebTooltip(zh)}>
-        <label className="ai-rag-toggle ai-toggle">
-          <Globe size={14} strokeWidth={2} aria-hidden="true" />
-          <Switch size="small" checked={web} onChange={onWeb} />
-          <span>{compact ? (zh ? '联网' : 'Web') : (zh ? '联网搜索' : 'Web search')}</span>
-        </label>
-      </Tooltip>
-      {/* 我的文件（RAG 引用平台内本人文档）：与「联网搜索」相邻成组但
-          图标（FileSearch）+ 文案（RAG）明显区分；仅 RAG 可用时显示（默认开）。 */}
-      {docsAvailable && (
-        <Tooltip title={aiDocsTooltip(zh)}>
-          <label className="ai-rag-toggle ai-toggle">
-            <FileSearch size={14} strokeWidth={2} aria-hidden="true" />
-            <Switch size="small" checked={docs} onChange={onDocs} />
-            <span>{compact ? (zh ? '文件RAG' : 'RAG') : (zh ? '我的文件（RAG）' : 'My files (RAG)')}</span>
-          </label>
-        </Tooltip>
-      )}
-      {/* 思考：当前模型不支持推理（capabilities.reasoning=false）时自动关闭
-          并隐藏；未配置模型（列表为空）时禁用；加载中（blocked=null 前置
-          ready 判定）正常可用。 */}
-      {thinkBlocked !== 'unsupported' && (
-        <Tooltip title={aiThinkTooltip(thinkBlocked, zh)}>
-          <label className={`ai-rag-toggle ai-toggle${thinkBlocked ? ' ai-toggle-blocked' : ''}`}>
-            <Brain size={14} strokeWidth={2} aria-hidden="true" />
-            <Switch size="small" checked={think} disabled={thinkBlocked !== null} onChange={onThink} />
-            <span>{compact ? (zh ? '思考' : 'Think') : (zh ? '深度思考' : 'Deep thinking')}</span>
-          </label>
-        </Tooltip>
-      )}
+      {iconBtn(zh ? '联网搜索' : 'Web search', Globe, web, () => onWeb(!web), aiWebTooltip(zh))}
+      {/* 我的文件（RAG 引用平台内本人文档）；仅 RAG 可用时显示（默认开）。 */}
+      {iconBtn(zh ? '我的文件（RAG）' : 'My files (RAG)', FileSearch, docs, () => onDocs(!docs), aiDocsTooltip(zh), { hidden: !docsAvailable })}
+      {/* 思考：模型不支持推理时隐藏；未配置模型时禁用。 */}
+      {iconBtn(zh ? '深度思考' : 'Deep thinking', Brain, think, () => onThink(!think), aiThinkTooltip(thinkBlocked, zh), {
+        hidden: thinkBlocked === 'unsupported',
+        disabled: thinkBlocked !== null,
+      })}
       {/* MCP 工具：仅平台存在启用中的 MCP 服务时显示（默认关）。 */}
-      {mcpAvailable && (
-        <Tooltip title={aiMCPTooltip(zh)}>
-          <label className="ai-rag-toggle ai-toggle">
-            <Wrench size={14} strokeWidth={2} aria-hidden="true" />
-            <Switch size="small" checked={mcp} onChange={onMcp} />
-            <span>{compact ? 'MCP' : (zh ? 'MCP 工具' : 'MCP tools')}</span>
-          </label>
-        </Tooltip>
-      )}
-      {/* 文件操作（df_* 平台文件工具）：默认开；onFiles 未传的调用方
-          （编辑页 AIEditChat 等保持编辑器内语义）不渲染；仅对话模式
-          （filesDisabled）下隐藏（模式已含「不操作文件」语义，发送恒
-          use_files:false）。 */}
-      {onFiles && !filesDisabled && (
-        <Tooltip title={aiFilesTooltip(zh)}>
-          <label className="ai-rag-toggle ai-toggle">
-            <FolderCog size={14} strokeWidth={2} aria-hidden="true" />
-            <Switch size="small" checked={files ?? true} onChange={onFiles} />
-            <span>{compact ? (zh ? '文件' : 'Files') : (zh ? '文件操作' : 'File operations')}</span>
-          </label>
-        </Tooltip>
-      )}
+      {iconBtn(zh ? 'MCP 工具' : 'MCP tools', Wrench, mcp, () => onMcp(!mcp), aiMCPTooltip(zh), { hidden: !mcpAvailable })}
+      {/* 文件操作（df_* 平台文件工具）：默认开；onFiles 未传/对话模式不渲染。 */}
+      {iconBtn(zh ? '文件操作' : 'File operations', FolderCog, files ?? true, () => onFiles?.(!(files ?? true)), aiFilesTooltip(zh), {
+        hidden: !onFiles || filesDisabled,
+      })}
     </span>
   )
 }

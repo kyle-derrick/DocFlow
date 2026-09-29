@@ -9,7 +9,7 @@ import { App as AntdApp, Dropdown, Tree } from 'antd'
 import type { MenuProps } from 'antd'
 import type { DataNode } from 'antd/es/tree'
 import {
-  FileText, FilePlus2, FileType2, Folder, FolderOpen,
+  FileText, FilePlus2, FileType2, Folder, FolderOpen, FolderPlus,
   Globe, Pencil, Plus, RefreshCw, SquarePen, Trash2, Upload, Wrench,
 } from 'lucide-react'
 import { listFiles } from '../../api'
@@ -43,6 +43,10 @@ export interface FileTreePanelProps {
   onSetWorkRoot?: (f: FileItem) => void
   onUploadTo?: (f: FileItem) => void
   onCreateDoc?: (kind: 'richtext' | 'markdown', folderId: string, folderName: string) => void
+  /** 「新建目录」回调（picker/项目树均可选；parent 为目标目录，根节点 name=rootTitle、id='__root__'）。 */
+  onCreateFolder?: (parent: { id: string; name: string }) => void
+  /** 拖拽上传（文件 drop 到目录节点；根 = 项目根；folder.id '' = 根）。 */
+  onDropFiles?: (files: File[], folder: { id: string; name: string }) => void
   onToggleRef?: (f: FileItem) => void
   onRename?: (f: FileItem) => void
   onDelete?: (f: FileItem) => void
@@ -51,7 +55,7 @@ export interface FileTreePanelProps {
 
 export default function FileTreePanel({
   zh, spaceId, rootId, rootTitle, onlyFolders = false, onPickFolder, activeFileId, activeFolderId,
-  isRefFile, onOpenFile, onEditFile, onSetWorkRoot, onUploadTo, onCreateDoc, onToggleRef, onRename, onDelete,
+  isRefFile, onOpenFile, onEditFile, onSetWorkRoot, onUploadTo, onCreateDoc, onCreateFolder, onDropFiles, onToggleRef, onRename, onDelete,
   className,
 }: FileTreePanelProps) {
   const { message } = AntdApp.useApp()
@@ -59,6 +63,8 @@ export default function FileTreePanel({
   const [childrenOf, setChildrenOf] = useState<Record<string, FileItem[]>>({})
   const [expanded, setExpanded] = useState<React.Key[]>([])
   const [err, setErr] = useState('')
+  // 拖拽上传高亮目标（dragover 中的目录 key；null = 无）。
+  const [dropKey, setDropKey] = useState<string | null>(null)
   const metaRef = useRef<MetaMap>({})
   metaRef.current[rootKey] = null
   // key → 全路径（根为 rootTitle；子级 = 父路径 + '/' + 名，加载时写入）。
@@ -107,8 +113,9 @@ export default function FileTreePanel({
   /** 右键菜单（目录/文件分列；VSCode/IDEA 式）。 */
   const ctxItems = (f: FileItem | null): MenuProps['items'] => {
     if (!f) {
-      // 根节点：上传/新建/刷新/复制路径。
+      // 根节点：新建目录/上传/新建/刷新/复制路径。
       const items: NonNullable<MenuProps['items']> = []
+      if (onCreateFolder) items.push({ key: 'newfolder', icon: <FolderPlus size={13} aria-hidden="true" />, label: zh ? '新建目录' : 'New folder' })
       if (onUploadTo) items.push({ key: 'upload', icon: <Upload size={13} aria-hidden="true" />, label: zh ? '上传文件到此目录' : 'Upload to this folder' })
       if (onCreateDoc) items.push({
         key: 'newdoc', icon: <FilePlus2 size={13} aria-hidden="true" />, label: zh ? '新建文档' : 'New document', children: [
@@ -127,6 +134,7 @@ export default function FileTreePanel({
         { key: 'expand', icon: isOpen ? <Folder size={13} aria-hidden="true" /> : <FolderOpen size={13} aria-hidden="true" />, label: isOpen ? (zh ? '收起' : 'Collapse') : (zh ? '展开' : 'Expand') },
       ]
       if (onPickFolder) items.push({ key: 'pick', icon: <Plus size={13} aria-hidden="true" />, label: zh ? '选择此目录' : 'Select this folder' })
+      if (onCreateFolder) items.push({ key: 'newfolder', icon: <FolderPlus size={13} aria-hidden="true" />, label: zh ? '在此新建目录' : 'New folder here' })
       if (onSetWorkRoot) items.push({ key: 'workroot', icon: <Wrench size={13} aria-hidden="true" />, label: zh ? '设为 AI 工作目录' : 'Set as AI working root' })
       if (onUploadTo) items.push({ key: 'upload', icon: <Upload size={13} aria-hidden="true" />, label: zh ? '上传文件到此目录' : 'Upload to this folder' })
       if (onCreateDoc) items.push({
@@ -169,6 +177,9 @@ export default function FileTreePanel({
       onSetWorkRoot?.(target)
     } else if (act === 'upload' && target) {
       onUploadTo?.(target)
+    } else if (act === 'newfolder' && target) {
+      // target.id 为 ''（根）时由父层换算为其空间根 parent（见 onCreateFolder 契约）。
+      onCreateFolder?.({ id: target.id || rootKey, name: target.name })
     } else if (act.startsWith('newdoc:') && target) {
       onCreateDoc?.(act === 'newdoc:md' ? 'markdown' : 'richtext', target.id, target.name)
     } else if (act === 'refresh') {
@@ -200,10 +211,30 @@ export default function FileTreePanel({
       'ftree-row',
       isFolder && activeFolderId === key && key !== rootKey ? ' workroot' : '',
       !isFolder && activeFileId === key ? ' file-active' : '',
+      dropKey === key ? ' droptarget' : '',
     ].filter(Boolean).join(' ')
+    // 目录节点支持拖拽上传（drop 到该目录；根 = 项目根）。
+    const dropProps = isFolder && onDropFiles
+      ? {
+          onDragOver: (e: React.DragEvent) => {
+            if (!e.dataTransfer.types.includes('Files')) return
+            e.preventDefault()
+            e.dataTransfer.dropEffect = 'copy'
+            setDropKey(key)
+          },
+          onDragLeave: () => setDropKey((cur) => (cur === key ? null : cur)),
+          onDrop: (e: React.DragEvent) => {
+            e.preventDefault()
+            e.stopPropagation()
+            setDropKey(null)
+            const files = Array.from(e.dataTransfer.files)
+            if (files.length > 0) onDropFiles(files, { id: key === rootKey ? '' : key, name: f?.name ?? rootTitle })
+          },
+        }
+      : {}
     return (
       <Dropdown trigger={['contextMenu']} menu={{ items: ctxItems(f), onClick: onCtxClick(f, key) }}>
-        <span className={rowCls} title={f?.name ?? rootTitle}>
+        <span className={rowCls} title={f?.name ?? rootTitle} {...dropProps}>
           {isFolder
             ? (isOpen ? <FolderOpen size={14} strokeWidth={2} aria-hidden="true" /> : <Folder size={14} strokeWidth={2} aria-hidden="true" />)
             : fileIcon(f!.name)}
@@ -228,8 +259,8 @@ export default function FileTreePanel({
     }
     const root: DataNode = { key: rootKey, title: renderTitle(rootKey), isLeaf: false, children: build(rootKey) ?? (childrenOf[rootKey] === undefined ? undefined : []) }
     return [root]
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- childrenOf/expanded 变化时重建（renderTitle 依赖 ref 状态）
-  }, [childrenOf, expanded, rootKey, activeFileId, activeFolderId, isRefFile])
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- childrenOf/expanded 变化时重建（renderTitle 依赖 ref/drop 状态）
+  }, [childrenOf, expanded, rootKey, activeFileId, activeFolderId, isRefFile, dropKey])
 
   return (
     <div className={`ftree${className ? ` ${className}` : ''}`}>

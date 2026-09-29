@@ -87,6 +87,10 @@ body,
 html {
   overflow-y: scroll;
   scrollbar-gutter: stable;
+  /* v3.3：横向裁剪——Tooltip/Popconfirm 等弹层挂在 body，贴近视口右/左缘
+     时瞬时溢出会撑出横向滚动条（即使 antd 自动翻转也存在的窗口）；站点
+     布局为纵向流式（宽内容均在组件内滚动），页面级横向无场景，clip 兜底。 */
+  overflow-x: clip;
 }
 
 body {
@@ -6991,18 +6995,7 @@ kbd {
 .stab-body { flex: 1; min-height: 0; overflow: auto; }
 .stab-edit-body { display: flex; flex-direction: column; }
 .stab-empty { flex: 1; display: flex; align-items: center; justify-content: center; }
-/* Skill 模板 chips（创作任务模式）。 */
-.studio-tpl-row { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 2px 6px; }
-.studio-tpl-chip {
-  padding: 2px 10px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--surface-2);
-  color: var(--text);
-  font-size: 12px;
-  cursor: pointer;
-}
-.studio-tpl-chip:hover { border-color: var(--primary); color: var(--primary); }
+/* Skill 模板 chips 已移除（v3.3：纯提示词填入价值低，易被误认为执行模式）。 */
 /* 会话内任务卡。 */
 .studio-taskcard {
   display: flex;
@@ -7070,13 +7063,20 @@ kbd {
 .studio-review-ops { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 /* 项目执行引擎 Tag（中栏工具栏/项目卡；docker=橙色进阶，platform=蓝色默认）。 */
 .studio-engine-tag {
+  /* v3.3 固定宽度 + 行内基线对齐（修复顶栏/下拉中标签偏上）：两档文案
+     （平台引擎/平台 | Docker 沙箱/沙箱）宽度一致，文本居中。 */
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 64px;
   padding: 1px 8px;
   border-radius: 999px;
   background: rgba(59, 130, 246, 0.14);
   color: #2563eb;
   font-size: 11px;
   font-weight: 600;
+  line-height: 18px;
   white-space: nowrap;
 }
 .studio-engine-tag.docker { background: rgba(217, 119, 6, 0.14); color: #b45309; }
@@ -7173,14 +7173,29 @@ kbd {
 .studio-proj-dd .name { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .studio-topbar-path { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .studio-topbar-ops { display: inline-flex; align-items: center; gap: 2px; margin-left: auto; flex-shrink: 0; }
-.studio-proj-option { display: flex; flex-direction: column; gap: 2px; padding: 4px 2px; min-width: 220px; }
+.studio-proj-option { display: flex; flex-direction: column; gap: 2px; padding: 4px 2px; min-width: 260px; }
 .studio-proj-option .l1 { display: flex; align-items: center; gap: 6px; }
 .studio-proj-option .l1 .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .studio-proj-option .l2 { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .studio-proj-option.active .l1 .name { color: var(--primary); }
 .studio-proj-menuop { display: inline-flex; align-items: center; gap: 8px; }
-/* ---- 右栏（AI 工作区） ---- */
+/* ---- 右栏（AI 工作区；v3.3 无面板头：platform 直出，docker 保留 slim tabs） ---- */
 .studio-right { padding: 0; }
+.studio-right-slim {
+  display: flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+/* 目录树拖拽上传：拖入中的目标行高亮。 */
+.ftree-row.droptarget {
+  background: var(--primary-bg, rgba(79, 124, 255, 0.16));
+  outline: 1px dashed var(--primary);
+  outline-offset: -1px;
+  border-radius: 4px;
+}
 .studio-ai-tabs { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--border); border-radius: 8px; }
 .studio-ai-tabs button {
   padding: 2px 14px;
@@ -7518,9 +7533,31 @@ kbd {
 .ai-toggle-row {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
   min-width: 0;
 }
+/* 图标化工具开关（v3.3：文字移入 tooltip，ChatGPT/豆包式）。 */
+.ai-tool-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.ai-tool-icon:hover { background: var(--surface-2); color: var(--text); }
+.ai-tool-icon.on {
+  background: var(--primary-bg, rgba(79, 124, 255, 0.14));
+  color: var(--primary);
+}
+.ai-tool-icon:disabled { opacity: 0.4; cursor: default; }
+.ai-tool-tip-state { margin-top: 4px; opacity: 0.75; font-size: 11px; }
 /* 思考开关不可用（未配置模型 / 当前模型不支持推理）。 */
 .ai-toggle-blocked { opacity: 0.55; cursor: default; }
 /* StudioChat 输入区上方的开关行。 */

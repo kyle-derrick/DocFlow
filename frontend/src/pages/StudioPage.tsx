@@ -19,18 +19,18 @@ import { App as AntdApp, Button, Dropdown, Input, Popover, Radio, Select, Toolti
 import type { MenuProps } from 'antd'
 import { Group, Panel, Separator, useDefaultLayout, usePanelRef } from 'react-resizable-panels'
 import {
-  Bot, Check, Eraser, FileText, FolderClosed, History, Package, Paperclip, PanelLeftClose, PanelLeftOpen,
+  Bot, Check, Eraser, FileText, FolderClosed, FolderPlus, History, Package, Paperclip, PanelLeftClose, PanelLeftOpen,
   PanelRightClose, PanelRightOpen, Pencil, Plus, RefreshCw, Settings2, Sparkles, Upload, X,
 } from 'lucide-react'
 import {
-  EMPTY_DFDOC_JSON, aiChat, createStudioProject, currentUserId, deleteFile, deleteStudioProject,
+  EMPTY_DFDOC_JSON, EMPTY_DRAWIO_XML, EMPTY_EXCALIDRAW_JSON, aiChat, createOfficeTemplate, createSpaceFolder, createStudioProject, currentUserId, deleteFile, deleteStudioProject,
   getMe, listAgentTasks, listFiles, listSpaces, listSpaceFiles, listStudioProjects, renameFile,
   searchFiles, updateStudioProject, uploadFile,
 } from '../api'
+import { Modal, TEXT_FILE_MIME, formatTime } from '../components/FileBrowser'
 import type { AgentTask, AIMessage, FileItem, Space, StudioProjectItem } from '../api'
 import { applyAgentTask, cancelAgentTask, createAgentTask, discardAgentTask, getAgentTask, rollbackAgentTask } from '../agentTasks'
 import type { AgentDiff } from '../agentTasks'
-import { Modal, formatTime } from '../components/FileBrowser'
 import { AIChatToggleBar, getAIModels, useAIChatToggles } from '../components/AIAssistant'
 import type { AIModelOption } from '../components/AIAssistant'
 import {
@@ -118,25 +118,32 @@ async function sha256Hex(text: string): Promise<string> {
   return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('')
 }
 
-// ---------- Skill 快捷模板（创作任务模式；{主题} 等占位符提示用户替换） ----------
 
-const SKILL_TEMPLATES: Array<{ label: string; prompt: string }> = [
-  { label: '建站落地页', prompt: '请为 {主题} 制作单页落地页网站，产出文件：\n1. index.html：现代响应式单页，语义化结构，内嵌 CSS/JS，无外部依赖；\n2. 包含：导航栏、Hero 主视觉（标题+副标题+行动按钮）、核心卖点 3-6 个卡片、功能详情、用户评价、FAQ、页脚联系方式；\n3. 配色排版统一克制，适配移动端，中文文案专业有说服力。' },
-  { label: '项目文档', prompt: '请为「{主题}」项目生成一套 Markdown 项目文档：\n1. README.md：简介、亮点、快速开始、目录结构；\n2. docs/architecture.md：整体架构与模块职责；\n3. docs/getting-started.md：环境要求、安装、配置与运行步骤；\n4. docs/faq.md：常见问题与排查。\n要求结构清晰、标题层级规范、命令可直接复制执行。' },
-  { label: '接口文档', prompt: '请为「{主题}」编写接口文档 api.md：\n1. 概述：基础地址、认证方式（Bearer）、通用错误码表；\n2. 按资源分组的接口清单：每个接口给出方法+路径、请求参数表（名称/类型/必填/说明）、成功与错误响应 JSON 示例；\n3. 至少覆盖核心资源的增删改查；\n4. 文末附 curl 调用示例。' },
-  { label: '思维导图大纲', prompt: '请为 {主题} 生成思维导图大纲 outline.md（Markdown 多级列表）：\n1. 以主题为中心展开 4-6 个一级分支，每个分支再细分 2-4 层；\n2. 分支命名短促（≤10 字）；\n3. 覆盖概念、方法、案例与延伸阅读。' },
-  { label: 'PPT 大纲', prompt: '请为 {主题} 生成 PPT 大纲 slides.md：\n1. 按页组织：每页一个二级标题（第 N 页：标题），下列 3-5 条要点（每条 ≤20 字）；\n2. 结构：封面 → 目录 → 背景/问题 → 方案主体（多页）→ 案例数据 → 总结 → Q&A；\n3. 标注建议的视觉形式（流程图、对比表格等）。' },
-  { label: '数据报表', prompt: '请为 {主题} 生成数据报表 report.md：\n1. 报表说明：口径、统计周期、数据来源假设；\n2. 核心指标汇总表（Markdown 表格：指标/本期/上期/环比）；\n3. 分维度明细表与简要解读（每条 1-2 句结论）；\n4. 风险提示与后续行动建议（可执行清单）。' },
-]
 
 // ---------- 沙箱执行引擎选项（docker 项目表单；'' = 跟随平台 auto） ----------
 
 const HARNESS_OPTIONS: Array<{ value: string; label: string; labelEn: string }> = [
-  { value: '', label: '跟随平台（auto）', labelEn: 'Follow platform (auto)' },
+  { value: '', label: '自动（按模型协议路由）', labelEn: 'Auto (route by model protocol)' },
   { value: 'claude-code', label: 'Claude Code（Anthropic 协议）', labelEn: 'Claude Code (Anthropic protocol)' },
   { value: 'pi', label: 'pi（OpenAI 兼容协议）', labelEn: 'pi (OpenAI-compatible)' },
-  { value: 'builtin', label: '内置 runner（builtin）', labelEn: 'Builtin runner' },
+  { value: 'builtin', label: '内置 runner（无外部依赖兜底）', labelEn: 'Builtin runner (no external deps)' },
 ]
+
+/** harness 兼容的 Provider 协议（与后端 agentHarnessTerminal 路由一致）：
+ *  claude-code ← anthropic；pi ← openai_compatible（mock 调试通用）。 */
+const harnessKindMatch = (harness: string, kind?: string): boolean => {
+  if (!kind) return true
+  if (harness === 'claude-code') return kind === 'anthropic'
+  if (harness === 'pi') return kind === 'openai_compatible' || kind === 'mock'
+  return true
+}
+
+/** auto harness 按所选模型协议解析的终值（提示用；与后端路由一致）。 */
+const autoHarnessOf = (kind?: string): string => {
+  if (kind === 'anthropic') return 'Claude Code'
+  if (kind === 'openai_compatible' || kind === 'mock') return 'pi'
+  return '内置 runner'
+}
 
 /** 任务产物动作 → 展示标签（与评审 diff 的 action 同源）。 */
 const ART_ACTION: Record<string, { label: string; labelEn: string; cls: string }> = {
@@ -326,6 +333,41 @@ function ProjectFormModal({ zh, agentOn, initial, onClose, onSubmit }: {
   const [err, setErr] = useState('')
   // 跟踪「自动填充」的项目名：名称为空或仍等于上次自动值时才随目录覆盖（手改后不再动）。
   const autoNameRef = useRef('')
+  // 目录树刷新节拍（新建目录后 +1 经 key 重挂载）与「新建目录」弹窗目标。
+  const [treeTick, setTreeTick] = useState(0)
+  const [newFolderTarget, setNewFolderTarget] = useState<{ id: string; name: string } | null>(null)
+  const [newFolderName, setNewFolderName] = useState('')
+  const [newFolderBusy, setNewFolderBusy] = useState(false)
+  const { message } = AntdApp.useApp()
+  // harness 兼容过滤后的模型选项（docker+harness 收窄协议；platform 全量）。
+  const modelOptions = engine === 'docker' && harness ? models.filter((m) => harnessKindMatch(harness, m.providerKind)) : models
+  const selectedModel = models.find((m) => m.id === model) ?? null
+
+  /** picker 树「新建目录」：创建成功后选中该目录并刷新树（选中即变更绑定）。 */
+  const createPickedFolder = async () => {
+    if (!newFolderTarget || !newFolderName.trim() || newFolderBusy) return
+    setNewFolderBusy(true)
+    try {
+      const created = await createSpaceFolder(spaceId, newFolderName.trim(), newFolderTarget.id || null)
+      setFolderId(created.id)
+      setFolderName(created.name)
+      setName((cur) => {
+        if (!cur.trim() || cur === autoNameRef.current) {
+          autoNameRef.current = created.name
+          return created.name
+        }
+        return cur
+      })
+      setNewFolderTarget(null)
+      setNewFolderName('')
+      setTreeTick((n) => n + 1)
+      message.success(zh ? `已创建目录「${created.name}」并选中` : `Folder "${created.name}" created & selected`)
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : (zh ? '创建目录失败' : 'Failed to create folder'))
+    } finally {
+      setNewFolderBusy(false)
+    }
+  }
 
   useEffect(() => {
     void listSpaces()
@@ -389,17 +431,25 @@ function ProjectFormModal({ zh, agentOn, initial, onClose, onSubmit }: {
       <label className="studio-form-label">{zh ? '任务根目录' : 'Task root folder'}</label>
       <div className="studio-pick-head">
         <button type="button" className={`studio-root-pick${folderId === '' ? ' active' : ''}`} onClick={() => { setFolderId(''); setFolderName('') }}>{zh ? '空间根目录' : 'Space root'}</button>
-        <span className="muted">{zh ? '或点击目录树选择' : 'or pick in the tree'}</span>
+        <Button size="small" onClick={() => { setNewFolderTarget({ id: folderId, name: folderName || (zh ? '空间根目录' : 'Space root') }); setNewFolderName('') }}>
+          <FolderPlus size={13} aria-hidden="true" />{zh ? '新建目录' : 'New folder'}
+        </Button>
+        <span className="muted">{zh ? '或点击目录树选择（右键可新建目录）' : 'or pick in the tree (right-click to create folder)'}</span>
       </div>
       <div className="studio-pick-tree">
         {spaceId && (
           <FileTreePanel
+            key={`${spaceId}:${treeTick}`}
             zh={zh}
             spaceId={spaceId}
             rootId={null}
             rootTitle={spaces.find((s) => s.id === spaceId)?.name ?? (zh ? '空间根目录' : 'Space root')}
             onlyFolders
             activeFolderId={folderId || null}
+            onCreateFolder={(parent) => {
+              setNewFolderTarget({ id: parent.id === '__root__' ? '' : parent.id, name: parent.name })
+              setNewFolderName('')
+            }}
             onPickFolder={(f) => {
               setFolderId(f.id)
               setFolderName(f.name)
@@ -432,7 +482,9 @@ function ProjectFormModal({ zh, agentOn, initial, onClose, onSubmit }: {
               {!agentOn && <span className="studio-engine-offtag">{zh ? '未启用' : 'Not enabled'}</span>}
             </span>
             <span className="studio-engine-desc">
-              {zh ? '可执行构建/测试，产物经评审写回' : 'Runs builds/tests; artifacts apply after review'}
+              {zh
+                ? '可执行构建/测试，产物经评审写回。前置条件：backend 容器挂载 Docker socket（见 docker-compose.yml 注释），否则任务将报「Docker 运行时未接入」'
+                : 'Runs builds/tests; artifacts apply after review. Requires the Docker socket mounted into backend (see docker-compose.yml), otherwise tasks fail with "Docker runtime unavailable"'}
             </span>
           </Radio>
         </div>
@@ -440,14 +492,31 @@ function ProjectFormModal({ zh, agentOn, initial, onClose, onSubmit }: {
       {engine === 'docker' && (
         <>
           <label className="studio-form-label">{zh ? '沙箱执行引擎（Harness）' : 'Sandbox harness'}</label>
-          <Select value={harness} onChange={setHarness} style={{ width: '100%' }}
+          <Select value={harness} onChange={(v) => {
+            setHarness(v)
+            // harness 收窄协议后，已选模型若不兼容则清空（提示重选）。
+            if (v && model) {
+              const hit = models.find((m) => m.id === model)
+              if (hit && !harnessKindMatch(v, hit.providerKind)) setModel('')
+            }
+          }} style={{ width: '100%' }}
             options={HARNESS_OPTIONS.map((h) => ({ value: h.value, label: zh ? h.label : h.labelEn }))} />
+          {!harness && selectedModel && selectedModel.providerKind && (
+            <div className="muted" style={{ fontSize: 12, margin: '-4px 0 6px' }}>
+              {zh
+                ? `auto 将解析为：${autoHarnessOf(selectedModel.providerKind)}（当前模型为 ${selectedModel.providerKind === 'anthropic' ? 'Anthropic' : selectedModel.providerKind === 'mock' ? 'Mock' : 'OpenAI 兼容'} 协议）`
+                : `auto resolves to: ${autoHarnessOf(selectedModel.providerKind)}`}
+            </div>
+          )}
         </>
       )}
       <label className="studio-form-label">{zh ? '默认模型' : 'Default model'}</label>
       <Select value={model || undefined} allowClear onChange={(v) => setModel(v ?? '')} style={{ width: '100%' }}
         placeholder={zh ? '平台默认模型' : 'Platform default model'}
-        options={models.map((m) => ({ value: m.id, label: `${m.providerName || m.providerId} / ${m.model}` }))} />
+        options={modelOptions.map((m) => ({
+          value: m.id,
+          label: `${m.providerName || m.providerId} / ${m.model}${m.providerKind === 'anthropic' ? ' · Anthropic' : ''}`,
+        }))} />
       <div className="muted" style={{ fontSize: 12, margin: '8px 0 0' }}>
         {zh
           ? '引擎随项目固定；模型在会话中可随时切换（空 = 平台默认）。平台引擎直接读写所选目录；Docker 沙箱产物需经评审写回。'
@@ -457,6 +526,23 @@ function ProjectFormModal({ zh, agentOn, initial, onClose, onSubmit }: {
         <Button onClick={onClose}>{zh ? '取消' : 'Cancel'}</Button>
         <Button type="primary" disabled={!name.trim() || !spaceId} loading={busy} onClick={() => void submit()}>{initial ? (zh ? '保存' : 'Save') : (zh ? '创建' : 'Create')}</Button>
       </div>
+      {/* 目录树内「新建目录」弹窗：创建成功即选中（见 createPickedFolder）。 */}
+      {newFolderTarget && (
+        <Modal title={zh ? `在「${newFolderTarget.name}」下新建目录` : `New folder in "${newFolderTarget.name}"`} onClose={() => setNewFolderTarget(null)}>
+          <Input
+            autoFocus
+            value={newFolderName}
+            maxLength={60}
+            placeholder={zh ? '目录名称' : 'Folder name'}
+            onPressEnter={() => void createPickedFolder()}
+            onChange={(e) => setNewFolderName(e.target.value)}
+          />
+          <div className="modal-actions">
+            <Button onClick={() => setNewFolderTarget(null)}>{zh ? '取消' : 'Cancel'}</Button>
+            <Button type="primary" disabled={!newFolderName.trim()} loading={newFolderBusy} onClick={() => void createPickedFolder()}>{zh ? '创建并选中' : 'Create & select'}</Button>
+          </div>
+        </Modal>
+      )}
     </Modal>
   )
 }
@@ -582,14 +668,12 @@ function RecentArtifacts({ zh, project, tick, onView }: {
 
 // ---------- 右栏 AI：对话/任务流（platform=aiChat 流式 / docker=建任务） ----------
 
-function StudioChat({ zh, engine, agentOn, onRefreshTasks, onChatSettled, project, taskRoot, sessions, activeId, onActive, onSessions, refs, onToggleRef, tasksById, onReview, onTaskCreated, focusSignal, recentTick, onOpenInTab }: {
+function StudioChat({ zh, engine, agentOn, onRefreshTasks, onChatSettled, project, taskRoot, sessions, activeId, onActive, onSessions, refs, onToggleRef, tasksById, onReview, onTaskCreated, recentTick, onOpenInTab }: {
   zh: boolean; engine: StudioEngine; agentOn: boolean; onRefreshTasks: () => void; onChatSettled: () => void
   project: StudioProject; taskRoot: string; sessions: StudioSession[]; activeId: string
   onActive: (id: string) => void; onSessions: (updater: (prev: StudioSession[]) => StudioSession[]) => void
   refs: AIAttachFile[]; onToggleRef: (f: { fileId: string; fileName: string }) => void
   tasksById: Record<string, AgentTask>; onReview: (taskId: string) => void; onTaskCreated: (taskId: string) => void
-  /** 欢迎卡「让 AI 生成」等外部聚焦信号（递增触发 focus）。 */
-  focusSignal: number
   /** platform 引擎「最近产物」刷新节拍（空态列表展示）。 */
   recentTick: number
   /** 空态「最近产物」点击：中栏 Tab 打开。 */
@@ -858,11 +942,8 @@ function StudioChat({ zh, engine, agentOn, onRefreshTasks, onChatSettled, projec
           ))}
         </div>
       )}
-      <div className="studio-tpl-row">
-        {SKILL_TEMPLATES.map((tpl) => (
-          <button key={tpl.label} type="button" className="studio-tpl-chip" title={zh ? '点击填入模板（请替换 {主题} 等占位符）' : 'Fill the template (replace {topic} placeholders)'} onClick={() => setInput(tpl.prompt)}>{tpl.label}</button>
-        ))}
-      </div>
+      {/* v3.3：移除「快捷模板」chips（纯提示词填入价值低且易被误认为执行
+          模式；技能模板仍可在管理端维护并经 AI 助理使用）。 */}
       <div className="aic-composer-opts">
         {models.length > 0 && (
           <Select
@@ -997,7 +1078,6 @@ function StudioChat({ zh, engine, agentOn, onRefreshTasks, onChatSettled, projec
         header={composerHeader}
         mentionRoot={taskRoot || project.root_folder_id}
         onMentionPick={(f) => { if (!refs.some((r) => r.fileId === f.id)) onToggleRef({ fileId: f.id, fileName: f.name }) }}
-        focusSignal={focusSignal}
       />
     </section>
   )
@@ -1157,9 +1237,8 @@ export default function StudioPage() {
   // platform 项目「最近产物」刷新节拍：对话落盘/上传/新建文档后递增。
   const [recentTick, setRecentTick] = useState(0)
   const [creating, setCreating] = useState<'richtext' | 'markdown' | null>(null)
-  // 右栏 Tab（docker：对话|评审）+ AI 输入聚焦信号。
+  // 右栏 Tab（docker：对话|评审）。（v3.3 移除聚焦信号与面板头。）
   const [aiTab, setAiTab] = useState<'chat' | 'review'>('chat')
-  const [aiFocus, setAiFocus] = useState(0)
   // 左/右栏折叠（react-resizable-panels v4 imperative collapse/expand；
   // onResize 百分比归零 = 折叠态，用于按钮图标方向）。
   const leftPanelRef = usePanelRef()
@@ -1500,8 +1579,106 @@ export default function StudioPage() {
     if (folderName) message.info(`已创建到「${folderName}」`)
   }
 
+  /** 新建类型（左栏「新建」下拉；与文件页新建菜单同构）。 */
+  type StudioCreateKind = 'folder' | 'md' | 'richtext' | 'textfile' | 'drawio' | 'whiteboard' | 'word' | 'spreadsheet' | 'presentation'
+  const CREATE_SPECS: Record<Exclude<StudioCreateKind, 'folder'>, { label: string; ext: string; content: string; mime: string }> = {
+    md: { label: zh ? 'Markdown 文档' : 'Markdown', ext: '.md', content: '# 新文档\n\n', mime: 'text/markdown' },
+    richtext: { label: zh ? '富文本文档' : 'Rich text', ext: '.dfrt', content: EMPTY_DFDOC_JSON, mime: 'application/json' },
+    textfile: { label: zh ? '文本文件（.txt/.html/代码…）' : 'Text file', ext: '', content: '', mime: '' },
+    drawio: { label: 'draw.io 图表', ext: '.drawio', content: EMPTY_DRAWIO_XML, mime: 'text/xml' },
+    whiteboard: { label: zh ? '白板' : 'Whiteboard', ext: '.excalidraw', content: EMPTY_EXCALIDRAW_JSON, mime: 'application/json' },
+    word: { label: 'Word', ext: '.docx', content: '', mime: '' },
+    spreadsheet: { label: 'Excel', ext: '.xlsx', content: '', mime: '' },
+    presentation: { label: 'PPT', ext: '.pptx', content: '', mime: '' },
+  }
+  const CREATE_DEFAULT_NAMES: Record<Exclude<StudioCreateKind, 'folder'>, string> = {
+    md: '新文档.md', richtext: '新文档.dfrt', textfile: 'untitled.txt', drawio: '新图表.drawio',
+    whiteboard: '新白板.excalidraw', word: '新文档.docx', spreadsheet: '新表格.xlsx', presentation: '新演示文稿.pptx',
+  }
+  // 名称弹窗（folder 与全部文档类型共用；目标目录 = 目录树目标或当前 AI 工作目录或项目根）。
+  const [createDialog, setCreateDialog] = useState<{ kind: StudioCreateKind; name: string; parent?: { id: string; name: string } } | null>(null)
+  const [createBusy, setCreateBusy] = useState(false)
+
+  /** 新建入口：folder/文本类经名称弹窗（校验扩展名），md/富文本直接建
+   *  （自动唯一化后缀）。parent 为目录树右键目标（缺省 = 工作目录/项目根）。 */
+  const beginCreate = (kind: StudioCreateKind, parent?: { id: string; name: string }) => {
+    if (!project || creating) return
+    if (kind === 'md' || kind === 'richtext') {
+      void createDoc(kind === 'md' ? 'markdown' : 'richtext', parent?.id, parent?.name)
+      return
+    }
+    setCreateDialog({ kind, name: kind === 'folder' ? (zh ? '新目录' : 'New folder') : CREATE_DEFAULT_NAMES[kind], parent })
+  }
+
+  /** 名称弹窗提交：目录走 createSpaceFolder；文档按类型走 upload 管线或
+   *  Office 模板端点；建完刷新树（文本/图表类直接在中栏打开编辑）。 */
+  const submitCreate = async () => {
+    if (!createDialog || !project || createBusy) return
+    let name = createDialog.name.trim()
+    const kind = createDialog.kind
+    if (!name) return
+    if (kind === 'textfile' && !/\.[A-Za-z0-9]{1,8}$/.test(name)) {
+      message.error(zh ? '请填写包含扩展名的文件名（如 untitled.txt）' : 'Include an extension (e.g. untitled.txt)')
+      return
+    }
+    if (kind !== 'folder' && kind !== 'textfile') {
+      const ext = CREATE_SPECS[kind].ext
+      if (!name.toLowerCase().endsWith(ext)) name += ext
+    }
+    setCreateBusy(true)
+    try {
+      const parent = createDialog.parent?.id ?? taskRoot ?? project.root_folder_id
+      const parentName = createDialog.parent?.name ?? (zh ? '所选目录' : 'target folder')
+      if (kind === 'folder') {
+        await createSpaceFolder(project.space_id, name, parent === '__root__' ? project.root_folder_id : parent)
+        message.success(zh ? `已创建目录「${name}」` : `Folder "${name}" created`)
+      } else if (kind === 'word' || kind === 'spreadsheet' || kind === 'presentation') {
+        const created = await createOfficeTemplate(kind, parent, name)
+        message.success(zh ? `已创建「${name}」` : `"${name}" created`)
+        openFile({ id: created.id, name: created.name }, 'edit')
+      } else {
+        const spec = CREATE_SPECS[kind]
+        const mime = kind === 'textfile' ? (TEXT_FILE_MIME[name.slice(name.lastIndexOf('.') + 1).toLowerCase()] ?? 'text/plain') : spec.mime
+        const session = await uploadFile(new File([spec.content], name, { type: mime }), parent, () => {})
+        if (session.file_id && session.file_id !== NIL_UUID) {
+          openFile({ id: session.file_id, name }, 'edit')
+          message.success(zh ? `已创建「${name}」到「${parentName}」` : `"${name}" created in "${parentName}"`)
+        }
+      }
+      setCreateDialog(null)
+      setTreeTick((n) => n + 1)
+      setRecentTick((n) => n + 1)
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : (zh ? '创建失败' : 'Failed to create'))
+    } finally {
+      setCreateBusy(false)
+    }
+  }
+
   // 上传到平台目录（非 Agent 工作目录——容器产物需经评审「写回」才进入
   // 平台；上传用于交付素材/参考资料，成功后刷新目录树并自动加入引用）。
+  /** 目录树拖拽上传（drop 到具体目录；根 = 项目根）：走 onUploadPicked 同
+   *  管线，成功刷新树与最近产物。 */
+  const onFilesDropped = async (files: File[], folder: { id: string; name: string }) => {
+    if (!project || files.length === 0) return
+    const targetId = folder.id || project.root_folder_id
+    setUploading(true)
+    let ok = 0
+    for (const file of files) {
+      try {
+        await uploadFile(file, targetId, () => {})
+        ok++
+      } catch (err) {
+        message.error(`${file.name}：${err instanceof Error ? err.message : '上传失败'}`)
+      }
+    }
+    setUploading(false)
+    if (ok > 0) {
+      message.success(zh ? `已上传 ${ok} 个文件到「${folder.name}」` : `${ok} file(s) uploaded to "${folder.name}"`)
+      setTreeTick((n) => n + 1)
+      setRecentTick((n) => n + 1)
+    }
+  }
   const openUpload = (target: { id: string; name: string }) => {
     setUploadTarget(target)
     uploadInputRef.current?.click()
@@ -1583,7 +1760,8 @@ export default function StudioPage() {
 
   return (
     <div className="studio-page">
-      {/* 顶栏：项目下拉 + 管理项目 + 定位到目录 + 当前路径。 */}
+      {/* 顶栏（v3.3 精简）：项目下拉 + 管理项目 + 打开项目目录 + 弹性空 +
+          左/右面板折叠钮（折叠后面板头不可见，顶栏为唯一展开入口）。 */}
       <header className="studio-topbar">
         <Dropdown trigger={['click']} menu={{ items: projMenuItems, onClick: onProjMenuClick }}>
           <button type="button" className="studio-proj-dd" title={project ? projPathText(project) : (zh ? '选择项目' : 'Select project')}>
@@ -1596,35 +1774,27 @@ export default function StudioPage() {
           <Button size="small" onClick={() => setManageOpen(true)}><Settings2 size={13} aria-hidden="true" />{zh ? '管理项目' : 'Projects'}</Button>
         </Tooltip>
         {project && (
-          <Tooltip title={zh ? `在文件页打开「${projPathText(project)}」所在空间` : 'Open the space in Files'}>
-            <Button size="small" onClick={() => { window.location.href = `/files?space=${project.space_id}` }}>
-              <FolderClosed size={13} aria-hidden="true" />{zh ? '定位到目录' : 'Locate folder'}
+          <Tooltip title={zh ? `在文件页打开「${projPathText(project)}」` : `Open "${projPathText(project)}" in Files`}>
+            <Button size="small" onClick={() => { window.location.href = `/files?space=${project.space_id}&folder=${project.root_folder_id}` }}>
+              <FolderClosed size={13} aria-hidden="true" />{zh ? '打开项目目录' : 'Open folder'}
             </Button>
           </Tooltip>
         )}
         {project && <span className="studio-topbar-path muted" title={projPathText(project)}>{projPathText(project)}</span>}
-        {project && (
-          <span className="studio-topbar-ops">
-            <Tooltip title={zh ? '让 AI 生成（聚焦右侧输入框）' : 'Ask AI (focus the input)'}>
-              <Button size="small" type="text" aria-label={zh ? '让 AI 生成' : 'Ask AI'} disabled={!feats.enabled}
-                onClick={() => { rightPanelRef.current?.expand(); setAiTab('chat'); setAiFocus((n) => n + 1) }}>
-                <Sparkles size={13} aria-hidden="true" />
-              </Button>
-            </Tooltip>
-            <Tooltip title={zh ? '新建 Markdown' : 'New Markdown'}>
-              <Button size="small" type="text" aria-label={zh ? '新建 Markdown' : 'New Markdown'} disabled={creating !== null} onClick={() => void createDoc('markdown')}><FileText size={13} aria-hidden="true" /></Button>
-            </Tooltip>
-            <Tooltip title={zh ? '新建富文本' : 'New rich text'}>
-              <Button size="small" type="text" aria-label={zh ? '新建富文本' : 'New rich text'} disabled={creating !== null} onClick={() => void createDoc('richtext')}><Plus size={13} aria-hidden="true" /></Button>
-            </Tooltip>
-            <Tooltip title={zh ? '上传文件' : 'Upload files'}>
-              <Button size="small" type="text" aria-label={zh ? '上传文件' : 'Upload files'} loading={uploading}
-                onClick={() => openUpload({ id: taskRoot || project.root_folder_id, name: taskRoot && taskRoot !== project.root_folder_id ? (zh ? '工作目录' : 'working root') : project.name })}>
-                <Upload size={13} aria-hidden="true" />
-              </Button>
-            </Tooltip>
-          </span>
-        )}
+        <span className="studio-topbar-ops">
+          <Tooltip title={leftCollapsed ? (zh ? '展开文件树' : 'Expand file tree') : (zh ? '收起文件树' : 'Collapse file tree')}>
+            <Button size="small" type="text" aria-label={zh ? '切换文件树' : 'Toggle file tree'} disabled={!project}
+              onClick={() => (leftCollapsed ? leftPanelRef.current?.expand() : leftPanelRef.current?.collapse())}>
+              {leftCollapsed ? <PanelLeftOpen size={14} aria-hidden="true" /> : <PanelLeftClose size={14} aria-hidden="true" />}
+            </Button>
+          </Tooltip>
+          <Tooltip title={aiCollapsed ? (zh ? '展开 AI 面板' : 'Expand AI panel') : (zh ? '收起 AI 面板' : 'Collapse AI panel')} disabled={!feats.enabled}>
+            <Button size="small" type="text" aria-label={zh ? '切换 AI 面板' : 'Toggle AI panel'} disabled={!feats.enabled}
+              onClick={() => (aiCollapsed ? rightPanelRef.current?.expand() : rightPanelRef.current?.collapse())}>
+              {aiCollapsed ? <PanelRightOpen size={14} aria-hidden="true" /> : <PanelRightClose size={14} aria-hidden="true" />}
+            </Button>
+          </Tooltip>
+        </span>
       </header>
 
       {/* 三栏（react-resizable-panels v4）：左树 | 中编辑（条件渲染）| 右 AI。
@@ -1644,19 +1814,44 @@ export default function StudioPage() {
         >
           <div className="studio-left-head">
             <span className="title"><FolderClosed size={13} aria-hidden="true" />{zh ? '文件' : 'Files'}</span>
-            <span className="ops">
-              {project && (
-                <Tooltip title={zh ? '刷新目录树' : 'Refresh tree'}>
-                  <Button size="small" type="text" aria-label={zh ? '刷新目录树' : 'Refresh tree'} onClick={() => setTreeTick((n) => n + 1)}><RefreshCw size={13} aria-hidden="true" /></Button>
+            {project && (
+              <span className="ops">
+                {/* 新建下拉（与文件页新建菜单同构：目录 + 全文档类型；目标 =
+                    当前 AI 工作目录或项目根）。 */}
+                <Dropdown
+                  trigger={['click']}
+                  menu={{
+                    items: [
+                      { key: 'folder', icon: <FolderPlus size={13} aria-hidden="true" />, label: zh ? '目录' : 'Folder' },
+                      { type: 'divider' },
+                      { key: 'md', icon: <FileText size={13} aria-hidden="true" />, label: zh ? 'Markdown 文档' : 'Markdown' },
+                      { key: 'richtext', icon: <Plus size={13} aria-hidden="true" />, label: zh ? '富文本文档' : 'Rich text' },
+                      { key: 'textfile', icon: <FileText size={13} aria-hidden="true" />, label: zh ? '文本文件' : 'Text file' },
+                      { key: 'drawio', icon: <Package size={13} aria-hidden="true" />, label: 'draw.io' },
+                      { key: 'whiteboard', icon: <Plus size={13} aria-hidden="true" />, label: zh ? '白板' : 'Whiteboard' },
+                      { type: 'divider' },
+                      { key: 'word', icon: <FileText size={13} aria-hidden="true" />, label: 'Word' },
+                      { key: 'spreadsheet', icon: <FileText size={13} aria-hidden="true" />, label: 'Excel' },
+                      { key: 'presentation', icon: <FileText size={13} aria-hidden="true" />, label: 'PPT' },
+                    ] as MenuProps['items'],
+                    onClick: ({ key }) => beginCreate(key as 'folder' | 'md' | 'richtext' | 'textfile' | 'drawio' | 'whiteboard' | 'word' | 'spreadsheet' | 'presentation'),
+                  }}
+                >
+                  <Button size="small" type="text" aria-label={zh ? '新建' : 'New'} disabled={creating !== null || createBusy}>
+                    <Plus size={14} aria-hidden="true" />
+                  </Button>
+                </Dropdown>
+                <Tooltip title={zh ? `上传到${taskRoot && taskRoot !== project.root_folder_id ? '「' + (zh ? 'AI 工作目录' : 'working root') + '」' : '项目根目录'}（也可拖拽文件到目录树）` : 'Upload to the working root (or drop files onto the tree)'}>
+                  <Button size="small" type="text" aria-label={zh ? '上传文件' : 'Upload files'} loading={uploading}
+                    onClick={() => openUpload({ id: taskRoot || project.root_folder_id, name: taskRoot && taskRoot !== project.root_folder_id ? (zh ? '工作目录' : 'working root') : project.name })}>
+                    <Upload size={14} aria-hidden="true" />
+                  </Button>
                 </Tooltip>
-              )}
-              <Tooltip title={zh ? (leftCollapsed ? '展开文件树' : '收起文件树') : (leftCollapsed ? 'Expand file tree' : 'Collapse file tree')}>
-                <Button size="small" type="text" aria-label={zh ? '收起文件树' : 'Collapse file tree'}
-                  onClick={() => (leftCollapsed ? leftPanelRef.current?.expand() : leftPanelRef.current?.collapse())}>
-                  {leftCollapsed ? <PanelLeftOpen size={14} aria-hidden="true" /> : <PanelLeftClose size={14} aria-hidden="true" />}
-                </Button>
-              </Tooltip>
-            </span>
+                <Tooltip title={zh ? '刷新目录树' : 'Refresh tree'}>
+                  <Button size="small" type="text" aria-label={zh ? '刷新目录树' : 'Refresh tree'} onClick={() => setTreeTick((n) => n + 1)}><RefreshCw size={14} aria-hidden="true" /></Button>
+                </Tooltip>
+              </span>
+            )}
           </div>
           <div className="studio-left-body">
             {project ? (
@@ -1675,7 +1870,9 @@ export default function StudioPage() {
                   onEditFile={(f) => openFile({ id: f.id, name: f.name }, 'edit')}
                   onSetWorkRoot={(f) => { setTaskRoot(f.id); message.info(zh ? `已将「${f.name}」设为 AI 工作目录` : `Working root set to "${f.name}"`) }}
                   onUploadTo={(f) => openUpload({ id: f.id, name: f.name })}
-                  onCreateDoc={(kind, folderId) => void createDoc(kind, folderId)}
+                  onCreateDoc={(kind, folderId, folderName) => void createDoc(kind, folderId, folderName)}
+                  onCreateFolder={(parent) => beginCreate('folder', { id: parent.id === '__root__' ? '' : parent.id, name: parent.name })}
+                  onDropFiles={(files, folder) => void onFilesDropped(files, folder)}
                   onToggleRef={(f) => toggleRef({ fileId: f.id, fileName: f.name })}
                   onRename={renameTreeItem}
                   onDelete={deleteTreeItem}
@@ -1733,24 +1930,16 @@ export default function StudioPage() {
           minSize={300}
           onResize={(size) => setAiCollapsed(size.asPercentage <= 0.5)}
         >
-          <div className="studio-right-head">
-            {engine === 'docker' ? (
+          {/* 右栏（v3.3 去掉面板头省纵向空间）：docker 引擎保留 28px slim
+              Tab 行（对话|评审）；platform 直出对话体。折叠钮在顶栏。 */}
+          {engine === 'docker' && (
+            <div className="studio-right-slim">
               <span className="studio-ai-tabs" role="tablist">
                 <button type="button" role="tab" aria-selected={aiTab === 'chat'} className={aiTab === 'chat' ? 'active' : ''} onClick={() => setAiTab('chat')}>{zh ? '对话' : 'Chat'}</button>
                 <button type="button" role="tab" aria-selected={aiTab === 'review'} className={aiTab === 'review' ? 'active' : ''} onClick={() => setAiTab('review')}>{zh ? '评审' : 'Review'}</button>
               </span>
-            ) : (
-              <span className="studio-right-title"><Sparkles size={13} aria-hidden="true" />{zh ? 'AI 工作区' : 'AI workspace'}</span>
-            )}
-            <span className="ops">
-              <Tooltip title={zh ? (aiCollapsed ? '展开 AI 面板' : '收起 AI 面板') : (aiCollapsed ? 'Expand AI panel' : 'Collapse AI panel')}>
-                <Button size="small" type="text" aria-label={zh ? '收起 AI 面板' : 'Collapse AI panel'}
-                  onClick={() => (aiCollapsed ? rightPanelRef.current?.expand() : rightPanelRef.current?.collapse())}>
-                  {aiCollapsed ? <PanelRightOpen size={14} aria-hidden="true" /> : <PanelRightClose size={14} aria-hidden="true" />}
-                </Button>
-              </Tooltip>
-            </span>
-          </div>
+            </div>
+          )}
           {aiTab === 'review' && engine === 'docker' ? (
             <div className="studio-right-body">
               {projectTasks.length > 0 ? taskPickSelect : <div className="muted studio-pad8">{zh ? '暂无任务：切回「对话」输入指令发起。' : 'No tasks yet; switch to Chat to create one.'}</div>}
@@ -1776,7 +1965,6 @@ export default function StudioPage() {
                   tasksById={tasksById}
                   onReview={goReview}
                   onTaskCreated={onTaskCreated}
-                  focusSignal={aiFocus}
                   recentTick={recentTick}
                   onOpenInTab={(f) => openFile(f, 'view')}
                 />
@@ -1827,6 +2015,26 @@ export default function StudioPage() {
             else await createProject(data)
           }}
         />
+      )}
+      {/* 左栏「新建」名称弹窗（目录/文本/图表/Office 模板）。 */}
+      {createDialog && (
+        <Modal
+          title={`${zh ? '新建' : 'New'}${createDialog.kind === 'folder' ? (zh ? '目录' : ' folder') : ''}${createDialog.parent ? ` — ${createDialog.parent.name}` : ''}`}
+          onClose={() => setCreateDialog(null)}
+        >
+          <Input
+            autoFocus
+            value={createDialog.name}
+            maxLength={80}
+            placeholder={createDialog.kind === 'textfile' ? (zh ? '含扩展名，如 index.html' : 'with extension, e.g. index.html') : (zh ? '名称' : 'Name')}
+            onPressEnter={() => void submitCreate()}
+            onChange={(e) => setCreateDialog({ ...createDialog, name: e.target.value })}
+          />
+          <div className="modal-actions">
+            <Button onClick={() => setCreateDialog(null)}>{zh ? '取消' : 'Cancel'}</Button>
+            <Button type="primary" disabled={!createDialog.name.trim()} loading={createBusy} onClick={() => void submitCreate()}>{zh ? '创建' : 'Create'}</Button>
+          </div>
+        </Modal>
       )}
     </div>
   )
