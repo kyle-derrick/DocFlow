@@ -7576,9 +7576,9 @@ components:
         root_folder_id: { type: string, format: uuid, description: 项目根目录（工作目录绑定） }
         space_name: { type: string, description: 绑定空间名快照（展示用） }
         folder_path: { type: string, description: 绑定路径「空间名/目录名」快照 }
-        engine: { type: string, enum: [platform, docker], description: platform=平台直读写（默认）；docker=Agent 沙箱 }
-        harness: { type: string, description: docker 沙箱执行引擎（空 = 跟随平台 auto） }
-        model: { type: string, description: 默认模型 `${providerId}/${model}`（空 = 平台默认） }
+        engine: { type: string, enum: [platform, docker], description: "platform=平台直读写（默认）；docker=Agent 沙箱" }
+        harness: { type: string, description: "docker 沙箱执行引擎（空 = 跟随平台 auto）" }
+        model: { type: string, description: "默认模型 `${providerId}/${model}`（空 = 平台默认）" }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
     StudioProjectInput:
