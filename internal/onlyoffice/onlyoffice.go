@@ -83,8 +83,12 @@ type Config struct {
 	// 加载 api.js，为空时回退 ServerURL；不影响 SSRF 校验基准。
 	PublicURL string
 	// DownloadBase DocumentServer 回源访问后端用的基地址（如 http://backend:8080），
-	// 用于拼接 document.url 与 editorConfig.callbackUrl。
+	// 下载/回调 URL 以此拼接（浏览器不可达，仅 DS 内网回源）。
 	DownloadBase string
+	// BrowserBase 浏览器可达的 DocFlow 站点基地址（如 https://example.com），
+	// v3.5 DocFlow AI 插件的 pluginsData 静态页 URL 以此拼接；为空时回退
+	// PublicURL 的同源根（compose 反代同域场景）。
+	BrowserBase string
 	// JWTSecret 与 DocumentServer 共享的签名密钥（HS256，启用时 ≥32 字节）。
 	JWTSecret string
 	// TokenTTL 编辑配置与下载 token 有效期（默认 5 分钟）。
@@ -142,6 +146,7 @@ func New(cfg Config, store FileStore, storage upload.Storage, username func(uuid
 	}
 	cfg.DownloadBase = strings.TrimSuffix(cfg.DownloadBase, "/")
 	cfg.PublicURL = strings.TrimSuffix(cfg.PublicURL, "/")
+	cfg.BrowserBase = strings.TrimSuffix(cfg.BrowserBase, "/")
 	if recorder == nil {
 		recorder = audit.NopRecorder{}
 	}
@@ -399,6 +404,14 @@ func (s *Service) NewSessionConfig(user, fileID uuid.UUID, opts SessionOptions) 
 		"mode":        mode,
 		"lang":        sanitizeEditorLang(opts.Lang),
 		"user":        map[string]any{"id": user.String(), "name": name},
+		// v3.5 DocFlow AI 插件（编辑模式注入）：插件静态页由前端域托管
+		//（dist/oo-plugins/docflow-ai，config.json 的 baseUrl 留空由 DS
+		// 按 pluginsData URL 推导）；插件页经同站 cookie 调 /ai/chat，
+		// 经 DS 桥 executeMethod 直接读写文档（方案 A）。
+		"plugins": map[string]any{
+			"autostart":   []string{"asc.{5A3F6E21-8C4D-4B0E-9A7D-2F1C0D5E8B44}"},
+			"pluginsData": []string{fmt.Sprintf("%s/oo-plugins/docflow-ai/config.json", s.publicBaseFor(base))},
+		},
 	}
 	config := map[string]any{
 		"documentType": documentType(f.Name),
@@ -491,6 +504,24 @@ func (s *Service) ResolveDownload(fileID uuid.UUID, versionParam, token string) 
 		return files.File{}, files.FileVersion{}, files.ObjectBlob{}, err
 	}
 	return f, version, blob, nil
+}
+
+// publicBaseFor 解析插件静态页的浏览器可达基址：BrowserBase（PUBLIC_BASE_URL）
+// 优先；缺省回退 PublicURL 同源根（compose 反代同域场景）；再缺省回退
+// DownloadBase 同源根（直连后端场景）。
+func (s *Service) publicBaseFor(downloadBase string) string {
+	if s.cfg.BrowserBase != "" {
+		return s.cfg.BrowserBase
+	}
+	for _, u := range []string{s.cfg.PublicURL, downloadBase} {
+		if u == "" {
+			continue
+		}
+		if parsed, err := url.Parse(u); err == nil && parsed.Host != "" {
+			return parsed.Scheme + "://" + parsed.Host
+		}
+	}
+	return downloadBase
 }
 
 // signConfig 对编辑配置整体签名（payload 含 document+editorConfig，附
