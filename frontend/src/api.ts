@@ -818,6 +818,11 @@ export async function createOfficeTemplate(kind: OfficeTemplateKind, parentId: s
   }))
 }
 
+/** 文件/目录元信息（GET /files/:id；含 parent_id——深链跳转上溯定位用）。 */
+export async function getFileItem(id: string): Promise<FileItem> {
+  return api<FileItem>(`/api/v1/files/${id}`)
+}
+
 export async function renameFile(id: string, name: string): Promise<FileItem> {
   return api<FileItem>(`/api/v1/files/${id}`, jsonInit('PATCH', { name }))
 }

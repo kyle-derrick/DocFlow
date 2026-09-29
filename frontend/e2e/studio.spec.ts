@@ -98,8 +98,9 @@ test.describe.serial('AI 创作空间冒烟', () => {
     await loginWithAI(page)
     await page.goto('/studio')
     await ensureProject(page, `${projectName}-md`)
-    // 顶栏快捷「新建 Markdown」。
-    await page.getByRole('button', { name: '新建 Markdown', exact: true }).click()
+    // 左栏「新建」下拉（v3.3：顶栏快捷按钮并入下拉，同文件页新建菜单）。
+    await page.locator('.studio-left-head').getByRole('button', { name: '新建' }).click()
+    await page.getByRole('menuitem', { name: /Markdown/ }).click()
     // 中栏出现编辑 Tab（Monaco 编辑器挂载）。
     await expect(page.locator('.stab').first()).toBeVisible({ timeout: 20_000 })
     await expect(page.locator('.monaco-editor').first()).toBeVisible({ timeout: 20_000 })

@@ -19,7 +19,7 @@ import { Dropdown, Tree } from 'antd'
 import type { MenuProps } from 'antd'
 import type { DataNode } from 'antd/es/tree'
 import { Folder, FolderOpen, Globe, Home } from 'lucide-react'
-import { FileItem, FileQueryOptions, OpenWithPrefs, drawioStatus, encodePathSegments, listOpenWith, onlyOfficeStatus } from '../api'
+import { FileItem, FileQueryOptions, OpenWithPrefs, drawioStatus, encodePathSegments, getFileItem, listOpenWith, onlyOfficeStatus } from '../api'
 import {
   allEditEntries,
   allViewEntries,
@@ -303,7 +303,7 @@ export default function FolderTreeNav({
  *   把面包屑切到根→目标完整链并加载目标目录（不重挂载、不回根，一次
  *   列表请求）。
  */
-export function FileBrowserWithTree({ listChildren, aside, treeRootLabel, ...browserProps }: FileBrowserProps & {
+export function FileBrowserWithTree({ listChildren, aside, treeRootLabel, initialFolderId, ...browserProps }: FileBrowserProps & {
   /** 目录树取子目录的数据源；缺省复用 listItems（目录 + 文件全量）。 */
   listChildren?: (parentId: string | null) => Promise<FileItem[]>
   /** 右侧栏内容（空间视图成员面板）；提供时启用三栏布局。 */
@@ -311,6 +311,9 @@ export function FileBrowserWithTree({ listChildren, aside, treeRootLabel, ...bro
   /** 目录树根节点显示名（缺省 rootLabel；v2.6 面包屑根改「根目录」短名
    *  后树根仍显示空间名，避免丢失空间上下文）。 */
   treeRootLabel?: string
+  /** 深链定位目录（?folder=<id>）：挂载完成后上溯构造链并驱动面包屑/树
+   *  展开至该目录（Studio「打开项目目录」等外部跳转入口）。 */
+  initialFolderId?: string
 }) {
   const rootLabel = browserProps.rootLabel
   const treeRoot = treeRootLabel ?? rootLabel
@@ -490,6 +493,58 @@ export function FileBrowserWithTree({ listChildren, aside, treeRootLabel, ...bro
   }
 
   // ---- 外部「打开文件」信号（树文件节点点击 → FileBrowser 查看弹窗） ----
+
+  // ---- 深链定位（initialFolderId：?folder=<id> 外部跳转，如 Studio
+  //      「打开项目目录」）——挂载后上溯 parent 链构造完整路径并驱动
+  //      面包屑/树展开（等价于用户逐级点入）。----
+
+  /** 上溯构造 {id,name} 链（每级一次 GET /files/:id；失败/越级静默放弃）。 */
+  const buildChainToRoot = useCallback(async (folderId: string): Promise<Array<{ id: string; name: string }>> => {
+    const chain: Array<{ id: string; name: string }> = []
+    const seen = new Set<string>()
+    let cur: string | null = folderId
+    while (cur && cur !== ROOT_KEY && !seen.has(cur)) {
+      seen.add(cur)
+      try {
+        const meta = await getFileItem(cur)
+        chain.unshift({ id: meta.id, name: meta.name })
+        cur = meta.parent_id || null
+      } catch {
+        break
+      }
+    }
+    return chain
+  }, [])
+
+  useEffect(() => {
+    if (!initialFolderId) return
+    let alive = true
+    // 等 FileBrowser 首次列表完成（root 挂载）后再深链，避免信号早于消费方。
+    const timer = window.setTimeout(() => {
+      void buildChainToRoot(initialFolderId).then((chain) => {
+        if (!alive || chain.length === 0) return
+        setCurrentKey(chain[chain.length - 1].id)
+        setFolderNavSignal({ seq: ++folderNavSeqRef.current, path: chain })
+        // 展开完整链（含目标）并逐层懒加载（registerListing 登记树节点）。
+        setExpanded((prev) => {
+          const n = new Set(prev)
+          chain.forEach((c) => n.add(c.id))
+          return n
+        })
+        let parent: string | null = ROOT_KEY
+        for (const seg of chain) {
+          void ensureLoaded(parent)
+          parent = seg.id
+        }
+        void ensureLoaded(chain[chain.length - 1].id)
+      })
+    }, 600)
+    return () => {
+      alive = false
+      window.clearTimeout(timer)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅挂载执行一次
+  }, [initialFolderId])
 
   // 信号序列号：每次点击自增，保证 FileBrowser 侧 effect 依 seq 变化触发。
   const fileOpenSeqRef = useRef(0)

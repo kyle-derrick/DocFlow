@@ -117,6 +117,9 @@ export default function FilesPage() {
   const [agentSelected, setAgentSelected] = useState<string[]>([])
   const [searchParams] = useSearchParams()
   const spaceIdParam = searchParams.get('space') ?? ''
+  // 深链目录（?folder=<id>，Studio「打开项目目录」）：FileBrowserWithTree
+  // 挂载后上溯展开定位（仅消费一次；空间 key 已保证随空间切换重挂载）。
+  const folderIdParam = searchParams.get('folder') ?? ''
 
   const [spaces, setSpaces] = useState<Space[]>([])
   const [reloadKey, setReloadKey] = useState(0)
@@ -610,6 +613,9 @@ export default function FilesPage() {
            空间名由左侧空间切换器表达。 */
         rootCrumbLabel={locale === 'zh-CN' ? '根目录' : 'root'}
         treeRootLabel={activeSpace?.name ?? msg('teamsTitle')}
+        /* 深链定位（Studio「打开项目目录」?space=X&folder=Y）：上溯展开
+           至目标目录（仅首次挂载消费一次）。 */
+        initialFolderId={folderIdParam || undefined}
         reloadKey={reloadKey}
         toolbarPrefix={
           <>

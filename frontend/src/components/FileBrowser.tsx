@@ -18,11 +18,13 @@
 import { FormEvent, ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { CloseOutlined } from '@ant-design/icons'
 import { createPortal } from 'react-dom'
-import { App as AntdApp, Button, Dropdown, Input, Menu, Modal as AntdModal, Popover, Select } from 'antd'
+import { App as AntdApp, Button, Dropdown, Input, Menu, Modal as AntdModal, Popover, Select, Tooltip } from 'antd'
 import type { DragEvent as ReactDragEvent } from 'react'
 import type { MenuProps } from 'antd'
 import SplitButton from './SplitButton'
 import {
+  Download,
+  ExternalLink,
   FileText,
   Folder,
   Globe,
@@ -31,6 +33,7 @@ import {
   Maximize2,
   Minimize2,
   MoreHorizontal,
+  Pencil,
   Plus,
   Search,
   Star,
@@ -503,8 +506,9 @@ function isTextEditable(name: string): boolean {
   return isTextEditableFile(name)
 }
 
-/** 「文本文件」新建：按用户自带扩展名推断 MIME（File 构造用）。 */
-const TEXT_FILE_MIME: Record<string, string> = {
+/** 「文本文件」新建：按用户自带扩展名推断 MIME（File 构造用；导出供
+ *  Studio 新建下拉同构复用）。 */
+export const TEXT_FILE_MIME: Record<string, string> = {
   html: 'text/html',
   htm: 'text/html',
   css: 'text/css',
@@ -2152,10 +2156,8 @@ export default function FileBrowser({
     const inModalEditable = editOptions.length > 0 && !((isOffice && !ooEnabled) || (isDrawio && !drawioEnabled))
     // 默认编辑路由：office/drawio 集成未启用时回落只读查看（与 openFileWith 一致）。
     const editFallbackView = (isOffice && !ooEnabled) || (isDrawio && !drawioEnabled)
-    const menuOf = (options: Array<{ label: string; run: () => void }>): MenuProps => ({
-      items: options.map((op) => ({ key: op.label, label: op.label })),
-      onClick: ({ key }) => options.find((op) => op.label === key)?.run(),
-    })
+    // menuOf（打开方式下拉）随 SplitButton 一并移除：完整「打开方式」菜单
+    // 保留在文件行「操作」菜单；预览工具条 v3.3 图标化（新窗口/编辑/下载）。
     return (
       <>
         {/* 弹窗内编辑（v2.7）：编辑视图 ↔ 查看视图就地切换。 */}
@@ -2183,27 +2185,30 @@ export default function FileBrowser({
             onSaved={() => setPreviewReloadKey((k) => k + 1)}
           />
         )}
-        <SplitButton
-          size="small"
-          menu={menuOf(viewOptions)}
-          arrowLabel={locale === 'zh-CN' ? '更多查看方式' : 'More view methods'}
-          onClick={() => openWithMethod(item, 'view', effectiveOpenWithFor(item.name, openWith).view)}
-        >
-          {locale === 'zh-CN' ? '新窗口查看' : 'View in new window'}
-        </SplitButton>
+        {/* v3.3 预览工具条图标化：新窗口查看 / 新窗口编辑 / 下载（ExternalLink
+            图标与文件页一致；打开方式的完整菜单保留在文件行「操作」菜单）。 */}
+        <Tooltip title={locale === 'zh-CN' ? '新窗口查看' : 'Open in new window'}>
+          <Button size="small" type="text" aria-label={locale === 'zh-CN' ? '新窗口查看' : 'Open in new window'}
+            onClick={() => openWithMethod(item, 'view', effectiveOpenWithFor(item.name, openWith).view)}>
+            <ExternalLink size={14} strokeWidth={2} aria-hidden="true" />
+          </Button>
+        </Tooltip>
         {editOptions.length > 0 && (
-          <SplitButton
-            size="small"
-            menu={menuOf(editOptions)}
-            arrowLabel={locale === 'zh-CN' ? '更多编辑方式' : 'More edit methods'}
-            onClick={() => {
-              if (editFallbackView) openWithMethod(item, 'view')
-              else openWithMethod(item, 'edit', effectiveOpenWithFor(item.name, openWith).edit)
-            }}
-          >
-            {locale === 'zh-CN' ? '新窗口编辑' : 'Edit in new window'}
-          </SplitButton>
+          <Tooltip title={locale === 'zh-CN' ? '新窗口编辑' : 'Edit in new window'}>
+            <Button size="small" type="text" aria-label={locale === 'zh-CN' ? '新窗口编辑' : 'Edit in new window'}
+              onClick={() => {
+                if (editFallbackView) openWithMethod(item, 'view')
+                else openWithMethod(item, 'edit', effectiveOpenWithFor(item.name, openWith).edit)
+              }}>
+              <Pencil size={14} strokeWidth={2} aria-hidden="true" />
+            </Button>
+          </Tooltip>
         )}
+        <Tooltip title={msg('download')}>
+          <Button size="small" type="text" aria-label={msg('download')} onClick={() => void handleDownload(item)}>
+            <Download size={14} strokeWidth={2} aria-hidden="true" />
+          </Button>
+        </Tooltip>
       </>
     )
   }
