@@ -21,6 +21,7 @@ import { createPortal } from 'react-dom'
 import { App as AntdApp, Button, Dropdown, Input, Menu, Modal as AntdModal, Popover, Select } from 'antd'
 import type { DragEvent as ReactDragEvent } from 'react'
 import type { MenuProps } from 'antd'
+import SplitButton from './SplitButton'
 import {
   FileText,
   Folder,
@@ -2182,24 +2183,26 @@ export default function FileBrowser({
             onSaved={() => setPreviewReloadKey((k) => k + 1)}
           />
         )}
-        <Dropdown.Button
+        <SplitButton
           size="small"
           menu={menuOf(viewOptions)}
+          arrowLabel={locale === 'zh-CN' ? '更多查看方式' : 'More view methods'}
           onClick={() => openWithMethod(item, 'view', effectiveOpenWithFor(item.name, openWith).view)}
         >
           {locale === 'zh-CN' ? '新窗口查看' : 'View in new window'}
-        </Dropdown.Button>
+        </SplitButton>
         {editOptions.length > 0 && (
-          <Dropdown.Button
+          <SplitButton
             size="small"
             menu={menuOf(editOptions)}
+            arrowLabel={locale === 'zh-CN' ? '更多编辑方式' : 'More edit methods'}
             onClick={() => {
               if (editFallbackView) openWithMethod(item, 'view')
               else openWithMethod(item, 'edit', effectiveOpenWithFor(item.name, openWith).edit)
             }}
           >
             {locale === 'zh-CN' ? '新窗口编辑' : 'Edit in new window'}
-          </Dropdown.Button>
+          </SplitButton>
         )}
       </>
     )
@@ -2633,10 +2636,11 @@ export default function FileBrowser({
           含「上传目录」（目录上传依赖建目录权限）。 */}
       {uploadFn && !searchMode && (
         <div className="create-menu-wrap">
-          <Dropdown.Button
+          <SplitButton
             size="small"
             type="primary"
             disabled={dirUpload !== null}
+            arrowLabel={locale === 'zh-CN' ? '更多上传方式' : 'More upload options'}
             menu={{
               items: [
                 { key: 'files', label: locale === 'zh-CN' ? '上传文件' : 'Upload files' },
@@ -2650,7 +2654,7 @@ export default function FileBrowser({
           >
             <Upload size={13} strokeWidth={2} aria-hidden="true" />{' '}
             {dirUpload !== null ? (locale === 'zh-CN' ? '上传中…' : 'Uploading…') : locale === 'zh-CN' ? '上传' : 'Upload'}
-          </Dropdown.Button>
+          </SplitButton>
           <input
             ref={fileInputRef}
             type="file"

@@ -21,8 +21,9 @@
 //   用，可另传 officeInsert 挂点提供「应用到文档」按钮——经 DocFlow AI
 //   插件把回复插入文档）。
 import { useEffect, useRef, useState } from 'react'
-import { App as AntdApp, Button, Dropdown, Input, Popover, Segmented, Tooltip } from 'antd'
+import { App as AntdApp, Button, Input, Popover, Segmented, Tooltip } from 'antd'
 import type { MenuProps } from 'antd'
+import SplitButton from './SplitButton'
 import type { TextAreaRef } from 'antd/es/input/TextArea'
 import { Check, Copy, FileInput, HelpCircle, Send, Sparkles, Square, Trash2, X } from 'lucide-react'
 import { aiChat, getFileMeta, restoreVersion } from '../api'
@@ -296,17 +297,17 @@ export function AIEditChatButton({
     }
   }
   return (
-    <Dropdown.Button
+    <SplitButton
       size="small"
       type={open ? 'primary' : 'default'}
       menu={{ items, onClick: onMenuClick }}
-      trigger={['click']}
+      arrowLabel={zh ? '快捷指令' : 'Quick actions'}
       disabled={disabled}
       onClick={onToggle}
     >
       <Sparkles size={13} strokeWidth={2} aria-hidden="true" />
       <span>{zh ? 'AI 对话' : 'AI chat'}</span>
-    </Dropdown.Button>
+    </SplitButton>
   )
 }
 

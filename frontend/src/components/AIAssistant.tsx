@@ -2031,7 +2031,8 @@ export default function AIAssistant() {
         </Tooltip>
       }
       placement="right"
-      width={480}
+      /* antd 6：width 已弃用，size 接受数字像素（窄屏 100% 全宽经 rootClassName 媒体查询保留）。 */
+      size={480}
       open={open}
       onClose={() => setOpen(false)}
       rootClassName="ai-drawer-root"
