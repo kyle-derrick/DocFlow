@@ -551,12 +551,14 @@ func main() {
 		aiEnvBaseline.DefaultProvider = "env"
 	}
 	aiUsageStore := ai.NewUsageStore(db)
-	// AI_ENABLED 硬关（显式设 false；未设置 = 不干预，跟随页面设置）：
-	// loader 直接返回空配置，等效「无任何 Provider」——全站 AI 入口
-	//（/ai/* 与管理端）统一按未启用处理，页面零 AI 痕迹。
+	// AI_DISABLED=true = 全站 AI 硬关（loader 直接返回空配置，等效「无任何
+	// Provider」——/ai/* 与管理端统一按未启用处理，页面零 AI 痕迹）。
+	// 注意不用 AI_ENABLED：它是 v2 的文件摘要开关且模板默认 false，语义
+	// 复用会把既有部署的 AI 全部关掉；显式独立键 + 默认不干预（跟随管理端
+	// 「AI 设置」总开关）。
 	aiHardOff := false
-	if raw, ok := os.LookupEnv("AI_ENABLED"); ok && strings.TrimSpace(raw) != "" {
-		if v, err := strconv.ParseBool(strings.TrimSpace(raw)); err == nil && !v {
+	if raw, ok := os.LookupEnv("AI_DISABLED"); ok && strings.TrimSpace(raw) != "" {
+		if v, err := strconv.ParseBool(strings.TrimSpace(raw)); err == nil && v {
 			aiHardOff = true
 		}
 	}
