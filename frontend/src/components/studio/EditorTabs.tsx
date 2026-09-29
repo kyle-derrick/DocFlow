@@ -51,27 +51,9 @@ export default function EditorTabs({ zh, tabs, activeId, onActive, onClose, onMo
       </span>
     ),
     closable: false,
-    children: tab.mode === 'view' ? (
-      <div className="stab-body preview-embed">
-        <FileViewerDispatch
-          key={tab.id}
-          fileId={tab.id}
-          name={tab.name}
-          resolveRawUrl={async () => {
-            try {
-              const r = await resolveFileById(tab.id, { mode: 'view' })
-              return r.raw_url
-            } catch {
-              return null
-            }
-          }}
-        />
-      </div>
-    ) : (
-      <div className="stab-body stab-edit-body">
-        <FileEditorDispatch key={tab.id} fileId={tab.id} name={tab.name} />
-      </div>
-    ),
+    // IDE 式：Tab 条仅作选择器（items 不带 children——antd Tabs 的
+    // content-holder 若参与渲染会撑爆 36px 的 stab-bar 并把 nav 顶出视口）；
+    // active 内容由 stab-bar 之后的 .stab-body 渲染。
   }))
 
   return (
@@ -105,6 +87,28 @@ export default function EditorTabs({ zh, tabs, activeId, onActive, onClose, onMo
           </span>
         )}
       </div>
+      {/* active 内容体（IDE 式：Tab 条仅选择器，内容独立于 Tabs 渲染）。 */}
+      {active && (active.mode === 'view' ? (
+        <div className="stab-body preview-embed">
+          <FileViewerDispatch
+            key={active.id}
+            fileId={active.id}
+            name={active.name}
+            resolveRawUrl={async () => {
+              try {
+                const r = await resolveFileById(active.id, { mode: 'view' })
+                return r.raw_url
+              } catch {
+                return null
+              }
+            }}
+          />
+        </div>
+      ) : (
+        <div className="stab-body stab-edit-body">
+          <FileEditorDispatch key={active.id} fileId={active.id} name={active.name} />
+        </div>
+      ))}
       {tabs.length === 0 && <div className="stab-empty muted">{zh ? '点击左侧文件打开' : 'Click a file in the tree to open'}</div>}
     </section>
   )

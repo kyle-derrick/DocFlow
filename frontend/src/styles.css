@@ -15,6 +15,8 @@
   --danger: #e0566b;
   --danger-hover: #e97084;
   --ok: #3fbf7f;
+  /* 工作台底色（IDE 式三栏区/分格背景：比 --surface 沉一档，面板浮起） */
+  --workbench: #12151c;
   /* accent 默认 = indigo（与既有蓝色一致，保持现状） */
   --primary: #4f7cff;
   --primary-hover: #6b90ff;
@@ -61,6 +63,7 @@
   --danger: #c2334d;
   --danger-hover: #d64560;
   --ok: #1f9d5a;
+  --workbench: #e9ebf0;
   color-scheme: light;
 }
 
@@ -6744,13 +6747,32 @@ kbd {
 .agent-sync-options .setting-desc { display: block; margin: 0; }
 
 /* ==================== AI 创作空间（StudioPage /studio，IDE 式三栏工作台） ==================== */
-/* 视口化：整页不超过一屏（calc(100vh - 64px)），三栏（react-resizable-panels）
-   各自内部滚动、直达屏幕底部；分栏宽度经 autoSaveId 自动持久化。 */
-.studio-page {
+/* VSCode 式工作台骨架：工作台底色（--workbench）沉一档承载三栏；每栏 =
+   面板头（36px，大写标题 + 下边框）+ 面板体（--surface）；栏间 1px 实线
+   分隔（拖拽热区 5px，hover/拖拽中高亮 primary）。
+   满高模式（无窗口滚动条）：.app-shell/.content 对 studio 切换为锁定视口
+   高、去 padding 的弹性容器，.studio-page 填满父级（不再用 calc 魔数——
+   旧 calc(100vh - 64px) 与 .content 上下 padding(40px) 叠加曾致整页溢出
+   16px 出窗口滚动条）；三栏各自内部滚动、直达屏幕底部。 */
+.app-shell:has(.studio-page) {
+  height: 100dvh;
+  overflow: hidden;
+}
+.content:has(> .studio-page) {
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 64px);
-  min-height: 420px;
+  padding: 0;
+  max-width: none;
+  overflow: hidden;
+}
+.studio-page {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--workbench);
 }
 /* 三栏容器（PanelGroup）：[左树 | 中编辑（条件渲染）| 右 AI]，中栏未打开
    文件时不渲染，右栏自动延展占满。 */
@@ -6761,25 +6783,59 @@ kbd {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  background: var(--surface);
 }
-/* 分栏拖拽把手（VSCode 式细条 + hover 高亮）。 */
+/* 分栏拖拽把手：热区 5px；渲染层为居中 1px 实线（VSCode 式硬边界），
+   hover/拖拽中加粗为 2px 并高亮 primary。 */
 .studio-split {
   position: relative;
   width: 5px;
-  margin: 0 -1px;
+  margin: 0 -2px;
   z-index: 5;
-  transition: background 0.15s;
+  background: var(--workbench);
 }
 .studio-split::after {
   content: '';
   position: absolute;
-  inset: 0 2px;
-  border-radius: 3px;
-  background: transparent;
-  transition: background 0.15s;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-50%);
+  background: var(--border);
+  transition: background 0.15s, width 0.15s;
 }
 .studio-split:hover::after,
-.studio-split[data-resize-handle-state="drag"]::after { background: var(--primary); opacity: 0.45; }
+.studio-split[data-resize-handle-state="drag"]::after {
+  width: 2px;
+  background: var(--primary);
+}
+/* 面板头（三栏统一 VSCode EXPLORER 式）：36px 高、下边框、11px 大写标题。 */
+.studio-left-head,
+.studio-right-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  height: 36px;
+  padding: 0 6px 0 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  flex-shrink: 0;
+}
+.studio-left-head .title,
+.studio-right-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.studio-left-body { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
+.studio-taskroot { flex-shrink: 0; font-size: 11px; padding: 4px 10px 2px; }
 .studio-pad8 { padding: 6px 8px; font-size: 12px; }
 .studio-card {
   display: flex;
@@ -6792,12 +6848,6 @@ kbd {
   background: var(--surface);
 }
 .studio-card-title { display: flex; align-items: center; gap: 6px; font-weight: 600; color: var(--primary); }
-/* 左栏：项目列表（上限高度内部滚动）+ 目录/任务主区。 */
-.studio-projects { flex-shrink: 0; max-height: 30%; overflow-y: auto; }
-.studio-proj-item .x,
-.studio-proj-item:hover .x,
-.studio-proj-item .x:hover,
-/* 项目搜索框（列表头部；按名称过滤）。 */
 /* 项目条目两行：名称 + 绑定路径（muted 小字）。 */
 .studio-proj-path {
   font-size: 11px;
@@ -6807,18 +6857,7 @@ kbd {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.studio-left { padding: 8px 6px 8px 10px; }
-.studio-left-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 6px;
-  padding: 0 4px 6px;
-  flex-shrink: 0;
-}
-.studio-left-head .title { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; letter-spacing: 0.02em; text-transform: uppercase; color: var(--muted); }
-.studio-left-body { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
-.studio-taskroot { flex-shrink: 0; font-size: 11px; padding: 2px 4px; }
+.studio-left { padding: 0; }
 /* 分组标题（左栏「项目目录/沙箱产物」等段头）。 */
 .studio-group {
   display: flex;
@@ -6886,17 +6925,43 @@ kbd {
 }
 .studio-thread { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .stab { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+/* 中栏面板头 = Tab 条（VSCode editor tabs）：高 36px 与左右面板头对齐，
+   card 型 tab 压扁为 IDE 分段（active 顶部 2px primary 指示 + 文本提亮）。 */
 .stab-bar {
   display: flex;
-  align-items: center;
+  align-items: stretch;
   gap: 8px;
-  padding: 4px 8px 0;
+  height: 36px;
+  padding: 0 6px 0 2px;
   border-bottom: 1px solid var(--border);
+  background: var(--surface);
   flex-shrink: 0;
 }
-.stab-tabs { flex: 1; min-width: 0; }
+.stab-tabs { flex: 1; min-width: 0; align-self: stretch; display: flex; flex-direction: column; }
 .stab-tabs .ant-tabs-nav { margin: 0; }
-.stab-tabs .ant-tabs-tab { padding: 4px 8px !important; }
+.stab-tabs .ant-tabs-content-holder { display: none; }
+.stab-tabs .ant-tabs-nav::before { border-bottom: none !important; }
+.stab-tabs .ant-tabs-tab { padding: 5px 10px !important; }
+.stab-tabs .ant-tabs-tab-active .stab-label { color: var(--text); font-weight: 600; }
+.stab-tabs.ant-tabs-card > .ant-tabs-nav .ant-tabs-tab {
+  border: none !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  position: relative;
+}
+.stab-tabs.ant-tabs-card > .ant-tabs-nav .ant-tabs-tab-active::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--primary);
+}
+.stab-tabs.ant-tabs-card > .ant-tabs-nav .ant-tabs-tab-active {
+  background: var(--workbench) !important;
+}
+.stab-ops { align-self: center; display: inline-flex; align-items: center; gap: 6px; padding: 0 2px; flex-shrink: 0; }
 .stab-label {
   display: inline-flex;
   align-items: center;
@@ -6922,7 +6987,6 @@ kbd {
 }
 .stab-label:hover .stab-close, .ant-tabs-tab-active .stab-close { opacity: 1; }
 .stab-close:hover { background: var(--surface-2); color: var(--danger, #dc2626); }
-.stab-ops { display: inline-flex; align-items: center; gap: 6px; padding: 2px 4px 4px; flex-shrink: 0; }
 .stab-mode { display: inline-flex; align-items: center; gap: 4px; }
 .stab-body { flex: 1; min-height: 0; overflow: auto; }
 .stab-edit-body { display: flex; flex-direction: column; }
@@ -7088,6 +7152,7 @@ kbd {
   gap: 8px;
   padding: 6px 12px;
   border-bottom: 1px solid var(--border);
+  background: var(--surface);
   flex-shrink: 0;
   overflow-x: auto;
 }
@@ -7115,16 +7180,7 @@ kbd {
 .studio-proj-option.active .l1 .name { color: var(--primary); }
 .studio-proj-menuop { display: inline-flex; align-items: center; gap: 8px; }
 /* ---- 右栏（AI 工作区） ---- */
-.studio-right { padding: 8px 8px 8px 4px; }
-.studio-right-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 6px;
-  padding: 0 4px 6px;
-  flex-shrink: 0;
-}
-.studio-right-title { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; letter-spacing: 0.02em; text-transform: uppercase; color: var(--muted); }
+.studio-right { padding: 0; }
 .studio-ai-tabs { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--border); border-radius: 8px; }
 .studio-ai-tabs button {
   padding: 2px 14px;
@@ -7136,7 +7192,7 @@ kbd {
   cursor: pointer;
 }
 .studio-ai-tabs button.active { background: var(--primary-bg, rgba(59, 130, 246, 0.12)); color: var(--primary); font-weight: 600; }
-.studio-right-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.studio-right-body { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 8px 8px 8px 10px; overflow-y: auto; }
 .studio-noproject {
   margin: auto;
   max-width: 420px;
