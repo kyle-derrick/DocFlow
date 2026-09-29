@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -550,7 +551,19 @@ func main() {
 		aiEnvBaseline.DefaultProvider = "env"
 	}
 	aiUsageStore := ai.NewUsageStore(db)
+	// AI_ENABLED 硬关（显式设 false；未设置 = 不干预，跟随页面设置）：
+	// loader 直接返回空配置，等效「无任何 Provider」——全站 AI 入口
+	//（/ai/* 与管理端）统一按未启用处理，页面零 AI 痕迹。
+	aiHardOff := false
+	if raw, ok := os.LookupEnv("AI_ENABLED"); ok && strings.TrimSpace(raw) != "" {
+		if v, err := strconv.ParseBool(strings.TrimSpace(raw)); err == nil && !v {
+			aiHardOff = true
+		}
+	}
 	aiService := ai.NewService(func() (settings.AIConfig, error) {
+		if aiHardOff {
+			return settings.DefaultAIConfig(), nil
+		}
 		effective := aiEnvBaseline
 		if ov, _, err := settingsStore.AIOverrides(); err == nil {
 			effective.Enabled = ov.Enabled // 总开关（ai.enabled；nil = 自动判定）

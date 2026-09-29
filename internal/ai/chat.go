@@ -95,6 +95,9 @@ type ChatRequest struct {
 	// PlatformTools() 全集）。与 UseMCP 可同开——两类工具合并进同一条
 	// 工具循环（df_ 前缀内置工具 + mcp_ 前缀外部工具）。
 	PlatformTools []PlatformTool
+	// ToolMaxRounds 显式覆盖工具轮次上限（0 = 默认：use_files 场景
+	// FilesToolMaxRounds，其余 MCPToolMaxRounds）。
+	ToolMaxRounds int
 	// ToolExecutor 为内置平台工具执行器回调（name+参数 JSON → 结果
 	// 字符串）：ai 包不依赖 http/service 层，执行桥经此回调注入（见
 	// internal/http/ai_platform_tools.go 的 executePlatformTool）。仅当
@@ -111,6 +114,20 @@ type ChatRequest struct {
 	OnThinking func(string)
 	// Stream true 时经 onDelta 流式回调增量。
 	Stream bool
+}
+
+// effectiveToolMaxRounds 解析本请求的工具轮次上限：显式 ToolMaxRounds > 0
+// 优先；use_files 平台创作（PlatformTools 非空）取 FilesToolMaxRounds（多
+// 步创作常见十几轮，低上限会中途截断——「AI 莫名停止」主因之一）；其余
+// 取 MCPToolMaxRounds 防死循环。
+func (r ChatRequest) effectiveToolMaxRounds() int {
+	if r.ToolMaxRounds > 0 {
+		return r.ToolMaxRounds
+	}
+	if len(r.PlatformTools) > 0 {
+		return FilesToolMaxRounds
+	}
+	return MCPToolMaxRounds
 }
 
 // ChatResult 为一次对话补全的结果元数据（内容经 onDelta 或 Content 返回）。
@@ -850,9 +867,14 @@ func truncateBytes(b []byte, n int) string {
 
 // 工具循环边界。
 const (
-	// MCPToolMaxRounds 工具执行轮次上限（防死循环）：达到上限后模型仍
-	// 请求工具时不再执行，输出已达成文本（无文本则提示已达上限）。
-	MCPToolMaxRounds = 5
+	// MCPToolMaxRounds 普通对话（MCP/联网等）的工具执行轮次上限（防死循环）：
+	// 达到上限后模型仍请求工具时不再执行，输出已达成文本（无文本则提示已达上限）。
+	MCPToolMaxRounds = 8
+	// FilesToolMaxRounds 平台文件创作（use_files 工作目录，AI 直接读写项目
+	// 目录）的轮次上限：多步创作任务（建目录→写多文件→改写→读校验）常见
+	// 十几轮，5-8 轮会中途截断（表现为「AI 莫名停止」）；仍保留硬上限防
+	// 死循环。
+	FilesToolMaxRounds = 24
 	// MCPToolResultMaxRunes 单次工具结果注入对话的长度上限（rune 计，
 	// 超长截断尾注）。
 	MCPToolResultMaxRunes = 8000
@@ -1268,7 +1290,7 @@ func (s *Service) chatOpenAITools(ctx context.Context, p settings.AIProvider, mo
 			res.Content = strings.TrimSpace(content.String())
 			return res, nil
 		}
-		if execs >= MCPToolMaxRounds {
+		if execs >= req.effectiveToolMaxRounds() {
 			res.Content = toolLoopFinish(emit, content)
 			return res, nil
 		}
@@ -1516,7 +1538,7 @@ func (s *Service) chatAnthropicTools(ctx context.Context, p settings.AIProvider,
 			res.Content = strings.TrimSpace(content.String())
 			return res, nil
 		}
-		if execs >= MCPToolMaxRounds {
+		if execs >= req.effectiveToolMaxRounds() {
 			res.Content = toolLoopFinish(emit, content)
 			return res, nil
 		}

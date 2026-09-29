@@ -14,7 +14,9 @@ import (
 	"time"
 )
 
-var ErrRuntimeUnavailable = errors.New("agent runtime unavailable: docker runtime is not configured")
+// ErrRuntimeUnavailable Docker 运行时不可用。文案带自助指引（最常见原因：
+// backend 容器未挂载 Docker socket——compose 中取消 volumes 注释即可）。
+var ErrRuntimeUnavailable = errors.New("Docker 运行时未接入：请将 Docker socket 挂载到 backend 容器（docker-compose.yml 的 backend.volumes 增加「- /var/run/docker.sock:/var/run/docker.sock」，Windows Docker Desktop 同样支持）后重启；当前无法启动 AI 创作舱沙箱任务")
 
 // Runtime 执行受限的 Agent 任务。实现不得接收平台凭据或数据库密钥。
 type Runtime interface {
