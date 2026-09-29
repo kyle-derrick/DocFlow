@@ -29,7 +29,7 @@ import {
 } from '../api'
 import { Modal, TEXT_FILE_MIME, formatTime } from '../components/FileBrowser'
 import type { AgentTask, AIMessage, FileItem, Space, StudioProjectItem } from '../api'
-import { applyAgentTask, cancelAgentTask, createAgentTask, discardAgentTask, getAgentTask, rollbackAgentTask } from '../agentTasks'
+import { cancelAgentTask, createAgentTask, discardAgentTask, getAgentTask } from '../agentTasks'
 import type { AgentDiff } from '../agentTasks'
 import { AIChatToggleBar, getAIModels, useAIChatToggles } from '../components/AIAssistant'
 import type { AIModelOption } from '../components/AIAssistant'
@@ -40,6 +40,7 @@ import type { AIAttachFile, AIChatTurnData } from '../components/aichat'
 import FileTreePanel from '../components/studio/FileTreePanel'
 import EditorTabs from '../components/studio/EditorTabs'
 import type { OpenTab } from '../components/studio/EditorTabs'
+import StudioTaskCard from '../components/studio/StudioTaskCard'
 import { useAIFeatures } from '../aiFeature'
 import { t, useLocale } from '../i18n'
 
@@ -99,11 +100,6 @@ const TASK_STATUS: Record<string, { label: string; cls: string }> = {
 }
 const isTerminal = (status: string) => status !== 'queued' && status !== 'running'
 
-function StatusBadge({ status }: { status: string }) {
-  const meta = TASK_STATUS[status] ?? { label: status, cls: 'wait' }
-  return <span className={`studio-badge studio-badge-${meta.cls}`}>{meta.label}</span>
-}
-
 /** 项目执行引擎 Tag（顶栏下拉/管理表格共用；docker=橙色进阶，platform=蓝色默认）。 */
 function EngineTag({ engine, zh }: { engine: StudioEngine; zh: boolean }) {
   return (
@@ -113,10 +109,6 @@ function EngineTag({ engine, zh }: { engine: StudioEngine; zh: boolean }) {
   )
 }
 
-async function sha256Hex(text: string): Promise<string> {
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))
-  return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('')
-}
 
 
 
@@ -668,12 +660,12 @@ function RecentArtifacts({ zh, project, tick, onView }: {
 
 // ---------- 右栏 AI：对话/任务流（platform=aiChat 流式 / docker=建任务） ----------
 
-function StudioChat({ zh, engine, agentOn, onRefreshTasks, onChatSettled, project, taskRoot, sessions, activeId, onActive, onSessions, refs, onToggleRef, tasksById, onReview, onTaskCreated, recentTick, onOpenInTab }: {
+function StudioChat({ zh, engine, agentOn, onRefreshTasks, onChatSettled, project, taskRoot, sessions, activeId, onActive, onSessions, refs, onToggleRef, tasksById, onTaskCreated, recentTick, onOpenInTab }: {
   zh: boolean; engine: StudioEngine; agentOn: boolean; onRefreshTasks: () => void; onChatSettled: () => void
   project: StudioProject; taskRoot: string; sessions: StudioSession[]; activeId: string
   onActive: (id: string) => void; onSessions: (updater: (prev: StudioSession[]) => StudioSession[]) => void
   refs: AIAttachFile[]; onToggleRef: (f: { fileId: string; fileName: string }) => void
-  tasksById: Record<string, AgentTask>; onReview: (taskId: string) => void; onTaskCreated: (taskId: string) => void
+  tasksById: Record<string, AgentTask>; onTaskCreated: (taskId: string) => void
   /** platform 引擎「最近产物」刷新节拍（空态列表展示）。 */
   recentTick: number
   /** 空态「最近产物」点击：中栏 Tab 打开。 */
@@ -984,22 +976,21 @@ function StudioChat({ zh, engine, agentOn, onRefreshTasks, onChatSettled, projec
     </div>
   )
 
-  /** docker 任务卡（renderItem 覆盖默认气泡）。 */
+  /** docker 任务卡（Trae 式内联 agent 输出：状态 + 实时日志 + 文件变更
+   *  + 操作按钮，全部在对话流内完成——不再依赖独立评审面板）。 */
   const renderTurn = useCallback((turn: StudioTurn): ReactNode | undefined => {
     if (turn.role !== 'assistant' || !turn.task) return undefined
-    const status = tasksById[turn.task.id]?.status ?? 'queued'
     return (
-      <div className="studio-taskcard">
-        <div className="studio-taskcard-head">
-          <Bot size={14} strokeWidth={2} aria-hidden="true" />
-          <span>{zh ? '创作任务' : 'Task'}</span>
-          <StatusBadge status={status} />
-        </div>
-        <div className="studio-taskcard-prompt" title={turn.task.prompt}>{turn.task.prompt}</div>
-        <Button size="small" onClick={() => onReview(turn.task!.id)}>{isTerminal(status) ? (zh ? '查看评审' : 'Review') : (zh ? '查看进度' : 'Progress')}</Button>
-      </div>
+      <StudioTaskCard
+        zh={zh}
+        taskId={turn.task.id}
+        prompt={turn.task.prompt}
+        task={tasksById[turn.task.id]}
+        onApplied={onRefreshTasks}
+        onOpenInTab={onOpenInTab}
+      />
     )
-  }, [tasksById, onReview, zh])
+  }, [tasksById, onRefreshTasks, onOpenInTab, zh])
 
   return (
     <section className="studio-chat" aria-label={engine === 'docker' ? 'Agent 任务流' : 'AI 对话流'}>
@@ -1086,128 +1077,6 @@ function StudioChat({ zh, engine, agentOn, onRefreshTasks, onChatSettled, projec
 
 // ---------- 右栏评审 Tab：任务评审（详情 + diff 勾选 + 写回/丢弃/回滚） ----------
 
-function TaskReview({ taskId, onChanged }: { taskId: string | null; onChanged: () => void }) {
-  const { message } = AntdApp.useApp()
-  const [detail, setDetail] = useState<Awaited<ReturnType<typeof getAgentTask>> | null>(null)
-  const [selected, setSelected] = useState<string[]>([])
-  const [busy, setBusy] = useState(false)
-  const [err, setErr] = useState('')
-  const initedRef = useRef('')
-
-  const load = useCallback(async (initSelection: boolean) => {
-    if (!taskId) return
-    try {
-      const d = await getAgentTask(taskId)
-      setDetail(d)
-      setErr('')
-      if (initSelection || initedRef.current !== taskId) {
-        initedRef.current = taskId
-        setSelected(d.diff.filter((x) => x.action !== 'deleted').map((x) => x.path))
-      }
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : '任务详情加载失败')
-    }
-  }, [taskId])
-
-  useEffect(() => {
-    setDetail(null)
-    setSelected([])
-    setErr('')
-    void load(true)
-  }, [load])
-
-  const status = detail?.task.status ?? ''
-  useEffect(() => {
-    if (!detail || isTerminal(status)) return
-    const timer = window.setInterval(() => void load(false), 5000)
-    return () => window.clearInterval(timer)
-  }, [detail, status, load])
-
-  const run = async (fail: string, fn: () => Promise<string>) => {
-    if (!detail || busy) return
-    setBusy(true)
-    setErr('')
-    try {
-      const text = await fn()
-      if (text) message.success(text)
-      await load(false)
-      onChanged()
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : fail
-      setErr(msg)
-      message.error(msg)
-    } finally {
-      setBusy(false)
-    }
-  }
-  const apply = () => run('写回失败', async () => {
-    const hasDeletes = detail!.diff.some((d) => selected.includes(d.path) && d.action === 'deleted')
-    if (hasDeletes && !window.confirm('删除类产物将移入回收站，确认继续？')) return ''
-    const hash = await sha256Hex(JSON.stringify(detail!.diff))
-    const res = await applyAgentTask(detail!.task.id, selected, detail!.task.snapshot_id, hash, hasDeletes)
-    return res.results.map((r) => `${r.path}: ${r.status}${r.error ? `（${r.error}）` : ''}`).join('；') || '没有选中可写回的产物'
-  })
-  const discard = () => run('丢弃失败', async () => {
-    await discardAgentTask(detail!.task.id)
-    return '任务已丢弃'
-  })
-  const rollback = () => run('回滚失败', async () => {
-    await rollbackAgentTask(detail!.task.id)
-    return '已回滚到任务前快照'
-  })
-
-  return (
-    <div className="studio-card studio-review">
-      <div className="studio-card-title">
-        <Bot size={14} aria-hidden="true" />任务评审
-        {detail && <StatusBadge status={detail.task.status} />}
-        {detail && <Button size="small" type="text" aria-label="刷新" title="刷新" onClick={() => void load(false)}><RefreshCw size={13} aria-hidden="true" /></Button>}
-      </div>
-      {err && <div className="error-text">{err}</div>}
-      {!taskId && <div className="muted studio-pad8">在上方选择任务查看评审。</div>}
-      {taskId && !detail && <div className="muted studio-pad8">加载中…</div>}
-      {detail && (
-        <>
-          <div className="studio-review-meta">
-            <div className="prompt" title={detail.task.prompt}>{detail.task.prompt}</div>
-            <div className="muted">创建 {formatTime(detail.task.created_at)}{detail.dry_run ? ' · dry-run' : ''}{detail.task.workspace_expires_at ? ` · 产物保留至 ${formatTime(detail.task.workspace_expires_at)}` : ''}</div>
-            {detail.task.error && <div className="error-text">{detail.task.error}</div>}
-          </div>
-          <div className="studio-diff-list">
-            <div className="studio-diff-head">
-              <span>产物差异（{detail.diff.length}）</span>
-              <span>
-                <Button size="small" type="text" onClick={() => setSelected(detail.diff.map((d) => d.path))}>全选</Button>
-                <Button size="small" type="text" onClick={() => setSelected([])}>清空</Button>
-              </span>
-            </div>
-            {detail.diff.length === 0 && <div className="muted studio-pad8">暂无产物差异</div>}
-            {detail.diff.map((d) => (
-              <label key={d.path} className="studio-diff-item">
-                <input type="checkbox" checked={selected.includes(d.path)} onChange={(e) => setSelected(e.target.checked ? [...selected, d.path] : selected.filter((p) => p !== d.path))} />
-                <span className={`act act-${d.action}`}>{d.action}</span>
-                <span className="path" title={d.path}>{d.path}</span>
-                <span className="size">{d.size} B</span>
-              </label>
-            ))}
-          </div>
-          <details className="studio-log">
-            <summary>执行日志（{detail.logs.length}）</summary>
-            <pre>{detail.logs.map((l) => `[${l.stream}] ${l.content}`).join('\n')}</pre>
-          </details>
-          <div className="studio-review-ops">
-            <Button size="small" type="primary" disabled={busy || !isTerminal(status) || selected.length === 0} onClick={apply}>写回所选</Button>
-            <Button size="small" disabled={busy || !isTerminal(status) || detail.task.status !== 'succeeded'} onClick={discard}>丢弃任务</Button>
-            <Button size="small" danger disabled={busy || detail.task.status !== 'applied'} onClick={rollback}>回滚</Button>
-          </div>
-        </>
-      )}
-    </div>
-  )
-}
-
-// ---------- 页面主体（IDE 式布局：顶栏 + 可拖拽三栏 [左树 | 中编辑 | 右 AI]） ----------
-
 export default function StudioPage() {
   const locale = useLocale()
   const zh = locale === 'zh-CN'
@@ -1239,7 +1108,6 @@ export default function StudioPage() {
   const [recentTick, setRecentTick] = useState(0)
   const [creating, setCreating] = useState<'richtext' | 'markdown' | null>(null)
   // 右栏 Tab（docker：对话|评审）。（v3.3 移除聚焦信号与面板头。）
-  const [aiTab, setAiTab] = useState<'chat' | 'review'>('chat')
   // 左/右栏折叠（react-resizable-panels v4 imperative collapse/expand；
   // onResize 百分比归零 = 折叠态，用于按钮图标方向）。
   const leftPanelRef = usePanelRef()
@@ -1314,7 +1182,7 @@ export default function StudioPage() {
     setTaskRoot(projects.find((p) => p.id === pid)?.root_folder_id ?? '')
     setRefs([])
     setReviewId('')
-    setAiTab('chat')
+
   }, [uid, pid]) // projects 读取为当前值即可，切换语义由 pid 驱动
 
   // 持久化写透：会话防抖 400ms（避免流式逐 token 落盘），任务映射/Tab 直接写。
@@ -1480,7 +1348,7 @@ export default function StudioPage() {
   const goReview = (taskId: string) => {
     rightPanelRef.current?.expand()
     setAiCollapsed(false)
-    setAiTab('review')
+
     setReviewId(taskId)
   }
 
@@ -1937,22 +1805,7 @@ export default function StudioPage() {
           minSize={300}
           onResize={(size) => setAiCollapsed(size.asPercentage <= 0.5)}
         >
-          {/* 右栏（v3.3 去掉面板头省纵向空间）：docker 引擎保留 28px slim
-              Tab 行（对话|评审）；platform 直出对话体。折叠钮在顶栏。 */}
-          {engine === 'docker' && (
-            <div className="studio-right-slim">
-              <span className="studio-ai-tabs" role="tablist">
-                <button type="button" role="tab" aria-selected={aiTab === 'chat'} className={aiTab === 'chat' ? 'active' : ''} onClick={() => setAiTab('chat')}>{zh ? '对话' : 'Chat'}</button>
-                <button type="button" role="tab" aria-selected={aiTab === 'review'} className={aiTab === 'review' ? 'active' : ''} onClick={() => setAiTab('review')}>{zh ? '评审' : 'Review'}</button>
-              </span>
-            </div>
-          )}
-          {aiTab === 'review' && engine === 'docker' ? (
-            <div className="studio-right-body">
-              {projectTasks.length > 0 ? taskPickSelect : <div className="muted studio-pad8">{zh ? '暂无任务：切回「对话」输入指令发起。' : 'No tasks yet; switch to Chat to create one.'}</div>}
-              <TaskReview taskId={reviewId || null} onChanged={() => void refreshTasks()} />
-            </div>
-          ) : (
+           {/* v3.6 独立评审 Tab 已移除——agent 任务卡在对话流内展示完整生命周期 */}
             <div className="studio-right-body">
               {project ? (
                 <StudioChat
@@ -1970,7 +1823,7 @@ export default function StudioPage() {
                   refs={refs}
                   onToggleRef={toggleRef}
                   tasksById={tasksById}
-                  onReview={goReview}
+                 
                   onTaskCreated={onTaskCreated}
                   recentTick={recentTick}
                   onOpenInTab={(f) => openFile(f, 'view')}
@@ -1990,7 +1843,6 @@ export default function StudioPage() {
                 </div>
               )}
             </div>
-          )}
         </Panel>
       </Group>
 

@@ -80,6 +80,10 @@ services:
         GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     image: docflow/backend:${DOCFLOW_IMAGE_TAG:-1.0.0}
     restart: unless-stopped
+    # Docker socket 访问权：挂载的 /var/run/docker.sock 属主 root:root 0660，
+    # backend 以 app(1000) 运行——root 补充组获得读写（Docker Desktop 场景
+    # 唯一可行方案；仅在挂载 socket 时需要，恒加不影响无 socket 部署）。
+    group_add: ["0"]
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgres://docflow:change-me@postgres:5432/docflow?sslmode=disable}
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
@@ -229,6 +233,9 @@ services:
       # backend（Windows Docker Desktop 同样经该 Unix socket 暴露）；未
       # 挂载时沙箱任务报「Docker 运行时未接入」。挂载即等同给予 backend
       # 编排宿主容器的能力，请自行评估信任边界（本机自用部署已启用）。
+      # socket 属主 root:root 0660，backend 以 app(1000) 运行——group_add
+      # root 作为补充组获得读写权（Docker Desktop 的 socket 恒 root:root，
+      # 宿主侧改组不可行）。
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       migrate:

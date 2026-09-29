@@ -764,9 +764,12 @@ func main() {
 	// AddVersion+Prune 的版本链路，下载大小上限沿用 MAX_FILE_SIZE）。
 	if cfg.OnlyOfficeEnabled {
 		onlyofficeSvc := onlyoffice.New(onlyoffice.Config{
-			ServerURL:        cfg.OnlyOfficeServerURL,
-			PublicURL:        cfg.OnlyOfficePublicURL,
-			DownloadBase:     cfg.OnlyOfficeDownloadURLBase,
+			ServerURL:    cfg.OnlyOfficeServerURL,
+			PublicURL:    cfg.OnlyOfficePublicURL,
+			DownloadBase: cfg.OnlyOfficeDownloadURLBase,
+			// v3.5 浏览器可达基址（DocFlow AI 插件静态页 pluginsData 用）：
+			// 缺省回退 PublicURL 同源（compose 反代场景同域）。
+			BrowserBase:      cfg.PublicBaseURL,
 			JWTSecret:        cfg.OnlyOfficeJWTSecret,
 			TokenTTL:         onlyoffice.DefaultTokenTTL,
 			DownloadMaxBytes: cfg.MaxFileSize,

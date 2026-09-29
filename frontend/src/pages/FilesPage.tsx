@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
-import { useNavigate, useSearchParams } from 'react-router-dom'
+import { useSearchParams } from 'react-router-dom'
 import { Lock, Trash2 } from 'lucide-react'
 import { App as AntdApp, Button, Input, Segmented, Select } from 'antd'
 import {
@@ -116,11 +116,26 @@ export default function FilesPage() {
   const [agentResult, setAgentResult] = useState('')
   const [agentSelected, setAgentSelected] = useState<string[]>([])
   const [searchParams] = useSearchParams()
-  const navigate = useNavigate()
   const spaceIdParam = searchParams.get('space') ?? ''
   // 深链目录（?folder=<id>，Studio「打开项目目录」）：FileBrowserWithTree
   // 挂载后上溯展开定位（仅消费一次；空间 key 已保证随空间切换重挂载）。
   const folderIdParam = searchParams.get('folder') ?? ''
+
+  // 全局空间记忆（v3.5 重做：同步解析，不再「先默认空间再 navigate 跳转」
+  // 的两段式闪烁）——挂载时同步读 localStorage，与 ?space= 参数合并出
+  // 生效空间 id：显式参数优先；无参数时用记忆值（首次渲染即命中，数据
+  // 请求/树挂载/高亮一步到位，无中间态）。
+  const [rememberedSpace, setRememberedSpace] = useState<string>(() => {
+    if (spaceIdParam) return ''
+    try { return localStorage.getItem('docflow.lastSpace') ?? '' } catch { return '' }
+  })
+  // v3.4 保留：显式 ?space= 进入（深链/切换）也写入记忆（与 SpaceSwitcher
+  // 用户切换同源），下次无参进入回落到该空间。
+  useEffect(() => {
+    if (!spaceIdParam) return
+    try { localStorage.setItem('docflow.lastSpace', spaceIdParam) } catch { /* ignore */ }
+  }, [spaceIdParam])
+  const activeSpaceId = spaceIdParam || rememberedSpace
 
   const [spaces, setSpaces] = useState<Space[]>([])
   const [reloadKey, setReloadKey] = useState(0)
@@ -133,19 +148,17 @@ export default function FilesPage() {
   // 所有权后设置类 tab 权限随之收敛）。
   useEffect(() => {
     void listSpaces().then(setSpaces).catch(() => setSpaces([]))
-  }, [spaceIdParam, reloadKey])
+  }, [activeSpaceId, reloadKey])
 
-  // 全局空间记忆（v3.4）：无 ?space 参数进入时回落到上次使用的空间（非
-  // 总是默认空间）；有记忆且空间仍可见时 replace 补 ?space=。
+  // 记忆失效清理（记忆的空间已被移出/删除）：清掉记忆回落默认空间
+  //（rememberedSpace 置空 → activeSpaceId 为空 → 按默认空间解析）。
   useEffect(() => {
-    if (searchParams.has('space') || spaces.length === 0) return
-    try {
-      const mem = localStorage.getItem('docflow.lastSpace')
-      if (mem && spaces.some((s) => s.id === mem)) {
-        navigate(`/files?space=${mem}`, { replace: true })
-      }
-    } catch { /* ignore */ }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅初始化回落一次
+    if (!rememberedSpace || spaces.length === 0) return
+    if (!spaces.some((s) => s.id === rememberedSpace)) {
+      setRememberedSpace('')
+      try { localStorage.removeItem('docflow.lastSpace') } catch { /* ignore */ }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [spaces.length])
 
   // 右侧成员栏（v2.2 起默认常开；工具栏「成员」切换按钮已移除）：
@@ -164,9 +177,9 @@ export default function FilesPage() {
   const [trashSeq, setTrashSeq] = useState(0)
 
   const activeSpace = useMemo(() => {
-    if (spaceIdParam) return spaces.find((s) => s.id === spaceIdParam) ?? null
+    if (activeSpaceId) return spaces.find((s) => s.id === activeSpaceId) ?? null
     return spaces.find((s) => s.is_default) ?? null
-  }, [spaces, spaceIdParam])
+  }, [spaces, activeSpaceId])
   const myRole: SpaceRole | null = activeSpace?.my_role ?? null
   const meId = currentUserId()
   const isOwner = activeSpace !== null && meId !== null && activeSpace.owner_id === meId
@@ -565,13 +578,13 @@ export default function FilesPage() {
   })
 
   // 列表/建目录按空间分派：非默认空间走 /spaces/:id 端点；缺省走 /files
-  //（后端缺省即默认空间）。v2.6 race 修复：分派依据 spaceIdParam（URL，
-  // 挂载时即确定）而非 activeSpace——后者经 listSpaces 异步加载，挂载瞬间
-  // 为 null 会走默认空间端点，加载完成后无重载（列表仍是默认空间内容，
-  // 再进目录即 folder not found）。
+  //（后端缺省即默认空间）。v2.6 race 修复：分派依据 activeSpaceId（URL
+  // 参数或空间记忆，挂载时同步确定）而非 activeSpace——后者经 listSpaces
+  // 异步加载，挂载瞬间为 null 会走默认空间端点，加载完成后无重载（列表
+  // 仍是默认空间内容，再进目录即 folder not found）。
   const rawListItems = async (parentId: string | null, opts?: FileQueryOptions): Promise<DirListing> => {
-    if (spaceIdParam) {
-      const res = await listSpaceFiles(spaceIdParam, parentId, opts)
+    if (activeSpaceId) {
+      const res = await listSpaceFiles(activeSpaceId, parentId, opts)
       return { items: res.files ?? [], folderId: res.parent_id }
     }
     return { items: await listFiles(parentId, opts), folderId: parentId }
@@ -602,7 +615,7 @@ export default function FilesPage() {
     return res
   }
   const doCreateFolder = (name: string, parentId: string | null) =>
-    spaceIdParam ? createSpaceFolder(spaceIdParam, name, parentId) : createFolder(name, parentId)
+    activeSpaceId ? createSpaceFolder(activeSpaceId, name, parentId) : createFolder(name, parentId)
 
   return (
     <div className="page wide-page files-page">
@@ -621,7 +634,7 @@ export default function FilesPage() {
            load、FolderTreeNav 的 nodes/expanded 与面包屑 crumbs 均保留旧
            空间内容（进旧目录 → folder not found）。key = URL space 参数
            （缺省 '__default__'，spaces 异步加载不引起二次重挂载）。 */
-        key={spaceIdParam || '__default__'}
+        key={activeSpaceId || '__default__'}
         rootLabel={activeSpace?.name ?? msg('teamsTitle')}
         /* 面包屑根目录短名（v2.6）：默认/非默认空间统一「根目录」，完整
            空间名由左侧空间切换器表达。 */
@@ -677,7 +690,7 @@ export default function FilesPage() {
         onViewReset={() => setSpaceView('all')}
         copyFn={canWrite ? ((fileId, parentId) => copyFile(fileId, parentId)) : undefined}
         fileMetaFn={(fileId) => getFileMeta(fileId).catch(() => null)}
-        ns={spaceIdParam ? { type: 'space', scope: spaceIdParam } : undefined}
+        ns={activeSpaceId ? { type: 'space', scope: activeSpaceId } : undefined}
         /* 回收站入口在工具行左端（toolbarPrefix），弹窗本体经受控信号打开；
            隐藏 FileBrowser 工具行行尾的默认回收站按钮。 */
         hideToolbarTrash
