@@ -46,15 +46,13 @@ import type { DataNode } from 'antd/es/tree'
 import antdZhCN from 'antd/locale/zh_CN'
 import antdEnUS from 'antd/locale/en_US'
 import { useNavigate } from 'react-router-dom'
-import { Bubble, Conversations, Sender, XProvider } from '@ant-design/x'
-import type { BubbleItemType } from '@ant-design/x'
+import { Conversations, Sender, XProvider } from '@ant-design/x'
 import xZhCN from '@ant-design/x/es/locale/zh_CN'
 import xEnUS from '@ant-design/x/es/locale/en_US'
 import { Sparkles, Trash2, FileText, Globe, RotateCcw, Copy, Bot, Plus, Check, Paperclip, Brain, Pencil, PencilLine, Pin, BookMarked, Wrench, Zap, FolderCog, FolderOpen, MessagesSquare, Crosshair, FileSearch, Search } from 'lucide-react'
 import {
   AISkillDef,
   AIUsage,
-  AISource,
   AIMessage,
   AIPersonalPrefsView,
   aiChat,
@@ -705,10 +703,10 @@ export function AIChatToggleBar({
 
 // 网络来源归一化与渲染、工具调用链迁至 components/aichat（三处对话共用），
 // 保留原导出名以兼容 AIEditChat / StudioPage 等既有引用。
-import { AIChatThinking, AIToolChain, AIWebSourcesView, applyToolResult, normalizeWebSources, toolEntryFrom } from './aichat'
+import { AIChatThinking, AIMessageList, AIToolChain, AIWebSourcesView, applyToolResult, normalizeWebSources, toolEntryFrom } from './aichat'
+import type { AIChatTurnData, AIToolCallEntry, AIAttachFile } from './aichat'
 import AIAttachTree from './aichat/AIAttachTree'
 import { useStickyScroll } from './aichat/useStickyScroll'
-import type { AIToolCallEntry, AIAttachFile, AIWebSource } from './aichat'
 
 export { normalizeWebSources } from './aichat'
 export type { AIWebSource } from './aichat'
@@ -1034,30 +1032,9 @@ export function setAIContextFile(context: AIContextFile | null): void {
   window.dispatchEvent(new CustomEvent<AIContextFile | null>('docflow:ai-context', { detail: context }))
 }
 
-interface ChatTurn {
-  /** 会话内自增 ID：流式回调按 id 定位更新，避免「新对话」清空后旧流写入错位。 */
-  id: number
-  role: 'user' | 'assistant'
-  content: string
-  streaming?: boolean
-  /** 用户主动停止（保留已生成内容，不视为错误）。 */
-  stopped?: boolean
+interface ChatTurn extends AIChatTurnData {
   /** assistant 回答来源：重试时据此分发（chat 重发最后一问 / summarize 重跑摘要）。 */
   kind?: 'chat' | 'summarize'
-  /** 用户回合引用的文件（📎 chips 展示；发送时已随 fileIds 上送）。 */
-  files?: AIAttachFile[]
-  /** 推理思考聚合文本（SSE thinking 增量；折叠区展示，不计入正文）。 */
-  thinking?: string
-  /** 首个思考增量时间戳（ms；计算用时）。 */
-  thinkingStartedAt?: number
-  /** 思考耗时（ms；流结束后写入）。 */
-  thinkingMS?: number
-  sources?: AISource[]
-  /** 联网搜索来源（SSE meta.sources 宽松归一化；底部折叠列表展示）。 */
-  webSources?: AIWebSource[]
-  /** 外部工具调用（SSE tool/tool_result 生命周期合并；ThoughtChain 展示）。 */
-  toolCalls?: AIToolCallEntry[]
-  error?: string
   usage?: AIUsage | null
 }
 
@@ -1214,7 +1191,7 @@ export default function AIAssistant() {
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState('')
   const [lastQuestion, setLastQuestion] = useState('')
-  const [copiedTurn, setCopiedTurn] = useState<number | null>(null)
+  const [copiedTurn, setCopiedTurn] = useState<number | string | null>(null)
   // ---- 体验增强：模型 / 人设 / 文件引用 ----
   const [models, setModels] = useState<AIModelOption[]>([])
   // /ai/models 是否已返回（含空结果）：思考开关禁用态判定前置条件
@@ -2001,11 +1978,7 @@ export default function AIAssistant() {
     )
   }
 
-  const bubbleItems: BubbleItemType[] = turns.map((turn, i) => ({
-    key: turn.id,
-    role: turn.role,
-    content: turn.role === 'user' ? renderUserContent(turn) : renderAssistantContent(turn, i === turns.length - 1),
-  }))
+
 
   // XProvider locale：x 组件 locale 会同时透传给内部 antd ConfigProvider，
   // 故与完整 antd locale 合并（避免 Drawer 子树内 antd 组件文案回退英文）。
@@ -2338,29 +2311,18 @@ export default function AIAssistant() {
           )}
           {turns.length > 0 && (
             <div ref={sticky.wrapRef} onScroll={sticky.onScroll} className="aic-list-wrap aiax-bubbles-wrap">
-              <Bubble.List
+              {/* v3.5 统一：消息流迁移共享 AIMessageList（与 Studio/编辑对话
+                  同一 Bubble.List 组件族）；自定义渲染覆盖（重试/用量等
+                  助手特有操作行经 renderItem 注入）。 */}
+              <AIMessageList
+                items={turns}
+                zh={zh}
                 className="aiax-bubbles"
-                items={bubbleItems}
-                role={{
-                  // 用户：右侧胶囊气泡（主色底）。
-                  user: {
-                    placement: 'end',
-                    variant: 'filled',
-                    shape: 'round',
-                    classNames: { content: 'aiax-bubble-user' },
-                  },
-                  // AI：左侧无底色全宽 markdown + Sparkles 头像。
-                  assistant: {
-                    placement: 'start',
-                    variant: 'borderless',
-                    avatar: (
-                      <span className="ai-avatar" aria-hidden="true">
-                        <Sparkles size={13} strokeWidth={2} />
-                      </span>
-                    ),
-                    classNames: { content: 'aiax-bubble-ai' },
-                  },
-                }}
+                renderItem={(turn, i) => (
+                  turn.role === 'user'
+                    ? renderUserContent(turn as ChatTurn)
+                    : renderAssistantContent(turn as ChatTurn, i === turns.length - 1)
+                )}
               />
             </div>
           )}

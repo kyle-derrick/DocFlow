@@ -4840,6 +4840,54 @@ kbd {
 }
 
 /* ---------- 回收站弹窗（TrashModal）：顶部工具行（范围/刷新/清空）。 */
+/* 目录快照差异树形视图（v3.5：替代 JSON 平铺）。 */
+.sdiff { display: flex; flex-direction: column; gap: 8px; }
+.sdiff-toolbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.sdiff-search {
+  flex: 1;
+  min-width: 140px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+}
+.sdiff-filter {
+  padding: 2px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+.sdiff-filter.on { color: var(--text); border-color: var(--primary); background: var(--primary-bg, rgba(79, 124, 255, 0.12)); }
+.sdiff-tree { max-height: 320px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; padding: 6px 4px; }
+.sdiff-row-wrap { }
+.sdiff-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  font-size: 12.5px;
+  cursor: default;
+  white-space: nowrap;
+}
+.sdiff-row[role='button'] { cursor: pointer; }
+.sdiff-row[role='button']:hover { background: var(--surface-2); }
+.sdiff-caret { width: 12px; color: var(--muted); font-size: 10px; flex-shrink: 0; }
+.sdiff-name { overflow: hidden; text-overflow: ellipsis; }
+.sdiff-badge { margin-left: auto; padding: 0 8px; border-radius: 999px; font-size: 11px; flex-shrink: 0; }
+.sdiff-row.sdiff-add .sdiff-name, .sdiff-row.sdiff-add .sdiff-badge { color: var(--ok, #3fbf7f); }
+.sdiff-row.sdiff-add .sdiff-badge { background: rgba(63, 191, 127, 0.14); }
+.sdiff-row.sdiff-del .sdiff-name, .sdiff-row.sdiff-del .sdiff-badge { color: var(--danger); }
+.sdiff-row.sdiff-del .sdiff-badge { background: rgba(224, 86, 107, 0.14); }
+.sdiff-row.sdiff-mod .sdiff-name, .sdiff-row.sdiff-mod .sdiff-badge { color: #e6a23c; }
+.sdiff-row.sdiff-mod .sdiff-badge { background: rgba(230, 162, 60, 0.14); }
+.sdiff-empty { padding: 12px; text-align: center; }
+
 .trash-modal .trash-modal-toolbar {
   display: flex;
   align-items: center;

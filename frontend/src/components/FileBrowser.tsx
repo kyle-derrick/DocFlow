@@ -22,6 +22,7 @@ import { App as AntdApp, Button, Dropdown, Input, Menu, Modal as AntdModal, Popo
 import type { DragEvent as ReactDragEvent } from 'react'
 import type { MenuProps } from 'antd'
 import SplitButton from './SplitButton'
+import SnapshotDiffView from './SnapshotDiffView'
 import {
   Download,
   ExternalLink,
@@ -3423,7 +3424,7 @@ export default function FileBrowser({
               <Button size="small" danger onClick={() => { if (window.confirm('仅恢复快照中仍存在文件的版本指针，继续？')) void restoreDirectorySnapshot(snap.id).then(() => void load(currentParent)) }}>恢复版本</Button>
             </div>
           ))}
-          {snapshotDiff && <pre style={{ whiteSpace: 'pre-wrap' }}>{JSON.stringify(snapshotDiff, null, 2)}</pre>}
+          {snapshotDiff && <SnapshotDiffView diff={snapshotDiff} zh={locale === 'zh-CN'} />}
         </Modal>
       )}
 

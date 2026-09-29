@@ -20,8 +20,8 @@
 // 无论成败 exit 0（平台以 .docflow-changes.json 与任务状态判定结果，
 // 不以容器退出码区分成败）。
 import { exec, execFile } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import http from 'node:http';
 import { promisify } from 'node:util';
 
@@ -49,15 +49,19 @@ const DEFAULT_GITIGNORE = [
 
 const SYSTEM_PROMPT = [
   'You are DocFlow Agent, an autonomous coding assistant running inside a sandboxed container.',
-  'The container has NO network access. You interact with the outside world only by executing local shell commands.',
+  'The container has NO network access. You interact with the outside world only through the tools below.',
   'A git baseline commit of the initial workspace has been created for you; your file changes are tracked automatically.',
-  'PROTOCOL: reply with ONE JSON object and nothing else. Two actions are allowed:',
-  '  {"action":"run","cmd":"<single shell command to execute in the workspace>"}',
+  'PROTOCOL: reply with ONE JSON object and nothing else. Available actions:',
+  '  {"action":"run","cmd":"<single shell command>"}',
+  '  {"action":"read","path":"<relative file path>"}',
+  '  {"action":"write","path":"<relative file path>","content":"<full file content>"}',
+  '  {"action":"edit","path":"<relative file path>","find":"<exact text to locate>","replace":"<replacement>"}',
   '  {"action":"done","summary":"<short summary of what you accomplished>"}',
   'Rules:',
-  '- Inspect the workspace first (e.g. ls, find, cat) before editing files.',
-  '- One command per turn; it runs with a 120s timeout in ' + WORKSPACE + '.',
-  '- Command output (stdout+stderr, truncated) is fed back to you in the next turn.',
+  '- Inspect the workspace first (run ls/find, or read files) before editing.',
+  '- Prefer read/write/edit over shell heredocs for file changes: they are exact and encoding-safe.',
+  '- write replaces the whole file; edit replaces ONLY the first occurrence of find (copied verbatim).',
+  '- One action per turn. run has a 120s timeout in ' + WORKSPACE + '; its output (truncated) is fed back next turn.',
   '- When the task is complete, or you cannot make progress, respond with the "done" action.',
 ].join('\n');
 
@@ -159,13 +163,43 @@ async function gitBaseline() {
   await git(['-c', 'user.email=agent@docflow', '-c', 'user.name=agent', 'commit', '-q', '--allow-empty', '-m', 'baseline']);
 }
 
+// resolveSafe 解析工作区内相对路径（拒绝越界 / 绝对路径）。
+function resolveSafe(rel) {
+  const p = join(WORKSPACE, rel);
+  if (!p.startsWith(WORKSPACE + '/') && p !== WORKSPACE) throw new Error(`path escapes workspace: ${rel}`);
+  return p;
+}
+
+// toolRead / toolWrite / toolEdit 文件工具（比 shell heredoc 编码安全）。
+async function toolRead(rel) {
+  const p = resolveSafe(rel);
+  const data = readFileSync(p, 'utf8');
+  return `FILE ${rel} (${data.length} chars)\n${truncate(data)}`;
+}
+function toolWrite(rel, content) {
+  const p = resolveSafe(rel);
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, String(content ?? ''), 'utf8');
+  return `WROTE ${rel} (${String(content ?? '').length} chars)`;
+}
+function toolEdit(rel, find, replaceText) {
+  const p = resolveSafe(rel);
+  const data = readFileSync(p, 'utf8');
+  const idx = data.indexOf(find);
+  if (idx < 0) return `EDIT FAILED: find text not found in ${rel}`;
+  writeFileSync(p, data.slice(0, idx) + replaceText + data.slice(idx + find.length), 'utf8');
+  return `EDITED ${rel} (replaced ${find.length} chars)`;
+}
+
 // aiLoop AI 工具循环（协议见 SYSTEM_PROMPT）；任何 AI 失败即中断循环，
-// 已产生的文件变更仍在收尾时同步。
+// 已产生的文件变更仍在收尾时同步。历史压缩：仅保留最近 4 轮命令输出的
+// 全文，更早的替换为截断占位（防上下文膨胀，pi 同款策略）。
 async function aiLoop(prompt) {
   const messages = [
     { role: 'system', content: SYSTEM_PROMPT },
     { role: 'user', content: prompt },
   ];
+  const outputTurns = [];
   for (let round = 1; round <= MAX_ROUNDS; round++) {
     let reply;
     try {
@@ -177,21 +211,45 @@ async function aiLoop(prompt) {
     const action = extractAction(reply.content);
     if (!action) {
       messages.push({ role: 'assistant', content: reply.content });
-      messages.push({ role: 'user', content: 'Invalid reply: your previous message was not a single JSON object. Respond ONLY with {"action":"run","cmd":"..."} or {"action":"done","summary":"..."}.' });
+      messages.push({ role: 'user', content: 'Invalid reply: your previous message was not a single JSON object. Respond ONLY with one action JSON per the protocol.' });
       continue;
     }
     if (action.action === 'done') {
       log(`agent-runner: done — ${String(action.summary || '').slice(0, 500)}`);
       return;
     }
-    if (action.action === 'run' && typeof action.cmd === 'string' && action.cmd.trim() !== '') {
-      const output = await runCommand(action.cmd);
-      messages.push({ role: 'assistant', content: JSON.stringify({ action: 'run', cmd: action.cmd }) });
-      messages.push({ role: 'user', content: `COMMAND OUTPUT (${action.cmd.slice(0, 200)})\n${output}\nContinue with the next JSON action.` });
-      continue;
+    let output;
+    try {
+      if (action.action === 'run' && typeof action.cmd === 'string' && action.cmd.trim() !== '') {
+        output = await runCommand(action.cmd);
+      } else if (action.action === 'read' && typeof action.path === 'string') {
+        output = toolRead(action.path);
+      } else if (action.action === 'write' && typeof action.path === 'string') {
+        output = toolWrite(action.path, action.content);
+      } else if (action.action === 'edit' && typeof action.path === 'string' && typeof action.find === 'string') {
+        output = toolEdit(action.path, action.find, String(action.replace ?? ''));
+      } else {
+        messages.push({ role: 'assistant', content: reply.content });
+        messages.push({ role: 'user', content: 'Invalid action. Respond ONLY with one action JSON per the protocol.' });
+        continue;
+      }
+    } catch (err) {
+      output = `TOOL ERROR: ${err.message || err}`;
     }
-    messages.push({ role: 'assistant', content: reply.content });
-    messages.push({ role: 'user', content: 'Invalid action. Respond ONLY with {"action":"run","cmd":"..."} or {"action":"done","summary":"..."}.' });
+    // 历史压缩：更早轮次的工具输出截为摘要占位（保留最近 4 轮全文）。
+    outputTurns.push(messages.length + 1);
+    if (outputTurns.length > 4) {
+      const oldIdx = outputTurns[0];
+      outputTurns.shift();
+      const m = messages[oldIdx];
+      if (m && typeof m.content === 'string' && m.content.length > 600) {
+        m.content = m.content.slice(0, 300) + `\n...(compressed, ${m.content.length} chars total)`;
+      }
+    }
+    const head = action.action === 'run' ? `COMMAND OUTPUT (${String(action.cmd).slice(0, 200)})`
+      : `TOOL OUTPUT (${action.action} ${String(action.path ?? '').slice(0, 120)})`;
+    messages.push({ role: 'assistant', content: JSON.stringify(action) });
+    messages.push({ role: 'user', content: `${head}\n${output}\nContinue with the next JSON action.` });
   }
   log(`agent-runner: reached max rounds (${MAX_ROUNDS})`);
 }

@@ -159,12 +159,17 @@ function MessageActions({ text, zh, onRegenerate }: { text: string; zh: boolean;
 
 /** AI 气泡内容（除 Bubble 壳外的一切：思考/工具链/正文/来源/操作）。 */
 /** 富文本编辑指令中的受保护占位行（[DocFlow-Embed/File/Image …]）在对话
- * 气泡内渲染为简洁引用块而非裸标记文本（应用后由富文本层还原为嵌入卡片）。 */
+ * 气泡内渲染为可点击卡片链接（点击在独立查看页打开真实内容；应用后由
+ * 富文本层还原为原生嵌入节点）。 */
 export function humanizeEmbedPlaceholders(text: string): string {
   return text.replace(/^\[DocFlow-(Embed|File|Image)([^\]]*)\]\s*$/gm, (_m, kind: string, rest: string) => {
+    const fid = (rest.match(/fileId="([^"]*)"/) || [])[1] ?? ''
     const title = (rest.match(/title="([^"]*)"/) || [])[1] ?? ''
-    const kindLabel = kind === 'Embed' ? '嵌入（图表/白板）' : kind === 'File' ? '文件' : '图片'
-    return `> 🧩 **${kindLabel}**${title ? `：${title}` : ''}（占位保留，应用后还原）`
+    const kLabel = kind === 'Embed' ? '嵌入（图表/白板）' : kind === 'File' ? '文件' : '图片'
+    const name = title || fid.slice(0, 8)
+    return fid
+      ? `> 🧩 **${kLabel}**：[${name}](/view/${fid})`
+      : `> 🧩 **${kLabel}**${title ? `：${title}` : ''}`
   })
 }
 
