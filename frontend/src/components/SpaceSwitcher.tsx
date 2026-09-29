@@ -50,6 +50,12 @@ export default function SpaceSwitcher({
   useEffect(() => { void listSpaces().then(setSpaces).catch(() => setSpaces([])) }, [location.search === '' ? 0 : 1])
 
   const currentSpaceId = new URLSearchParams(location.search).get('space') ?? ''
+  // v3.6 修复：无 URL 参数时同步读空间记忆（与 FilesPage 的 activeSpaceId
+  // 同源），而非总回默认空间——否则顶栏显示默认空间名但实际内容是记忆
+  // 空间的（「显示 admin的空间但实际是 V25S-t5hore」的根因）。
+  const rememberedSpaceId = currentSpaceId || (() => {
+    try { return localStorage.getItem('docflow.lastSpace') ?? '' } catch { return '' }
+  })()
   const ordered = [...spaces.filter((s) => s.is_default), ...spaces.filter((s) => !s.is_default)]
 
   return (
@@ -58,7 +64,7 @@ export default function SpaceSwitcher({
         size="small"
         className="space-select"
         aria-label={locale === 'zh-CN' ? '选择空间' : 'Select space'}
-        value={currentSpaceId || ordered.find((s) => s.is_default)?.id || ''}
+        value={(rememberedSpaceId && spaces.some((s) => s.id === rememberedSpaceId) ? rememberedSpaceId : '') || ordered.find((s) => s.is_default)?.id || ''}
         onChange={(v) => {
           // 全局空间记忆（v3.4）：切换写入 localStorage——AI 助手工作目录、
           // 下次进入文件页（无 ?space 参数时）均回落到该空间，而非总回默认。

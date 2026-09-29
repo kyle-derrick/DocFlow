@@ -12,7 +12,7 @@ import {
   FileText, FilePlus2, FileType2, Folder, FolderOpen, FolderPlus,
   Globe, Pencil, Plus, RefreshCw, SquarePen, Trash2, Upload, Wrench,
 } from 'lucide-react'
-import { listFiles } from '../../api'
+import { getFileItem, listFiles } from '../../api'
 import type { FileItem } from '../../api'
 import { fileIcon } from '../fileIcon'
 
@@ -47,6 +47,9 @@ export interface FileTreePanelProps {
   onCreateFolder?: (parent: { id: string; name: string }) => void
   /** 拖拽上传（文件 drop 到目录节点；根 = 项目根；folder.id '' = 根）。 */
   onDropFiles?: (files: File[], folder: { id: string; name: string }) => void
+  /** 深链展开：从根目录自动展开到该目录（构建引用树等场景——默认展开
+   *  根→当前目录路径；需要逐级向上解析 parent 链）。 */
+  expandTo?: string
   onToggleRef?: (f: FileItem) => void
   onRename?: (f: FileItem) => void
   onDelete?: (f: FileItem) => void
@@ -55,7 +58,7 @@ export interface FileTreePanelProps {
 
 export default function FileTreePanel({
   zh, spaceId, rootId, rootTitle, onlyFolders = false, onPickFolder, activeFileId, activeFolderId,
-  isRefFile, onOpenFile, onEditFile, onSetWorkRoot, onUploadTo, onCreateDoc, onCreateFolder, onDropFiles, onToggleRef, onRename, onDelete,
+  isRefFile, onOpenFile, onEditFile, onSetWorkRoot, onUploadTo, onCreateDoc, onCreateFolder, onDropFiles, expandTo, onToggleRef, onRename, onDelete,
   className,
 }: FileTreePanelProps) {
   const { message } = AntdApp.useApp()
@@ -91,6 +94,42 @@ export default function FileTreePanel({
       return []
     }
   }, [spaceId, onlyFolders, zh, rootTitle])
+
+  // expandTo：从根目录自动展开到目标目录（构建引用树等场景）——先向上
+  // 解析 parent 链，再逐级 loadChildren + setExpanded。
+  useEffect(() => {
+    if (!expandTo || !spaceId) return
+    let alive = true
+    const expandPath = async () => {
+      try {
+        // 向上构建链（目标 → ... → 根的子目录）。
+        const chain: string[] = []
+        const seen = new Set<string>()
+        let cur: string | null = expandTo
+        while (cur && cur !== rootKey && !seen.has(cur)) {
+          seen.add(cur)
+          chain.unshift(cur)
+          const meta = await getFileItem(cur)
+          if (!alive) return
+          cur = meta.parent_id || null
+        }
+        if (!alive || chain.length === 0) return
+        // 从根开始逐级加载 + 展开。
+        await loadChildren(rootKey)
+        if (!alive) return
+        for (let i = 0; i < chain.length; i++) {
+          await loadChildren(chain[i])
+          if (!alive) return
+        }
+        setExpanded(chain)
+      } catch {
+        // 展开失败静默（树仍可用，只是未自动展开）。
+      }
+    }
+    void expandPath()
+    return () => { alive = false }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅挂载执行一次
+  }, [expandTo, spaceId])
 
   // 根目录切换：清空重载并展开根。
   useEffect(() => {

@@ -7961,18 +7961,56 @@ kbd {
 .aiax-msg-actions .ant-btn { padding: 0 4px; color: var(--muted); }
 .aiax-msg-actions .ant-btn:hover { color: var(--primary); }
 
-/* ---- 底部输入区（Sender） ---- */
+/* ---- 底部输入区（v3.6 ChatGPT 式统一框：输入+工具一体，
+   纯 CSS column-reverse 实现——DOM 不动，Sender 视觉置顶、工具沉底） ---- */
 .aiax-composer {
   border-top: 1px solid var(--border);
   padding: 8px 10px 10px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 0;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface-2);
+  transition: border-color 0.15s;
+  overflow: hidden;
+  min-height: 0;
+}
+.aiax-composer:focus-within { border-color: var(--primary); }
+/* Sender 置顶：自身边框去除（外层统一框）。 */
+.aiax-composer .aiax-sender.ant-sender {
+  border: none !important;
+  background: transparent !important;
+  border-radius: 14px 14px 0 0;
+  order: 99; /* column-reverse 下最大 order = 视觉最顶 */
+}
+/* 工具行沉底。 */
+.aiax-composer .aiax-send-header {
+  order: 1; /* 视觉底部 */
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  flex-shrink: 0;
+  gap: 2px;
+  padding: 2px 6px 4px;
+  border-top: 1px solid var(--border);
+  min-height: 0;
 }
-/* 开关 pill 行：模型选择（左）+ 图标式 pill 组。 */
-.aiax-toggles { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; }
-/* 图标式开关 pill（DeepSeek 式）：图标 + 短词；开启态主色描边 + 淡填充。 */
+.aiax-composer .aiax-send-tools { display: flex; align-items: center; gap: 2px; flex-wrap: wrap; }
+/* 开关行在工具行上方。 */
+.aiax-composer .aiax-toggles {
+  order: 2;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-wrap: wrap;
+  min-width: 0;
+  padding: 0;
+}
+/* 模型选择推到右端。 */
+.aiax-composer .aiax-toggles > :first-child { margin-left: auto; }
+/* 引用 chips 在最底。 */
+.aiax-composer .ai-attach-chips { order: 0; padding: 2px 6px 0; }
+/* 图标式开关（DeepSeek 式，28px 方块）：开启态主色填充。 */
 .aiax-pill {
   display: inline-flex;
   align-items: center;
@@ -7996,17 +8034,7 @@ kbd {
   background: color-mix(in srgb, var(--primary) 12%, transparent);
 }
 .aiax-pill:disabled { opacity: 0.5; cursor: default; }
-/* Sender 容器：圆角面板底 + 聚焦主色描边（对齐旧 .ai-input-box 视觉）。 */
-.aiax-sender.ant-sender {
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  background: var(--surface-2);
-  transition: border-color 0.15s;
-}
-.aiax-sender.ant-sender:focus-within { border-color: var(--primary); }
-/* Sender header 区：工具行（引用 / 技能 / 当前文档）+ 引用文件 chips。 */
-.aiax-send-header { display: flex; flex-direction: column; gap: 4px; padding: 6px 8px 2px; }
-.aiax-send-tools { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; row-gap: 2px; min-width: 0; }
+/* v3.6：旧独立 Sender 边框与旧工具行样式已并入 aiax-composer 统一框。 */
 
 /* ---- 查看页悬浮 AI 助理：缩小（40px）+ 边缘吸附半嵌圆点 ---- */
 /* 边界探测锚点（display:none 不参与布局，仅 closest 探测弹窗容器）。 */

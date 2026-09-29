@@ -185,6 +185,7 @@ export default function ViewerAIWidget({
   const [pos, setPos] = useState<DragPos>(() => {
     const stored = loadPos()
     if (stored) return { x: stored.x, y: stored.y }
+    // 默认：视口右下角（留 24px 边距）——不是弹窗边界（用户直觉是屏幕角落）。
     return { x: window.innerWidth - BALL_SIZE - 24, y: window.innerHeight - BALL_SIZE - 24 }
   })
   const posRef = useRef(pos)
@@ -201,6 +202,8 @@ export default function ViewerAIWidget({
 
   // 挂载后按记忆/默认位置初始化（锚点此时已渲染，可探测弹窗边界）；
   // 初始化前悬浮球隐藏，避免按视口默认位置在弹窗外闪现一帧。
+  // v3.6 修复：默认位置用**视口**右下角（用户直觉是屏幕角落），不用弹窗
+  // 边界（弹窗居中且小于视口，右下角会在屏幕中间——观感是「位置不对」）。
   const [inited, setInited] = useState(false)
   useEffect(() => {
     const b = readBounds()
@@ -210,7 +213,10 @@ export default function ViewerAIWidget({
     } else if (stored) {
       applyPos(clampPos(stored, BALL_SIZE, BALL_SIZE, b))
     } else {
-      applyPos({ x: b.left + b.width - BALL_SIZE - 24, y: b.top + b.height - BALL_SIZE - 24 })
+      applyPos(clampPos(
+        { x: window.innerWidth - BALL_SIZE - 24, y: window.innerHeight - BALL_SIZE - 24 },
+        BALL_SIZE, BALL_SIZE, b,
+      ))
     }
     setInited(true)
     // eslint-disable-next-line react-hooks/exhaustive-deps

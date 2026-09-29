@@ -23,11 +23,12 @@ export default function AIAttachTree({ zh, spaceId, rootFolderId, selected, onTo
   return (
     <div className="ai-attach-tree">
       <FileTreePanel
-        key={`${spaceId}:${rootFolderId ?? 'root'}:${tick}`}
+        key={`${spaceId}:${tick}`}
         zh={zh}
         spaceId={spaceId}
-        rootId={rootFolderId}
-        rootTitle={zh ? '当前位置' : 'Current location'}
+        rootId={null}
+        rootTitle={zh ? '全部文件' : 'All files'}
+        expandTo={rootFolderId ?? undefined}
         isRefFile={(f) => selected.some((s) => s.fileId === f.id)}
         onOpenFile={(f: FileItem) => onToggle({ fileId: f.id, fileName: f.name })}
         onRename={() => setTick((n) => n + 1)}
