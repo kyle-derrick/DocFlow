@@ -68,6 +68,28 @@ function Ask-Secret([string]$Label, [scriptblock]$Generate, [string]$Hint = '', 
     }
 }
 
+# ---------- 场景模板（deploy/env 四套 + 根目录开发模板） ----------
+$scenarios = @(
+    @{ key = 'dev';         file = '.env.example';                        desc = '本地开发（make run/dev 直连本机 PostgreSQL）' }
+    @{ key = 'single-node'; file = 'deploy/env/.env.single-node.example'; desc = '单机生产（compose 单域名 + 自动 HTTPS）' }
+    @{ key = 'cluster';     file = 'deploy/env/.env.cluster.example';     desc = '多节点集群（外部 PG/Redis/存储 + 多服务实例）' }
+    @{ key = 'verify';      file = 'deploy/env/.env.local-verify.example';desc = '本地验证栈（compose 全组件弱密钥，本机自测）' }
+    @{ key = 'env-dev';     file = 'deploy/env/.env.dev.example';         desc = '联调模板（弱密钥连共享开发库）' }
+)
+if (-not $Auto -and $Template -eq '.env.example' -and -not $Patch) {
+    Write-Host ''
+    Write-Host '选择场景模板：' -ForegroundColor Cyan
+    for ($i = 0; $i -lt $scenarios.Count; $i++) {
+        Write-Host ("  [{0}] {1,-12} {2}" -f ($i + 1), $scenarios[$i].key, $scenarios[$i].desc)
+    }
+    $pick = Read-Host '输入编号（回车 = 1 本地开发）'
+    $idx = 0
+    if ([int]::TryParse($pick, [ref]$idx) -and $idx -ge 1 -and $idx -le $scenarios.Count) {
+        $Template = $scenarios[$idx - 1].file
+    }
+    Write-Host "模板：$Template"
+}
+
 # ---------- 主流程 ----------
 if (-not (Test-Path $Template)) { throw "模板不存在：$Template" }
 $exists = Test-Path '.env'
@@ -127,6 +149,18 @@ if ($oo) {
     $made.Add('ONLYOFFICE_JWT_SECRET')
 }
 
+# 5) 通用占位符兜底：场景模板（single-node/cluster）里值含 CHANGE_ME 的其余
+#    密钥键（MEILI_*/REDIS_PASSWORD 等）一律生成随机值；SMTP_PASS 除外（邮箱
+#    授权码须真实值，生成无意义——留占位并提示手动填）。
+$skipAutoGen = @('SMTP_PASS')
+$placeholderKeys = [regex]::Matches($text, '(?m)^([A-Z0-9_]+)=.*CHANGE_ME.*$') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
+$leftover = @()
+foreach ($k in $placeholderKeys) {
+    if ($skipAutoGen -contains $k) { $leftover += $k; continue }
+    $text = $text -replace "(?m)^$k=.*$", "$k=$(New-Password)"
+    $made.Add($k)
+}
+
 Set-Content -Path '.env' -Value $text -NoNewline -Encoding UTF8
 
 Write-Host ''
@@ -139,3 +173,15 @@ Write-Host "  邮箱/用户名：$email / $user"
 Write-Host "  密码：$adminPass"
 Write-Host '  （首次登录后建议立即在「设置 → 账号安全」修改。）'
 if (-not $oo) { Write-Host '  ONLYOFFICE_JWT_SECRET 未设置：使用 minimal profile 不受影响；启用 full 时重跑 -Patch 补齐。' }
+if ($leftover.Count) {
+    Write-Host ''
+    Write-Host '以下键须手动填写（自动生成无意义，仍为占位值）：' -ForegroundColor Yellow
+    foreach ($k in $leftover) { Write-Host "  $k" }
+}
+# 域名类字段提醒（场景模板的 example.com 占位）。
+$domainish = [regex]::Matches($text, '(?m)^([A-Z0-9_]*(DOMAIN|BASE_URL)[A-Z0-9_]*)=(.*example\.com.*)$') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
+if ($domainish.Count) {
+    Write-Host ''
+    Write-Host '以下域名/基地址仍为模板占位（example.com），部署前请改为真实值：' -ForegroundColor Yellow
+    foreach ($k in $domainish) { Write-Host "  $k" }
+}

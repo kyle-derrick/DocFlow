@@ -45,6 +45,31 @@ gen_secret32() { # 32 字节 → URL-safe base64（无 +/）
   openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n'
 }
 
+# ---------- 场景模板（deploy/env 四套 + 根目录开发模板） ----------
+scenarios=(
+  'dev|.env.example|本地开发（make run/dev 直连本机 PostgreSQL）'
+  'single-node|deploy/env/.env.single-node.example|单机生产（compose 单域名 + 自动 HTTPS）'
+  'cluster|deploy/env/.env.cluster.example|多节点集群（外部 PG/Redis/存储 + 多服务实例）'
+  'verify|deploy/env/.env.local-verify.example|本地验证栈（compose 全组件弱密钥，本机自测）'
+  'env-dev|deploy/env/.env.dev.example|联调模板（弱密钥连共享开发库）'
+)
+if [[ $AUTO -eq 0 && "$TEMPLATE" == '.env.example' && $PATCH -eq 0 ]]; then
+  echo ''
+  echo '选择场景模板：'
+  i=1
+  for s in "${scenarios[@]}"; do
+    key="${s%%|*}"; rest="${s#*|}"; desc="${rest#*|}"
+    printf '  [%d] %-12s %s\n' "$i" "$key" "$desc"
+    i=$((i + 1))
+  done
+  read -r -p '输入编号（回车 = 1 本地开发）：' pick
+  case "$pick" in
+    2|3|4|5) TEMPLATE="$(echo "${scenarios[pick - 1]}" | cut -d'|' -f2)" ;;
+    *) : ;;
+  esac
+  echo "模板：$TEMPLATE"
+fi
+
 ask_secret() { # $1=标签 $2=hint $3=optional(1/0) $4=生成函数名；值经 stdout 返回
   #（标签/提示走 stderr，避免被 $() 捕获）；空输出 = 跳过（仅 optional）。
   local label="$1" hint="$2" optional="${3:-0}" genfn="$4" v manual
@@ -127,6 +152,17 @@ if [[ -n "$OO" ]]; then
   MADE+=('ONLYOFFICE_JWT_SECRET')
 fi
 
+# 5) 通用占位符兜底：场景模板里值含 CHANGE_ME 的其余密钥键（MEILI_*/
+#    REDIS_PASSWORD 等）一律生成随机值；SMTP_PASS 除外（邮箱授权码须真实值，
+#    生成无意义——留占位并提示手动填）。
+LEFTOVER=()
+while IFS= read -r k; do
+  [[ -z "$k" || "$k" == 'SMTP_PASS' ]] && { [[ "$k" == 'SMTP_PASS' ]] && LEFTOVER+=("$k"); continue; }
+  set_kv "$k" "$(gen_password)"
+  MADE+=("$k")
+done < <(grep -E '^[A-Z0-9_]+=.*CHANGE_ME' <<<"$TEXT" | cut -d= -f1 | sort -u)
+TEXT="$(printf '%s' "$TEXT")"
+
 printf '%s' "$TEXT" > .env
 
 echo ''
@@ -139,4 +175,15 @@ echo "  邮箱/用户名：$EMAIL / $USERNAME"
 echo "  密码：$ADMIN_PASS"
 echo '  （首次登录后建议立即在「设置 → 账号安全」修改。）'
 [[ -z "$OO" ]] && echo '  ONLYOFFICE_JWT_SECRET 未设置：minimal 不受影响；启用 full 时重跑 --patch 补齐。'
+if [[ ${#LEFTOVER[@]} -gt 0 ]]; then
+  echo ''
+  echo '以下键须手动填写（自动生成无意义，仍为占位值）：'
+  for k in "${LEFTOVER[@]}"; do echo "  $k"; done
+fi
+DOMAINISH=$(grep -E '^[A-Z0-9_]*(DOMAIN|BASE_URL)[A-Z0-9_]*=.*example\.com' .env | cut -d= -f1 | sort -u)
+if [[ -n "$DOMAINISH" ]]; then
+  echo ''
+  echo '以下域名/基地址仍为模板占位（example.com），部署前请改为真实值：'
+  echo "$DOMAINISH" | sed 's/^/  /' || echo "$DOMAINISH" | while read -r k; do echo "  $k"; done
+fi
 exit 0
