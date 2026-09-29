@@ -177,7 +177,11 @@ function parseExcalidrawSkeletons(raw: string, existingIds: Set<string>): Array<
  * 1) 形状（rectangle/ellipse/diamond）宽高缺失或非法 → 补 160×80 默认值；
  * 2) 坐标归一化：所有元素 x/y 钳制到 [-500, 20000]（模型偶发输出 NaN/
  *    巨大坐标导致元素飞出视口）；
- * 3) 重叠错开：形状两两包围盒相交时，后一个元素按 40px 步进右下错开
+ * 3) 连线（arrow/line）points 归一：excalidraw 的 points 为相对 x/y 的
+ *    偏移，而模型常输出绝对画布坐标——首点距原点较远时判定为绝对坐标并
+ *    平移为相对（修复「箭头全部堆积在画布左上角」）；带 start/end 绑定
+ *    但缺 points 的连线补 [[0,0],[0,0]]（官方转换器按绑定重新计算端点）；
+ * 4) 重叠错开：形状两两包围盒相交时，后一个元素按 40px 步进右下错开
  *    （最多 100 步），保证每个节点在画布上独立可见。
  * 全部为幂等纯改写，不剔除任何元素。 */
 function autoFixSkeletons(items: Array<Record<string, unknown>>): void {
@@ -192,6 +196,19 @@ function autoFixSkeletons(items: Array<Record<string, unknown>>): void {
     if (el.type === 'rectangle' || el.type === 'ellipse' || el.type === 'diamond') {
       if (typeof el.width !== 'number' || !Number.isFinite(el.width) || el.width <= 0) el.width = 160
       if (typeof el.height !== 'number' || !Number.isFinite(el.height) || el.height <= 0) el.height = 80
+    }
+    if (el.type === 'arrow' || el.type === 'line') {
+      if (isValidPoints(el.points)) {
+        // 绝对坐标风格启发式：相对 points 的首点几乎总在 [0,0] 附近；
+        // 模型给的绝对首点通常远离原点 → 平移为相对。
+        const first = (el.points as number[][])[0]
+        if (Math.abs(first[0]) > 60 || Math.abs(first[1]) > 60) {
+          el.points = (el.points as number[][]).map(([px, py]) => [px - nx, py - ny])
+        }
+      } else if ((el.start != null && typeof el.start === 'object') || (el.end != null && typeof el.end === 'object')) {
+        // 绑定连线缺 points：官方转换器按绑定端点重建，占位两点即可。
+        el.points = [[0, 0], [0, 0]]
+      }
     }
   }
   // 形状包围盒两两错开（保留首个位置，后续元素右下步进避让）。

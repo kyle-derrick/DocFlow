@@ -6580,6 +6580,10 @@ kbd {
 /* 引用文件弹层（最近访问 / 搜索，多选）。 */
 .ai-attach-pop { width: 292px; display: flex; flex-direction: column; gap: 8px; }
 .ai-attach-list { max-height: 236px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+/* 引用文件目录树浏览（v3.4）：与平铺列表同尺寸节奏。 */
+.ai-attach-tree { display: flex; flex-direction: column; gap: 4px; }
+.ai-attach-tree-panel { max-height: 236px; }
+.ai-attach-tree-hint { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; }
 /* 工作目录按钮（df_* 文件工具基准）：显示完整路径「空间名/目录/…」；
    跟随态（未手选且有文件页位置）路径前加「跟随」Tag 并高亮。 */
 .ai-workdir-btn.ant-btn { gap: 4px; max-width: 224px; }
@@ -7101,8 +7105,9 @@ kbd {
 .studio-recent-item .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .studio-recent-item .time { flex-shrink: 0; font-size: 11px; color: var(--muted); }
 /* 新建项目弹窗：执行引擎单选（名称行 + 说明行，纵向两选项）。 */
-.studio-engine-options { display: flex; flex-direction: column; gap: 6px; }
+.studio-engine-options { display: flex; flex-direction: column; gap: 8px; }
 .studio-engine-options .ant-radio-wrapper { align-items: flex-start; margin: 0; }
+.studio-engine-options .ant-radio-wrapper .ant-radio { margin-top: 3px; }
 .studio-engine-name { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
 .studio-engine-desc { display: block; margin-left: 22px; font-size: 12px; color: var(--muted); line-height: 1.5; }
 .studio-engine-offtag {
@@ -7173,10 +7178,19 @@ kbd {
 .studio-proj-dd .name { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .studio-topbar-path { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .studio-topbar-ops { display: inline-flex; align-items: center; gap: 2px; margin-left: auto; flex-shrink: 0; }
-.studio-proj-option { display: flex; flex-direction: column; gap: 2px; padding: 4px 2px; min-width: 260px; }
-.studio-proj-option .l1 { display: flex; align-items: center; gap: 6px; }
+/* 项目下拉选项（v3.4 修复重叠/Tag 越界）：antd menu item 高度自适应内容；
+   l1 行设定最小行高容纳引擎 Tag；l2 路径行独立不挤压。 */
+.studio-proj-dd + .ant-dropdown-menu-item,
+.ant-dropdown-menu-item:has(.studio-proj-option) {
+  height: auto;
+  line-height: 1.4;
+  padding-top: 5px;
+  padding-bottom: 5px;
+}
+.studio-proj-option { display: flex; flex-direction: column; gap: 3px; padding: 2px 0; min-width: 300px; max-width: 420px; }
+.studio-proj-option .l1 { display: flex; align-items: center; gap: 6px; min-height: 22px; }
 .studio-proj-option .l1 .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
-.studio-proj-option .l2 { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.studio-proj-option .l2 { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.3; }
 .studio-proj-option.active .l1 .name { color: var(--primary); }
 .studio-proj-menuop { display: inline-flex; align-items: center; gap: 8px; }
 /* ---- 右栏（AI 工作区；v3.3 无面板头：platform 直出，docker 保留 slim tabs） ---- */
@@ -7196,6 +7210,10 @@ kbd {
   outline-offset: -1px;
   border-radius: 4px;
 }
+/* 右键/拖拽热区覆盖整行（v3.4：antd Tree blockNode 的 title 容器为 flex，
+   行 span 设 flex:1 撑满，而非仅图标+文字宽度）。 */
+.ftree-antd .ant-tree-node-content-wrapper { flex: 1; min-width: 0; }
+.ftree-antd .ftree-row { flex: 1; min-width: 0; }
 .studio-ai-tabs { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--border); border-radius: 8px; }
 .studio-ai-tabs button {
   padding: 2px 14px;
@@ -7247,7 +7265,7 @@ kbd {
 .ftree .ant-tree { background: transparent; font-size: 12.5px; }
 .ftree .ant-tree-node-content-wrapper { border-radius: 6px; }
 .ftree .ant-tree-node-selected { background: var(--primary-bg, rgba(59, 130, 246, 0.12)) !important; }
-.ftree-row { display: inline-flex; align-items: center; gap: 5px; min-width: 0; max-width: 100%; padding: 1px 2px; }
+.ftree-row { display: flex; align-items: center; gap: 5px; min-width: 0; max-width: 100%; padding: 1px 4px 1px 2px; }
 .ftree-row .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ftree-row.workroot .name { color: var(--primary); font-weight: 600; }
 .ftree-row.file-active .name { color: var(--primary); font-weight: 600; }
@@ -7428,7 +7446,12 @@ kbd {
   margin-bottom: 6px;
   padding-bottom: 6px;
 }
-.aic-send-header { display: flex; flex-direction: column; gap: 6px; }
+/* 贴底跟随包裹层（v3.4）：占满消息区高度并接管纵向滚动（Bubble.List 自身
+   不再 autoScroll）。 */
+.aic-list-wrap { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
+.aic-list-wrap .ant-bubble-list { flex: 1; }
+.aic-list-wrap .ant-bubble-list-scroll-box { overflow: visible; }
+.aiax-send-header { display: flex; flex-direction: column; gap: 6px; }
 .aic-send-tools { display: flex; align-items: center; gap: 8px; }
 .aic-composer-opts { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; row-gap: 4px; }
 /* # 提及浮层（输入框上方）。 */

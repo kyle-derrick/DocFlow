@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { Lock, Trash2 } from 'lucide-react'
 import { App as AntdApp, Button, Input, Segmented, Select } from 'antd'
 import {
@@ -116,6 +116,7 @@ export default function FilesPage() {
   const [agentResult, setAgentResult] = useState('')
   const [agentSelected, setAgentSelected] = useState<string[]>([])
   const [searchParams] = useSearchParams()
+  const navigate = useNavigate()
   const spaceIdParam = searchParams.get('space') ?? ''
   // 深链目录（?folder=<id>，Studio「打开项目目录」）：FileBrowserWithTree
   // 挂载后上溯展开定位（仅消费一次；空间 key 已保证随空间切换重挂载）。
@@ -133,6 +134,19 @@ export default function FilesPage() {
   useEffect(() => {
     void listSpaces().then(setSpaces).catch(() => setSpaces([]))
   }, [spaceIdParam, reloadKey])
+
+  // 全局空间记忆（v3.4）：无 ?space 参数进入时回落到上次使用的空间（非
+  // 总是默认空间）；有记忆且空间仍可见时 replace 补 ?space=。
+  useEffect(() => {
+    if (searchParams.has('space') || spaces.length === 0) return
+    try {
+      const mem = localStorage.getItem('docflow.lastSpace')
+      if (mem && spaces.some((s) => s.id === mem)) {
+        navigate(`/files?space=${mem}`, { replace: true })
+      }
+    } catch { /* ignore */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅初始化回落一次
+  }, [spaces.length])
 
   // 右侧成员栏（v2.2 起默认常开；工具栏「成员」切换按钮已移除）：
   // <1280px 视口自动收起回两栏。

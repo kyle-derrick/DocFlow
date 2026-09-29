@@ -227,10 +227,9 @@ services:
       - docflow-agent-ipc:/run/docflow-ipc
       # AI 创作舱（Docker 沙箱引擎）必需：把宿主 Docker socket 挂进
       # backend（Windows Docker Desktop 同样经该 Unix socket 暴露）；未
-      # 挂载时沙箱任务报「Docker 运行时未接入」。默认注释——平台引擎部署
-      # 保持最小权限；挂载即等同给予 backend 编排宿主容器的能力，请自行
-      # 评估信任边界后取消注释。
-      # - /var/run/docker.sock:/var/run/docker.sock
+      # 挂载时沙箱任务报「Docker 运行时未接入」。挂载即等同给予 backend
+      # 编排宿主容器的能力，请自行评估信任边界（本机自用部署已启用）。
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       migrate:
         condition: service_completed_successfully

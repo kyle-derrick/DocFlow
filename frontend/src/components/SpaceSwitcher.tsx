@@ -59,7 +59,12 @@ export default function SpaceSwitcher({
         className="space-select"
         aria-label={locale === 'zh-CN' ? '选择空间' : 'Select space'}
         value={currentSpaceId || ordered.find((s) => s.is_default)?.id || ''}
-        onChange={(v) => navigate(v ? `/files?space=${v}` : '/files')}
+        onChange={(v) => {
+          // 全局空间记忆（v3.4）：切换写入 localStorage——AI 助手工作目录、
+          // 下次进入文件页（无 ?space 参数时）均回落到该空间，而非总回默认。
+          try { localStorage.setItem('docflow.lastSpace', v || '') } catch { /* ignore */ }
+          navigate(v ? `/files?space=${v}` : '/files')
+        }}
         options={ordered.map((s) => ({
           value: s.id,
           label: (

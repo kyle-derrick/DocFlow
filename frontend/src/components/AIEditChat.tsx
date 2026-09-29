@@ -812,17 +812,6 @@ export default function AIEditChat({
 
   if (!aiOn || !open) return null
 
-  const chips = forceChatOnly
-    ? (zh ? ['总结要点', '翻译成英文', '润色建议', '列表化'] : ['Summarize', 'Translate to English', 'Polish suggestions', 'Turn into lists'])
-    : applyKind === 'excalidraw-json'
-      ? (zh ? ['画一个流程图', '画一个架构图', '生成概念图', '画一个看板'] : ['Draw a flowchart', 'Architecture diagram', 'Concept map', 'Kanban board'])
-      : applyKind === 'drawio-xml'
-        ? (zh ? ['生成流程图', '生成架构图', '美化整体布局', '改为横向布局'] : ['Generate a flowchart', 'Architecture diagram', 'Clean up the layout', 'Switch to horizontal layout'])
-        : applyKind === 'richtext-patch'
-          ? (zh ? ['润色全文', '修正错别字', '精简全文', '文末续写一段'] : ['Polish all', 'Fix typos', 'Shorten', 'Append a paragraph'])
-          : zh
-            ? ['续写', '扩写', '精简', '修正错别字', '翻译成英文']
-            : ['Continue writing', 'Expand', 'Shorten', 'Fix typos', 'Translate to English']
   const scopeHint = applyKind === 'excalidraw-json'
     ? (zh ? '白板无选区，将使用画布内容摘要' : 'No selection; the whiteboard summary will be used')
     : applyKind === 'drawio-xml'
@@ -1101,13 +1090,9 @@ export default function AIEditChat({
           </div>
         ))}
       </div>
-      {/* 快捷指令 + 输入区（与 AI 助手同款「圆角框内嵌发送/停止」形态）。 */}
+      {/* 输入区（v3.4：预设 chips 移除——纯填入提示词价值低；常用快捷指令
+          保留在头部「AI 对话」下拉）。 */}
       <div className="ai-edit-chat-composer">
-        <div className="ai-edit-chat-chips">
-          {chips.map((chip) => (
-            <Button key={chip} size="small" disabled={busy} onClick={() => setInput(chip)}>{chip}</Button>
-          ))}
-        </div>
         {notice && <div className="ai-edit-chat-notice error-text">{notice}</div>}
         <div className="ai-input-box">
           <Input.TextArea

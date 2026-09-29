@@ -19,7 +19,7 @@ import { App as AntdApp, Button, Dropdown, Input, Popover, Radio, Select, Toolti
 import type { MenuProps } from 'antd'
 import { Group, Panel, Separator, useDefaultLayout, usePanelRef } from 'react-resizable-panels'
 import {
-  Bot, Check, Eraser, FileText, FolderClosed, FolderPlus, History, Package, Paperclip, PanelLeftClose, PanelLeftOpen,
+  Bot, Check, Columns3, Eraser, FileText, FolderClosed, FolderPlus, History, Package, Paperclip, PanelLeftClose, PanelLeftOpen,
   PanelRightClose, PanelRightOpen, Pencil, Plus, RefreshCw, Settings2, Sparkles, Upload, X,
 } from 'lucide-react'
 import {
@@ -840,8 +840,9 @@ function StudioChat({ zh, engine, agentOn, onRefreshTasks, onChatSettled, projec
       })
       onTaskCreated(task.id)
       patchSession((m) => [...m, { id: ++seq.current, role: 'assistant', content: '', task: { id: task.id, prompt } }])
-      message.success('任务已创建，可在右侧「评审」查看进度')
-      onReview(task.id)
+      // v3.4：不自动跳评审（ChatGPT/豆包式 agent 体验——对话流内任务卡实时
+      // 展示状态，评审由任务卡「查看评审」显式进入）。
+      message.success('任务已创建，进度见下方任务卡（可点「查看评审」）')
     } catch (err) {
       const msg = err instanceof Error ? err.message : '创建任务失败'
       patchSession((m) => [...m, { id: ++seq.current, role: 'assistant', content: '', error: `${msg}\n请确认管理端已启用「AI 智能体（Agent）」并配置默认镜像后重试。` }])
@@ -1243,7 +1244,9 @@ export default function StudioPage() {
   // onResize 百分比归零 = 折叠态，用于按钮图标方向）。
   const leftPanelRef = usePanelRef()
   const rightPanelRef = usePanelRef()
+  const midPanelRef = usePanelRef()
   const [leftCollapsed, setLeftCollapsed] = useState(false)
+  const [midCollapsed, setMidCollapsed] = useState(false)
   const [aiCollapsed, setAiCollapsed] = useState(false)
   // 分栏布局持久化（useDefaultLayout：localStorage，条件渲染中栏时按
   // panelIds 保存多套布局）。
@@ -1770,9 +1773,6 @@ export default function StudioPage() {
             {project && <EngineTag engine={engine} zh={zh} />}
           </button>
         </Dropdown>
-        <Tooltip title={zh ? '管理项目（编辑/删除/新建）' : 'Manage projects (edit/delete/new)'}>
-          <Button size="small" onClick={() => setManageOpen(true)}><Settings2 size={13} aria-hidden="true" />{zh ? '管理项目' : 'Projects'}</Button>
-        </Tooltip>
         {project && (
           <Tooltip title={zh ? `在文件页打开「${projPathText(project)}」` : `Open "${projPathText(project)}" in Files`}>
             <Button size="small" onClick={() => { window.location.href = `/files?space=${project.space_id}&folder=${project.root_folder_id}` }}>
@@ -1786,6 +1786,13 @@ export default function StudioPage() {
             <Button size="small" type="text" aria-label={zh ? '切换文件树' : 'Toggle file tree'} disabled={!project}
               onClick={() => (leftCollapsed ? leftPanelRef.current?.expand() : leftPanelRef.current?.collapse())}>
               {leftCollapsed ? <PanelLeftOpen size={14} aria-hidden="true" /> : <PanelLeftClose size={14} aria-hidden="true" />}
+            </Button>
+          </Tooltip>
+          {/* 中栏（查看/编辑区）折叠：仅已打开文件时可用（v3.4）。 */}
+          <Tooltip title={midCollapsed ? (zh ? '展开编辑区' : 'Expand editor') : (zh ? '收起编辑区' : 'Collapse editor')} disabled={openTabs.length === 0}>
+            <Button size="small" type="text" aria-label={zh ? '切换编辑区' : 'Toggle editor'} disabled={openTabs.length === 0}
+              onClick={() => (midCollapsed ? midPanelRef.current?.expand() : midPanelRef.current?.collapse())}>
+              <Columns3 size={14} aria-hidden="true" />
             </Button>
           </Tooltip>
           <Tooltip title={aiCollapsed ? (zh ? '展开 AI 面板' : 'Expand AI panel') : (zh ? '收起 AI 面板' : 'Collapse AI panel')} disabled={!feats.enabled}>
@@ -1906,7 +1913,7 @@ export default function StudioPage() {
         {openTabs.length > 0 && (
           <>
             <Separator className="studio-split" />
-            <Panel id="mid" className="studio-col studio-mid" minSize="22%" defaultSize="44%">
+            <Panel id="mid" className="studio-col studio-mid" panelRef={midPanelRef} collapsible collapsedThreshold="15%" minSize="22%" defaultSize="44%" onResize={(size) => setMidCollapsed(size.asPercentage <= 0.5)}>
               <EditorTabs
                 zh={zh}
                 tabs={openTabs}

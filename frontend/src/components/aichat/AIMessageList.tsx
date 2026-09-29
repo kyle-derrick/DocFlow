@@ -12,6 +12,7 @@ import type { BubbleItemType } from '@ant-design/x'
 import { Brain, Check, Copy, FileText, Globe, Paperclip, RotateCcw, Sparkles, Wrench } from 'lucide-react'
 import { Tooltip } from 'antd'
 import AIMarkdown from '../AIMarkdown'
+import { useStickyScroll } from './useStickyScroll'
 import {
   dfToolLabel, isWriteTool, thinkingTitle,
 } from './turns'
@@ -157,6 +158,16 @@ function MessageActions({ text, zh, onRegenerate }: { text: string; zh: boolean;
 }
 
 /** AI 气泡内容（除 Bubble 壳外的一切：思考/工具链/正文/来源/操作）。 */
+/** 富文本编辑指令中的受保护占位行（[DocFlow-Embed/File/Image …]）在对话
+ * 气泡内渲染为简洁引用块而非裸标记文本（应用后由富文本层还原为嵌入卡片）。 */
+export function humanizeEmbedPlaceholders(text: string): string {
+  return text.replace(/^\[DocFlow-(Embed|File|Image)([^\]]*)\]\s*$/gm, (_m, kind: string, rest: string) => {
+    const title = (rest.match(/title="([^"]*)"/) || [])[1] ?? ''
+    const kindLabel = kind === 'Embed' ? '嵌入（图表/白板）' : kind === 'File' ? '文件' : '图片'
+    return `> 🧩 **${kindLabel}**${title ? `：${title}` : ''}（占位保留，应用后还原）`
+  })
+}
+
 export function AIAssistantMessageBody({ turn, zh, isLast, onRegenerate, extra }: {
   turn: AIChatTurnData
   zh: boolean
@@ -178,7 +189,7 @@ export function AIAssistantMessageBody({ turn, zh, isLast, onRegenerate, extra }
       <AIChatThinking text={turn.thinking ?? ''} streaming={turn.streaming} thinkingMS={turn.thinkingMS} zh={zh} />
       <AIToolChain toolCalls={turn.toolCalls} zh={zh} />
       {turn.content ? (
-        <AIMarkdown text={turn.content} zh={zh} streaming={turn.streaming} />
+        <AIMarkdown text={humanizeEmbedPlaceholders(turn.content)} zh={zh} streaming={turn.streaming} />
       ) : turn.streaming ? (
         <span className="aic-generating"><Sparkles size={12} strokeWidth={2} aria-hidden="true" />{zh ? '生成中…' : 'Generating…'}</span>
       ) : turn.stopped ? (
@@ -223,7 +234,8 @@ export function AIUserMessageBody({ turn }: { turn: AIChatTurnData }) {
   )
 }
 
-/** 共享消息流（Bubble.List：用户右 / AI 左；autoScroll 底部跟随）。
+/** 共享消息流（Bubble.List：用户右 / AI 左；贴底跟随 v3.4——用户上滚
+ *  阅读历史时不被流式输出强制拉回底部，回到底部自动恢复跟随）。
  *  items 为统一 turn 模型；renderItem 覆盖单条渲染（任务卡等宿主特例）。 */
 function AIMessageListImpl({ items, zh, className, autoScroll = true, renderItem }: {
   items: AIChatTurnData[]
@@ -246,11 +258,15 @@ function AIMessageListImpl({ items, zh, className, autoScroll = true, renderItem
           : <AIAssistantMessageBody turn={turn} zh={zh} isLast={i === items.length - 1} />,
     }
   })
+  // 贴底跟随（包裹式：div.ref + onScroll；不碰 Bubble.List 的 ref 形状）。
+  const last = items.length > 0 ? items[items.length - 1] : null
+  const dep = last ? `${last.id}:${(last.content ?? '').length}:${(last.thinking ?? '').length}` : ''
+  const sticky = useStickyScroll(dep)
   return (
-    <Bubble.List
-      className={className}
-      items={bubbleItems}
-      autoScroll={autoScroll}
+    <div ref={autoScroll ? sticky.wrapRef : undefined} onScroll={autoScroll ? sticky.onScroll : undefined} className="aic-list-wrap">
+      <Bubble.List
+        className={className}
+        items={bubbleItems}
       role={{
         user: {
           placement: 'end',
@@ -269,7 +285,8 @@ function AIMessageListImpl({ items, zh, className, autoScroll = true, renderItem
           classNames: { content: 'aic-bubble-ai' },
         },
       }}
-    />
+      />
+    </div>
   )
 }
 

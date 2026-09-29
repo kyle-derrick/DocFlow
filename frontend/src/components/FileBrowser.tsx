@@ -25,6 +25,7 @@ import SplitButton from './SplitButton'
 import {
   Download,
   ExternalLink,
+  Eye,
   FileText,
   Folder,
   Globe,
@@ -2160,20 +2161,19 @@ export default function FileBrowser({
     // 保留在文件行「操作」菜单；预览工具条 v3.3 图标化（新窗口/编辑/下载）。
     return (
       <>
-        {/* 弹窗内编辑（v2.7）：编辑视图 ↔ 查看视图就地切换。 */}
+        {/* 弹窗内编辑（v2.7）：编辑视图 ↔ 查看视图就地切换（v3.4 图标化：
+            Pencil 图标 = 进入编辑；编辑态变 Eye = 返回查看）。 */}
         {inModalEditable && (
-          <Button
-            size="small"
-            type={previewEdit ? 'default' : 'primary'}
-            onClick={() => setPreviewEdit((v) => !v)}
-            title={previewEdit
-              ? (locale === 'zh-CN' ? '返回查看视图' : 'Back to view')
-              : (locale === 'zh-CN' ? '在弹窗内编辑' : 'Edit in this dialog')}
-          >
-            {previewEdit
-              ? (locale === 'zh-CN' ? '完成编辑' : 'Done editing')
-              : (locale === 'zh-CN' ? '编辑' : 'Edit')}
-          </Button>
+          <Tooltip title={previewEdit
+            ? (locale === 'zh-CN' ? '返回查看视图' : 'Back to view')
+            : (locale === 'zh-CN' ? '在弹窗内编辑' : 'Edit in this dialog')}>
+            <Button size="small" type={previewEdit ? 'primary' : 'text'} aria-label={previewEdit ? (locale === 'zh-CN' ? '返回查看' : 'Back to view') : (locale === 'zh-CN' ? '编辑' : 'Edit')}
+              onClick={() => setPreviewEdit((v) => !v)}>
+              {previewEdit
+                ? <Eye size={14} strokeWidth={2} aria-hidden="true" />
+                : <Pencil size={14} strokeWidth={2} aria-hidden="true" />}
+            </Button>
+          </Tooltip>
         )}
         {/* 悬浮 AI 助理（对话/摘要/修改保存新版本；AI 未启用时组件自隐藏）。
             与独立查看页同组件，替代原标题行内嵌的 AI 摘要按钮行。 */}
@@ -2185,30 +2185,35 @@ export default function FileBrowser({
             onSaved={() => setPreviewReloadKey((k) => k + 1)}
           />
         )}
-        {/* v3.3 预览工具条图标化：新窗口查看 / 新窗口编辑 / 下载（ExternalLink
-            图标与文件页一致；打开方式的完整菜单保留在文件行「操作」菜单）。 */}
+        {/* v3.4 工具条（图标组在前、文字按钮殿后）：新窗口查看 / 下载 / 目录
+            网页打开（Globe）；「新窗口编辑」为文字按钮放最后（语义显式）。 */}
         <Tooltip title={locale === 'zh-CN' ? '新窗口查看' : 'Open in new window'}>
           <Button size="small" type="text" aria-label={locale === 'zh-CN' ? '新窗口查看' : 'Open in new window'}
             onClick={() => openWithMethod(item, 'view', effectiveOpenWithFor(item.name, openWith).view)}>
             <ExternalLink size={14} strokeWidth={2} aria-hidden="true" />
           </Button>
         </Tooltip>
-        {editOptions.length > 0 && (
-          <Tooltip title={locale === 'zh-CN' ? '新窗口编辑' : 'Edit in new window'}>
-            <Button size="small" type="text" aria-label={locale === 'zh-CN' ? '新窗口编辑' : 'Edit in new window'}
-              onClick={() => {
-                if (editFallbackView) openWithMethod(item, 'view')
-                else openWithMethod(item, 'edit', effectiveOpenWithFor(item.name, openWith).edit)
-              }}>
-              <Pencil size={14} strokeWidth={2} aria-hidden="true" />
-            </Button>
-          </Tooltip>
-        )}
         <Tooltip title={msg('download')}>
           <Button size="small" type="text" aria-label={msg('download')} onClick={() => void handleDownload(item)}>
             <Download size={14} strokeWidth={2} aria-hidden="true" />
           </Button>
         </Tooltip>
+        {item.has_index_web && resolveNs && (
+          <Tooltip title={locale === 'zh-CN' ? '作为网页打开（新窗口）' : 'Open as website (new window)'}>
+            <Button size="small" type="text" aria-label={locale === 'zh-CN' ? '作为网页打开' : 'Open as website'}
+              onClick={() => void openAsWebsite(item)}>
+              <Globe size={14} strokeWidth={2} aria-hidden="true" />
+            </Button>
+          </Tooltip>
+        )}
+        {editOptions.length > 0 && (
+          <Button size="small" onClick={() => {
+            if (editFallbackView) openWithMethod(item, 'view')
+            else openWithMethod(item, 'edit', effectiveOpenWithFor(item.name, openWith).edit)
+          }}>
+            {locale === 'zh-CN' ? '新窗口编辑' : 'Edit in new window'}
+          </Button>
+        )}
       </>
     )
   }

@@ -22,9 +22,9 @@
 import { useEffect, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import { App as AntdApp, Button, Input, Popconfirm, Segmented, Select, Tooltip } from 'antd'
-import { Check, ChevronDown, Copy, RotateCcw, Save, Send, Sparkles, Square, Trash2 } from 'lucide-react'
+import { Check, ChevronDown, Copy, Globe, Brain, RotateCcw, Save, Send, Sparkles, Square, Trash2 } from 'lucide-react'
 import AIMarkdown from './AIMarkdown'
-import { AIModelOption, AI_MODEL_STORAGE_KEY, defaultAIModelKey, getAIModels } from './AIAssistant'
+import { AIModelOption, AI_MODEL_STORAGE_KEY, AI_THINK_STORAGE_KEY, AI_WEB_STORAGE_KEY, defaultAIModelKey, getAIModels, readAIFlag, writeAIFlag } from './AIAssistant'
 import { AIChatThinking, AIToolChain, applyToolResult, toolEntryFrom } from './aichat'
 import type { AIToolCallEntry } from './aichat'
 import {
@@ -310,6 +310,9 @@ export default function ViewerAIWidget({
   const turnsRef = useRef<WidgetTurn[]>([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
+  // 对话图标开关（v3.4）：联网/思考，localStorage 记忆（与 AI 助手共用键）。
+  const [web, setWeb] = useState(() => readAIFlag(AI_WEB_STORAGE_KEY) ?? false)
+  const [think, setThink] = useState(() => readAIFlag(AI_THINK_STORAGE_KEY) ?? true)
   const busyRef = useRef(false)
   const abortRef = useRef<AbortController | null>(null)
   const seqRef = useRef(0)
@@ -395,6 +398,9 @@ export default function ViewerAIWidget({
           messages: [{ role: 'system', content: sys }, ...history, { role: 'user', content: text }],
           providerId: selected?.providerId || undefined,
           model: selected ? { providerId: selected.providerId, modelId: selected.model } : undefined,
+          // v3.4：图标开关随发送携带（联网/思考；模型支持推理才透传）。
+          web_search: web,
+          think: think && (selected?.reasoning ?? true),
         },
         {
           onDelta: (chunk) => updateTurn(assistantId, (x) => ({ content: x.content + chunk })),
@@ -706,6 +712,19 @@ export default function ViewerAIWidget({
                   />
                 )}
                 <span className="viewer-aiw-input-spacer" />
+                {/* 对话图标开关（联网/思考，localStorage 记忆与 AI 助手共用）。 */}
+                <Tooltip title={zh ? '联网搜索（回答附网络来源）' : 'Web search (with sources)'}>
+                  <button type="button" className={`ai-tool-icon${web ? ' on' : ''}`} aria-pressed={web} aria-label={zh ? '联网搜索' : 'Web search'}
+                    onClick={() => { const v = !web; setWeb(v); writeAIFlag(AI_WEB_STORAGE_KEY, v) }}>
+                    <Globe size={15} strokeWidth={2} aria-hidden="true" />
+                  </button>
+                </Tooltip>
+                <Tooltip title={zh ? '深度思考（所选模型须支持推理）' : 'Deep thinking (requires a reasoning model)'}>
+                  <button type="button" className={`ai-tool-icon${think ? ' on' : ''}`} aria-pressed={think} aria-label={zh ? '深度思考' : 'Deep thinking'}
+                    onClick={() => { const v = !think; setThink(v); writeAIFlag(AI_THINK_STORAGE_KEY, v) }}>
+                    <Brain size={15} strokeWidth={2} aria-hidden="true" />
+                  </button>
+                </Tooltip>
                 <Tooltip title={t(locale, 'aiAssistantClear')}>
                   <Button size="small" type="text" className="viewer-aiw-act" disabled={turns.length === 0} aria-label={t(locale, 'aiAssistantClear')} onClick={() => { abortRef.current?.abort(); applyTurns(() => []) }}>
                     <Trash2 size={13} strokeWidth={2} aria-hidden="true" />
