@@ -8128,7 +8128,7 @@ kbd {
 /* 边界探测锚点（display:none 不参与布局，仅 closest 探测弹窗容器）。 */
 .viewer-aiw-anchor { display: none; }
 /* 悬浮球缩小为 40px（追加在末尾覆盖上方 56px 旧值；其余视觉不变）。 */
-.viewer-aiw-ball { width: 40px; height: 40px; }
+/* v3.7：尺寸统一由 .viewer-aiw-ball 主规则控制（56px）。 */
 /* 吸附态：半嵌边缘圆点——露出的一半可点击展开；阴影更聚拢。 */
 .viewer-aiw-ball.snapped { box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4); }
 :root[data-mode='light'] .viewer-aiw-ball.snapped { box-shadow: 0 4px 12px rgba(24, 30, 42, 0.28); }
