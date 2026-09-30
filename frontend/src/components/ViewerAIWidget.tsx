@@ -213,10 +213,13 @@ export default function ViewerAIWidget({
     } else if (stored) {
       applyPos(clampPos(stored, BALL_SIZE, BALL_SIZE, b))
     } else {
-      applyPos(clampPos(
-        { x: window.innerWidth - BALL_SIZE - 24, y: window.innerHeight - BALL_SIZE - 24 },
-        BALL_SIZE, BALL_SIZE, b,
-      ))
+      // 默认位置：视口右下角（不 clamp 到弹窗边界——弹窗居中小于视口，
+      // clamp 会把球拉到屏幕中间。球可以超出弹窗但不出视口）。
+      const vb = viewportBounds()
+      applyPos({
+        x: Math.min(window.innerWidth - BALL_SIZE - 24, vb.left + vb.width - BALL_SIZE - VIEW_MARGIN),
+        y: Math.min(window.innerHeight - BALL_SIZE - 24, vb.top + vb.height - BALL_SIZE - VIEW_MARGIN),
+      })
     }
     setInited(true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -277,6 +280,14 @@ export default function ViewerAIWidget({
       if (side) applyPos({ x: snappedX(side, b), y: clampSnappedY(posRef.current.y, b) })
       persistPos({ ...posRef.current, snap: side })
     }
+  }
+
+  /** 双击悬浮球重置位置（回到视口右下角）。 */
+  const resetPos = () => {
+    const vb = viewportBounds()
+    applyPos({ x: vb.left + vb.width - BALL_SIZE - 24, y: vb.top + vb.height - BALL_SIZE - 24 })
+    setSnap(null)
+    persistPos({ ...posRef.current, snap: null })
   }
 
   const toggleOpen = () => {
@@ -698,45 +709,7 @@ export default function ViewerAIWidget({
           </div>
           {/* 底部：模型选择 + 清空（对话页签）/ 输入行。 */}
           {tab === 'chat' && (
-            <div className="viewer-aiw-input">
-              <div className="viewer-aiw-input-row">
-                {models.length > 0 && (
-                  <Select
-                    size="small"
-                    className="viewer-aiw-model"
-                    value={modelKey || undefined}
-                    placeholder={zh ? '默认模型' : 'Default model'}
-                    onChange={(v) => {
-                      setModelKey(v)
-                      try {
-                        window.localStorage.setItem(AI_MODEL_STORAGE_KEY, v)
-                      } catch {
-                        /* ignore */
-                      }
-                    }}
-                    options={models.map((m) => ({ value: m.id, label: `${m.providerName || m.providerId} / ${m.model}` }))}
-                  />
-                )}
-                <span className="viewer-aiw-input-spacer" />
-                {/* 对话图标开关（联网/思考，localStorage 记忆与 AI 助手共用）。 */}
-                <Tooltip title={zh ? '联网搜索（回答附网络来源）' : 'Web search (with sources)'}>
-                  <button type="button" className={`ai-tool-icon${web ? ' on' : ''}`} aria-pressed={web} aria-label={zh ? '联网搜索' : 'Web search'}
-                    onClick={() => { const v = !web; setWeb(v); writeAIFlag(AI_WEB_STORAGE_KEY, v) }}>
-                    <Globe size={15} strokeWidth={2} aria-hidden="true" />
-                  </button>
-                </Tooltip>
-                <Tooltip title={zh ? '深度思考（所选模型须支持推理）' : 'Deep thinking (requires a reasoning model)'}>
-                  <button type="button" className={`ai-tool-icon${think ? ' on' : ''}`} aria-pressed={think} aria-label={zh ? '深度思考' : 'Deep thinking'}
-                    onClick={() => { const v = !think; setThink(v); writeAIFlag(AI_THINK_STORAGE_KEY, v) }}>
-                    <Brain size={15} strokeWidth={2} aria-hidden="true" />
-                  </button>
-                </Tooltip>
-                <Tooltip title={t(locale, 'aiAssistantClear')}>
-                  <Button size="small" type="text" className="viewer-aiw-act" disabled={turns.length === 0} aria-label={t(locale, 'aiAssistantClear')} onClick={() => { abortRef.current?.abort(); applyTurns(() => []) }}>
-                    <Trash2 size={13} strokeWidth={2} aria-hidden="true" />
-                  </Button>
-                </Tooltip>
-              </div>
+            <div className="chat-input-box viewer-aiw-input">
               <div className="viewer-aiw-input-row">
                 <Input.TextArea
                   autoSize={{ minRows: 1, maxRows: 4 }}
@@ -744,7 +717,6 @@ export default function ViewerAIWidget({
                   placeholder={t(locale, 'aiAssistantPlaceholder')}
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={(e) => {
-                    // Enter 发送 / Shift+Enter 换行；输入法组合中 Enter 不发送。
                     if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                       e.preventDefault()
                       void send(input)
@@ -752,33 +724,42 @@ export default function ViewerAIWidget({
                   }}
                 />
                 {busy ? (
-                  <Button
-                    className="ai-stop-btn"
-                    shape="circle"
-                    size="small"
-                    aria-label={t(locale, 'aiAssistantStop')}
-                    title={t(locale, 'aiAssistantStop')}
-                    onClick={() => abortRef.current?.abort()}
-                  >
+                  <Button className="ai-stop-btn" shape="circle" size="small" aria-label={t(locale, 'aiAssistantStop')} title={t(locale, 'aiAssistantStop')} onClick={() => abortRef.current?.abort()}>
                     <Square size={10} fill="currentColor" strokeWidth={0} aria-hidden="true" />
                   </Button>
                 ) : (
-                  <Button
-                    className="ai-send-btn"
-                    type="primary"
-                    shape="circle"
-                    size="small"
-                    disabled={!input.trim()}
-                    aria-label={t(locale, 'aiAssistantSend')}
-                    title={t(locale, 'aiAssistantSend')}
-                    onClick={() => void send(input)}
-                  >
+                  <Button className="ai-send-btn" type="primary" shape="circle" size="small" disabled={!input.trim()} aria-label={t(locale, 'aiAssistantSend')} title={t(locale, 'aiAssistantSend')} onClick={() => void send(input)}>
                     <Send size={13} strokeWidth={2} aria-hidden="true" />
                   </Button>
                 )}
               </div>
+              <div className="chat-tools-bar">
+                <Tooltip title={zh ? '联网搜索（回答附网络来源）' : 'Web search (with sources)'}>
+                  <button type="button" className={`ai-tool-icon${web ? ' on' : ''}`} aria-pressed={web} aria-label={zh ? '联网搜索' : 'Web search'} onClick={() => { const v = !web; setWeb(v); writeAIFlag(AI_WEB_STORAGE_KEY, v) }}>
+                    <Globe size={15} strokeWidth={2} aria-hidden="true" />
+                  </button>
+                </Tooltip>
+                <Tooltip title={zh ? '深度思考（所选模型须支持推理）' : 'Deep thinking (requires a reasoning model)'}>
+                  <button type="button" className={`ai-tool-icon${think ? ' on' : ''}`} aria-pressed={think} aria-label={zh ? '深度思考' : 'Deep thinking'} onClick={() => { const v = !think; setThink(v); writeAIFlag(AI_THINK_STORAGE_KEY, v) }}>
+                    <Brain size={15} strokeWidth={2} aria-hidden="true" />
+                  </button>
+                </Tooltip>
+                <Tooltip title={t(locale, 'aiAssistantClear')}>
+                  <Button size="small" type="text" disabled={turns.length === 0} aria-label={t(locale, 'aiAssistantClear')} onClick={() => { abortRef.current?.abort(); applyTurns(() => []) }}>
+                    <Trash2 size={13} strokeWidth={2} aria-hidden="true" />
+                  </Button>
+                </Tooltip>
+                <div className="chat-tools-right">
+                  {models.length > 0 && (
+                    <Select size="small" className="viewer-aiw-model" value={modelKey || undefined} placeholder={zh ? '默认模型' : 'Default model'}
+                      onChange={(v) => { setModelKey(v); try { window.localStorage.setItem(AI_MODEL_STORAGE_KEY, v) } catch { /* ignore */ } }}
+                      options={models.map((m) => ({ value: m.id, label: `${m.providerName || m.providerId} / ${m.model}` }))} />
+                  )}
+                </div>
+              </div>
             </div>
           )}
+
         </div>
       ) : (
         <button
@@ -789,6 +770,7 @@ export default function ViewerAIWidget({
           onPointerMove={moveDrag}
           onPointerUp={endDrag}
           onPointerCancel={endDrag}
+          onDoubleClick={resetPos}
           onClick={() => {
             if (suppressClickRef.current) {
               suppressClickRef.current = false

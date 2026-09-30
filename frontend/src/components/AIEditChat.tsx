@@ -1094,7 +1094,7 @@ export default function AIEditChat({
           保留在头部「AI 对话」下拉）。 */}
       <div className="ai-edit-chat-composer">
         {notice && <div className="ai-edit-chat-notice error-text">{notice}</div>}
-        <div className="ai-input-box">
+        <div className="chat-input-box">
           <Input.TextArea
             ref={inputRef}
             autoSize={{ minRows: 1, maxRows: 5 }}
@@ -1109,7 +1109,7 @@ export default function AIEditChat({
               }
             }}
           />
-          <div className="ai-input-footer">
+          <div className="chat-tools-bar">
             <span className="ai-input-tools">
               {/* 平台技能模板：{selection}=当前选区（无选区置空并提示）、
                   {file}=当前文件名（面板打开时解析）。 */}

@@ -114,7 +114,7 @@ export default function AIChatComposer({
   }
 
   return (
-    <div className="aic-composer">
+    <div className="chat-input-box">
       <Sender
         ref={(r) => {
           localRef.current = (r ?? null) as unknown as AISenderInstance | null
@@ -139,7 +139,7 @@ export default function AIChatComposer({
         disabled={disabled}
         onSubmit={() => submit()}
         onCancel={onCancel}
-        header={header}
+        /* v3.7：header prop 从 Sender 内部移到框外底部（chat-tools-bar）。 */
         onKeyDown={(e) => {
           if (e.nativeEvent.isComposing) return // IME 组合中：交输入法处理
           if (mentionOpen) {
@@ -151,6 +151,9 @@ export default function AIChatComposer({
           return undefined
         }}
       />
+      {/* v3.7 Cherry Studio 式：工具栏在输入框内底部（header prop 内容
+          渲染为单行工具栏）。 */}
+      {header && <div className="chat-tools-bar">{header}</div>}
       {mentionOpen && (
         <div className="aic-mention-panel">
           {mentionLoading && <div className="aic-mention-state muted">{zh ? '搜索中…' : 'Searching…'}</div>}
