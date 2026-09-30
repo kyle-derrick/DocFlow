@@ -162,14 +162,15 @@ function MessageActions({ text, zh, onRegenerate }: { text: string; zh: boolean;
  * 气泡内渲染为可点击卡片链接（点击在独立查看页打开真实内容；应用后由
  * 富文本层还原为原生嵌入节点）。 */
 export function humanizeEmbedPlaceholders(text: string): string {
-  return text.replace(/^\[DocFlow-(Embed|File|Image)([^\]]*)\]\s*$/gm, (_m, kind: string, rest: string) => {
+  // v3.7：匹配整行 AND 行内（AI 可能把占位行嵌在段落中间）。
+  return text.replace(/\[DocFlow-(Embed|File|Image)([^\]]*)\]/g, (_m, kind: string, rest: string) => {
     const fid = (rest.match(/fileId="([^"]*)"/) || [])[1] ?? ''
     const title = (rest.match(/title="([^"]*)"/) || [])[1] ?? ''
-    const kLabel = kind === 'Embed' ? '嵌入（图表/白板）' : kind === 'File' ? '文件' : '图片'
+    const kLabel = kind === 'Embed' ? '嵌入' : kind === 'File' ? '文件' : '图片'
     const name = title || fid.slice(0, 8)
     return fid
-      ? `> 🧩 **${kLabel}**：[${name}](/view/${fid})`
-      : `> 🧩 **${kLabel}**${title ? `：${title}` : ''}`
+      ? `**${kLabel}**：[${name}](/view/${fid})`
+      : `**${kLabel}**${title ? `：${title}` : ''}`
   })
 }
 

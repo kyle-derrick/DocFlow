@@ -58,6 +58,38 @@ export default function AIChatComposer({
   const [mentionLoading, setMentionLoading] = useState(false)
   const mentionOn = mentionRoot !== null && !!onMentionPick
 
+  // v3.7 输入历史（↑/↓ 切换，Cherry Studio/终端式）：会话级内存数组，
+  // 发送后追加；↑ 回溯、↓ 前进、Esc 清空回当前输入。
+  const historyRef = useRef<string[]>([])
+  const historyIdxRef = useRef(-1)
+  const draftRef = useRef('')
+  const pushHistory = (text: string) => {
+    if (!text.trim()) return
+    const h = historyRef.current
+    if (h[h.length - 1] !== text) h.push(text)
+    if (h.length > 50) h.shift() // 上限 50 条
+    historyIdxRef.current = -1
+    draftRef.current = ''
+  }
+  const navigateHistory = (dir: 1 | -1): string | null => {
+    const h = historyRef.current
+    if (h.length === 0) return null
+    let idx = historyIdxRef.current
+    if (dir === -1) { // ↑ 回溯
+      if (idx === -1) { draftRef.current = value; idx = h.length } // 保存当前草稿
+      idx = Math.max(0, idx - 1)
+    } else { // ↓ 前进
+      if (idx === -1) return null
+      idx = Math.min(h.length, idx + 1)
+      if (idx === h.length) { // 回到草稿
+        historyIdxRef.current = -1
+        return draftRef.current
+      }
+    }
+    historyIdxRef.current = idx
+    return h[idx] ?? null
+  }
+
   // 外部聚焦信号（欢迎卡「让 AI 生成」等）。
   useEffect(() => {
     if (focusSignal && focusSignal > 0) localRef.current?.focus()
@@ -110,6 +142,7 @@ export default function AIChatComposer({
   const submit = () => {
     const text = value.trim()
     if (!text || busy || disabled) return
+    pushHistory(text)
     onSend(text)
   }
 
@@ -143,6 +176,22 @@ export default function AIChatComposer({
         /* v3.7：header prop 从 Sender 内部移到框外底部（chat-tools-bar）。 */
         onKeyDown={(e) => {
           if (e.nativeEvent.isComposing) return // IME 组合中：交输入法处理
+          // v3.7 输入历史导航：光标在首行时 ↑ 回溯、末行时 ↓ 前进（终端式）。
+          if (!mentionOpen && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+            const ta = localRef.current?.resizableTextArea?.textArea
+            if (ta) {
+              const atFirstLine = e.key === 'ArrowUp' && ta.selectionStart === 0
+              const atLastLine = e.key === 'ArrowDown' && ta.selectionStart >= value.length
+              if (atFirstLine || atLastLine) {
+                const next = navigateHistory(e.key === 'ArrowUp' ? -1 : 1)
+                if (next !== null) {
+                  e.preventDefault()
+                  onChange(next)
+                  return false
+                }
+              }
+            }
+          }
           if (mentionOpen) {
             if (e.key === 'ArrowUp' && mentionItems.length > 0) { e.preventDefault(); setMentionActive((i) => (i - 1 + mentionItems.length) % mentionItems.length); return false }
             if (e.key === 'ArrowDown' && mentionItems.length > 0) { e.preventDefault(); setMentionActive((i) => (i + 1) % mentionItems.length); return false }

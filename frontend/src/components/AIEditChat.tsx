@@ -583,8 +583,8 @@ export default function AIEditChat({
           : `You are a draw.io diagram assistant. Based on the given current diagram XML, output the complete modified drawio XML (wrapped in <mxGraphModel>...</mxGraphModel> or <mxfile>...</mxfile>). Output only the XML itself, no explanations.\n\n${DRAWIO_XML_GUIDE}`)
         : applyKind === 'richtext-patch'
           ? (zh
-            ? `你是富文本文档编辑助手。请按用户指令对给定文档进行修改（新增、插入、删除、替换），修改以下述「编辑指令」表达——系统会自动定位并逐条执行，不要直接输出修改后的全文。文档中的 [DocFlow-Embed / DocFlow-Image / DocFlow-File] 占位行是嵌入的图表/白板/图片/文件块，属受保护内容，必须逐字保留在输出里。\n\n${RICHTEXT_PATCH_GUIDE}`
-            : `You are a rich text document editing assistant. Apply the user's requested changes (add, insert, delete, replace) as edit instructions per the protocol below — they are located and executed automatically; do NOT output the whole modified document. [DocFlow-Embed / DocFlow-Image / DocFlow-File] placeholder lines in the document are protected embedded blocks (diagrams/whiteboards/images/files) and must be preserved verbatim in your output.\n\n${RICHTEXT_PATCH_GUIDE}`)
+            ? `你是富文本文档编辑助手。请按用户指令对给定文档进行修改（新增、插入、删除、替换），修改以下述「编辑指令」表达——系统会自动定位并逐条执行，不要直接输出修改后的全文。文档中的 [DocFlow-Embed / DocFlow-Image / DocFlow-File] 占位行是嵌入的图表/白板/图片/文件块，属受保护内容，必须逐字保留在编辑指令里。在对话回复中引用这些嵌入内容时，用标题指代（如「流程图"新图表"」），不要把 [DocFlow-...] 占位语法复制到对话正文。\n\n${RICHTEXT_PATCH_GUIDE}`
+            : `You are a rich text document editing assistant. Apply the user's requested changes (add, insert, delete, replace) as edit instructions per the protocol below — they are located and executed automatically; do NOT output the whole modified document. [DocFlow-Embed / DocFlow-Image / DocFlow-File] placeholder lines in the document are protected embedded blocks (diagrams/whiteboards/images/files) and must be preserved verbatim in edit instructions. When referencing them in conversation replies, use their titles — NEVER copy the raw [DocFlow-...] syntax into your response text.\n\n${RICHTEXT_PATCH_GUIDE}`)
           : outputFormat === 'markdown'
           ? (zh
             ? '你是富文本文档写作助手。请按指令处理给定文本，仅输出最终内容本身：不要解释、不要说明。请用 Markdown 输出结果（标题 #/##/###、有序与无序列表、表格、代码块、加粗、斜体、链接等）——内容将被转换为富文本样式插入文档。'
@@ -885,23 +885,25 @@ export default function AIEditChat({
       <div className="ai-edit-chat-head">
         <Sparkles size={14} strokeWidth={2} aria-hidden="true" />
         <span className="ai-edit-chat-title">{zh ? 'AI 对话' : 'AI chat'}</span>
-        <Tooltip title={zh ? '清空会话' : 'Clear conversation'}>
+        <span className="ai-edit-chat-head-ops">
+          <Tooltip title={zh ? '清空会话' : 'Clear conversation'}>
+            <Button
+              size="small"
+              type="text"
+              icon={<Trash2 size={13} strokeWidth={2} />}
+              disabled={turns.length === 0}
+              onClick={() => { setTurns([]); setNotice('') }}
+              aria-label={zh ? '清空会话' : 'Clear conversation'}
+            />
+          </Tooltip>
           <Button
             size="small"
             type="text"
-            icon={<Trash2 size={13} strokeWidth={2} />}
-            disabled={turns.length === 0}
-            onClick={() => { setTurns([]); setNotice('') }}
-            aria-label={zh ? '清空会话' : 'Clear conversation'}
+            icon={<X size={14} strokeWidth={2} />}
+            onClick={onClose}
+            aria-label={zh ? '收起面板' : 'Close panel'}
           />
-        </Tooltip>
-        <Button
-          size="small"
-          type="text"
-          icon={<X size={14} strokeWidth={2} />}
-          onClick={onClose}
-          aria-label={zh ? '收起面板' : 'Close panel'}
-        />
+        </span>
       </div>
       {/* 模式：可修改（自动应用+版本保护，默认）/ 仅对话（纯输出）；
           forceChatOnly（如 OnlyOffice 页）隐藏切换恒仅对话；
