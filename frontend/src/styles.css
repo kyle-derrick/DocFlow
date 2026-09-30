@@ -7858,7 +7858,7 @@ kbd {
   gap: 6px;
 }
 .viewer-aiw-input-row { display: flex; align-items: flex-end; gap: 6px; min-width: 0; }
-.viewer-aiw-input-row .ant-input { flex: 1; min-width: 0; }
+.viewer-aiw-input-row .ant-input { flex: 1; min-width: 0; border: none !important; box-shadow: none !important; background: transparent !important; }
 .viewer-aiw-input-spacer { flex: 1; }
 .viewer-aiw-model { min-width: 0; max-width: 200px; }
 /* 窄视口：卡片缩至近全宽，避免遮挡内容。 */
@@ -7992,6 +7992,8 @@ kbd {
   background: transparent !important;
   border-radius: 14px 14px 0 0;
 }
+/* 隐藏 Sender 内置发送按钮（v3.7：发送/停止移到 chat-tools-bar 最右端）。 */
+.chat-input-box .ant-sender .ant-sender-actions { display: none !important; }
 .chat-input-box .ant-input {
   border: none !important;
   box-shadow: none !important;
@@ -8010,6 +8012,31 @@ kbd {
   overflow-x: auto;
 }
 .chat-tools-right { margin-left: auto; flex-shrink: 0; display: flex; align-items: center; }
+/* 发送/停止按钮（工具栏最右端，Cherry Studio 式）。 */
+.chat-send-btn-wrap { flex-shrink: 0; margin-left: 4px; display: flex; align-items: center; }
+.chat-send-btn, .chat-stop-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, opacity 0.12s;
+}
+.chat-send-btn {
+  background: var(--primary);
+  color: #fff;
+}
+.chat-send-btn:hover:not(:disabled) { background: var(--primary-hover); }
+.chat-send-btn:disabled { opacity: 0.35; cursor: default; }
+.chat-stop-btn {
+  background: var(--danger, #e0566b);
+  color: #fff;
+}
+.chat-stop-btn:hover { background: var(--danger-hover, #e97084); }
 /* 旧 aiax-composer 类保留兼容（不再使用统一框样式）。 */
 .aiax-composer { border-top: 1px solid var(--border); padding: 8px 10px 10px; flex-shrink: 0; }
   gap: 2px;

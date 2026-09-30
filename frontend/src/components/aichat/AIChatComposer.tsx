@@ -135,7 +135,8 @@ export default function AIChatComposer({
         }}
         placeholder={placeholder}
         autoSize={{ minRows: 1, maxRows: 6 }}
-        loading={busy}
+        /* v3.7：loading 不传给 Sender（隐藏内置发送按钮——移到 chat-tools-bar
+            最右端与工具按钮同行，Cherry Studio 式）。 */
         disabled={disabled}
         onSubmit={() => submit()}
         onCancel={onCancel}
@@ -152,8 +153,21 @@ export default function AIChatComposer({
         }}
       />
       {/* v3.7 Cherry Studio 式：工具栏在输入框内底部（header prop 内容
-          渲染为单行工具栏）。 */}
-      {header && <div className="chat-tools-bar">{header}</div>}
+          渲染为单行工具栏 + 发送/停止按钮最右端）。 */}
+      <div className="chat-tools-bar">
+        {header}
+        <span className="chat-send-btn-wrap">
+          {busy ? (
+            <button type="button" className="chat-stop-btn" aria-label={zh ? '停止生成' : 'Stop'} title={zh ? '停止生成' : 'Stop'} onClick={onCancel}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2" /></svg>
+            </button>
+          ) : (
+            <button type="button" className="chat-send-btn" disabled={!value.trim() || disabled} aria-label={zh ? '发送' : 'Send'} title={zh ? '发送（Enter）' : 'Send (Enter)'} onClick={submit}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>
+            </button>
+          )}
+        </span>
+      </div>
       {mentionOpen && (
         <div className="aic-mention-panel">
           {mentionLoading && <div className="aic-mention-state muted">{zh ? '搜索中…' : 'Searching…'}</div>}

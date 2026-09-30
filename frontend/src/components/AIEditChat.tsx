@@ -931,21 +931,8 @@ export default function AIEditChat({
             zh={zh}
           />
         )}
-        <AIChatToggleBar
-          compact
-          zh={zh}
-          web={toggles.web}
-          think={toggles.think}
-          thinkBlocked={toggles.thinkBlocked}
-          mcp={toggles.mcp}
-          mcpAvailable={toggles.mcpAvailable}
-          docs={toggles.docs}
-          docsAvailable={toggles.docsAvailable}
-          onWeb={toggles.setWeb}
-          onThink={toggles.setThink}
-          onMcp={toggles.setMcp}
-          onDocs={toggles.setDocs}
-        />
+        {/* v3.7：AIChatToggleBar 移到 chat-tools-bar（输入框内底部工具栏），
+            不再在面板顶部平铺。 */}
         {/* 模式说明收起为悬浮图标（hover 显示完整说明），避免平铺文案占用输入区空间。 */}
         <Popover
           content={<div className="ai-edit-chat-mode-popover"><strong>{modeHint}</strong><div className="muted">{modeTip}</div></div>}
@@ -1126,6 +1113,21 @@ export default function AIEditChat({
               />
               <span className="ai-input-hint muted">{zh ? 'Enter 发送 · Shift + Enter 换行' : 'Enter to send · Shift+Enter for newline'}</span>
             </span>
+            {/* v3.7：AIChatToggleBar 从面板顶部移到输入框底部工具栏。 */}
+            <AIChatToggleBar
+              zh={zh}
+              web={toggles.web}
+              think={toggles.think}
+              thinkBlocked={toggles.thinkBlocked}
+              mcp={toggles.mcp}
+              mcpAvailable={toggles.mcpAvailable}
+              docs={toggles.docs}
+              docsAvailable={toggles.docsAvailable}
+              onWeb={toggles.setWeb}
+              onThink={toggles.setThink}
+              onMcp={toggles.setMcp}
+              onDocs={toggles.setDocs}
+            />
             {busy ? (
               <Button
                 className="ai-stop-btn"

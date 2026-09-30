@@ -42,7 +42,7 @@ import { t, useLocale } from '../i18n'
  *  snap = 吸附边（'left' | 'right' | null，半嵌圆点态）。 */
 const WIDGET_POS_KEY = 'docflow.viewer-ai.pos'
 /** 悬浮球尺寸 / 卡片尺寸 / 边界内边距（px）。 */
-const BALL_SIZE = 40
+const BALL_SIZE = 56
 const CARD_W = 360
 const CARD_H = 520
 const VIEW_MARGIN = 8
@@ -183,9 +183,9 @@ export default function ViewerAIWidget({
     return boundsRef.current
   }
   const [pos, setPos] = useState<DragPos>(() => {
-    const stored = loadPos()
-    if (stored) return { x: stored.x, y: stored.y }
-    // 默认：视口右下角（留 24px 边距）——不是弹窗边界（用户直觉是屏幕角落）。
+    // v3.7：清除旧存储的位置（之前 BALL_SIZE=40 与 CSS 56px 不匹配导致
+    // 位置漂移），每次会话默认视口右下角（24px 边距）。
+    try { localStorage.removeItem('docflow.viewerAI.pos') } catch { /* ignore */ }
     return { x: window.innerWidth - BALL_SIZE - 24, y: window.innerHeight - BALL_SIZE - 24 }
   })
   const posRef = useRef(pos)
@@ -206,31 +206,24 @@ export default function ViewerAIWidget({
   // 边界（弹窗居中且小于视口，右下角会在屏幕中间——观感是「位置不对」）。
   const [inited, setInited] = useState(false)
   useEffect(() => {
-    const b = readBounds()
-    const stored = loadPos()
-    if (stored?.snap) {
-      applyPos({ x: snappedX(stored.snap, b), y: clampSnappedY(stored.y, b) })
-    } else if (stored) {
-      applyPos(clampPos(stored, BALL_SIZE, BALL_SIZE, b))
-    } else {
-      // 默认位置：视口右下角（不 clamp 到弹窗边界——弹窗居中小于视口，
-      // clamp 会把球拉到屏幕中间。球可以超出弹窗但不出视口）。
-      const vb = viewportBounds()
-      applyPos({
-        x: Math.min(window.innerWidth - BALL_SIZE - 24, vb.left + vb.width - BALL_SIZE - VIEW_MARGIN),
-        y: Math.min(window.innerHeight - BALL_SIZE - 24, vb.top + vb.height - BALL_SIZE - VIEW_MARGIN),
-      })
-    }
+    // v3.7：默认恒为视口右下角（不读旧存储——旧数据因 BALL_SIZE 不匹配
+    // 而漂移；位置记忆在拖拽后重新写入）。
+    const vb = viewportBounds()
+    applyPos({
+      x: Math.min(window.innerWidth - BALL_SIZE - 24, vb.left + vb.width - BALL_SIZE - 12),
+      y: Math.min(window.innerHeight - BALL_SIZE - 24, vb.top + vb.height - BALL_SIZE - 12),
+    })
     setInited(true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const startDrag = (e: ReactPointerEvent<HTMLElement>) => {
     if (e.button !== 0) return
-    // 头部内交互控件（收起按钮等）不进入拖拽：setPointerCapture 会把后续
-    // 点击事件重定向到把手元素，按钮的 click 被吞（v3.3 修复「下箭头点不
-    // 动」的根因）。
-    if ((e.target as HTMLElement).closest('button, a, input, .ant-segmented, [role="button"]')) return
+    // 注意：不能检查 closest('button')——悬浮球本身就是 <button>，会自我
+    // 匹配导致拖拽永远不触发（v3.7 修复）。仅在展开态卡片头部拖拽时排除
+    // 头部内的交互控件（收起球无子按钮，无需排除）。
+    const el = e.target as HTMLElement
+    if (el !== e.currentTarget && el.closest('button, a, input, .ant-segmented, [role="button"]')) return
     e.preventDefault()
     const b = readBounds()
     const size = open ? cardSize(b) : { w: BALL_SIZE, h: BALL_SIZE }
