@@ -976,21 +976,18 @@ function StudioChat({ zh, engine, agentOn, onRefreshTasks, onChatSettled, projec
     </div>
   )
 
-  /** docker 任务卡（Trae 式内联 agent 输出：状态 + 实时日志 + 文件变更
-   *  + 操作按钮，全部在对话流内完成——不再依赖独立评审面板）。 */
+  /** docker 任务卡（v3.8 对话式：与普通 AI 消息同视觉，无边框卡片）。 */
   const renderTurn = useCallback((turn: StudioTurn): ReactNode | undefined => {
     if (turn.role !== 'assistant' || !turn.task) return undefined
     return (
       <StudioTaskCard
         zh={zh}
         taskId={turn.task.id}
-        prompt={turn.task.prompt}
         task={tasksById[turn.task.id]}
         onApplied={onRefreshTasks}
-        onOpenInTab={onOpenInTab}
       />
     )
-  }, [tasksById, onRefreshTasks, onOpenInTab, zh])
+  }, [tasksById, onRefreshTasks, zh])
 
   return (
     <section className="studio-chat" aria-label={engine === 'docker' ? 'Agent 任务流' : 'AI 对话流'}>

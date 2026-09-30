@@ -7099,35 +7099,21 @@ kbd {
 .stab-empty { flex: 1; display: flex; align-items: center; justify-content: center; }
 /* Skill 模板 chips 已移除（v3.3：纯提示词填入价值低，易被误认为执行模式）。 */
 /* 会话内任务卡（v3.6 Trae 式：日志流 + 文件变更 + 操作全部内联）。 */
-.studio-taskcard {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 6px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--primary);
-  border-radius: 8px;
-  background: var(--surface-2);
-  font-size: 13px;
-}
-.studio-taskcard-head { display: flex; align-items: center; gap: 6px; font-weight: 600; color: var(--primary); }
-/* Trae 式任务卡子区块：日志流 + 文件变更 + 操作。 */
-.stc-error { color: var(--danger); font-size: 12px; font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
-.stc-section { display: flex; flex-direction: column; gap: 4px; align-self: stretch; }
-.stc-section-toggle { display: inline-flex; align-items: center; gap: 4px; border: none; background: none; color: var(--muted); font-size: 12px; cursor: pointer; padding: 2px 0; text-align: left; }
+
+
+
+
+
+
 .stc-section-toggle:hover { color: var(--text); }
-.stc-section-title { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 600; color: var(--muted); }
-.stc-logs {
-  max-height: 200px; overflow-y: auto; background: var(--workbench, #12151c); border-radius: 6px; padding: 6px 8px;
-  font-family: var(--font-mono, monospace); font-size: 11.5px; display: flex; flex-direction: column; gap: 2px;
-}
-.stc-log { display: flex; gap: 6px; align-items: baseline; }
-.stc-log-stream { color: var(--muted); font-size: 10px; flex-shrink: 0; min-width: 36px; text-transform: uppercase; }
-.stc-log-stdout .stc-log-text { color: var(--text); }
-.stc-log-stderr .stc-log-text { color: var(--danger); }
-.stc-log-system .stc-log-text { color: var(--muted); font-style: italic; }
-.stc-log-text { word-break: break-all; }
+
+
+
+
+.stc-log-stdout 
+.stc-log-stderr 
+.stc-log-system 
+
 .stc-diff { display: flex; flex-direction: column; gap: 2px; }
 .stc-diff-row { display: flex; align-items: center; gap: 6px; padding: 3px 6px; border-radius: 4px; font-size: 12px; font-family: var(--font-mono, monospace); }
 .stc-diff-add .stc-diff-path, .stc-diff-add > svg { color: var(--ok, #3fbf7f); }
@@ -7136,18 +7122,8 @@ kbd {
 .stc-diff-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .stc-diff-size { font-size: 11px; flex-shrink: 0; }
 .stc-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.stc-hint { font-size: 12px; }
-.studio-taskcard-prompt {
-  align-self: stretch;
-  max-height: 60px;
-  overflow: hidden;
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-  color: var(--muted);
-  font-size: 12.5px;
-  white-space: pre-wrap;
-}
+
+
 /* 右栏下：任务评审。 */
 .studio-review { flex: 1; overflow-y: auto; }
 .studio-review-meta { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
@@ -7781,10 +7757,14 @@ kbd {
 }
 
 /* ==================== 查看页悬浮 AI 助理（.viewer-aiw-*） ==================== */
-/* 收起态悬浮球：56px 圆形主色，可拖动（位置记忆 localStorage），点击展开。 */
+/* 收起态悬浮球：56px 圆形主色。v3.8 定位重写：
+   默认 right:24px bottom:24px（CSS 贴角，窗口 resize 自动适配，零 JS）；
+   拖拽后 JS 切 left/top（right/bottom: auto）；双击重置回默认。 */
 .viewer-aiw-ball {
   position: fixed;
   z-index: 1200;
+  right: 24px;
+  bottom: 24px;
   width: 56px;
   height: 56px;
   border: 0;
@@ -7808,10 +7788,12 @@ kbd {
   transition: none;
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
 }
-/* 展开态卡片：360×520（组件内联定位），头部可拖动把手。 */
+/* 展开态卡片：默认右下角（与球同位，CSS right/bottom），拖拽后跟随球位置。 */
 .viewer-aiw-card {
   position: fixed;
   z-index: 1200;
+  right: 24px;
+  bottom: 24px;
   display: flex;
   flex-direction: column;
   background: var(--surface);
@@ -8088,6 +8070,18 @@ kbd {
 }
 .chat-stop-btn:hover { background: var(--danger-hover, #e97084); }
 /* v3.7：旧 aiax-composer 样式已全部清理。 */
+/* Agent 对话式消息（v3.8：替代卡片，与普通 AI 消息同视觉）。 */
+.stc-msg { display: flex; flex-direction: column; gap: 8px; }
+.stc-summary { font-size: 13px; line-height: 1.5; }
+.stc-changes { display: flex; flex-direction: column; gap: 4px; }
+.stc-changes-title { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 600; color: var(--muted); }
+.stc-diff { display: flex; flex-direction: column; gap: 2px; }
+.stc-diff-row { display: flex; align-items: center; gap: 6px; padding: 3px 6px; border-radius: 4px; font-size: 12px; font-family: var(--font-mono, monospace); }
+.stc-diff-add .stc-diff-path, .stc-diff-add > svg { color: var(--ok, #3fbf7f); }
+.stc-diff-del .stc-diff-path, .stc-diff-del > svg { color: var(--danger); }
+.stc-diff-mod .stc-diff-path, .stc-diff-mod > svg { color: #e6a23c; }
+.stc-diff-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stc-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 /* 引用 chips 在最底。 */
 
 /* 图标式开关（DeepSeek 式，28px 方块）：开启态主色填充。 */

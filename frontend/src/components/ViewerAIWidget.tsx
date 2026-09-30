@@ -41,84 +41,53 @@ import { t, useLocale } from '../i18n'
 /** 悬浮位置持久化 key（{x,y,snap}：x/y 为悬浮球/卡片左上角（视口坐标），
  *  snap = 吸附边（'left' | 'right' | null，半嵌圆点态）。 */
 const WIDGET_POS_KEY = 'docflow.viewer-ai.pos'
-/** 悬浮球尺寸 / 卡片尺寸 / 边界内边距（px）。 */
+/** 悬浮球尺寸 / 卡片尺寸（px）。 */
 const BALL_SIZE = 56
 const CARD_W = 360
 const CARD_H = 520
-const VIEW_MARGIN = 8
+/** 默认边距：球距视口右下角（px，CSS 中使用）。 */
+// const DEFAULT_MARGIN = 24
 /** 拖动阈值：位移超过该值判定为拖动（否则视为点击）。 */
 const DRAG_THRESHOLD = 4
-/** 边缘吸附阈值：拖动结束时球心距左/右边界小于该值吸附贴边。 */
-const EDGE_SNAP = 24
 /** 对话上下文注入的文件全文截断长度。 */
 const CONTEXT_TEXT_LIMIT = 12000
 
-/** 悬浮位置。 */
-interface DragPos {
-  x: number
-  y: number
-}
+/** 悬浮位置：null = 默认（CSS right/bottom 贴角），否则为拖拽后的自定义
+ *  视口坐标（left/top 定位）。双击清除回默认。 */
+type CustomPos = { x: number; y: number } | null
 
-/** 可用边界（视口或弹窗容器矩形；坐标一律为视口坐标系）。 */
-interface Bounds {
-  left: number
-  top: number
-  width: number
-  height: number
-}
-
-/** 读取记忆的悬浮位置（非法/缺失返回 null；snap 宽松校验）。 */
-function loadPos(): (DragPos & { snap: 'left' | 'right' | null }) | null {
+/** 读取记忆的自定义位置（null = 使用默认 right/bottom 贴角）。 */
+function loadPos(): CustomPos {
   try {
     const raw = window.localStorage.getItem(WIDGET_POS_KEY)
     if (!raw) return null
-    const v = JSON.parse(raw) as Partial<DragPos & { snap: unknown }>
+    const v = JSON.parse(raw) as Partial<{ x: unknown; y: unknown }>
     const x = Number(v.x)
     const y = Number(v.y)
     if (!Number.isFinite(x) || !Number.isFinite(y)) return null
-    return { x, y, snap: v.snap === 'left' || v.snap === 'right' ? v.snap : null }
+    // 位置超出当前视口 → 视为过期，回默认。
+    if (x < 0 || y < 0 || x > window.innerWidth || y > window.innerHeight) return null
+    return { x, y }
   } catch {
     return null
   }
 }
 
-/** 持久化悬浮位置与吸附边（失败静默）。 */
-function persistPos(p: DragPos & { snap: 'left' | 'right' | null }): void {
+/** 持久化自定义位置（null = 清除，回默认贴角）。 */
+function persistPos(p: CustomPos): void {
   try {
-    window.localStorage.setItem(WIDGET_POS_KEY, JSON.stringify(p))
+    if (p) window.localStorage.setItem(WIDGET_POS_KEY, JSON.stringify(p))
+    else window.localStorage.removeItem(WIDGET_POS_KEY)
   } catch {
     /* ignore */
   }
 }
 
-/** 视口边界。 */
-function viewportBounds(): Bounds {
-  return { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight }
-}
-
-/** 位置夹取进边界（按当前元素尺寸；边界过小时贴边界内缘）。 */
-function clampPos(p: DragPos, w: number, h: number, b: Bounds): DragPos {
+/** 视口内夹取（防拖出屏幕）。 */
+function clampToViewport(p: { x: number; y: number }): { x: number; y: number } {
   return {
-    x: Math.min(Math.max(p.x, b.left + VIEW_MARGIN), Math.max(b.left + VIEW_MARGIN, b.left + b.width - w - VIEW_MARGIN)),
-    y: Math.min(Math.max(p.y, b.top + VIEW_MARGIN), Math.max(b.top + VIEW_MARGIN, b.top + b.height - h - VIEW_MARGIN)),
-  }
-}
-
-/** 吸附态 x 坐标（半嵌：球一半露出边界外）。 */
-function snappedX(side: 'left' | 'right', b: Bounds): number {
-  return side === 'left' ? b.left - BALL_SIZE / 2 : b.left + b.width - BALL_SIZE / 2
-}
-
-/** 吸附态仅夹取 y（x 半嵌边界外，不参与夹取）。 */
-function clampSnappedY(y: number, b: Bounds): number {
-  return Math.min(Math.max(y, b.top + VIEW_MARGIN), Math.max(b.top + VIEW_MARGIN, b.top + b.height - BALL_SIZE - VIEW_MARGIN))
-}
-
-/** 卡片实际尺寸（按边界收缩：窄/矮视口或弹窗不超出）。 */
-function cardSize(b: Bounds): { w: number; h: number } {
-  return {
-    w: Math.min(CARD_W, Math.max(160, b.width - VIEW_MARGIN * 2)),
-    h: Math.min(CARD_H, Math.max(200, b.height - VIEW_MARGIN * 2)),
+    x: Math.min(Math.max(p.x, 0), Math.max(0, window.innerWidth - BALL_SIZE)),
+    y: Math.min(Math.max(p.y, 0), Math.max(0, window.innerHeight - BALL_SIZE)),
   }
 }
 
@@ -166,81 +135,37 @@ export default function ViewerAIWidget({
   const { message } = AntdApp.useApp()
   const textLike = isTextLike(fileName, '')
 
-  // ---- 悬浮球 / 卡片：位置与拖动（边界 = 视口或弹窗容器）----
+  // ---- 悬浮球 / 卡片：位置与拖动（v3.8 重写）----
+  // 简化原则：默认用 CSS right/bottom 贴角（窗口 resize 自动适配，零 JS），
+  // 拖拽后才切 left/top 自定义定位；双击重置回默认。
   const [open, setOpen] = useState(false)
-  // 隐藏锚点：挂在渲染点（弹窗标题行内），closest 向上探测是否在
-  // .ant-modal-container（antd v6 弹窗内容盒）内——在则边界为弹窗矩形。
-  const anchorRef = useRef<HTMLSpanElement | null>(null)
-  const boundsRef = useRef<Bounds>(viewportBounds())
-  const readBounds = (): Bounds => {
-    const host = anchorRef.current?.closest<HTMLElement>('.ant-modal-container, .ant-modal-content')
-    let next: Bounds | null = null
-    if (host) {
-      const r = host.getBoundingClientRect()
-      if (r.width > 0 && r.height > 0) next = { left: r.left, top: r.top, width: r.width, height: r.height }
-    }
-    boundsRef.current = next ?? viewportBounds()
-    return boundsRef.current
-  }
-  const [pos, setPos] = useState<DragPos>(() => {
-    // v3.7：清除旧存储的位置（之前 BALL_SIZE=40 与 CSS 56px 不匹配导致
-    // 位置漂移），每次会话默认视口右下角（24px 边距）。
-    try { localStorage.removeItem('docflow.viewerAI.pos') } catch { /* ignore */ }
-    return { x: window.innerWidth - BALL_SIZE - 24, y: window.innerHeight - BALL_SIZE - 24 }
-  })
-  const posRef = useRef(pos)
-  // 吸附边（'left' | 'right' | null）：非空 = 半嵌圆点态（仅收起态球）。
-  const [snap, setSnap] = useState<'left' | 'right' | null>(() => loadPos()?.snap ?? null)
+  const [customPos, setCustomPos] = useState<CustomPos>(() => loadPos())
   const [dragging, setDragging] = useState(false)
-  const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number; moved: boolean; w: number; h: number } | null>(null)
+  const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number; moved: boolean } | null>(null)
   const suppressClickRef = useRef(false)
 
-  const applyPos = (p: DragPos) => {
-    posRef.current = p
-    setPos(p)
-  }
-
-  // 挂载后按记忆/默认位置初始化（锚点此时已渲染，可探测弹窗边界）；
-  // 初始化前悬浮球隐藏，避免按视口默认位置在弹窗外闪现一帧。
-  // v3.6 修复：默认位置用**视口**右下角（用户直觉是屏幕角落），不用弹窗
-  // 边界（弹窗居中且小于视口，右下角会在屏幕中间——观感是「位置不对」）。
-  const [inited, setInited] = useState(false)
-  useEffect(() => {
-    // v3.7：默认恒为视口右下角（不读旧存储——旧数据因 BALL_SIZE 不匹配
-    // 而漂移；位置记忆在拖拽后重新写入）。
-    const vb = viewportBounds()
-    applyPos({
-      x: Math.min(window.innerWidth - BALL_SIZE - 24, vb.left + vb.width - BALL_SIZE - 12),
-      y: Math.min(window.innerHeight - BALL_SIZE - 24, vb.top + vb.height - BALL_SIZE - 12),
-    })
-    setInited(true)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  /** 球/卡片样式：null = 默认 CSS right/bottom；有值 = left/top 自定义。 */
+  const posStyle = customPos
+    ? { left: customPos.x, top: customPos.y, right: 'auto', bottom: 'auto' }
+    : {}
 
   const startDrag = (e: ReactPointerEvent<HTMLElement>) => {
     if (e.button !== 0) return
-    // 注意：不能检查 closest('button')——悬浮球本身就是 <button>，会自我
-    // 匹配导致拖拽永远不触发（v3.7 修复）。仅在展开态卡片头部拖拽时排除
-    // 头部内的交互控件（收起球无子按钮，无需排除）。
+    // 排除子交互控件（展开态卡片头部的按钮）——球本身是 button 但
+    // e.target === e.currentTarget 时是球/把手本体，不排除。
     const el = e.target as HTMLElement
-    if (el !== e.currentTarget && el.closest('button, a, input, .ant-segmented, [role="button"]')) return
+    if (el !== e.currentTarget && el.closest('button, a, input, .ant-segmented')) return
     e.preventDefault()
-    const b = readBounds()
-    const size = open ? cardSize(b) : { w: BALL_SIZE, h: BALL_SIZE }
+    // 获取当前实际渲染位置（不论默认还是自定义，统一转 left/top 基准）。
+    const rect = e.currentTarget.getBoundingClientRect()
     dragRef.current = {
       startX: e.clientX,
       startY: e.clientY,
-      origX: posRef.current.x,
-      origY: posRef.current.y,
+      origX: rect.left,
+      origY: rect.top,
       moved: false,
-      w: size.w,
-      h: size.h,
     }
-    try {
-      e.currentTarget.setPointerCapture(e.pointerId)
-    } catch {
-      /* ignore */
-    }
+    try { e.currentTarget.setPointerCapture(e.pointerId) } catch { /* ignore */ }
     setDragging(true)
   }
 
@@ -251,68 +176,35 @@ export default function ViewerAIWidget({
     const dy = e.clientY - d.startY
     if (!d.moved && Math.abs(dx) <= DRAG_THRESHOLD && Math.abs(dy) <= DRAG_THRESHOLD) return
     d.moved = true
-    applyPos(clampPos({ x: d.origX + dx, y: d.origY + dy }, d.w, d.h, boundsRef.current))
+    setCustomPos(clampToViewport({ x: d.origX + dx, y: d.origY + dy }))
   }
 
   const endDrag = () => {
     const d = dragRef.current
     dragRef.current = null
     setDragging(false)
-    if (!d) return
-    if (d.moved) {
+    if (d?.moved) {
       suppressClickRef.current = true
-      // 边缘吸附：仅收起态球（卡片展开时保持完整在界内）；距边 <24px
-      // 吸附为半嵌圆点（x 一半露出边界外，y 保持）。
-      const b = boundsRef.current
-      let side: 'left' | 'right' | null = null
-      if (!open) {
-        if (posRef.current.x - b.left < EDGE_SNAP) side = 'left'
-        else if (b.left + b.width - (posRef.current.x + d.w) < EDGE_SNAP) side = 'right'
-      }
-      setSnap(side)
-      if (side) applyPos({ x: snappedX(side, b), y: clampSnappedY(posRef.current.y, b) })
-      persistPos({ ...posRef.current, snap: side })
+      persistPos(customPos)
     }
   }
 
-  /** 双击悬浮球重置位置（回到视口右下角）。 */
+  /** 双击重置位置（回到默认 CSS right/bottom 贴角）。 */
   const resetPos = () => {
-    const vb = viewportBounds()
-    applyPos({ x: vb.left + vb.width - BALL_SIZE - 24, y: vb.top + vb.height - BALL_SIZE - 24 })
-    setSnap(null)
-    persistPos({ ...posRef.current, snap: null })
+    setCustomPos(null)
+    persistPos(null)
   }
 
   const toggleOpen = () => {
-    const next = !open
-    const b = readBounds()
-    if (next) {
-      // 展开：脱离吸附态，回到边界内完整可见。
-      setSnap(null)
-      const size = cardSize(b)
-      applyPos(clampPos(posRef.current, size.w, size.h, b))
-    } else {
-      applyPos(clampPos(posRef.current, BALL_SIZE, BALL_SIZE, b))
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false
+      return
     }
-    setOpen(next)
-    persistPos({ ...posRef.current, snap: null })
+    setOpen((v) => !v)
   }
 
-  // 边界尺寸变化（视口 resize）：按当前形态（含吸附态）重新夹取位置。
-  useEffect(() => {
-    const onResize = () => {
-      const b = readBounds()
-      if (snap && !open) {
-        applyPos({ x: snappedX(snap, b), y: clampSnappedY(posRef.current.y, b) })
-        return
-      }
-      const size = open ? cardSize(b) : { w: BALL_SIZE, h: BALL_SIZE }
-      applyPos(clampPos(posRef.current, size.w, size.h, b))
-    }
-    window.addEventListener('resize', onResize)
-    return () => window.removeEventListener('resize', onResize)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, snap])
+  // v3.8：无需 resize handler——默认位置由 CSS right/bottom 自动适配，
+  // 自定义位置仅在拖拽时设置（窗口缩小后 clampToViewport 兜底）。
 
   // ---- 页签 / 对话会话 ----
   const [tab, setTab] = useState<'chat' | 'summary'>('chat')
@@ -568,16 +460,14 @@ export default function ViewerAIWidget({
   }
 
   // 卡片尺寸（按当前边界收缩；弹窗内挂载时随弹窗大小）。
-  const card = cardSize(boundsRef.current)
+  // 卡片尺寸由 CSS 控制（360×520 max，自适应 maxHeight）。
 
   return (
     <>
-      {/* 边界探测锚点（display:none 不参与布局，仅 closest 向上找弹窗容器）。 */}
-      <span ref={anchorRef} className="viewer-aiw-anchor" aria-hidden="true" />
       {open ? (
         <div
           className={`viewer-aiw-card${dragging ? ' dragging' : ''}`}
-          style={{ left: pos.x, top: pos.y, width: card.w, height: card.h }}
+          style={{ ...posStyle, width: CARD_W, maxHeight: CARD_H }}
           role="dialog"
           aria-label={zh ? 'AI 助理' : 'AI assistant'}
         >
@@ -757,8 +647,8 @@ export default function ViewerAIWidget({
       ) : (
         <button
           type="button"
-          className={`viewer-aiw-ball${dragging ? ' dragging' : ''}${snap ? ' snapped' : ''}`}
-          style={{ left: pos.x, top: pos.y, visibility: inited ? undefined : 'hidden' }}
+          className={`viewer-aiw-ball${dragging ? ' dragging' : ''}`}
+          style={posStyle}
           onPointerDown={startDrag}
           onPointerMove={moveDrag}
           onPointerUp={endDrag}
