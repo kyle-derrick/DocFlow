@@ -8087,17 +8087,9 @@ kbd {
   color: #fff;
 }
 .chat-stop-btn:hover { background: var(--danger-hover, #e97084); }
-/* 旧 aiax-composer 类保留兼容（不再使用统一框样式）。 */
-.aiax-composer { border-top: 1px solid var(--border); padding: 8px 10px 10px; flex-shrink: 0; }
-  gap: 2px;
-  flex-wrap: wrap;
-  min-width: 0;
-  padding: 0;
-}
-/* 模型选择推到右端。 */
-.aiax-composer .aiax-toggles > :first-child { margin-left: auto; }
+/* v3.7：旧 aiax-composer 样式已全部清理。 */
 /* 引用 chips 在最底。 */
-.aiax-composer .ai-attach-chips { order: 0; padding: 2px 6px 0; }
+
 /* 图标式开关（DeepSeek 式，28px 方块）：开启态主色填充。 */
 .aiax-pill {
   display: inline-flex;
@@ -8122,7 +8114,7 @@ kbd {
   background: color-mix(in srgb, var(--primary) 12%, transparent);
 }
 .aiax-pill:disabled { opacity: 0.5; cursor: default; }
-/* v3.6：旧独立 Sender 边框与旧工具行样式已并入 aiax-composer 统一框。 */
+
 
 /* ---- 查看页悬浮 AI 助理：缩小（40px）+ 边缘吸附半嵌圆点 ---- */
 /* 边界探测锚点（display:none 不参与布局，仅 closest 探测弹窗容器）。 */
