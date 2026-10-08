@@ -26,6 +26,7 @@ frontend/blob-report/
 .aider*
 .windsurf/
 opencode.json
+.mcp.json
 .playwright-mcp/
 
 # AI 辅助开发过程产物（设计稿等，不属于开源交付物）

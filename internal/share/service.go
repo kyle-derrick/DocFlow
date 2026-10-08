@@ -684,10 +684,10 @@ func (s *Service) BundleItems(sh Share) ([]files.File, error) {
 }
 
 // AttachReferenceFiles 把富文本文档引用的资源附加为分享的可见 grant 条目
-//（share_files，与打包分享同一张表；单文件分享亦支持）：逐条要求 owner 可读
+// （share_files，与打包分享同一张表；单文件分享亦支持）：逐条要求 owner 可读
 // 且未删除、条目本身须为文件；不可读/已删的越界引用静默跳过（公开页渲染
 // 占位）。已存在的条目去重跳过。返回实际新增条目数；持久化失败返回错误
-//（调用方决定是否吞掉——附加资源失败不应阻断分享本身）。
+// （调用方决定是否吞掉——附加资源失败不应阻断分享本身）。
 func (s *Service) AttachReferenceFiles(sh Share, owner uuid.UUID, fileIDs []uuid.UUID) (int, error) {
 	if len(fileIDs) == 0 || sh.ID == uuid.Nil {
 		return 0, nil

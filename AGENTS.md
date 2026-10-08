@@ -59,8 +59,9 @@
 
 ## AI agent 配置约定
 
-- agent 私有目录（`.opencode/`、`.trae/`、`.cursor/`、`opencode.json` 等）**不进 git**（已 gitignore）；跨 agent 通用技能放用户级 `~/.claude/skills/`，仓库内不放
-- 项目共享 MCP 服务定义在根目录 `.mcp.json`（Claude Code 项目级格式，Windows 下 `cmd /c npx` 包装）；新增 MCP server 改此文件而非各 agent 私有配置
+- agent 私有目录与配置（`.opencode/`、`.trae/`、`.cursor/`、`opencode.json`、`.mcp.json` 等）**一律不进 git**（已 gitignore）——目前不存在跨 agent 通用的 MCP 客户端配置格式，各 agent 读各自的文件，统一在本机维护
+- 跨 agent 通用的仓库约定只走两处：本文件（AGENTS.md 是各家 agent 共识的指令标准）与平台自身对外暴露的 MCP Server（见 `docs/mcp.md`，客户端连接信息以文档为准）
+- 通用技能（TDD/调试/docx/pdf 等）放用户级 `~/.claude/skills/`，仓库内不放
 
 ## 文档
 

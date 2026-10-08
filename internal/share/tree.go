@@ -170,7 +170,7 @@ func (s *Service) resolveBundleTree(sh Share, path string) (TreeResult, error) {
 }
 
 // resolveRefByName 引用资源兜底解析：path 末段文件名与 share_files 条目
-//（refs；打包分享条目为锚点子树解析所覆盖，不会走到这里）按名匹配，命中
+// （refs；打包分享条目为锚点子树解析所覆盖，不会走到这里）按名匹配，命中
 // 返回该文件条目（Path 保持请求的相对路径，前端 raw URL 拼接不受影响）。
 // 多条目同名取首个；目录条目与已删除/不可读条目跳过（BundleItems 已过滤）。
 func (s *Service) resolveRefByName(sh Share, path string) (TreeResult, error) {
