@@ -66,7 +66,10 @@ export default defineConfig({
       },
       workbox: {
         navigateFallback: 'index.html',
-        navigateFallbackDenylist: [/^\/api\//, /^\/content\//, /^\/onlyoffice\//, /^\/drawio\//, /^\/s\//],
+        // 非SPA路径必须排除在导航兜底外：否则SW会把同源 iframe/直开链接
+        // 劫持成预缓存的 SPA index.html——/oo-plugins/（OnlyOffice DocFlow AI
+        // 插件面板，曾致插件打开成"文件页"）与 /raw/（受控原始内容直开）。
+        navigateFallbackDenylist: [/^\/api\//, /^\/content\//, /^\/onlyoffice\//, /^\/drawio\//, /^\/s\//, /^\/oo-plugins\//, /^\/raw\//],
         globPatterns: ['**/*.{js,css,html,svg,png,webmanifest}'],
         // mermaid 生态按需懒加载块（图表类型子块为「名-哈希-哈希」双段命名，
         // 另有 mermaid.core/cytoscape/katex 单段大件）合计 5MB+，仅查看图表

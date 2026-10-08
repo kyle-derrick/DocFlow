@@ -124,9 +124,17 @@
   }
 
   // ---- 认证：插件页与 DocFlow 同站（iframe 加载本域），用 refresh cookie
-  //      换一次性 access token（与主应用 authFetch 同协议）。----
+  //      换一次性 access token（与主应用 authFetch 同协议：POST 须带
+  //      X-CSRF-Token 头，取自 docflow_csrf cookie——否则 CSRF_REJECTED）。----
+  function csrfToken() {
+    var m = document.cookie.match(/(?:^|; )docflow_csrf=([^;]*)/)
+    return m ? decodeURIComponent(m[1]) : null
+  }
   function refresh() {
-    return fetch('/api/v1/auth/refresh', { method: 'POST', credentials: 'same-origin' })
+    var headers = { 'Content-Type': 'application/json' }
+    var csrf = csrfToken()
+    if (csrf) headers['X-CSRF-Token'] = csrf
+    return fetch('/api/v1/auth/refresh', { method: 'POST', credentials: 'same-origin', headers: headers })
       .then(function (r) { if (!r.ok) throw new Error('refresh ' + r.status); return r.json(); })
       .then(function (d) { token = d.access_token || ''; });
   }
