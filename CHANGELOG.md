@@ -6,7 +6,8 @@
 
 ### 变更
 - **移除 AI 创作空间（/studio）与 Agent 创作舱**：批量/多步文件创作改由外部 agent（Claude Code、Codex 等）经平台 MCP（docs/mcp.md）对接实现；平台 MCP 服务端、df_* 文档工具、AI 助手与编辑页对话完整保留。迁移 052 幂等 DROP agent_tasks / agent_task_logs / studio_projects；compose 移除 docker.sock 挂载与 IPC 卷，Dockerfile.agent / agent-runner 删除
-- Office 编辑页 AI 收敛为编辑器内「DocFlow AI」插件面板（不 autostart，从插件图标展开）：SSE 对话 + 思考折叠 + 停止 + 联网/思考开关 + 多轮历史 + callCommand 全文上下文 + 引用选中/插入/替换；插件清单为静态相对 URL（DS 对 variations[].url 按 config.json 所在目录拼接，绝对 URL 会 404——实测结论），页内外部 AI 面板移除
+- Office 编辑页 AI 收敛为编辑器内「DocFlow AI」插件面板（不 autostart，从插件图标展开）；插件清单为静态相对 URL（DS 对 variations[].url 按 config.json 所在目录拼接，绝对 URL 会 404——实测结论），页内外部 AI 面板移除
+- **插件 v4.0 真集成**：「可修改」模式 = AI 输出 docflow-edit 编辑指令（replaceAll/append/insertAtCursor/replaceSelection/insertTable），插件经 OnlyOffice Api 直接在文档上执行，轻量 Markdown（标题/加粗/行内代码/列表/表格行/代码块）转原生文档元素，每项操作成败明细 + 可展开原始输出；「仅对话」= 问答 + 手动插入。补齐模型选择（/ai/models，与主应用共用偏好）、联网/思考、多轮历史、思考折叠、停止、清空、引用选中/全文；直接编辑支持 word（cell/slide 明确提示暂不支持）
 - AI agent 私有目录（.opencode/.trae/opencode.json 等）出库；通用技能迁用户级 ~/.claude/skills，MCP 客户端定义集中项目根 .mcp.json
 
 ### 修复
