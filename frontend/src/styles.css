@@ -6958,56 +6958,12 @@ kbd {
   cursor: pointer;
 }
 .aic-msg-action:hover { background: var(--surface-2); color: var(--primary); }
-/* 输入区（共享 Sender）。 */
-.aic-composer { position: relative; display: flex; flex-direction: column; padding: 0 2px 6px; }
-.aic-sender { flex: 1; }
-.aic-sender .ant-sender-header {
-  border-bottom: 1px solid var(--border);
-  margin-bottom: 6px;
-  padding-bottom: 6px;
-}
 /* 贴底跟随包裹层（v3.4）：占满消息区高度并接管纵向滚动（Bubble.List 自身
    不再 autoScroll）。 */
 .aic-list-wrap { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
 .aic-list-wrap .ant-bubble-list { flex: 1; }
 .aic-list-wrap .ant-bubble-list-scroll-box { overflow: visible; }
 .aic-send-tools { display: flex; align-items: center; gap: 8px; }
-/* # 提及浮层（输入框上方）。 */
-.aic-mention-panel {
-  position: absolute;
-  bottom: calc(100% + 4px);
-  left: 4px;
-  right: 4px;
-  max-height: 236px;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 4px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
-  z-index: 40;
-}
-.aic-mention-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text);
-  font-size: 12.5px;
-  text-align: left;
-  cursor: pointer;
-}
-.aic-mention-item:hover, .aic-mention-item.active { background: var(--surface-2); color: var(--primary); }
-.aic-mention-item .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.aic-mention-state { font-size: 12px; padding: 6px 8px; }
-/* Agent 能力未启用：中栏顶部黄条提示。 */
-
 /* ==================== AI 编辑对话：模式开关 + 自动应用/撤销（版本保护） ==================== */
 /* 面板头部下方的「可修改 / 仅对话 + 选区 / 全文」单行（v3.9 两行合并省一行），
    模型选择在底部输入区工具栏、发送键最右端。 */

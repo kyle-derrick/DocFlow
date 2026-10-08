@@ -2489,7 +2489,7 @@ export default function AIAssistant() {
             {/* 平台技能模板。 */}
             <AISkillButton zh={zh} onPick={(s) => setInput(renderSkillPrompt(s.prompt))} />
             {/* 右：模型选择（margin-left: auto 推到右端）+ 发送/停止按钮
-                （最右端，与 AIChatComposer / 编辑页同款样式）。 */}
+                （最右端，与编辑页/查看页同款样式）。 */}
             <div className="chat-tools-right">
               {models.length > 0 && (
                 <AIModelSelect

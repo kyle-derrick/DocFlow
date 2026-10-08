@@ -1,7 +1,6 @@
-// AI 对话共享图标（发送/停止按钮专用，四处对话场景同款）：
-// AIChatComposer（创作）/ AIAssistant（助理）/ AIEditChat（编辑页）/
-// ViewerAIWidget（查看页）的工具栏最右端发送⇄停止按钮共用，避免四处
-// 内联 SVG 漂移。
+// AI 对话共享图标（发送/停止按钮专用，各对话场景同款）：
+// AIAssistant（助理）/ AIEditChat（编辑页）/ ViewerAIWidget（查看页）
+// 的工具栏最右端发送⇄停止按钮共用，避免内联 SVG 多处漂移。
 import type { ReactElement } from 'react'
 
 /** 发送按钮图标（纸飞机，chat-send-btn 用）。 */

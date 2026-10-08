@@ -4,6 +4,19 @@
 
 ## [Unreleased]
 
+### 变更
+- **移除 AI 创作空间（/studio）与 Agent 创作舱**：批量/多步文件创作改由外部 agent（Claude Code、Codex 等）经平台 MCP（docs/mcp.md）对接实现；平台 MCP 服务端、df_* 文档工具、AI 助手与编辑页对话完整保留。迁移 052 幂等 DROP agent_tasks / agent_task_logs / studio_projects；compose 移除 docker.sock 挂载与 IPC 卷，Dockerfile.agent / agent-runner 删除
+- Office 编辑页 AI 收敛为编辑器内「DocFlow AI」插件面板（不 autostart，从插件图标展开）：SSE 对话 + 思考折叠 + 停止 + 联网/思考开关 + 多轮历史 + callCommand 全文上下文 + 引用选中/插入/替换；插件清单为静态相对 URL（DS 对 variations[].url 按 config.json 所在目录拼接，绝对 URL 会 404——实测结论），页内外部 AI 面板移除
+- AI agent 私有目录（.opencode/.trae/opencode.json 等）出库；通用技能迁用户级 ~/.claude/skills，MCP 客户端定义集中项目根 .mcp.json
+
+### 修复
+- AI 对话「已深度思考后内容全空白」根因：openai 兼容网关 max_tokens 同时计入 reasoning_content（默认 2048 被思考耗尽致正文空），think 时抬高至 4096；三条静默空正文路径（openai 非流式/工具循环回退、anthropic thinking-only 轮）改为显式报错；流式失败回退非流式经 onDelta 补发全文
+- 输入框内出现两个发送键：@ant-design/x v2 内置按钮类名变更（ant-sender-actions-list-presets）致旧 CSS 隐藏规则失效；改为 CSS 隐藏（suffix={false} 会冻结 submitDisabled 废掉 Enter 提交，不可用），发送/停止统一 28×28 与工具开关同尺寸、固定于工具栏最右端（模型选择右侧）
+- 思考按钮常显：模型未勾选 reasoning 能力时此前整个按钮消失（创作/编辑页"没有思考按钮"的根因），现改为禁用并说明
+- 查看页悬浮球：缩小为 44px；挂载后延迟 ~250ms 测量边界完成再显示（弹窗内不再"先视口角再跳到弹窗角"）；拖动修复（球内图标被误判为子交互控件 + 快速移动丢事件，move/up 改挂 window）；展开卡片翻转定位（左上优先、不足向右下、夹取在弹窗/视口内）恢复 360×520 比例
+- 编辑页 AI 面板：「可修改/仅对话」与「选区/全文」合并同行；移除 Enter 提示行；新增文件引用（其它文件全文注入上下文）；所有编辑页顶栏按钮统一靠右
+- Empty-completion 兜底：流结束但无正文/错误/停止标记时显示「（模型未返回内容）」而非空白
+
 ### 文档
 - 新增 [docs/architecture.md](docs/architecture.md) 架构总览：总体形态、系统架构与部署拓扑、后端 35 个模块划分、数据模型（内容寻址/空间权限/演进史）、关键链路、前端架构、配置两级模型、设计取舍与已知局限
 - 新增 [deploy/env/](deploy/env/) 四套场景化 `.env` 模板（本地开发 / 单机验证 / 单机生产 / 多实例集群），并修正 README 中过时描述（draw.io 已无独立服务、自定义角色已移除、镜像清单与推送示例）

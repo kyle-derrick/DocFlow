@@ -7,6 +7,4 @@ export {
 export {
   AIMessageList, AIChatThinking, AIToolChain, AIWebSourcesView, AIAssistantMessageBody, AIUserMessageBody,
 } from './AIMessageList'
-export { default as AIChatComposer } from './AIChatComposer'
-export { detectMention } from './AIChatComposer'
 export { CHAT_SEND_ICON, CHAT_STOP_ICON } from './icons'
