@@ -2,7 +2,7 @@
 // - 480px 右侧 Drawer（窄屏 100% 全宽），内容包 XProvider（x 组件 locale）；
 //   结构 = 顶部栏（左：当前会话标题，点击重命名；右：历史会话（Conversations）
 //   + 新建 + 图钉 + 关闭）+ 顶部工具栏（人设 Select + 智能|仅对话 Segmented +
-//   工作目录 + 记忆 / 清空 / 智能体任务（跳 /studio））+ 消息流（Bubble.List，
+//   工作目录 + 记忆 / 清空）+ 消息流（Bubble.List，
 //   用户右 / AI 左，含来源引用与工具调用展示）+ 底部统一输入框（autoSize
 //   Sender；v3.9 内置发送按钮经 CSS 隐藏）+ 输入框下单行图标式
 //   开关 pill（模型选择 + 联网 / 文件RAG / 思考 / MCP / 文件工具 / 文件检索，
@@ -25,7 +25,7 @@
 //   · 联网搜索 / 深度思考：真开关（不再是禁用态）——选中时 aiChat options
 //     携带 web_search / think:true；思考开关按所选模型 capabilities.reasoning
 //     决定默认开/关与禁用态（localStorage docflow.ai.think / docflow.ai.web
-//     持久化，AIEditChat / StudioChat 经导出的 useAIChatToggles 复用同一套
+//     持久化，AIEditChat 经导出的 useAIChatToggles 复用同一套
 //     逻辑）；联网回答经 SSE meta.sources 渲染「网络来源」折叠列表；
 //   · 助手固定（pin）：头部图钉——固定后无遮罩、点页面/Esc 不关闭
 //     （localStorage docflow.ai.pinned），取消图钉或 X 才关闭；
@@ -45,11 +45,10 @@ import { Drawer, Button, Input, Popconfirm, Popover, Segmented, Select, Switch, 
 import type { DataNode } from 'antd/es/tree'
 import antdZhCN from 'antd/locale/zh_CN'
 import antdEnUS from 'antd/locale/en_US'
-import { useNavigate } from 'react-router-dom'
 import { Conversations, Sender, XProvider } from '@ant-design/x'
 import xZhCN from '@ant-design/x/es/locale/zh_CN'
 import xEnUS from '@ant-design/x/es/locale/en_US'
-import { Sparkles, Trash2, FileText, Globe, RotateCcw, Copy, Bot, Plus, Check, Paperclip, Brain, Pencil, PencilLine, Pin, BookMarked, Wrench, Zap, FolderCog, FolderOpen, MessagesSquare, Crosshair, FileSearch, Search } from 'lucide-react'
+import { Sparkles, Trash2, FileText, Globe, RotateCcw, Copy, Plus, Check, Paperclip, Brain, Pencil, PencilLine, Pin, BookMarked, Wrench, Zap, FolderCog, FolderOpen, MessagesSquare, Crosshair, FileSearch, Search } from 'lucide-react'
 import {
   AISkillDef,
   AIUsage,
@@ -100,7 +99,7 @@ export type { AIAttachFile } from './aichat'
 // ---------- 可选模型列表（GET /api/v1/ai/models 由并行任务添加） ----------
 // api.ts 暂无封装（getAIModels 可能由并行任务加入），为解耦在此本地实现：
 // authFetch GET /api/v1/ai/models，任何失败（404/网络/解析）一律返回空数组，
-// 调用方（助手次级工具行、StudioPage 内嵌对话）据此隐藏模型选择器。
+// 调用方（助手次级工具行等内嵌对话）据此隐藏模型选择器。
 
 /** 可选模型条目（provider + model + 能力标签）。 */
 export interface AIModelOption {
@@ -116,10 +115,10 @@ export interface AIModelOption {
   providerKind?: string
 }
 
-/** 选定模型持久化 key（助手与 StudioPage 内嵌对话共用）。 */
+/** 选定模型持久化 key（助手与编辑页内嵌对话共用）。 */
 export const AI_MODEL_STORAGE_KEY = 'docflow.ai.model'
 
-/** 联网/思考开关持久化 key（AIAssistant / AIEditChat / StudioChat 三处对话 UI 共用）。 */
+/** 联网/思考开关持久化 key（AIAssistant / AIEditChat 等对话 UI 共用）。 */
 export const AI_WEB_STORAGE_KEY = 'docflow.ai.web'
 export const AI_THINK_STORAGE_KEY = 'docflow.ai.think'
 /** MCP 工具开关持久化 key（默认关；仅平台存在启用中的 MCP 服务时显示开关）。 */
@@ -489,7 +488,7 @@ export interface AIChatToggleState {
 }
 
 /**
- * 联网/思考/MCP/我的文件开关共享逻辑（AIAssistant / AIEditChat / StudioChat 复用）：
+ * 联网/思考/MCP/我的文件开关共享逻辑（AIAssistant / AIEditChat 复用）：
  * - 联网：默认开（后端未配置搜索时静默忽略），持久化 docflow.ai.web；
  * - 思考：所选模型 capabilities 含 reasoning 时默认开，否则关且禁用
  *   （Tooltip 由调用方按 thinkBlocked 提示）；模型切换/列表加载后重估；
@@ -512,7 +511,7 @@ export function useAIChatToggles(models: AIModelOption[], modelKey: string, opts
   const [mcpAvailable, setMcpAvailable] = useState(false)
   const [docs, setDocsState] = useState(() => readAIFlag(AI_DOCS_STORAGE_KEY) ?? true)
   const [files, setFilesState] = useState(() => readAIFlag(AI_FILES_STORAGE_KEY) ?? true)
-  // RAG 能力（aiFeature 并行任务提供 {enabled,agent,web_search,mcp,rag}）。
+  // RAG 能力（aiFeature 并行任务提供 {enabled,web_search,mcp,rag}）。
   const features = useAIFeatures()
   const docsAvailable = features.rag === true
   useEffect(() => {
@@ -705,7 +704,7 @@ export function AIChatToggleBar({
 // ---------- 网络来源 / 工具调用展示（共享 aichat 实现，此处保留兼容导出） ----------
 
 // 网络来源归一化与渲染、工具调用链迁至 components/aichat（三处对话共用），
-// 保留原导出名以兼容 AIEditChat / StudioPage 等既有引用。
+// 保留原导出名以兼容 AIEditChat 等既有引用。
 import { AIChatThinking, AIMessageList, AIToolChain, AIWebSourcesView, applyToolResult, normalizeWebSources, toolEntryFrom } from './aichat'
 import { CHAT_SEND_ICON as SEND_ICON, CHAT_STOP_ICON as STOP_ICON } from './aichat/icons'
 import type { AIChatTurnData, AIToolCallEntry, AIAttachFile } from './aichat'
@@ -1133,7 +1132,7 @@ function aiConvoRelTime(ts: number, zh: boolean): string {
 
 /**
  * 图标式开关 pill（DeepSeek 式：图标 + 短词；开启态主色描边 + 淡填充，
- * 未开启灰）。仅本组件内部使用——AIEditChat / StudioPage 仍用导出的
+ * 未开启灰）。仅本组件内部使用——AIEditChat 仍用导出的
  * AIChatToggleBar（Switch 形态，签名不变）。
  */
 function AITogglePill({ icon, label, active, disabled, title, onClick }: {
@@ -1185,7 +1184,6 @@ export function AIAssistantButton() {
 export default function AIAssistant() {
   const locale = useLocale()
   const zh = locale === 'zh-CN'
-  const navigate = useNavigate()
   const enabled = useAIEnabled()
   const [open, setOpen] = useState(false)
   const [context, setContext] = useState<AIContextFile | null>(null)
@@ -1217,7 +1215,7 @@ export default function AIAssistant() {
       return false
     }
   })
-  // 联网/思考开关（共享逻辑，AIEditChat / StudioChat 复用同一 hook 与 key）。
+  // 联网/思考开关（共享逻辑，AIEditChat 复用同一 hook 与 key）。
   // ready：/ai/models 已返回后才按 capabilities.reasoning 判定禁用/隐藏，
   // 加载期间思考开关保持可用（默认开），避免「支持思考却禁用」误判。
   const toggles = useAIChatToggles(models, modelKey, { ready: modelsLoaded })
@@ -2111,7 +2109,7 @@ export default function AIAssistant() {
       <div className="aiax-root">
         {notice && <div className="ai-notice error-text">{notice}</div>}
         {/* 顶部工具栏（单行 flex，溢出 wrap）：人设 + 智能|仅对话 + 工作目录（左）
-            + 记忆 / 清空会话 / 智能体任务（跳 /studio，右）。 */}
+            + 记忆 / 清空会话（右）。 */}
         <div className="aiax-toolbar">
           {/* 助手人设（三源合并：平台 plat: 前缀 → 内置 → 自定义）。 */}
           <Select
@@ -2288,12 +2286,6 @@ export default function AIAssistant() {
               <Trash2 size={14} strokeWidth={2} aria-hidden="true" />
             </Button>
           </Tooltip>
-          {/* 智能体任务 → AI 创作空间（/studio；创作入口在顶部导航）。 */}
-          <Tooltip title={zh ? '智能体任务（AI 创作空间）' : 'Agent tasks (AI Studio)'}>
-            <Button size="small" type="text" className="aiax-head-btn" aria-label={zh ? '智能体任务' : 'Agent tasks'} onClick={() => { setOpen(false); navigate('/studio') }}>
-              <Bot size={14} strokeWidth={2} aria-hidden="true" />
-            </Button>
-          </Tooltip>
         </div>
         {/* 消息流（Bubble.List：用户右 / AI 左；autoScroll 底部跟随）。 */}
         <div className="aiax-thread">
@@ -2315,7 +2307,7 @@ export default function AIAssistant() {
           )}
           {turns.length > 0 && (
             <div ref={sticky.wrapRef} onScroll={sticky.onScroll} className="aic-list-wrap aiax-bubbles-wrap">
-              {/* v3.5 统一：消息流迁移共享 AIMessageList（与 Studio/编辑对话
+              {/* v3.5 统一：消息流迁移共享 AIMessageList（与编辑对话
                   同一 Bubble.List 组件族）；自定义渲染覆盖（重试/用量等
                   助手特有操作行经 renderItem 注入）。 */}
               <AIMessageList

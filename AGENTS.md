@@ -39,7 +39,7 @@
 ## 目录结构
 
 - `cmd/`：server / migrate / seed / backup-verify / wscheck
-- `internal/`：业务模块（acl/auth/files/space/share/upload/search/ai/agent/...），handler 集中在 `internal/http/`
+- `internal/`：业务模块（acl/auth/files/space/share/upload/search/ai/...），handler 集中在 `internal/http/`
 - `migrations/`：增量 SQL（`NNN_*.sql` 按文件名序执行、幂等、单文件失败即退出）
 - `frontend/`：React SPA 与 Playwright E2E
 - `deploy/`：Caddyfile（TLS/反代/子路径）+ `env/` 场景模板

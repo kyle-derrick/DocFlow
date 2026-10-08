@@ -509,7 +509,7 @@ function isTextEditable(name: string): boolean {
 }
 
 /** 「文本文件」新建：按用户自带扩展名推断 MIME（File 构造用；导出供
- *  Studio 新建下拉同构复用）。 */
+ *  新建文件入口同构复用）。 */
 export const TEXT_FILE_MIME: Record<string, string> = {
   html: 'text/html',
   htm: 'text/html',
@@ -630,8 +630,6 @@ export interface FileBrowserProps {
    * 横幅）；缺省回退本组件内置的通用删除确认（deleteFile，回收站可恢复）。
    */
   deleteFn?: (item: FileItem) => void
-  /** AI 创作任务入口仅由宿主在 AI 与 Agent 同时启用时注入。 */
-  agentTaskFn?: (item: FileItem) => void
   /**
    * 隐藏工具栏行尾的「回收站」按钮（v2.2：文件页把回收站移到工具行左端
    * 空间切换旁，经 trashSignal 受控触发本组件的回收站弹窗）。
@@ -668,7 +666,6 @@ export default function FileBrowser({
   shareFn,
   renameFn,
   deleteFn,
-  agentTaskFn,
   hideToolbarTrash,
   trashSignal,
 }: FileBrowserProps) {
@@ -2292,9 +2289,6 @@ export default function FileBrowser({
         entries.push({ key: 'preview-web', label: zh ? '网页预览（弹窗）' : 'Preview as website' })
         entries.push({ key: 'open-web', label: zh ? '作为网页打开' : 'Open as website' })
       }
-      if (agentTaskFn) {
-        entries.push({ key: 'agent-task', label: zh ? 'AI 创作任务' : 'AI creation task' })
-      }
     } else {
       // 查看方式：用户偏好合并内置默认；集成门槛（office/drawio）过滤。
       const effective = effectiveOpenWithFor(item.name, openWith)
@@ -2434,9 +2428,6 @@ export default function FileBrowser({
         return
       case 'ai-summary':
         setAiSummaryTarget(item)
-        return
-      case 'agent-task':
-        agentTaskFn?.(item)
         return
       case 'tag':
         void openTagModal(item)

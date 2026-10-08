@@ -35,8 +35,11 @@ export interface AIChatComposerProps {
   onCancel?: () => void
   disabled?: boolean
   placeholder?: string
-  /** Sender header（开关组/模板 chips/引用 chips 由调用方组装）。 */
+  /** Sender header（开关组/引用入口等由调用方组装，渲染在工具栏左侧、
+   *  模型选择与发送键之前）。 */
   header?: ReactNode
+  /** 输入框上方插槽（引用文件 chips 等，与全局 AI 助手同位置）。 */
+  chips?: ReactNode
   /** #提及候选根目录（null/缺省 = 禁用提及）。 */
   mentionRoot?: string | null
   /** 选中提及项回调（宿主把文件加入引用 chips）。 */
@@ -48,7 +51,7 @@ export interface AIChatComposerProps {
 }
 
 export default function AIChatComposer({
-  zh, value, onChange, onSend, busy, onCancel, disabled, placeholder, header,
+  zh, value, onChange, onSend, busy, onCancel, disabled, placeholder, header, chips,
   mentionRoot = null, onMentionPick, focusSignal, senderRef, className,
 }: AIChatComposerProps) {
   const localRef = useRef<AISenderInstance | null>(null)
@@ -148,8 +151,11 @@ export default function AIChatComposer({
   }
 
   return (
-    <div className="chat-input-box">
-      <Sender
+    <div className="chat-input-wrap aic-composer-wrap">
+      {/* 引用 chips 等上方插槽（与全局 AI 助手的输入区布局同构）。 */}
+      {chips}
+      <div className="chat-input-box">
+        <Sender
         ref={(r) => {
           localRef.current = (r ?? null) as unknown as AISenderInstance | null
           if (typeof senderRef === 'function') senderRef(localRef.current)
@@ -221,19 +227,20 @@ export default function AIChatComposer({
           )}
         </span>
       </div>
-      {mentionOpen && (
-        <div className="aic-mention-panel">
-          {mentionLoading && <div className="aic-mention-state muted">{zh ? '搜索中…' : 'Searching…'}</div>}
-          {!mentionLoading && mentionItems.length === 0 && <div className="aic-mention-state muted">{zh ? '没有匹配的文件' : 'No matching files'}</div>}
-          {mentionItems.map((item, i) => (
-            <button key={item.id} type="button" className={`aic-mention-item${i === mentionActive ? ' active' : ''}`}
-              onMouseDown={(e) => e.preventDefault()} onMouseEnter={() => setMentionActive(i)} onClick={() => insertMention(item)}>
-              <FileText size={13} strokeWidth={2} aria-hidden="true" />
-              <span className="name" title={item.name}>{item.name}</span>
-            </button>
-          ))}
-        </div>
-      )}
+        {mentionOpen && (
+          <div className="aic-mention-panel">
+            {mentionLoading && <div className="aic-mention-state muted">{zh ? '搜索中…' : 'Searching…'}</div>}
+            {!mentionLoading && mentionItems.length === 0 && <div className="aic-mention-state muted">{zh ? '没有匹配的文件' : 'No matching files'}</div>}
+            {mentionItems.map((item, i) => (
+              <button key={item.id} type="button" className={`aic-mention-item${i === mentionActive ? ' active' : ''}`}
+                onMouseDown={(e) => e.preventDefault()} onMouseEnter={() => setMentionActive(i)} onClick={() => insertMention(item)}>
+                <FileText size={13} strokeWidth={2} aria-hidden="true" />
+                <span className="name" title={item.name}>{item.name}</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   )
 }

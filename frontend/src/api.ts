@@ -885,12 +885,6 @@ export async function downloadFile(item: FileItem): Promise<void> {
   saveBlob(blob, item.name)
 }
 
-/** 按 id 下载文件当前版本（无完整 FileItem 的调用点：Studio 中栏查看器）。 */
-export async function downloadFileById(id: string, name: string): Promise<void> {
-  const blob = await fetchBlob(`/api/v1/files/${id}/download`, '下载失败')
-  saveBlob(blob, name)
-}
-
 /** 认证读取文件当前版本内容为文本（draw.io 编辑器加载 XML 用；走下载端点）。
  * bust 非空时追加查询参数绕过浏览器 HTTP 缓存（嵌入块「刷新」/返回检测用）。 */
 export async function fetchFileText(fileId: string, bust?: number | string): Promise<string> {
@@ -1518,56 +1512,6 @@ export interface SpaceGroupUser {
 export interface SpaceMembersResult {
   members: SpaceMember[]
   group_users: SpaceGroupUser[]
-}
-
-// ---------- Studio 项目注册表（服务端化；migration 051） ----------
-
-/** Studio 项目条目（服务端 studio_projects 行；字段与后端契约一致）。 */
-export interface StudioProjectItem {
-  id: string
-  name: string
-  space_id: string
-  root_folder_id: string
-  space_name?: string
-  folder_path?: string
-  engine?: 'platform' | 'docker'
-  harness?: string
-  model?: string
-  created_at?: string
-  updated_at?: string
-}
-
-/** 新建/更新项目载荷（id 由服务端生成；更新为全字段覆盖）。 */
-export interface StudioProjectInput {
-  name: string
-  space_id: string
-  root_folder_id: string
-  space_name?: string
-  folder_path?: string
-  engine?: 'platform' | 'docker'
-  harness?: string
-  model?: string
-}
-
-/** 本人项目列表（updated_at 倒序）。 */
-export async function listStudioProjects(): Promise<StudioProjectItem[]> {
-  const data = await api<{ projects: StudioProjectItem[] }>('/api/v1/studio/projects')
-  return data.projects ?? []
-}
-
-/** 新建项目（服务端生成 id；name 1-100 字符等校验见后端）。 */
-export async function createStudioProject(input: StudioProjectInput): Promise<StudioProjectItem> {
-  return api<StudioProjectItem>('/api/v1/studio/projects', jsonInit('POST', input))
-}
-
-/** 覆盖式更新项目（非属主/不存在 404）。 */
-export async function updateStudioProject(id: string, input: StudioProjectInput): Promise<StudioProjectItem> {
-  return api<StudioProjectItem>(`/api/v1/studio/projects/${id}`, jsonInit('PUT', input))
-}
-
-/** 删除项目（仅删记录；文件本体不受影响）。 */
-export async function deleteStudioProject(id: string): Promise<void> {
-  await api<void>(`/api/v1/studio/projects/${id}`, { method: 'DELETE' })
 }
 
 /** 创建空间：创建者自动成为 owner 成员并生成空间根目录；新空间配额 = space.default_quota。 */
@@ -3355,14 +3299,6 @@ export interface AIUsageRow {
 }
 
 /** AI 用量统计（日期过滤，YYYY-MM-DD；可空）。 */
-export interface AgentTask { id: string; user_id: string; space_id: string; root_folder_id: string; snapshot_id: string; image: string; status: 'queued'|'running'|'succeeded'|'failed'|'cancelled'|'rolled_back'; prompt: string; started_at?: string; finished_at?: string; error?: string; created_at: string }
-export interface AgentLog { id: number; task_id: string; stream: string; content: string; created_at: string }
-export async function getAgentSettings(): Promise<Record<string, unknown>> { return api<Record<string, unknown>>('/api/v1/admin/settings/agent') }
-export async function putAgentSettings(input: Record<string, unknown>): Promise<Record<string, unknown>> { return api<Record<string, unknown>>('/api/v1/admin/settings/agent', jsonInit('PUT', input)) }
-export async function listAgentTasks(): Promise<AgentTask[]> { const d=await api<{tasks:AgentTask[]}>('/api/v1/agent-tasks'); return d.tasks ?? [] }
-export async function getAgentTask(id:string): Promise<{task:AgentTask;logs:AgentLog[];dry_run:boolean}> { return api(`/api/v1/agent-tasks/${id}`) }
-export async function cancelAgentTask(id:string): Promise<void> { await api(`/api/v1/agent-tasks/${id}/cancel`, {method:'POST'}) }
-export async function rollbackAgentTask(id:string): Promise<void> { await api(`/api/v1/agent-tasks/${id}/rollback`, {method:'POST'}) }
 
 export async function getAIUsage(from?: string, to?: string): Promise<{ rows: AIUsageRow[]; total: { calls: number; tokens: number } }> {
   const params = new URLSearchParams()

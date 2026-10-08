@@ -404,15 +404,12 @@ func (s *Service) NewSessionConfig(user, fileID uuid.UUID, opts SessionOptions) 
 		"mode":        mode,
 		"lang":        sanitizeEditorLang(opts.Lang),
 		"user":        map[string]any{"id": user.String(), "name": name},
-		// v3.9 DocFlow AI 插件（编辑模式注入）：pluginsData 指向后端动态清单
-		// 端点（/api/v1/onlyoffice/ai-plugin/config.json）——清单内 baseUrl 与
-		// variations[].url 均为绝对 URL，规避部分 DS 版本对空 baseUrl 的相对
-		// 解析落到反代 SPA 兜底（插件面板打开成「文件页」）的问题；插件静态
-		// 页（dist/oo-plugins/docflow-ai）经同站 cookie 调 /ai/chat，经 DS 桥
-		// executeMethod 直接读写文档。
+		// v3.10 DocFlow AI 插件（编辑模式注入）：pluginsData 指向前端静态
+		// 清单（dist/oo-plugins/docflow-ai/config.json，variations[].url 相对
+		// ——DS 的解析是拼接到 config.json 所在目录，绝对 URL 会 404，实测）；
+		// 不 autostart，默认收起由用户从编辑器插件图标展开。
 		"plugins": map[string]any{
-			"autostart":   []string{"asc.{5A3F6E21-8C4D-4B0E-9A7D-2F1C0D5E8B44}"},
-			"pluginsData": []string{fmt.Sprintf("%s/api/v1/onlyoffice/ai-plugin/config.json", s.publicBaseFor(base))},
+			"pluginsData": []string{fmt.Sprintf("%s/oo-plugins/docflow-ai/config.json", s.publicBaseFor(base))},
 		},
 	}
 	config := map[string]any{
@@ -524,60 +521,6 @@ func (s *Service) publicBaseFor(downloadBase string) string {
 		}
 	}
 	return downloadBase
-}
-
-// AIPluginGUID DocFlow AI 编辑器插件的 guid（与动态清单端点一致）。
-const AIPluginGUID = "asc.{5A3F6E21-8C4D-4B0E-9A7D-2F1C0D5E8B44}"
-
-// BrowserBaseFor 解析浏览器可达的 DocFlow 站点基址（动态插件清单用）：
-// BrowserBase（PUBLIC_BASE_URL）显式值优先，否则按请求 scheme+host 推导
-// （反代同域场景最准确），兜底 PublicURL。
-func (s *Service) BrowserBaseFor(scheme, host string) string {
-	if s.cfg.BrowserBase != "" {
-		return strings.TrimSuffix(s.cfg.BrowserBase, "/")
-	}
-	if host != "" {
-		return scheme + "://" + host
-	}
-	if parsed, err := url.Parse(s.cfg.PublicURL); err == nil && parsed.Host != "" {
-		return parsed.Scheme + "://" + parsed.Host
-	}
-	return ""
-}
-
-// AIPluginManifest 生成 DocFlow AI 插件的动态清单（绝对 URL 版）：静态
-// config.json 的 baseUrl 为空、url 相对，部分 DocumentServer 版本会相对
-// 到 DS 自身 origin，经反代 SPA 兜底后插件面板打开成站点「文件页」。
-// 动态清单按请求 Host 生成绝对 baseUrl/variations[].url/icons，加载
-// 结果与部署形态无关。
-func (s *Service) AIPluginManifest(base string) map[string]any {
-	plug := strings.TrimSuffix(base, "/") + "/oo-plugins/docflow-ai/"
-	return map[string]any{
-		"name":        "DocFlow AI",
-		"nameLocale":  map[string]any{"zh": "DocFlow AI 助手"},
-		"guid":        AIPluginGUID,
-		"version":     "1.1.0",
-		"baseUrl":     plug,
-		"description": "DocFlow AI assistant: chat about the document, quote the selection, insert or replace text",
-		"descriptionLocale": map[string]any{
-			"zh": "DocFlow AI 助手：围绕当前文档对话、引用选区、插入或替换文本",
-		},
-		"variations": []map[string]any{{
-			"url":            plug + "index.html",
-			"icons":          []string{plug + "icon.svg"},
-			"isViewer":       false,
-			"EditorsSupport": []string{"word", "cell", "slide"},
-			"type":           "panel",
-			"isVisual":       true,
-			"isModal":        false,
-			"isInsideMode":   false,
-			"isSystem":       false,
-			"initDataType":   "none",
-			"initData":       "",
-			"buttons":        []string{},
-			"events":         []string{},
-		}},
-	}
 }
 
 // signConfig 对编辑配置整体签名（payload 含 document+editorConfig，附

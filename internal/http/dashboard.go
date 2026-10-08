@@ -75,13 +75,6 @@ func (h *Handler) SetDashboardSource(s dashboardSource) {
 	}
 }
 
-// SetStudioStore 注入 Studio 项目注册表存储；nil 保持缺省（请求返回 503）。
-func (h *Handler) SetStudioStore(s studioStore) {
-	if s != nil {
-		h.studioProjects = s
-	}
-}
-
 // dashboardStats GET /api/v1/dashboard：个人统计（默认空间文件数 / 存储占用 /
 // 其他空间文件数 / 有效分享数 / 近 7 天上传会话数 / 最近文件 5 条）；请求者为
 // admin 时附加全局统计（复用 admin stats）。角色查询失败时静默降级为个人

@@ -30,10 +30,6 @@ const RUNTIME_GROUPS: Array<{
     prefixes: ['ai'],
   },
   {
-    id: 'agent', title: { zh: 'Agent', en: 'Agent' }, panel: { zh: 'AI 创作舱', en: 'AI agent studio' },
-    prefixes: ['agent'],
-  },
-  {
     id: 'mail', title: { zh: '邮件', en: 'Mail' }, panel: { zh: '邮件', en: 'Mail' },
     prefixes: [],
     envOnlyNote: {
@@ -70,9 +66,8 @@ const RUNTIME_GROUPS: Array<{
 ]
 
 /** AI 能力徽章（键与 /ai/status 能力标志一一对应）。 */
-const AI_CAP_BADGES: Array<{ key: 'enabled' | 'agent' | 'web_search' | 'mcp' | 'rag'; zh: string; en: string }> = [
+const AI_CAP_BADGES: Array<{ key: 'enabled' | 'web_search' | 'mcp' | 'rag'; zh: string; en: string }> = [
   { key: 'enabled', zh: 'AI 总开关', en: 'AI enabled' },
-  { key: 'agent', zh: 'Agent 创作舱', en: 'Agent studio' },
   { key: 'web_search', zh: '联网搜索', en: 'Web search' },
   { key: 'mcp', zh: 'MCP 外部工具', en: 'MCP tools' },
   { key: 'rag', zh: '知识库问答（RAG）', en: 'RAG Q&A' },

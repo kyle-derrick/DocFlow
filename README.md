@@ -44,12 +44,12 @@
 - RAG 检索增强：关键词 / 混合（关键词 + 向量）模式，向量库 Qdrant（`--profile ai-vector`）；embedding 模型从 Provider 池勾选向量能力模型，热切换免重启（collection 按 provider + 模型派生，切换后管理端一键「重建向量索引」）；rerank 重排（Cohere / Jina 兼容 /rerank 协议，失败静默原序）；chunk / top-k / overlap 可配
 - 联网搜索：`--profile ai-search` 启 SearXNG 或配置 Tavily Key；对话可开「联网」，来源以引用展示，8s 超时静默降级
 - 思考推理：对话「思考」开关，openai reasoning_effort / anthropic thinking 参数透传
-- AI 助手与编辑器对话：GPT 式抽屉（气泡 / 停止 / 建议 / 模型选择 / 图钉固定）；编辑页对话可直接修改文档（可修改|仅对话模式，自动应用前存版本、消息级撤销）；三处对话（助手 / 编辑页 / 创作空间）共享联网·思考·MCP 开关
+- AI 助手与编辑器对话：GPT 式抽屉（气泡 / 停止 / 建议 / 模型选择 / 图钉固定）；编辑页对话可直接修改文档（可修改|仅对话模式，自动应用前存版本、消息级撤销）；两处对话（助手 / 编辑页）共享联网·思考·MCP 开关
 - AI 记忆：手动增删改 + 自动提取长期偏好（个人开关、去重、上限 100 条）；对话注入最近 20 条（总量 6000 字符截断）
 - 人设与技能：平台人设（system 提示模板，全员可选）+ 个人人设；平台技能模板（快捷指令，`{selection}`/`{file}` 占位符，助手与编辑页对话可用）
 - 图片 OCR：索引管道自动调视觉模型提取图片文字，入全文 + 向量索引（单图上限 1-32MB 可配、热配置）
 - MCP 双向：自身作为 MCP Server 对外暴露文档工具（见 [docs/mcp.md](docs/mcp.md)）；作为客户端消费外部 MCP 服务器（平台配置 ≤8 个 Streamable HTTP 服务 + 鉴权头，对话「MCP 工具」开关，工具调用 ≤5 轮、流式展示）
-- AI 创作空间（顶部入口）：项目绑定空间目录、多会话持久化、目录树 / 任务列表、Skill 创作模板（建站落地页 / 项目文档 / 接口文档 / 思维导图大纲 / PPT 大纲 / 数据报表）、Agent 任务创建 → 轮询 → Diff 评审 → 应用 / 放弃 / 回滚
+- 批量/多步文件创作：平台不再内置创作舱；用外部 agent（Claude Code、Codex 等）经 MCP 对接平台文档工具（见 [docs/mcp.md](docs/mcp.md)），权限/版本/审计仍由平台保障
 
 **安全与运维**
 - TOTP 两步验证、会话管理、PAT 个人访问令牌、登录限流与锁定
@@ -79,17 +79,14 @@ draw.io 与前端 SPA 均无独立服务：静态层在构建期并入 caddy 镜
 | `docflow/backend:1.0.0` | `./`（Dockerfile） | Go 多阶段构建：`/docflow` 服务、`/migrate`、`/seed`，含 migrations |
 | `docflow/caddy:1.0.0` | `./frontend`（frontend/Dockerfile） | 前端 Vite 产物 → `/srv/frontend` + draw.io 静态层 → `/srv/drawio`，Caddy 托管 + 反代 |
 | `docflow/onlyoffice:8.2.3-cjk` | `./deploy/onlyoffice` | 官方 DocumentServer + 中文字体（`make up-full` 时构建） |
-| `docflow/agent:1.0.0` | `./`（Dockerfile.agent） | Agent 创作舱沙箱镜像，`make build-agent`（up/deploy 目标自动依赖） |
 
 推送到镜像仓库后即可在任意装了 docker compose 的主机部署：
 
 ```bash
 docker build -t <registry>/docflow/backend:1.0.0 .
 docker build -t <registry>/docflow/caddy:1.0.0 ./frontend
-docker build -t <registry>/docflow/agent:1.0.0 -f Dockerfile.agent .
 docker push <registry>/docflow/backend:1.0.0
 docker push <registry>/docflow/caddy:1.0.0
-docker push <registry>/docflow/agent:1.0.0
 ```
 
 ## 部署（生产）
@@ -136,23 +133,10 @@ curl -sf https://<你的域名>/ready    # {"status":"ready"} 六项检查全 ok
 - 停止：`make down`（含全部 profile；加 `-v` 清数据卷）
 - 备份：`make backup` / `make backup-verify`（Windows 用 `backup-windows` 系）
 
-## AI、Agent 与 WebDAV 使用说明
-
-### AI 助手与 AI 智能体的区别
+## AI 与 WebDAV 使用说明
 
 - **AI 助手**：面向当前页面的即时问答、摘要、润色、翻译和选区改写；不会自行执行多步文件操作。
-- **AI 智能体**：面向空间目录的复杂任务，例如创建 Web 项目、批量整理文档、生成图表和演示文稿。任务先创建目录快照，Agent 在受限 Docker workspace 中执行，产物先生成 Diff，用户确认后才写回平台。
-- Agent 默认关闭。启用后仍需配置镜像白名单、资源限制和 Docker runtime；平台不会把宿主机任意目录或 Docker Socket 暴露给 Agent。
-
-### 空间目录与 Agent 工作区
-
-Agent 不直接把数据库对象目录挂给容器，也不直接让容器改平台文件。推荐流程是：
-
-```text
-平台空间目录 → 任务快照 → 临时 Docker workspace → Agent 修改 → Diff/预览 → 用户确认 → 平台上传/新版本
-```
-
-这样可以保留平台 ACL、病毒扫描、配额和版本链。当前不把 Git 作为平台底层存储；如果需要代码分支，可在 Agent workspace 内使用 Git，但最终通过 Diff 和平台版本写回。平台目录级快照负责跨文件回滚，比把数据库目录直接 Git 化更安全。
+- **批量/多步创作**：平台不内置创作舱。自行使用外部 agent（Claude Code、Codex 等）经 MCP 对接平台文档工具（列目录/读/写/建目录/搜索，见 [docs/mcp.md](docs/mcp.md)）；写操作自动留版本，权限与审计仍由平台保障。
 
 ### WebDAV 挂载
 
@@ -226,7 +210,7 @@ cd frontend && npm install && npm run dev
 
 ```
 cmd/            server / migrate / seed / backup-verify / wscheck
-internal/       业务模块（auth/files/space/share/upload/search/ai/agent/...）
+internal/       业务模块（auth/files/space/share/upload/search/ai/...）
 migrations/     增量 SQL（按文件名序执行，幂等）
 frontend/       React SPA 与 E2E
 deploy/         Caddyfile（TLS / 反代 / 子路径规则）+ env 场景模板

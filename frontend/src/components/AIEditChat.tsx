@@ -413,7 +413,7 @@ export default function AIEditChat({
   const modeRef = useRef<ChatMode>('edit')
   /** 正在执行撤销的回合 id（单飞：同一时间只允许一次版本回退）。 */
   const [undoingId, setUndoingId] = useState<number | null>(null)
-  // 联网/思考开关：与全局助手 / Studio 共用 localStorage key 与默认逻辑
+  // 联网/思考开关：与全局助手共用 localStorage key 与默认逻辑
   //（所选模型从 docflow.ai.model 读取，无记忆时回落 default_models.chat；
   //  模型列表仅用于评估思考能力）。
   const [models, setModels] = useState<AIModelOption[]>([])

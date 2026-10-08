@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/docflow/docflow/internal/ai"
@@ -148,9 +147,6 @@ type Handler struct {
 	// dashboard 为个人仪表盘聚合源（SetDashboardSource 注入）；nil 时
 	// GET /api/v1/dashboard 返回 500（生产恒注入）。
 	dashboard dashboardSource
-	// studioProjects 为 Studio 项目注册表存储（SetStudioStore 注入）；
-	// nil 时 /studio/projects 返回 503（生产恒注入）。
-	studioProjects studioStore
 	// invites 为邀请制注册服务、mailer 为邮件通道（邀请/重置链接），
 	// publicBaseURL 用于拼接邮件里的绝对链接；SetInvites 注入，未注入时
 	// 邀请与注册/重置端点返回 503。
@@ -285,19 +281,10 @@ type Handler struct {
 	// aiMemory 为用户 AI 记忆存取（ai_memory 表，migration 050，本人维度；
 	// NewHandler 以 *auth.UserStore 装配，接口化便于单测注入内存实现）；
 	// 未注入时 /ai/memory 端点 503、chat 的 include_memory 静默跳过。
-	aiMemory      aiMemoryStore
-	webdav        *davHandler
-	webdavTokens  *auth.WebDAVStore
-	commentsDB    *gorm.DB
-	agentDB       *gorm.DB
-	agentSem      chan struct{}
-	agentSemMu    sync.Mutex
-	agentCancelMu sync.Mutex
-	agentCancels  map[uuid.UUID]context.CancelFunc
-	// agentAI 为 Agent 容器 IPC 调平台 AI 的网关（SetAgentAI 注入，main
-	// 装配并启动 unix socket server）；nil 时任务不签发 AI 令牌（容器
-	// 内无 AI 能力，agent-runner 降级为仅执行 prompt 中的 ```run 块）。
-	agentAI *AgentAIGateway
+	aiMemory     aiMemoryStore
+	webdav       *davHandler
+	webdavTokens *auth.WebDAVStore
+	commentsDB   *gorm.DB
 }
 
 func NewHandler(authService *auth.Service, users *auth.UserStore, fileStore *files.Store, shares *share.Service, spaces *space.Service, uploads *upload.Service, storage upload.Storage, cookieSecure bool, cookieDomain string, refreshTokenTTL time.Duration) *Handler {
@@ -388,14 +375,6 @@ func (h *Handler) SetRealtimeHub(hub *realtime.Hub, origins []string, environmen
 }
 func (h *Handler) SetWSSecret(secret string) { h.wsSecret = secret }
 func (h *Handler) SetBackupDir(dir string)   { h.backupDir = strings.TrimSpace(dir) }
-
-// SetAgentAI 注入 Agent 容器平台 AI IPC 网关（幂等；nil 保持未装配）。
-// 网关的 unix socket server 由 main 经 StartAgentIPCServer 启动。
-func (h *Handler) SetAgentAI(gw *AgentAIGateway) {
-	if gw != nil {
-		h.agentAI = gw
-	}
-}
 
 // SetAccessSalt 注入公开访问事件 IP 哈希的静态盐（ACCESS_SALT；缺省由
 // config 从 JWT secret 派生）。空值时回退固定占位盐（仅测试场景）。
@@ -611,22 +590,7 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	api.GET("/search", h.searchFiles)
 	// 个人仪表盘概览统计（admin 附加全局统计，见 dashboard.go）。
 	api.GET("/dashboard", h.dashboardStats)
-	// Studio 项目注册表（服务端化，migration 051）：本人维度 CRUD；写入类
-	// 须 PAT files:write scope（与文件夹/Agent 任务写路径同口径）。
-	api.GET("/studio/projects", h.studioProjectsList)
-	api.POST("/studio/projects", auth.RequireScope("files:write"), h.studioProjectsCreate)
-	api.PUT("/studio/projects/:id", auth.RequireScope("files:write"), h.studioProjectsUpdate)
-	api.DELETE("/studio/projects/:id", auth.RequireScope("files:write"), h.studioProjectsDelete)
 	api.POST("/folders", h.createFolder)
-	api.POST("/folders/:id/agent-tasks", auth.RequireScope("files:write"), h.createAgentTask)
-	api.GET("/agent-tasks", h.listAgentTasks)
-	api.GET("/agent-tasks/:id", h.getAgentTask)
-	api.GET("/agent-tasks/:id/diff", h.getAgentTaskDiff)
-	api.GET("/agent-tasks/:id/logs", h.listAgentTaskLogs)
-	api.POST("/agent-tasks/:id/cancel", h.cancelAgentTask)
-	api.POST("/agent-tasks/:id/apply", auth.RequireScope("files:write"), h.applyAgentTask)
-	api.POST("/agent-tasks/:id/discard", h.discardAgentTask)
-	api.POST("/agent-tasks/:id/rollback", auth.RequireScope("files:write"), h.rollbackAgentTask)
 	api.POST("/folders/:id/snapshots", h.createSnapshot)
 	api.GET("/folders/:id/snapshots", h.listSnapshots)
 	api.GET("/folders/:id/diff", h.diffSnapshot)
@@ -810,8 +774,6 @@ func (h *Handler) Register(r *gin.Engine, jwtSecret string, rateLimit, loginRate
 	// AI 运行时配置（system_settings 的 ai.* 键）：多 Provider CRUD（密钥
 	// 只写不读，留空保持）、默认 Provider/温度/max_tokens/每用户限流，
 	// 连接测试（发一条 ping 返回延迟/错误）与用量统计（按用户聚合）。
-	admin.GET("/settings/agent", h.agentConfig)
-	admin.PUT("/settings/agent", h.putAgentConfig)
 	// 启动级环境变量只读总览（配置总览页；敏感值脱敏）。
 	admin.GET("/settings/env", h.adminGetEnv)
 	admin.GET("/settings/ai", h.getAISettings)

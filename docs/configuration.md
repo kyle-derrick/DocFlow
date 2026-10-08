@@ -121,14 +121,6 @@ DocFlow 采用**两级配置模型**：
 | `AI_API_KEY` | 空 | 上游 API Key | `AI_ENABLED=true` 时**必填**；安全敏感 |
 | `AI_MODEL` | `gpt-4o-mini` | 默认摘要模型 | |
 
-### Agent（Docker 沙箱创作舱）
-
-Agent 的行为开关（镜像白名单、资源上限、AI 调用等）全部为**运行时键**（`agent.*`，见 [AI 智能体](#ai-智能体平台管理--ai-创作舱)）；启动级仅一个变量：
-
-| 变量 | 默认值 | 说明 | 备注 |
-| --- | --- | --- | --- |
-| `DOCFLOW_AGENT_IPC_DIR` | 空 | backend 与 Agent 容器共享的 **IPC socket 目录**（宿主路径，需以共享卷方式同时挂给 backend 与任务容器） | `agent.allow_ai=true` 时容器经该目录下的 Unix socket 调用平台 AI（容器保持断网 `network_mode=none`）；（新增键） |
-
 ### 安全与防爆破（限流 / 锁定 / 病毒扫描）
 
 | 变量 | 默认值 | 说明 | 备注 |
@@ -235,29 +227,9 @@ Agent 的行为开关（镜像白名单、资源上限、AI 调用等）全部�
 
 另见 [docs/mcp.md](mcp.md)（DocFlow 自身作为 MCP Server 对外暴露文档工具）。
 
-### AI 智能体（平台管理 → AI 创作舱）
-
-`agent.*` 键（通用端点可写、创作舱面板统一维护）。任务链路：目录快照 → 受限 Docker workspace → Diff 评审 → 用户确认写回。默认镜像 `alpine:3.20` 占位，自建镜像见[修改示例](#修改示例常见任务)。
-
-| 键 | 默认值 | 生效 | 说明 |
-| --- | --- | --- | --- |
-| `agent.enabled` | `true` | 即时 | 创作舱总开关（AI 总开关关闭时 Agent 一并不可用） |
-| `agent.runtime` | `docker` | 重启 | 运行时（当前仅 `docker`；`fake` 为开发干跑） |
-| `agent.allowed_images` | 空（默认 `alpine:3.20`） | 即时 | 允许的镜像白名单（逗号分隔）；配置非空时整体覆盖默认镜像，**首个镜像**即未指定时的任务默认 |
-| `agent.max_concurrent` | `1`（1–100） | 即时 | 最大并发任务数 |
-| `agent.default_timeout_seconds` | `900`（1–86400） | 即时 | 任务默认超时（秒） |
-| `agent.max_cpu` | `1`（1–64） | 即时 | 每容器 CPU 上限 |
-| `agent.max_memory_bytes` | `536870912`（512MiB） | 即时 | 每容器内存上限（1MiB–1TiB） |
-| `agent.network_mode` | `none` | 即时 | 容器网络模式：`none`（断网，默认）\| `restricted` |
-| `agent.mcp_callback_base_url` | 空 | 即时 | 受限 MCP 回调基地址（不含凭据） |
-| `agent.allow_ai` | （新增） | 即时 | 允许容器经 IPC socket 调用平台 AI：backend 与容器共享 `DOCFLOW_AGENT_IPC_DIR` 目录下的 Unix socket，容器保持断网（`network_mode=none`）也能使用平台 AI 能力 |
-| `agent.ai_max_calls` | `40`（新增） | 即时 | 每任务 AI 调用次数上限，超出后任务内 AI 调用被拒绝 |
-| `agent.sync_mode` | （新增） | 即时 | 产物同步方式：`git`（以 git 变更识别产物，按 `.gitignore` 过滤）\| `scan`（全量扫描工作区 + 内置忽略规则，如 `node_modules` 等） |
-| `agent.harness` | （新增） | 即时 | 沙箱执行引擎：`auto`（默认，按平台默认 Provider 协议自动路由：Anthropic → Claude Code，OpenAI 兼容 → pi）\| `claude-code` \| `pi` \| `builtin`（内置轻量 runner 兜底）。官方镜像 `docflow/agent` 内置双 CLI，CLI 不可用或未配 AI 令牌时自动回落 builtin |
-
 ### 系统设置（平台管理 → 系统设置）
 
-通用键全集（`GET /api/v1/admin/settings` 输出顺序）；`ai.rag.*`、`ai.search.*` 归 AI 设置面板维护、`agent.*` 归创作舱面板维护，此处一并列出以便检索。除标注「须重启」外均即时生效。
+通用键全集（`GET /api/v1/admin/settings` 输出顺序）；`ai.rag.*`、`ai.search.*` 归 AI 设置面板维护。除标注「须重启」外均即时生效。
 
 **上传与版本（upload.\*）**
 
@@ -327,7 +299,7 @@ Agent 的行为开关（镜像白名单、资源上限、AI 调用等）全部�
 | `webdav.enabled` | `false` | 即时 | 启用 WebDAV 文件访问（`/webdav`，一次性令牌 Basic Auth） |
 | `collab.enabled` | `true` | 即时 | 启用富文本实时协作（`/api/v1/collab/{fileId}/ws`；关闭时端点 404 且不创建房间） |
 
-**AI 检索/搜索与 Agent 键（在通用设置列表中可见，面板归属见前两节）**：`ai.rag.mode`、`ai.rag.vector_enabled`、`ai.rag.qdrant_url`、`ai.rag.collection_prefix`、`ai.rag.embedding_provider`、`ai.rag.embedding_model`、`ai.rag.top_k`、`ai.rag.chunk_size`、`ai.rag.chunk_overlap`、`ai.search.provider`、`ai.search.searxng_url`、`ai.search.max_results`、`agent.enabled`、`agent.runtime`、`agent.allowed_images`、`agent.max_concurrent`、`agent.default_timeout_seconds`、`agent.max_cpu`、`agent.max_memory_bytes`、`agent.network_mode`、`agent.mcp_callback_base_url`（含义与默认值见前两节表格）。
+**AI 检索/搜索键（在通用设置列表中可见，面板归属见 AI 设置节）**：`ai.rag.mode`、`ai.rag.vector_enabled`、`ai.rag.qdrant_url`、`ai.rag.collection_prefix`、`ai.rag.embedding_provider`、`ai.rag.embedding_model`、`ai.rag.top_k`、`ai.rag.chunk_size`、`ai.rag.chunk_overlap`、`ai.search.provider`、`ai.search.searxng_url`、`ai.search.max_results`（含义与默认值见 AI 设置节表格）。
 
 ### 邮件（平台管理 → 邮件）
 
@@ -424,24 +396,6 @@ ONLYOFFICE_UPSTREAM=onlyoffice:80                          # make up-full 自动
 
 `make up-full` 后浏览器经 `https://<域名>/onlyoffice` 加载编辑器；本地联调可用 `docker run -p 8081:80` 直连 DS 并把两个 URL 均指向 `http://localhost:8081`。
 
-### 5. 构建并启用自建 Agent 镜像
-
-```bash
-# 1) 构建含工具链的镜像（示例：git + node + python）
-cat > Dockerfile.agent <<'EOF'
-FROM alpine:3.20
-RUN apk add --no-cache git nodejs npm python3 py3-pip
-EOF
-docker build -f Dockerfile.agent -t registry.example.com/docflow-agent:1.0.0 .
-docker push registry.example.com/docflow-agent:1.0.0
-
-# 2) 平台管理 → AI 创作舱（运行时，即时生效）：
-#    agent.allowed_images = registry.example.com/docflow-agent:1.0.0,alpine:3.20
-#    （逗号分隔白名单；首个镜像为任务未指定时的默认）
-#    按需调整 max_cpu / max_memory_bytes / default_timeout_seconds
-```
-
-Agent 容器默认断网（`agent.network_mode=none`）；如需容器内调用平台 AI，开启 `agent.allow_ai` 并以共享卷挂载 `DOCFLOW_AGENT_IPC_DIR` 目录（IPC socket）。仓库不预置 agent 专用镜像，默认白名单仅 `alpine:3.20` 占位。
 
 ---
 

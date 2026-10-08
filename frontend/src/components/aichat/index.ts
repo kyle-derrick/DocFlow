@@ -1,4 +1,4 @@
-// AI 对话共享组件族（@ant-design/x）：三处对话场景（Studio 右栏 / 全局
+// AI 对话共享组件族（@ant-design/x）：对话场景（全局
 // AI 助手 / 编辑器侧栏）统一消息流、思考过程、工具调用链与输入区。
 export {
   type AIToolStatus, type AIToolCallEntry, type AIChatTurnData, type AIAttachFile, type AIWebSource,

@@ -110,103 +110,6 @@ tags:
       图表文件即普通 .drawio 文件
 
 paths:
-  /folders/{id}/agent-tasks:
-    post:
-      summary: 创建 Agent 创作任务（Agent 关闭时 404）
-      parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [prompt]
-              properties:
-                prompt: {type: string, description: 任务提示词（前端可将联网/思考等开关以前缀写入）}
-                image: {type: string, description: 运行镜像（空 = 平台默认镜像）}
-                timeout_seconds: {type: integer, description: 超时秒数}
-                harness:
-                  type: string
-                  enum: [claude-code, pi, builtin]
-                  description: >-
-                    请求级执行引擎（项目创建时选择）：优先于平台 agent.harness
-                    配置；auto 不是请求级合法值——跟随平台请直接不传（400
-                    AGENT_HARNESS_INVALID）
-                model:
-                  description: >-
-                    请求级模型意图（默认模型/会话切换）：对齐 /ai/chat 的
-                    model 传法（{providerId,modelId} 对象；另接受
-                    provider_id/model_id 键或 "provider/model" 单字符串）。
-                    仅记录意图（容器 env DOCFLOW_MODEL + 任务日志）——
-                    网关透传端点按平台默认对话目标替换实际执行模型
-                  oneOf:
-                    - type: string
-                    - type: object
-                      properties:
-                        provider_id: {type: string}
-                        provider_id_cc: {type: string, description: providerId（camelCase 别名）}
-                        model_id: {type: string}
-                        model_id_cc: {type: string, description: modelId（camelCase 别名）}
-      responses: {'201': {description: Created}, '400': {description: 参数非法（prompt 缺失 / harness 非法 / model 过长）}}
-  /agent-tasks:
-    get:
-      summary: 列出当前用户 Agent 任务
-      responses: {'200': {description: OK}}
-  /agent-tasks/{id}:
-    get:
-      summary: Agent 任务详情及日志
-      parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
-      responses: {'200': {description: OK}}
-  /agent-tasks/{id}/diff:
-    get:
-      summary: 获取 Agent workspace 产物差异（仅元数据）
-      parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
-      responses: {'200': {description: OK}}
-  /agent-tasks/{id}/logs:
-    get:
-      summary: 获取 Agent 任务日志
-      parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
-      responses: {'200': {description: OK}}
-  /agent-tasks/{id}/cancel:
-    post:
-      summary: 取消 Agent 任务
-      parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
-      responses: {'200': {description: OK}}
-  /agent-tasks/{id}/apply:
-    post:
-      summary: 预留安全写回入口（当前拒绝写回）
-      parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
-      responses: {'409': {description: Writeback disabled}}
-  /agent-tasks/{id}/discard:
-    post:
-      summary: 放弃并清理 Agent workspace 产物
-      parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
-      responses: {'200': {description: OK}}
-  /agent-tasks/{id}/rollback:
-    post:
-      summary: 按任务快照回滚
-      parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
-      responses: {'200': {description: OK}}
-  /admin/settings/agent:
-    get:
-      summary: Agent 配置状态
-      description: >-
-        读取创作舱全部配置键（system_settings agent.*）：enabled 总开关 /
-        runtime 运行时 / allowed_images 镜像白名单（回显数组）/ max_concurrent
-        并发任务上限 / default_timeout_seconds 默认超时 / max_cpu CPU 限额 /
-        max_memory_bytes 内存限额 / network_mode 容器网络模式（默认 none 断网）/
-        mcp_callback_base_url 回调基址 / allow_ai 容器 AI 能力 / ai_max_calls
-        每任务 AI 调用上限 / sync_mode 产物同步（git|scan）/ harness 执行引擎
-        （auto|claude-code|pi|builtin）。agent.enabled 关闭时仅回 {enabled:false}
-        （配置读取不被拦截，保证可重新开启）。
-      responses: {'200': {description: OK}}
-    put:
-      summary: 更新 Agent 配置（任意 agent.* 键，密钥不入库）
-      description: >-
-        载荷键自动加 agent. 前缀逐键写入 system_settings（PATCH 语义，
-        未带的键保持现值）；值经键级校验，非法 400。
-      requestBody: {required: true, content: {application/json: {schema: {type: object}}}}
-      responses: {'200': {description: OK}}
   /admin/settings/env:
     get:
       summary: 启动级环境变量只读总览（敏感值脱敏）
@@ -243,89 +146,6 @@ paths:
       summary: 创建 WebDAV 令牌（明文仅返回一次）
       security: [{bearerAuth: []}]
       responses: {"201": {description: Created}}
-  /studio/projects:
-    get:
-      tags: [AI]
-      operationId: listStudioProjects
-      summary: Studio 项目列表（本人）
-      description: >-
-        AI 创作空间的项目注册表（studio_projects，migration 051）：项目 =
-        空间 + 根目录 + 执行引擎的绑定，本人维度，updated_at 倒序。
-        空间名/路径为创建时快照（展示用弱引用）。服务端化替代旧版浏览器
-        localStorage 存储（换浏览器/清存储不再丢项目入口）。
-      security: [{bearerAuth: []}]
-      responses:
-        '200':
-          description: 项目列表
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [projects]
-                properties:
-                  projects:
-                    type: array
-                    items: { $ref: '#/components/schemas/StudioProject' }
-    post:
-      tags: [AI]
-      operationId: createStudioProject
-      summary: 新建 Studio 项目
-      description: >-
-        载荷校验：name 去空白 1-100 字符；space_id/root_folder_id 须合法
-        UUID；engine 空=platform（白名单外归一 platform）；harness ≤32、
-        model ≤160 字符。id 服务端生成。PAT 须 files:write scope。
-      security: [{bearerAuth: []}]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/StudioProjectInput' }
-      responses:
-        '201':
-          description: 已创建
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/StudioProject' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-  /studio/projects/{id}:
-    put:
-      tags: [AI]
-      operationId: updateStudioProject
-      summary: 覆盖式更新 Studio 项目
-      description: >-
-        全字段覆盖更新（名称/绑定/引擎等由客户端整体提交）；校验同
-        POST。不存在与非属主一律 404（不区分，避免探测他人项目 id）。
-        PAT 须 files:write scope。
-      security: [{bearerAuth: []}]
-      parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/StudioProjectInput' }
-      responses:
-        '200':
-          description: 已更新
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/StudioProject' }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '404': { $ref: '#/components/responses/NotFound' }
-    delete:
-      tags: [AI]
-      operationId: deleteStudioProject
-      summary: 删除 Studio 项目
-      description: >-
-        仅删项目记录（文件本体不受影响）。不存在与非属主一律 404。
-        PAT 须 files:write scope。
-      security: [{bearerAuth: []}]
-      parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
-      responses:
-        '204': {description: 已删除}
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '404': { $ref: '#/components/responses/NotFound' }
   /webdav/tokens/{id}:
     delete:
       summary: 撤销 WebDAV 令牌
@@ -5470,8 +5290,7 @@ paths:
       description: >-
         登录用户读取 AI 能力标志对象：enabled 为总开关（ai.enabled 显式
         false 关闭 + 存在启用中的 Provider，system_settings 的 ai.providers
-        与 env AI_* 兜底）；agent 为 Agent 创作舱（agent.enabled 未配置
-        默认 true，AI 总开关关闭时连带 false）；web_search 为联网搜索
+        与 env AI_* 兜底）；web_search 为联网搜索
         （管理端配置 ai.search.provider 非空）；mcp 为外部 MCP 工具
         （ai.mcp 存在启用中的服务，读取失败容错 false）；rag 为知识库问答
         （引用文件基于关键词检索，AI 开即可用，= enabled）。前端据
@@ -5485,22 +5304,10 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [enabled, agent, web_search, mcp, rag]
+                required: [enabled, web_search, mcp, rag]
                 properties:
                   enabled: { type: boolean }
-                  agent:
-                    type: boolean
-                    description: Agent 创作舱可用（agent.enabled 默认 true；AI 总开关关闭时 false）
-                  web_search:
-                    type: boolean
-                    description: 联网搜索已配置（ai.search.provider 非空）
-                  mcp:
-                    type: boolean
-                    description: 存在启用中的外部 MCP 服务（ai.mcp）
-                  rag:
-                    type: boolean
-                    description: 知识库问答可用（= enabled）
-        '401': { $ref: '#/components/responses/Unauthorized' }
+                  '401': { $ref: '#/components/responses/Unauthorized' }
 
   /ai/summarize:
     post:
@@ -6276,35 +6083,6 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
         '429': { $ref: '#/components/responses/RateLimited' }
-
-  /onlyoffice/ai-plugin/config.json:
-    get:
-      tags: [onlyoffice]
-      operationId: onlyofficeAIPluginManifest
-      summary: DocFlow AI 编辑器插件动态清单（无 Bearer）
-      description: >-
-        DocumentServer 编辑器 api.js 以普通 fetch 拉取的 DocFlow AI 插件
-        manifest（公开组，独立按 IP 轻限流，集成未启用时不注册=404）。
-        baseUrl 与 variations[].url/icons 均为按请求 scheme+host 推导的
-        绝对 URL（显式 PUBLIC_BASE_URL 优先）——静态 config.json 的相对
-        url 在部分 DocumentServer 版本下解析到反代 SPA 兜底，插件面板会
-        打开成站点「文件页」；动态绝对 URL 与部署形态无关。插件静态页由
-        前端产物 /oo-plugins/docflow-ai/index.html 提供（同站 cookie 调
-        /ai/chat，经 DS 插件桥读写文档）。
-      responses:
-        '200':
-          description: 插件 manifest（OnlyOffice config.json 结构，绝对 URL）
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: true
-        '429': { $ref: '#/components/responses/RateLimited' }
-        '503':
-          description: 公开基址不可推导（PUBLIC_BASE_URL 未配置且请求 Host 缺失）
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/Error' }
 
   /files/from-template:
     post:
@@ -7594,51 +7372,6 @@ components:
 
   schemas:
     Error:
-    # Studio 项目注册表（/studio/projects；migration 051）
-    StudioProject:
-      type: object
-      description: AI 创作空间项目（本人维度；space_name/folder_path 为创建时快照）
-      properties:
-        id: { type: string, format: uuid }
-        name: { type: string, description: 1-100 字符 }
-        space_id: { type: string, format: uuid }
-        root_folder_id: { type: string, format: uuid, description: 项目根目录（工作目录绑定） }
-        space_name: { type: string, description: 绑定空间名快照（展示用） }
-        folder_path: { type: string, description: 绑定路径「空间名/目录名」快照 }
-        engine: { type: string, enum: [platform, docker], description: "platform=平台直读写（默认）；docker=Agent 沙箱" }
-        harness: { type: string, description: "docker 沙箱执行引擎（空 = 跟随平台 auto）" }
-        model: { type: string, description: "默认模型 `${providerId}/${model}`（空 = 平台默认）" }
-        created_at: { type: string, format: date-time }
-        updated_at: { type: string, format: date-time }
-    StudioProjectInput:
-      type: object
-      required: [name, space_id, root_folder_id]
-      properties:
-        name: { type: string, description: 1-100 字符（去空白） }
-        space_id: { type: string, format: uuid }
-        root_folder_id: { type: string, format: uuid }
-        space_name: { type: string }
-        folder_path: { type: string }
-        engine: { type: string, enum: [platform, docker] }
-        harness: { type: string, maxLength: 32 }
-        model: { type: string, maxLength: 160 }
-      type: object
-      required: [error]
-      properties:
-        error:
-          type: string
-          description: 人类可读错误信息
-        code:
-          type: string
-          description: >-
-            机器可读错误码；当前实现使用 NAME_CONFLICT / NOT_DELETED / PARENT_DELETED /
-            QUARANTINED / FAILED / TOTP_REQUIRED（POST /auth/login 对已启用两步
-            验证账号的 401，error=totp_required）/ ACCOUNT_LOCKED（登录与
-            refresh 遇锁定期账号的 423）/ QUOTA_EXCEEDED（上传建会话配额
-            超限的 403）/ CSRF_REJECTED（refresh/logout 同源校验失败的 403）
-        status:
-          type: string
-          description: 上传相关错误附带的会话状态（仅 uploads complete 端点）
     OpenWithPreference:
       type: object
       description: 默认打开方式偏好（/me/open-with）；ext 已规范化（小写、去点）

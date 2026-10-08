@@ -590,19 +590,6 @@ export const SETTING_KEY_META: Record<string, { zh: string; en: string; dzh: str
   // ---- webdav / collab ----
   'webdav.enabled': { zh: '启用 WebDAV 访问', en: 'WebDAV enabled', dzh: '开启后可经 /webdav 以个人令牌挂载文件', den: 'Mount files via /webdav with personal tokens' },
   'collab.enabled': { zh: '启用富文本实时协作', en: 'Rich-text collaboration', dzh: '协作 WebSocket 房间（关闭时端点 404）', den: 'Collab WebSocket rooms (endpoint 404s when off)' },
-  // ---- agent.* ----
-  'agent.enabled': { zh: '启用 Docker Agent 创作舱', en: 'Agent studio enabled', dzh: '关闭时 API 不可用且不启动容器', den: 'API disabled and no containers when off' },
-  'agent.runtime': { zh: 'Agent 运行时', en: 'Agent runtime', dzh: '当前仅支持 docker（须重启生效）', den: 'Currently docker only (restart required)' },
-  'agent.allowed_images': { zh: 'Agent 镜像白名单', en: 'Allowed agent images', dzh: '逗号分隔的容器镜像列表', den: 'Comma-separated container image list' },
-  'agent.max_concurrent': { zh: 'Agent 最大并发任务数', en: 'Agent max concurrency', dzh: '同时运行的 Agent 任务上限', den: 'Max concurrently running agent tasks' },
-  'agent.default_timeout_seconds': { zh: 'Agent 默认超时（秒）', en: 'Agent default timeout', dzh: '单个任务的默认超时秒数', den: 'Default per-task timeout in seconds' },
-  'agent.max_cpu': { zh: 'Agent 最大 CPU 数', en: 'Agent max CPU', dzh: '单容器可用 CPU 上限', den: 'CPU limit per container' },
-  'agent.max_memory_bytes': { zh: 'Agent 最大内存', en: 'Agent max memory', dzh: '单容器内存上限（字节）', den: 'Memory limit per container (bytes)' },
-  'agent.network_mode': { zh: 'Agent 网络模式', en: 'Agent network mode', dzh: 'none 或 restricted（受限出网）', den: 'none or restricted' },
-  'agent.mcp_callback_base_url': { zh: '受限 MCP 回调基地址', en: 'MCP callback base URL', dzh: '不含凭据的回调地址前缀', den: 'Credential-free callback URL prefix' },
-  'agent.allow_ai': { zh: '允许 Agent 调用平台 AI', en: 'Agent AI over IPC', dzh: '容器保持断网，经 IPC socket 调用平台默认对话模型', den: 'Containers stay offline; platform AI reached over an IPC socket' },
-  'agent.ai_max_calls': { zh: 'Agent 单任务 AI 调用上限', en: 'Agent AI call limit', dzh: '单个任务经 IPC 调用平台 AI 的次数上限（超出 429）', den: 'Per-task platform AI calls over IPC (429 beyond)' },
-  'agent.sync_mode': { zh: 'Agent 产物同步模式', en: 'Agent sync mode', dzh: 'git（按变更清单同步，推荐）或 scan（全量扫描）', den: 'git (change-list based, recommended) or scan (full scan)' },
 }
 
 /** 按键取当前语言的名称；未收录回退空串（行内仅显示原 key，不硬造）。

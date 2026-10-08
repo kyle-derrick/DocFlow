@@ -1,0 +1,25 @@
+{
+  "name": "DocFlow AI",
+  "nameLocale": { "zh": "DocFlow AI 助手" },
+  "guid": "asc.{5A3F6E21-8C4D-4B0E-9A7D-2F1C0D5E8B44}",
+  "version": "1.2.0",
+  "baseUrl": "",
+  "variations": [
+    {
+      "description": "DocFlow AI assistant: chat about the document, quote the selection, insert or replace text",
+      "url": "index.html",
+      "icons": ["icon.svg"],
+      "isViewer": false,
+      "EditorsSupport": ["word", "cell", "slide"],
+      "isVisual": true,
+      "isModal": false,
+      "isInsideMode": false,
+      "isSystem": false,
+      "initDataType": "none",
+      "initData": "",
+      "isUpdateOleOnResize": false,
+      "buttons": [],
+      "events": []
+    }
+  ]
+}

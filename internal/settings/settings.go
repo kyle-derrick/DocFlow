@@ -87,24 +87,7 @@ const (
 	KeyWebDAVEnabled     = "webdav.enabled"
 	// KeyCollabEnabled 富文本实时协作（ProseMirror 协作房间）总开关：
 	// 关闭时 /api/v1/collab/:fileId/ws 返回 404 且不创建房间。
-	KeyCollabEnabled       = "collab.enabled"
-	KeyAgentEnabled        = "agent.enabled"
-	KeyAgentRuntime        = "agent.runtime"
-	KeyAgentAllowedImages  = "agent.allowed_images"
-	KeyAgentMaxConcurrent  = "agent.max_concurrent"
-	KeyAgentDefaultTimeout = "agent.default_timeout_seconds"
-	KeyAgentMaxCPU         = "agent.max_cpu"
-	KeyAgentMaxMemory      = "agent.max_memory_bytes"
-	KeyAgentNetworkMode    = "agent.network_mode"
-	KeyAgentCallbackURL    = "agent.mcp_callback_base_url"
-	// Agent 容器经 IPC socket 调用平台 AI（agentsock）与产物同步模式。
-	KeyAgentAllowAI    = "agent.allow_ai"
-	KeyAgentAIMaxCalls = "agent.ai_max_calls"
-	KeyAgentSyncMode   = "agent.sync_mode"
-	// KeyAgentHarness 为 Agent 执行引擎选择（键名冻结）：auto 按平台默认
-	// 模型协议自动路由，claude-code/pi 为显式指定，builtin 为内置轻量
-	// runner；终值经 RuntimeRequest 注入容器 env DOCFLOW_HARNESS。
-	KeyAgentHarness = "agent.harness"
+	KeyCollabEnabled = "collab.enabled"
 )
 
 // SMTP 运行时配置键（system_settings 存储，邮件发送处优先读库回退 env）。
@@ -996,19 +979,6 @@ var Definitions = []Definition{
 	{Key: KeySpaceMaxPerUser, Type: TypeInt, Default: int64(20), Min: intPtr(1), Max: intPtr(1000), Effect: EffectImmediate, Description: "每用户空间数上限（owner 维度计数，含默认空间）：超出后创建空间返回 413"},
 	{Key: KeyWebDAVEnabled, Type: TypeBool, Default: false, Effect: EffectImmediate, Description: "启用 WebDAV 文件访问"},
 	{Key: KeyCollabEnabled, Type: TypeBool, Default: true, Effect: EffectImmediate, Description: "启用富文本实时协作（/api/v1/collab/{fileId}/ws 协作房间；关闭时端点返回 404 且不创建房间）"},
-	{Key: KeyAgentEnabled, Type: TypeBool, Default: false, Effect: EffectImmediate, Description: "Docker 沙箱（进阶）：默认关闭，需管理员显式开启（开启后 AI 创作空间可选 Docker 沙箱引擎）"},
-	{Key: KeyAgentRuntime, Type: TypeString, Default: "docker", Effect: EffectRestart, Description: "Agent runtime（仅 docker）"},
-	{Key: KeyAgentAllowedImages, Type: TypeString, Default: "", Effect: EffectImmediate, Description: "允许的 Agent 镜像，逗号分隔"},
-	{Key: KeyAgentMaxConcurrent, Type: TypeInt, Default: int64(1), Min: intPtr(1), Max: intPtr(100), Effect: EffectImmediate, Description: "Agent 最大并发任务数"},
-	{Key: KeyAgentDefaultTimeout, Type: TypeInt, Default: int64(900), Min: intPtr(1), Max: intPtr(86400), Effect: EffectImmediate, Description: "Agent 默认超时秒数"},
-	{Key: KeyAgentMaxCPU, Type: TypeInt, Default: int64(1), Min: intPtr(1), Max: intPtr(64), Effect: EffectImmediate, Description: "Agent 最大 CPU 数"},
-	{Key: KeyAgentMaxMemory, Type: TypeInt, Default: int64(512 << 20), Min: intPtr(1 << 20), Max: intPtr(1 << 40), Effect: EffectImmediate, Description: "Agent 最大内存字节数"},
-	{Key: KeyAgentNetworkMode, Type: TypeString, Default: "none", Effect: EffectImmediate, Description: "Agent 网络模式 none/restricted"},
-	{Key: KeyAgentCallbackURL, Type: TypeString, Default: "", Effect: EffectImmediate, Description: "受限 MCP 回调基地址（不含凭据）"},
-	{Key: KeyAgentAllowAI, Type: TypeBool, Default: true, Effect: EffectImmediate, Description: "允许 Agent 容器经 IPC socket（unix domain，NetworkMode=none 下仍可用）调用平台默认对话模型；关闭时创建任务不签发 AI 令牌、容器不注入 DOCFLOW_AI_TOKEN"},
-	{Key: KeyAgentAIMaxCalls, Type: TypeInt, Default: int64(40), Min: intPtr(1), Max: intPtr(10000), Effect: EffectImmediate, Description: "单个 Agent 任务经 IPC socket 调用平台 AI 的次数上限（超出返回 429，令牌随任务终态注销）"},
-	{Key: KeyAgentSyncMode, Type: TypeString, Default: "git", Effect: EffectImmediate, Description: "Agent 产物同步模式：git 优先读取容器内 runner 产出的 .docflow-changes.json（A/M/D 清单）构造 diff，缺失/非法时回退全量扫描；scan 恒走全量扫描"},
-	{Key: KeyAgentHarness, Type: TypeString, Default: "auto", Effect: EffectImmediate, Description: "Agent 执行引擎：auto 按平台默认模型协议自动选择（Anthropic→Claude Code，OpenAI 兼容→pi）；builtin=内置轻量 runner"},
 }
 
 // DefinitionByKey 返回键定义；未知键返回 ErrUnknownKey。

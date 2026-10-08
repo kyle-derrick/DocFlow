@@ -15,7 +15,7 @@
 //     uploadFileVersion 覆盖当前 file_id，自动留版本链）；
 //   · 摘要：/ai/summarize 流式，markdown 展示 + 复制。
 // - AI 未启用（useAIEnabled=false）不渲染。
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import { App as AntdApp, Button, Input, Popconfirm, Segmented, Select, Tooltip } from 'antd'
 import { Check, ChevronDown, Copy, Globe, Brain, RotateCcw, Save, Sparkles, Trash2 } from 'lucide-react'
@@ -38,7 +38,7 @@ import { t, useLocale } from '../i18n'
 /** 悬浮位置持久化 key（{x,y}：x/y 为悬浮球左上角（视口坐标））。 */
 const WIDGET_POS_KEY = 'docflow.viewer-ai.pos'
 /** 悬浮球尺寸 / 卡片尺寸（px）。 */
-const BALL_SIZE = 56
+const BALL_SIZE = 44
 const CARD_W = 360
 const CARD_H = 520
 /** 默认边距：球/卡片距边界（px）。 */
@@ -156,21 +156,23 @@ export default function ViewerAIWidget({
   const { message } = AntdApp.useApp()
   const textLike = isTextLike(fileName, '')
 
-  // ---- 悬浮球 / 卡片：位置与拖动（v3.9）----
+  // ---- 悬浮球 / 卡片：位置与拖动（v3.10）----
   // 默认用 CSS right/bottom 贴角（窗口 resize 自动适配，零 JS）；弹窗内挂载
   // 时改贴弹窗容器右下角（JS 定位）；拖拽后切 left/top 自定义；双击重置。
+  // 显示时机：挂载后延迟 ~250ms（弹窗动画/DOM 稳定）测量边界完成才显示，
+  // 弹窗内不会「先视口右下角再跳到弹窗右下角」。
   const [open, setOpen] = useState(false)
   const [customPos, setCustomPos] = useState<CustomPos>(() => loadPos())
   const [dragging, setDragging] = useState(false)
-  const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number; moved: boolean } | null>(null)
+  const [settled, setSettled] = useState(false)
+  const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number; lastX: number; lastY: number; moved: boolean } | null>(null)
   const suppressClickRef = useRef(false)
   // 当前渲染根元素（球或卡片），用于判定弹窗内挂载与解析边界。
   const hostRef = useRef<HTMLElement | null>(null)
   const [modalRect, setModalRect] = useState<{ left: number; top: number; width: number; height: number } | null>(null)
 
   // 重测弹窗边界（无弹窗祖先 = null）：open 切换（根元素换位球⇄卡片）与
-  // 窗口 resize（弹窗重新居中）时调用；useLayoutEffect 保证首帧前完成，
-  // 弹窗内默认贴角不闪视口角。
+  // 窗口 resize（弹窗重新居中）时调用；useLayoutEffect 保证首帧前完成。
   const measureModal = () => {
     const modal = hostRef.current?.closest('.ant-modal') as HTMLElement | null
     if (modal) {
@@ -181,6 +183,16 @@ export default function ViewerAIWidget({
     }
   }
   useLayoutEffect(measureModal, [open])
+
+  // 挂载后延迟测量并显示（弹窗动画完毕、DOM 稳定；消除弹窗内跳变）。
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      measureModal()
+      setSettled(true)
+    }, 250)
+    return () => window.clearTimeout(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   /** 卡片可用边界（弹窗内挂载 = 弹窗矩形；否则视口）。 */
   const hostBounds: HostBounds = modalRect
@@ -220,12 +232,45 @@ export default function ViewerAIWidget({
   }, [])
   void resizeTick // 仅作 resize 重渲染触发器（读取一次避免未用告警）
 
+  // ---- 拖动（v3.10 重写）：window 级 pointermove/up 监听 ----
+  // 两处历史缺陷：① 球内 Sparkles 图标是 e.target，closest('button') 命中
+  // 球自身被误判为「子交互控件」直接 return——点在图标上（球的正中央）
+  // 无法拖动，表现为「拖不动、要碰运气」；② 仅依赖元素自身的 pointer
+  // capture + React 合成事件，快速移动指针脱离元素后事件丢失。改为排除
+  // 判定只挡「非自身」的交互控件，move/up 挂 window，拖动全程可靠。
+  const moveDragRaw = useCallback((ev: PointerEvent) => {
+    const d = dragRef.current
+    if (!d) return
+    const dx = ev.clientX - d.startX
+    const dy = ev.clientY - d.startY
+    if (!d.moved && Math.abs(dx) <= DRAG_THRESHOLD && Math.abs(dy) <= DRAG_THRESHOLD) return
+    d.moved = true
+    const next = clampToViewport({ x: d.origX + dx, y: d.origY + dy })
+    d.lastX = next.x
+    d.lastY = next.y
+    setCustomPos(next)
+  }, [])
+
+  const endDragRaw = useCallback(() => {
+    const d = dragRef.current
+    dragRef.current = null
+    setDragging(false)
+    window.removeEventListener('pointermove', moveDragRaw)
+    window.removeEventListener('pointerup', endDragRaw)
+    window.removeEventListener('pointercancel', endDragRaw)
+    if (d?.moved) {
+      suppressClickRef.current = true
+      persistPos({ x: d.lastX, y: d.lastY })
+    }
+  }, [moveDragRaw])
+
   const startDrag = (e: ReactPointerEvent<HTMLElement>) => {
     if (e.button !== 0) return
-    // 排除子交互控件（展开态卡片头部的按钮）——球本身是 button 但
-    // e.target === e.currentTarget 时是球/把手本体，不排除。
+    // 排除非自身的子交互控件（卡片头部的收起按钮等）；球自身是 button，
+    // 点在球内图标上时 closest 命中球自身 → 不排除（可拖）。
     const el = e.target as HTMLElement
-    if (el !== e.currentTarget && el.closest('button, a, input, .ant-segmented')) return
+    const interactive = el.closest('button, a, input, textarea, .ant-segmented')
+    if (interactive && interactive !== e.currentTarget) return
     e.preventDefault()
     // 拖拽基准 = 球锚点（卡片头部拖拽同样移动球锚点，卡片随翻转逻辑跟随；
     // 默认贴角无自定义坐标时取边界右下角等效锚点）。
@@ -234,31 +279,23 @@ export default function ViewerAIWidget({
       startY: e.clientY,
       origX: anchorResolved.x,
       origY: anchorResolved.y,
+      lastX: anchorResolved.x,
+      lastY: anchorResolved.y,
       moved: false,
     }
     try { e.currentTarget.setPointerCapture(e.pointerId) } catch { /* ignore */ }
+    window.addEventListener('pointermove', moveDragRaw)
+    window.addEventListener('pointerup', endDragRaw)
+    window.addEventListener('pointercancel', endDragRaw)
     setDragging(true)
   }
 
-  const moveDrag = (e: ReactPointerEvent<HTMLElement>) => {
-    const d = dragRef.current
-    if (!d) return
-    const dx = e.clientX - d.startX
-    const dy = e.clientY - d.startY
-    if (!d.moved && Math.abs(dx) <= DRAG_THRESHOLD && Math.abs(dy) <= DRAG_THRESHOLD) return
-    d.moved = true
-    setCustomPos(clampToViewport({ x: d.origX + dx, y: d.origY + dy }))
-  }
-
-  const endDrag = () => {
-    const d = dragRef.current
-    dragRef.current = null
-    setDragging(false)
-    if (d?.moved) {
-      suppressClickRef.current = true
-      persistPos(customPos)
-    }
-  }
+  // 卸载兜底：移除可能残留的 window 拖动监听。
+  useEffect(() => () => {
+    window.removeEventListener('pointermove', moveDragRaw)
+    window.removeEventListener('pointerup', endDragRaw)
+    window.removeEventListener('pointercancel', endDragRaw)
+  }, [moveDragRaw, endDragRaw])
 
   /** 双击重置位置（回到默认 CSS right/bottom 贴角）。 */
   const resetPos = () => {
@@ -535,7 +572,7 @@ export default function ViewerAIWidget({
       {open ? (
         <div
           ref={(el) => { hostRef.current = el }}
-          className={`viewer-aiw-card${dragging ? ' dragging' : ''}`}
+          className={`viewer-aiw-card${dragging ? ' dragging' : ''}${settled ? '' : ' aiw-pending'}`}
           /* v3.9：卡片恒定定宽高（360×520 固有比例，按边界收缩），位置经
              cardPosFor 翻转/夹取——不再出现接近 1:1 的挤压形态或越界。 */
           style={{ left: cardPos.left, top: cardPos.top, right: 'auto', bottom: 'auto', width: cardPos.width, height: cardPos.height }}
@@ -546,9 +583,6 @@ export default function ViewerAIWidget({
           <div
             className={`viewer-aiw-head${dragging ? ' dragging' : ''}`}
             onPointerDown={startDrag}
-            onPointerMove={moveDrag}
-            onPointerUp={endDrag}
-            onPointerCancel={endDrag}
           >
             <span className="viewer-aiw-title">
               <Sparkles size={14} strokeWidth={2} aria-hidden="true" />
@@ -723,12 +757,9 @@ export default function ViewerAIWidget({
         <button
           type="button"
           ref={(el) => { hostRef.current = el }}
-          className={`viewer-aiw-ball${dragging ? ' dragging' : ''}`}
+          className={`viewer-aiw-ball${dragging ? ' dragging' : ''}${settled ? '' : ' aiw-pending'}`}
           style={posStyle}
           onPointerDown={startDrag}
-          onPointerMove={moveDrag}
-          onPointerUp={endDrag}
-          onPointerCancel={endDrag}
           onDoubleClick={resetPos}
           onClick={() => {
             if (suppressClickRef.current) {
@@ -740,7 +771,7 @@ export default function ViewerAIWidget({
           aria-label={zh ? 'AI 助理' : 'AI assistant'}
           title={zh ? 'AI 助理：摘要 / 对话 / 修改' : 'AI assistant: summary / chat / edit'}
         >
-          <Sparkles size={16} strokeWidth={2} aria-hidden="true" />
+          <Sparkles size={14} strokeWidth={2} aria-hidden="true" />
         </button>
       )}
     </>

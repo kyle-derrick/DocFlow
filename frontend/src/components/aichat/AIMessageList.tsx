@@ -1,5 +1,5 @@
 // AI 对话共享消息流渲染（@ant-design/x：Bubble.List + Think + ThoughtChain）。
-// 三处对话场景（Studio 右栏 / 全局 AI 助手 Drawer / 编辑器侧栏）统一气泡：
+// 对话场景（全局 AI 助手 Drawer / 编辑器侧栏）统一气泡：
 // - 用户：右侧主色胶囊（含 📎 引用 chips）；
 // - AI：左侧无底色全宽 —— 顶部「思考过程」折叠区（Think 组件：流式期间
 //   自动展开跟随、完成后自动收起并展示用时，DeepSeek 交互范式）+ 工具

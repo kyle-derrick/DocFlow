@@ -10,7 +10,7 @@
 //   （listSpaceFiles，根目录 + 逐级展开）+ 文件名 Input（按语言推导默认值，
 //   可改）→ uploadFile(new File([code], name), folderId) 落盘，成功
 //   message「已保存：<空间/目录/文件名>」+「新窗口打开」链接（/view/{id}）；
-// - AIAssistant / AIEditChat / StudioPage 对话气泡共用（assistant 消息；
+// - AIAssistant / AIEditChat 对话气泡共用（assistant 消息；
 //   错误分支保持各自原样式）；memo 降低流式期间重渲染开销。
 import { createContext, memo, useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
@@ -295,7 +295,7 @@ const mdComponents: Components = {
 }
 
 /**
- * AI 对话 Markdown 渲染（共享组件；AIAssistant / AIEditChat / StudioPage 气泡
+ * AI 对话 Markdown 渲染（共享组件；AIAssistant / AIEditChat 气泡
  * 使用）。streaming 时同样渲染（调用方已有的行内光标负责动画；流式期间
  * 代码块不折叠，避免边生成边展开/收起跳动）。
  */

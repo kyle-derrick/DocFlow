@@ -61,9 +61,6 @@ if ($missing) {
 $profileArgs = @('--profile', $Profile)
 if ($Profile -eq 'full') { $env:ONLYOFFICE_UPSTREAM = 'onlyoffice:80' }
 Invoke-Checked 'docker' @('compose', 'config', '--quiet')
-# Agent 创作舱默认镜像（Dockerfile.agent：node:20-alpine + git + agent-runner；
-# 即 agent.DefaultImage 的 docflow/agent:1.0.0）随部署构建，跟随 deploy 流程。
-Invoke-Checked 'docker' @('build', '-f', 'Dockerfile.agent', '-t', 'docflow/agent:1.0.0', '.')
 Invoke-Checked 'docker' @('compose', 'build', 'backend', 'caddy', 'migrate', 'seed')
 Invoke-Checked 'docker' (@('compose') + $profileArgs + @('up', '-d'))
 

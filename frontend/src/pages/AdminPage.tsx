@@ -64,7 +64,6 @@ import { MessageKey, t, useLocale } from '../i18n'
 // React.lazy 后 vite 自动分包，进入对应 tag 才拉取并挂载（Suspense 兜底
 // loading）；面板为命名导出，经 then 映射为 default。
 const AISettingsPanel = lazy(() => import('../components/AISettingsPanel'))
-const AgentPanel = lazy(() => import('../components/AgentPanel'))
 const ConfigOverviewPanel = lazy(() => import('../components/ConfigOverviewPanel'))
 const MailPanel = lazy(() => import('../components/settings/PlatformPanels').then((m) => ({ default: m.MailPanel })))
 const TlsPanel = lazy(() => import('../components/settings/PlatformPanels').then((m) => ({ default: m.TlsPanel })))
@@ -2262,7 +2261,7 @@ const adminSectionGroups: Array<{ title: string; titleEn: string; items: Readonl
   {
     title: '平台设置',
     titleEn: 'Platform settings',
-    items: [['ai', 'AI 设置'], ['agent', 'AI 创作舱'], ['mail', '邮件'], ['tls', 'TLS'], ['system', '系统设置'], ['security', '安全与访问'], ['config', '配置总览']],
+    items: [['ai', 'AI 设置'], ['mail', '邮件'], ['tls', 'TLS'], ['system', '系统设置'], ['security', '安全与访问'], ['config', '配置总览']],
   },
 ]
 const adminSections = adminSectionGroups.flatMap((g) => g.items)
@@ -2434,14 +2433,6 @@ export default function AdminPage() {
             />
           </Suspense>
         </div>
-      )}
-      {section === 'agent' && !loading && !forbidden && (
-        <Suspense fallback={<div className="hint">{msg('loading')}</div>}>
-          <AgentPanel
-            onError={(m) => { setError(m); setNotice('') }}
-            onNotice={(m) => { setNotice(m); setError('') }}
-          />
-        </Suspense>
       )}
       {section === 'mail' && !loading && !forbidden && (
         <Suspense fallback={<div className="hint">{msg('loading')}</div>}>

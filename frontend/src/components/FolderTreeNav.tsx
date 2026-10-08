@@ -1,5 +1,5 @@
 ﻿// 文件管理左侧目录树（替代 Wiki 视图的空间内导航价值）：
-// - FolderTreeNav：当前空间的目录树 UI（antd Tree 目录模式，与 Studio 左栏
+// - FolderTreeNav：当前空间的目录树 UI（antd Tree 目录模式
 //   同一视觉体系）——根 = 空间根；子目录懒加载，目录下同时展示文件叶子
 //   节点；单击目录名 = 进入（onSelect 驱动中间列表切换）、单击文件 = 查看弹
 //   窗（fileOpenSignal）、展开/收起只经左侧箭头；当前目录高亮 + 自动展开
@@ -312,7 +312,7 @@ export function FileBrowserWithTree({ listChildren, aside, treeRootLabel, initia
    *  后树根仍显示空间名，避免丢失空间上下文）。 */
   treeRootLabel?: string
   /** 深链定位目录（?folder=<id>）：挂载完成后上溯构造链并驱动面包屑/树
-   *  展开至该目录（Studio「打开项目目录」等外部跳转入口）。 */
+   *  展开至该目录（外部深链跳转入口）。 */
   initialFolderId?: string
 }) {
   const rootLabel = browserProps.rootLabel
@@ -494,7 +494,7 @@ export function FileBrowserWithTree({ listChildren, aside, treeRootLabel, initia
 
   // ---- 外部「打开文件」信号（树文件节点点击 → FileBrowser 查看弹窗） ----
 
-  // ---- 深链定位（initialFolderId：?folder=<id> 外部跳转，如 Studio
+  // ---- 深链定位（initialFolderId：?folder=<id> 外部跳转，
   //      「打开项目目录」）——挂载后上溯 parent 链构造完整路径并驱动
   //      面包屑/树展开（等价于用户逐级点入）。----
 

@@ -213,7 +213,6 @@ func (h *Handler) aiRequireService(c *gin.Context) *ai.Service {
 // 显隐全站 AI 入口与各能力入口）。本端点不随开关 404（否则无法区分
 // 「关闭」与「未部署」）。响应为能力标志对象：
 //   - enabled：总开关（ai.enabled + 存在启用中的 Provider）；
-//   - agent：Agent 创作舱（agentEnabled 新语义：默认开启，受 AI 总开关约束）；
 //   - web_search：联网搜索（管理端配置 ai.search.provider 非空）；
 //   - mcp：外部 MCP 工具（ai.mcp 存在启用中的服务；读取失败容错 false）；
 //   - rag：知识库问答（引用文件基于关键词检索，AI 开即可用 = enabled）。
@@ -236,7 +235,6 @@ func (h *Handler) aiStatus(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"enabled":    enabled,
-		"agent":      h.agentEnabled(),
 		"web_search": webSearch,
 		"mcp":        mcpEnabled,
 		"rag":        enabled,

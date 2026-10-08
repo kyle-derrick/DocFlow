@@ -98,11 +98,6 @@ var envCatalog = []struct {
 	}, map[string]string{
 		"AI_ENABLED": "AI 总开关引导值（运行时可经平台管理覆盖）",
 	}},
-	{"Agent（Docker 沙箱）", [][2]string{
-		{"DOCFLOW_AGENT_IPC_DIR", "/run/docflow-ipc"},
-	}, map[string]string{
-		"DOCFLOW_AGENT_IPC_DIR": "AI IPC socket 目录（named volume 挂载点）",
-	}},
 	{"安全与防爆破", [][2]string{
 		{"JWT_SECRET", ""}, {"ACCESS_SALT", ""}, {"RATE_LIMIT_PER_MINUTE", "240"},
 		{"PUBLIC_RATE_LIMIT_PER_MINUTE", "60"}, {"LOGIN_RATE_LIMIT_PER_MINUTE", "10"},

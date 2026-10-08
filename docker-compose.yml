@@ -80,10 +80,6 @@ services:
         GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     image: docflow/backend:${DOCFLOW_IMAGE_TAG:-1.0.0}
     restart: unless-stopped
-    # Docker socket 访问权：挂载的 /var/run/docker.sock 属主 root:root 0660，
-    # backend 以 app(1000) 运行——root 补充组获得读写（Docker Desktop 场景
-    # 唯一可行方案；仅在挂载 socket 时需要，恒加不影响无 socket 部署）。
-    group_add: ["0"]
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgres://docflow:change-me@postgres:5432/docflow?sslmode=disable}
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
@@ -211,11 +207,6 @@ services:
       AI_RAG_TOP_K: ${AI_RAG_TOP_K:-8}
       AI_RAG_CHUNK_SIZE: ${AI_RAG_CHUNK_SIZE:-1000}
       AI_RAG_CHUNK_OVERLAP: ${AI_RAG_CHUNK_OVERLAP:-100}
-      # Agent 容器平台 AI IPC socket 目录（agentsock.go；backend 在此监听
-      # ai.sock，agent 容器经下方 docflow-agent-ipc 卷只读共享 /run/docflow-ai
-      # ——NetworkMode=none 断网容器仍可调平台 AI）。agent.allow_ai=false
-      # 时平台不签发令牌，容器内无 AI 能力（runner 降级），socket 保持监听。
-      DOCFLOW_AGENT_IPC_DIR: /run/docflow-ipc
     expose:
       - "8080"
     healthcheck:
@@ -226,17 +217,6 @@ services:
     volumes:
       - backend_storage:/data/storage
       - tls_certs:/data/tls
-      # Agent AI IPC socket 共享卷（可写；agent 容器由 backend 经 Docker
-      # Engine API 创建并以 :ro 挂载到 /run/docflow-ai）。
-      - docflow-agent-ipc:/run/docflow-ipc
-      # AI 创作舱（Docker 沙箱引擎）必需：把宿主 Docker socket 挂进
-      # backend（Windows Docker Desktop 同样经该 Unix socket 暴露）；未
-      # 挂载时沙箱任务报「Docker 运行时未接入」。挂载即等同给予 backend
-      # 编排宿主容器的能力，请自行评估信任边界（本机自用部署已启用）。
-      # socket 属主 root:root 0660，backend 以 app(1000) 运行——group_add
-      # root 作为补充组获得读写权（Docker Desktop 的 socket 恒 root:root，
-      # 宿主侧改组不可行）。
-      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -455,11 +435,6 @@ services:
 volumes:
   postgres_data:
   backend_storage:
-  # Agent AI IPC socket 共享卷：backend 可写（监听 ai.sock），backend 创建
-  # 的 agent 容器只读挂载到 /run/docflow-ai。name 钉死实际卷名（不带
-  # compose 项目前缀），backend 才能用固定名 docflow-agent-ipc 挂到同一卷。
-  docflow-agent-ipc:
-    name: docflow-agent-ipc
   clamav_data:
   caddy_data:
   caddy_config:

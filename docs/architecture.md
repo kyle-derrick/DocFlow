@@ -55,8 +55,7 @@
      （Go API）      （元数据）        （队列/广播）  （文档编辑）     / clamav
           │
           ├── backend_storage 卷（local 驱动时的文件对象）
-          ├── tls_certs 卷（与 caddy 共享，只读挂给 caddy）
-          └── docflow-agent-ipc 卷（Agent 容器 AI IPC socket）
+          └── tls_certs 卷（与 caddy 共享，只读挂给 caddy）
 ```
 
 ### 2.2 三个二进制的镜像复用
@@ -131,7 +130,6 @@ seed 的幂等策略：`INSERT ... ON CONFLICT (email) DO UPDATE ... WHERE users
 | `audit` | 审计日志写入与查询 |
 | `settings` | 运行时设置键定义、类型/范围校验、热读取、审计 |
 | `ai` | 多 Provider 对话、内容抽取、OCR、摘要、RAG（关键词/hybrid+Qdrant）、rerank、联网搜索、用量记账、平台文件工具 |
-| `agent` | Docker 沙箱 Agent 创作舱：镜像白名单、容器生命周期、产物同步与 diff |
 | `oidc` | OIDC 客户端（授权码 + PKCE S256，手写标准库流程，不引 oauth2） |
 
 ### 3.2 基础设施模块
@@ -244,7 +242,7 @@ users ──┬── spaces（owner_id）
 | 账号凭据 | `users`、`sessions`、`api_tokens`、`webdav_tokens`、`user_totp`、`oidc_links`、`email_change_codes`、`password_reset_tokens`、`invitations`、`user_ai_prefs`、`ai_memory`、`ai_usage` |
 | 文件内容 | `files`、`file_versions`、`object_blobs`、`upload_sessions`、`directory_snapshots`、`web_packages`、`file_search_docs` |
 | 分享 | `shares`、`share_users`、`share_spaces`、`share_files`、`share_access_sessions`、`file_access_events` |
-| 平台 | `audit_logs`、`system_settings`、`notifications`、`webhooks`、`tags`/`file_tags`、`onlyoffice_callbacks`、`document_comments`、`agent_tasks`、`tls_state` |
+| 平台 | `audit_logs`、`system_settings`、`notifications`、`webhooks`、`tags`/`file_tags`、`onlyoffice_callbacks`、`document_comments`、`tls_state` |
 
 ---
 
@@ -412,10 +410,10 @@ Caddy:  header { -Cookie; Content-Security-Policy "sandbox allow-scripts"; nosni
 | 类别 | 路径 | 外壳 |
 | --- | --- | --- |
 | 公开页 | `/login`、`/sso`、`/register/:token`、`/forgot`、`/reset/:token`、`/s/:token` | 无 |
-| 常规页 | `/`、`/files`、`/dashboard`、`/spaces`、`/shared`、`/studio`、`/admin/:section`、`/settings/:section` | TopBar + 全局 AI Drawer |
+| 常规页 | `/`、`/files`、`/dashboard`、`/spaces`、`/shared`、`/admin/:section`、`/settings/:section` | TopBar + 全局 AI Drawer |
 | 独立编辑器 | `/view/:fileId`、`/edit/:fileId`、`/drawio/:fileId`、`/excalidraw/:fileId`、`/text/:fileId`、`/dfdoc/:fileId` 等 | `bare`（不挂顶栏） |
 
-管理后台 13 个分区（`AdminPage.tsx`）：overview / people / spaces / audit / threat / backup / ai / agent / mail / tls / system / security / config。重面板经 `React.lazy` 懒加载。
+管理后台 12 个分区（`AdminPage.tsx`）：overview / people / spaces / audit / threat / backup / ai / mail / tls / system / security / config。重面板经 `React.lazy` 懒加载。
 
 `RequireAuth` 关键行为：`access_token` **仅存内存**（`useState`），未持有 token 时先用 `refreshSession()` 静默续期，失败才跳登录。
 
@@ -481,7 +479,6 @@ Caddy:  header { -Cookie; Content-Security-Policy "sandbox allow-scripts"; nosni
 | `onlyoffice_data` | DS 文档数据 | 视情形 |
 | `meili_data` / `qdrant_data` | 索引/向量 | 可不备（可重建） |
 | `clamav_data` / `caddy_config` / `onlyoffice_logs` | 病毒库/配置缓存/日志 | 不需要 |
-| `docflow-agent-ipc` | Agent AI IPC socket | 不需要（`name:` 钉死实际卷名） |
 
 `make backup` / `backup-verify` / `backup-windows`；`GET /admin/backups/status` 读校验标记。
 
@@ -492,20 +489,7 @@ Caddy:  header { -Cookie; Content-Security-Policy "sandbox allow-scripts"; nosni
 | `docflow/caddy:$TAG` | `frontend/Dockerfile`（上下文 `./frontend`） | 入口：TLS + SPA 静态 + draw.io 静态 + 反代 |
 | `docflow/backend:$TAG` | `Dockerfile`（上下文 `.`） | Go API；migrate/seed 复用同镜像 |
 | `docflow/onlyoffice:8.2.3-cjk` | `deploy/onlyoffice/Dockerfile` | 官方 DS + `fonts-noto-cjk`（无 CJK 字体时中文渲染为方块） |
-| `docflow/agent:1.0.0` | `Dockerfile.agent` | Agent 沙箱执行镜像 |
 
-**所有 up/deploy 目标都依赖 `build-agent`** —— Agent 镜像随部署自动构建。
-
-### 7.5 Agent 沙箱安全模型
-
-`internal/agent/docker.go` 直接经 Docker Engine HTTP API 创建容器，加固项：
-
-`User 65534:65534`、`NetworkMode: none`、`Privileged: false`、`CapDrop: ["ALL"]`、`no-new-privileges`、`ReadonlyRootfs: true`、`PidsLimit: 64`、tmpfs `/tmp`（`noexec,nosuid,nodev`）、CPU/内存受控。
-
-三重边界：
-1. **workspace 必须是 `os.TempDir()` 下 `docflow-agent-` 前缀目录**，且非符号链接 —— 绝不暴露 daemon socket 或宿主内部目录
-2. **绝不持久化 stdout/stderr** —— 容器输出可能回显 prompt 或密钥，只取固定状态字符串
-3. **断网容器调平台 AI 走 unix socket**（`/run/docflow-ipc/ai.sock`）：`NetworkMode=none` 下经共享卷挂载的 socket 是唯一通道，鉴权用任务级 Bearer token，每任务调用上限 `agent.ai_max_calls`
 
 ---
 

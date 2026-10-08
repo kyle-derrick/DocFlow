@@ -41,7 +41,6 @@ import (
 	"github.com/docflow/docflow/internal/settings"
 	"github.com/docflow/docflow/internal/share"
 	"github.com/docflow/docflow/internal/space"
-	"github.com/docflow/docflow/internal/studio"
 	"github.com/docflow/docflow/internal/tagging"
 	"github.com/docflow/docflow/internal/tasks"
 	"github.com/docflow/docflow/internal/upload"
@@ -636,62 +635,6 @@ func main() {
 		aiService.SetHybridRetriever(hybrid, ragEffective)
 	}
 	handler.SetAIService(aiService, aiEnvBaseline, aiUsageStore)
-	// Agent 容器平台 AI IPC 网关（agentsock.go）：任务创建时签发一次性
-	// 令牌，断网容器（NetworkMode=none）经 unix socket POST /chat、
-	// POST /v1/chat/completions（OpenAI 协议兼容子集，agentsock_openai.go）
-	// 与 POST /v1/messages（Anthropic Messages 兼容子集，agentsock_anthropic.go）
-	// 回调平台默认对话模型（零值 ChatRequest：禁用工具/联网/记忆/思考；
-	// onDelta 非空即流式）；用量按任务归属用户记账（ForUser）。
-	agentAI := httpapi.NewAgentAIGateway(func(ctx context.Context, user uuid.UUID, system string, messages []ai.Message, maxTokens int, onDelta func(string)) (string, string, error) {
-		res, err := aiService.ForUser(user).Chat(ctx, ai.ChatRequest{System: system, Messages: messages, MaxTokens: maxTokens, Stream: onDelta != nil}, onDelta)
-		if err != nil {
-			return "", "", err
-		}
-		return res.Content, res.ProviderID + "/" + res.Model, nil
-	})
-	// /v1/messages 工具透传（Claude Code harness）：解析平台默认对话目标
-	// 供网关直连转发（要求 anthropic kind——网关把 tools/content 块以
-	// anthropic 原生形状透传，平台仍管鉴权/限流/审计/模型路由）。
-	agentAI.SetAnthropicTarget(func(ctx context.Context, user uuid.UUID) (string, string, string, error) {
-		target, err := aiService.ForUser(user).ResolveChatTargetFor("", "", settings.AIScenarioChat)
-		if err != nil {
-			return "", "", "", err
-		}
-		if target.Provider.Kind != settings.AIKindAnthropic {
-			return "", "", "", httpapi.ErrAgentAIAnthropicIncompatible
-		}
-		return target.Provider.BaseURL, target.Provider.APIKey, target.Model, nil
-	})
-	// /v1/chat/completions 工具直连（pi harness，OpenAI 兼容协议）：解析
-	// 平台默认对话目标（要求 openai 兼容 kind）供网关改写 model 后直发
-	// 上游 /chat/completions（tools/tool_choice/messages 原样、Bearer
-	// 鉴权、响应体原样回传），平台仍管鉴权/限流/审计/模型路由。
-	agentAI.SetOpenAITarget(func(ctx context.Context, user uuid.UUID) (string, string, string, error) {
-		target, err := aiService.ForUser(user).ResolveChatTargetFor("", "", settings.AIScenarioChat)
-		if err != nil {
-			return "", "", "", err
-		}
-		if target.Provider.Kind != settings.AIKindOpenAICompatible {
-			return "", "", "", httpapi.ErrAgentAIOpenAIIncompatible
-		}
-		return target.Provider.BaseURL, target.Provider.APIKey, target.Model, nil
-	})
-	agentAI.SetAuditRecorder(auditStore)
-	handler.SetAgentAI(agentAI)
-	// socket 服务：/run/docflow-ipc/ai.sock（DOCFLOW_AGENT_IPC_DIR 可配，
-	// compose 经 named volume docflow-agent-ipc 与 agent 容器共享）。
-	// 监听失败（如本机开发无 /run 权限）仅告警降级：agent 任务照常运行，
-	// 容器内无 AI 能力（runner 降级为执行 prompt 中的 ```run 块）。
-	if stopIPC, ipcErr := httpapi.StartAgentIPCServer(ctx, os.Getenv("DOCFLOW_AGENT_IPC_DIR"), agentAI.Handler()); ipcErr != nil {
-		log.Printf("agent ai ipc socket disabled: %v", ipcErr)
-	} else {
-		defer stopIPC()
-		ipcDir := os.Getenv("DOCFLOW_AGENT_IPC_DIR")
-		if ipcDir == "" {
-			ipcDir = httpapi.AgentAIIPCDefaultDir
-		}
-		log.Printf("agent ai ipc socket listening on %s/%s (POST /chat, POST /v1/chat/completions, POST /v1/messages)", ipcDir, httpapi.AgentAISockName)
-	}
 	// 图片 OCR 自动入索引：aiService 读 blob 需要存储读取器；把它挂到
 	// 索引器（*ai.Service 满足 search.OCRExtractor，编译期保证），OCR
 	// 未开启时 ExtractImageText 安静返回空、索引行为不变。
@@ -705,15 +648,12 @@ func main() {
 	handler.SetTaskEnqueuer(enqueuer)
 	// 管理端：系统设置（system_settings）、基础统计与 admin 角色查询。
 	handler.SetSettingsService(settingsStore)
-	handler.SetAgentDB(db)
 	// 重建索引端点（POST /admin/settings/ai/reindex）的文件列表源
 	//（files 表游标分页直查；切换 embedding 模型后重建新 collection 用）。
 	handler.SetReindexLister(httpapi.NewReindexLister(db))
 	handler.SetWebDAV(auth.NewWebDAVStore(db))
 	handler.SetStatsSource(httpapi.NewAdminStats(db))
 	handler.SetRoleLookup(userStore)
-	// Studio 项目注册表（migration 051）：本人维度 CRUD 存储。
-	handler.SetStudioStore(studio.NewStore(db))
 	// 用户组管理（migration 035）：组 CRUD 与成员维护（仅 admin 路由组）。
 	handler.SetGroups(group.NewService(group.NewGormStore(db)))
 	// HTTPS 运行时切换（管理页面）：CADDY_ADMIN_ADDR 配置时经 Caddy admin

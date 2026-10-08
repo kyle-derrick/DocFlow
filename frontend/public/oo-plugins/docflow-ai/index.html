@@ -10,7 +10,10 @@
      - 文档操作（DS 插件桥）：引用选中（GetSelectedText）/ 插入到光标
        （PasteHtml）/ 替换选中（InsertAndReplaceText）；
      - 插件桥脚本：优先同源反代 /onlyoffice/sdkjs-plugins/v1/plugins.js
-       （离线部署可用），失败回退 onlyoffice.github.io CDN。 -->
+       （离线部署可用），失败回退 onlyoffice.github.io CDN；
+     - config.json 静态托管（variations[].url 相对路径——DS 解析是拼接到
+       config.json 所在目录，绝对 URL 会 404）；不 autostart，从编辑器左侧
+       插件图标按需展开。 -->
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8" />

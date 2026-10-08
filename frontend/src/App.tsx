@@ -53,7 +53,6 @@ import SettingsPage from './pages/SettingsPage'
 import DashboardPage from './pages/DashboardPage'
 import ViewerPage from './pages/ViewerPage'
 import { EditDispatchPage } from './pages/ViewerPage'
-import StudioPage from './pages/StudioPage'
 import { EditByPathPage, ViewByPathPage } from './pages/ByPathPage'
 import { messages, saveLocale, t, useLocale } from './i18n'
 
@@ -713,7 +712,6 @@ function TopBar() {
   const location = useLocation()
   const locale = useLocale()
   const msg = (key: keyof typeof messages['zh-CN']) => t(locale, key)
-  const aiOn = useAIEnabled()
   // admin 探测：JWT 无 role 声明，降级为请求 /admin/stats（200/403）判定，
   // 结果按会话缓存（登录/登出后失效）；非 admin 隐藏「管理」入口。
   const [admin, setAdmin] = useState(false)
@@ -773,13 +771,6 @@ function TopBar() {
         {/* 空间管理页（v2.0 统一空间模型）：我的空间卡片 + 成员/用户组/配额/解散/转让入口。 */}
         <Link to="/spaces" className={location.pathname.startsWith('/spaces') ? 'active' : ''}>{msg('teams')}</Link>
         <Link to="/shared" className={location.pathname === '/shared' ? 'active' : ''}>{msg('shared')}</Link>
-        {/* AI 创作空间（AI 启用时显示）：独立创作页（文件快速访问 + AI 对话/
-            智能体任务聚合），顶栏直达。 */}
-        {aiOn && (
-          <Link to="/studio" className={location.pathname.startsWith('/studio') ? 'active' : ''}>
-            {locale === 'zh-CN' ? 'AI 创作' : 'AI Studio'}
-          </Link>
-        )}
       </nav>
       <TopBarSearch />
       <OfflineBadge />
@@ -903,8 +894,6 @@ export default function App() {
         <Route path="/code/:fileId" element={<RequireAuth bare><TextEditorPage kind="text" /></RequireAuth>} />
         {/* .dfdoc 富文本文档（Tiptap JSON）：编辑/查看同编辑器，独立窗口。 */}
         <Route path="/dfdoc/:fileId" element={<RequireAuth bare><DfdocEditorPage /></RequireAuth>} />
-        {/* AI 创作空间：文件快速访问 + AI 对话/智能体任务聚合（AI 启用）。 */}
-        <Route path="/studio" element={<RequireAuth><StudioPage /></RequireAuth>} />
         <Route path="/admin" element={<Navigate to="/admin/overview" replace />} />
         <Route path="/admin/:section" element={<RequireAuth><AdminPage /></RequireAuth>} />
         {/* 回收站已弹窗化（文件页工具栏按钮，见 TrashModal），整页路由删除；

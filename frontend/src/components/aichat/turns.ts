@@ -1,4 +1,4 @@
-// AI 对话共享数据模型（纯逻辑，无 React 依赖；三处对话场景共用）：
+// AI 对话共享数据模型（纯逻辑，无 React 依赖；各对话场景共用）：
 // - 工具调用生命周期条目（SSE event:tool → running / event:tool_result →
 //   success|error，按 server+tool 顺序配对合并）；
 // - 推理思考（thinking）增量随 turn 聚合，附起止时间供折叠标题展示用时；
@@ -127,7 +127,7 @@ export interface AIAttachFile {
   fileName: string
 }
 
-/** 对话消息统一展示模型（Studio 会话 / AI 助手 / 编辑器侧栏共用渲染）。 */
+/** 对话消息统一展示模型（AI 助手 / 编辑器侧栏共用渲染）。 */
 export interface AIChatTurnData {
   /** 会话内自增 ID：流式回调按 id 定位更新。 */
   id: number | string

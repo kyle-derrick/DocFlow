@@ -48,18 +48,18 @@ const DOC_EDITOR_READY_TIMEOUT_MS = 15000
 /** 跨标签页保存标记：本窗口保存后写入，其他窗口 storage 事件感知后刷新版本。 */
 const savedMarkerKey = (fileId: string) => `docflow:onlyoffice-saved:${fileId}`
 
-/** DocFlow AI OnlyOffice 插件 guid（与后端动态清单端点一致）：编辑器内
- * 侧栏 AI 对话面板（oo-plugins/docflow-ai/index.html——SSE 流式对话 +
- * 引用选区 + 插入/替换文档，v3.9 起为 Office 唯一 AI 入口，页内不再渲染
- * 外部 AI 面板）。 */
-const DOCFLOW_AI_PLUGIN_GUID = 'asc.{5A3F6E21-8C4D-4B0E-9A7D-2F1C0D5E8B44}'
+/** DocFlow AI OnlyOffice 插件清单 URL：前端站点同源静态资源（构建期
+ *  public/ 拷入产物）。DS 对 variations[].url 的解析是「拼接到 config.json
+ *  所在目录」——只支持相对路径（绝对 URL 会被拼成 …/ai-plugin/http://…
+ *  导致 404，v3.10 实测），故 config.json 用相对 url + 静态托管。
+ *  插件页 = 编辑器内侧栏 AI 对话面板。 */
 
 /** 插件清单 URL：后端动态端点（公开组，无 Bearer——编辑器 api.js 以普通
  * fetch 拉取）。清单内 baseUrl/variations[].url 均为按请求 Host 推导的
  * 绝对 URL，规避部分 DS 版本空 baseUrl 相对解析落 SPA 兜底（面板打开成
  * 「文件页」）的问题。 */
-const docflowAIPluginManifestURL = () =>
-  new URL('api/v1/onlyoffice/ai-plugin/config.json', window.location.origin + '/').href
+const docflowAIPluginConfigURL = () =>
+  new URL('oo-plugins/docflow-ai/config.json', window.location.origin + '/').href
 
 /**
  * 动态注入 DocumentServer 的 api.js（全局只增不删）：
@@ -213,18 +213,16 @@ export default function EditorPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
             ...((config.customization as Record<string, unknown> | undefined) ?? {}),
             uiTheme: colorMode === 'dark' ? 'theme-dark' : 'theme-classic-light',
           },
-          // DocFlow AI 插件（编辑会话）：pluginsData 指向后端动态清单（绝对
-          // URL，规避 DS 相对解析落 SPA 兜底=面板成「文件页」），DS 据此
-          // 加载编辑器内 AI 对话面板并 autostart 自动打开。plugins 为后端
+          // DocFlow AI 插件（编辑会话）：pluginsData 指向同源静态清单，DS
+          // 据此在「插件」菜单注册侧栏 AI 对话面板。v3.10：不 autostart——
+          // 默认收起，用户从编辑器左侧插件图标按需展开。plugins 为后端
           // JWT 载荷未覆盖的 UI 级字段（前端追加与 customization/events 同
-          // 机制生效）；DS 8.2.3 若 autostart 未生效，可从编辑器「插件」
-          // 菜单手动打开。
+          // 机制生效）。
           ...(!viewMode && {
             editorConfig: {
               ...((config.editorConfig as Record<string, unknown> | undefined) ?? {}),
               plugins: {
-                autostart: [DOCFLOW_AI_PLUGIN_GUID],
-                pluginsData: [docflowAIPluginManifestURL()],
+                pluginsData: [docflowAIPluginConfigURL()],
               },
             },
           }),
@@ -373,7 +371,7 @@ export default function EditorPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
 
       {/* DocEditor 挂载容器：未进入错误态时始终渲染，placeholder 由 effect
           内命令式创建（每次 init 全新 id）。v3.9：Office 的 AI 对话入口 =
-          编辑器内 DocFlow AI 插件面板（autostart，见上方 plugins 注入），
+          编辑器内 DocFlow AI 插件面板（见上方 plugins 注入，从插件图标展开），
           页内不再渲染外部 AI 面板。 */}
       {!error && !loadError && <div className="editor-shell" ref={shellRef} />}
     </div>
