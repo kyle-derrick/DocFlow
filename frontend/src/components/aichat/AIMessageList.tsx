@@ -200,7 +200,11 @@ export function AIAssistantMessageBody({ turn, zh, isLast, onRegenerate, extra }
         <span className="aic-generating"><Sparkles size={12} strokeWidth={2} aria-hidden="true" />{zh ? '生成中…' : 'Generating…'}</span>
       ) : turn.stopped ? (
         <span className="aic-stopped">{zh ? '已停止' : 'Stopped'}</span>
-      ) : null}
+      ) : (
+        // 兜底：流结束但无正文/错误/停止标记（如推理模型耗尽输出上限返回
+        // 空 done）——给出可见提示而非整块空白。
+        <span className="aic-stopped muted">{zh ? '（模型未返回内容）' : '(no content returned)'}</span>
+      )}
       {turn.streaming && turn.content && <span className="ai-caret" aria-hidden="true" />}
       {turn.stopped && turn.content && <span className="aic-stopped-tag">{zh ? '已停止' : 'Stopped'}</span>}
       {turn.sources && turn.sources.length > 0 && (

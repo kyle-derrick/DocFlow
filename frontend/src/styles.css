@@ -2956,7 +2956,9 @@ svg.lucide {
   margin: 0;
   font-size: 15px;
   min-width: 0;
-  flex: 0 1 auto;
+  /* v3.9：标题占满剩余宽度，把其后按钮/徽标推到行尾统一靠右
+     （此前跟在标题后随标题长度漂移）。 */
+  flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -3792,19 +3794,8 @@ kbd {
   padding: 0;
 }
 
-/* 富文本编辑页头部操作行（[AI 对话][保存]）靠左：原 .editor-head-actions
-   的 margin-left:auto + .text-editor-head 的 space-between 把整组按钮推到
-   行尾，页面顶部工具行呈「靠右对齐」观感（用户反馈，与 DrawioPage/
-   EditorPage 头部左排一致）。仅作用富文本页（:has(.rich-text-wrap) 锚定，
-   md/文本编辑页按钮多、保持原布局）。 */
-.text-editor-page:has(.rich-text-wrap) .text-editor-head {
-  justify-content: flex-start;
-}
-
-.text-editor-page:has(.rich-text-wrap) .text-editor-head .editor-head-actions {
-  margin-left: 0;
-}
-
+/* v3.9：所有编辑页顶部按钮统一靠右（.text-editor-head 的 space-between +
+   .editor-head-actions 的 margin-left:auto；富文本页此前的靠左覆写已删除）。 */
 /* 协作状态胶囊：位于工具栏首位、紧跟工具组（紧凑排布，行尾自然留白）；
    不再用 margin-left:auto——旧实现把 badge 右推，其左侧（行首）被撑出
    大片空隙（用户反馈 6）。与工具组的间距由工具栏 gap 提供。 */
@@ -6078,7 +6069,6 @@ kbd {
   gap: 8px;
 }
 .ai-input-hint { font-size: 11px; user-select: none; }
-.ai-send-btn, .ai-stop-btn { flex-shrink: 0; }
 /* 打字机光标（流式输出中）。 */
 .ai-caret::after {
   content: '▍';
@@ -6465,14 +6455,6 @@ kbd {
   margin-right: auto;
   color: var(--text);
 }
-.ai-edit-chat-scope {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--border);
-}
 .ai-edit-chat-scope-hint { font-size: 12px; }
 .ai-edit-chat-thread {
   flex: 1;
@@ -6672,7 +6654,6 @@ kbd {
 .ai-attach-chip button:hover { color: var(--danger); }
 /* 输入框左下工具组（引用 / 技能 / 工作目录 / 当前文档 / 智能体 / 记忆 /
    清空 / 文件检索开关 + 输入提示；元素多时允许换行）。 */
-.ai-input-tools { display: inline-flex; align-items: center; gap: 4px; min-width: 0; flex-wrap: wrap; row-gap: 2px; }
 .ai-attach-btn.ant-btn { padding: 0 4px; color: var(--muted); }
 .ai-attach-btn.ant-btn:hover { color: var(--primary); }
 /* 引用文件弹层（最近访问 / 搜索，多选）。 */
@@ -7590,7 +7571,8 @@ kbd {
 /* Agent 能力未启用：中栏顶部黄条提示。 */
 
 /* ==================== AI 编辑对话：模式开关 + 自动应用/撤销（版本保护） ==================== */
-/* 面板头部下方的「可修改 / 仅对话」模式行（与范围行同款分隔）。 */
+/* 面板头部下方的「可修改 / 仅对话 + 选区 / 全文」单行（v3.9 两行合并省一行），
+   模型选择在底部输入区工具栏、发送键最右端。 */
 .ai-edit-chat-mode {
   display: flex;
   align-items: center;
@@ -7691,7 +7673,6 @@ kbd {
   min-width: 0;
 }
 /* AIEditChat 模式行：开关组靠右（行本身已 flex-wrap，窄面板换行不挤爆）。 */
-.ai-edit-chat-mode .ai-toggle-row { margin-left: auto; }
 
 /* 「网络来源」折叠列表（联网开关生效时后端 SSE meta.sources 宽松读取）。 */
 
@@ -7889,8 +7870,6 @@ kbd {
   flex-direction: column;
   gap: 6px;
 }
-.viewer-aiw-input-row { display: flex; align-items: flex-end; gap: 6px; min-width: 0; }
-.viewer-aiw-input-row .ant-input { flex: 1; min-width: 0; border: none !important; box-shadow: none !important; background: transparent !important; }
 .viewer-aiw-input-spacer { flex: 1; }
 .viewer-aiw-model { min-width: 0; max-width: 200px; }
 /* 窄视口：卡片缩至近全宽，避免遮挡内容。 */
@@ -8024,8 +8003,13 @@ kbd {
   background: transparent !important;
   border-radius: 14px 14px 0 0;
 }
-/* 隐藏 Sender 内置发送按钮（v3.7：发送/停止移到 chat-tools-bar 最右端）。 */
-.chat-input-box .ant-sender .ant-sender-actions { display: none !important; }
+/* 隐藏 Sender 内置发送按钮（发送/停止在 chat-tools-bar 最右端）。内置按钮
+   必须保持挂载——@ant-design/x v2 的 submitDisabled 状态仅由其 effect 驱动，
+   卸载（suffix={false}）会让 Enter 永远无法提交——因此用 CSS 隐藏，且同时
+   覆盖 v1（ant-sender-actions）与 v2（ant-sender-actions-list 包装层）两代
+   类名。 */
+.chat-input-box .ant-sender .ant-sender-actions,
+.chat-input-box .ant-sender .ant-sender-actions-list { display: none !important; }
 .chat-input-box .ant-input {
   border: none !important;
   box-shadow: none !important;

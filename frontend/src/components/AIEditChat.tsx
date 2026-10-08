@@ -17,19 +17,21 @@
 //   AI 只回 excalidraw 元素 JSON 数组，自动应用时提取 JSON 交宿主经官方
 //   convertToExcalidrawElements 转为白板原生元素追加插入）、drawio-xml
 //   （图表页：AI 回完整 drawio XML，自动应用时提取 XML 整体替换画布）；
-//   forceChatOnly=true 恒「仅对话」（OnlyOffice 等无自动落盘 API 的编辑页
-//   用，可另传 officeInsert 挂点提供「应用到文档」按钮——经 DocFlow AI
-//   插件把回复插入文档）。
+//   v3.9：OnlyOffice 编辑页不再挂本面板（Office 的 AI 入口 = 编辑器内
+//   DocFlow AI 插件，见 frontend/public/oo-plugins/docflow-ai）；本面板
+//   仅服务有落盘通道的宿主页（Monaco/Tiptap/白板/图表）。
 import { useEffect, useRef, useState } from 'react'
 import { App as AntdApp, Button, Input, Popover, Segmented, Tooltip } from 'antd'
 import type { MenuProps } from 'antd'
 import SplitButton from './SplitButton'
 import type { TextAreaRef } from 'antd/es/input/TextArea'
-import { Check, Copy, FileInput, HelpCircle, Send, Sparkles, Square, Trash2, X } from 'lucide-react'
-import { aiChat, getFileMeta, restoreVersion } from '../api'
+import { Check, Copy, FileText, HelpCircle, Paperclip, Sparkles, Trash2, X } from 'lucide-react'
+import { aiChat, getFileMeta, listFiles, restoreVersion, searchFiles } from '../api'
 import type { AIMessage } from '../api'
 import { AIChatToggleBar, AISkillButton, AIToolCalls, AIWebSources, AI_MODEL_STORAGE_KEY, defaultAIModelKey, getAIModels, normalizeWebSources, renderSkillPrompt, useAIChatToggles } from './AIAssistant'
 import { AIChatThinking, applyToolResult, toolEntryFrom } from './aichat'
+import { CHAT_SEND_ICON, CHAT_STOP_ICON } from './aichat/icons'
+import type { AIAttachFile } from './aichat'
 import type { AIToolCallEntry } from './aichat'
 import type { AIModelOption, AIWebSource } from './AIAssistant'
 import AIModelSelect from './AIModelSelect'
@@ -206,6 +208,8 @@ interface ChatTurn {
   error?: string
   /** 附注：用户消息的上下文范围/长度/截断说明；助手消息的停止说明。 */
   note?: string
+  /** 用户回合引用的其它文件（chips 展示，全文经 context.fileIds 注入）。 */
+  files?: AIAttachFile[]
   /** 推理思考聚合文本（SSE thinking 增量；折叠区展示，不计入正文）。 */
   thinking?: string
   /** 首个思考增量时间戳（ms；计算用时）。 */
@@ -332,9 +336,7 @@ export default function AIEditChat({
   quickCommand,
   onQuickConsumed,
   applyKind = 'text',
-  forceChatOnly = false,
   outputFormat = 'plaintext',
-  officeInsert,
 }: {
   open: boolean
   onClose: () => void
@@ -360,17 +362,6 @@ export default function AIEditChat({
   onQuickConsumed?: () => void
   /** 应用通道（默认 text；excalidraw-json/drawio-xml 见 AIApplyKind）。 */
   applyKind?: AIApplyKind
-  /** 恒「仅对话」：隐藏模式切换（不支持自动落盘的宿主页，如 OnlyOffice）。 */
-  forceChatOnly?: boolean
-  /** Office 文档「应用到文档」挂点（OnlyOffice 页）：提供时每条助手回复
-   * 下方渲染「应用到文档」按钮——点击经宿主把回复插入编辑器（DocFlow AI
-   * 插件 postMessage 链路）；ready=false 时点击提示先打开插件面板。 */
-  officeInsert?: {
-    /** DocFlow AI 插件是否已就绪（插件面板已打开并上报）。 */
-    ready: boolean
-    /** 把一段回复内容插入文档（宿主负责 postMessage 与提示）。 */
-    onInsert: (text: string) => void
-  }
   /** text 通道输出格式（默认 plaintext=原样纯文本输出，Monaco 等用）；
    * markdown=富文本宿主（.dfrt 编辑页）：system 指令要求输出 Markdown，
    * 宿主经 marked 转富文本 HTML 插入。仅 applyKind='text' 生效。 */
@@ -417,10 +408,9 @@ export default function AIEditChat({
   const [selectionLen, setSelectionLen] = useState(0)
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState('')
-  /** 面板模式：可修改（默认）/仅对话（ref 供快捷指令立即生效）；
-   * forceChatOnly 恒 chat。 */
-  const [mode, setMode] = useState<ChatMode>(() => (forceChatOnly ? 'chat' : 'edit'))
-  const modeRef = useRef<ChatMode>(forceChatOnly ? 'chat' : 'edit')
+  /** 面板模式：可修改（默认）/仅对话（ref 供快捷指令立即生效）。 */
+  const [mode, setMode] = useState<ChatMode>('edit')
+  const modeRef = useRef<ChatMode>('edit')
   /** 正在执行撤销的回合 id（单飞：同一时间只允许一次版本回退）。 */
   const [undoingId, setUndoingId] = useState<number | null>(null)
   // 联网/思考开关：与全局助手 / Studio 共用 localStorage key 与默认逻辑
@@ -443,6 +433,40 @@ export default function AIEditChat({
     }
   })
   const toggles = useAIChatToggles(models, modelKey)
+  // 文件引用（v3.9）：随指令附带其它文件全文（context.fileIds 注入 system
+  // 上下文；当前文档本身已是主上下文，引用的是「其它」文件）。
+  const [attached, setAttached] = useState<AIAttachFile[]>([])
+  const [attachOpen, setAttachOpen] = useState(false)
+  const [attachQuery, setAttachQuery] = useState('')
+  const [attachItems, setAttachItems] = useState<Array<{ id: string; name: string }>>([])
+  const [attachLoading, setAttachLoading] = useState(false)
+  const toggleAttach = (f: { id: string; name: string }) => {
+    setAttached((prev) => (prev.some((x) => x.fileId === f.id)
+      ? prev.filter((x) => x.fileId !== f.id)
+      : [...prev, { fileId: f.id, fileName: f.name }]))
+  }
+  // 引用候选（空关键词 = 最近访问；否则 350ms 防抖全文搜索）。
+  useEffect(() => {
+    if (!attachOpen) return
+    let alive = true
+    const q = attachQuery.trim()
+    const run = (pr: Promise<Array<{ id: string; name: string; type?: string }>>) => {
+      setAttachLoading(true)
+      void pr
+        .then((items) => { if (alive) setAttachItems(items.filter((x) => x.type !== 'folder').map((x) => ({ id: x.id, name: x.name }))) })
+        .catch(() => { if (alive) setAttachItems([]) })
+        .finally(() => { if (alive) setAttachLoading(false) })
+    }
+    if (!q) {
+      run(listFiles(null, { recent: true, limit: 20 }))
+      return () => { alive = false }
+    }
+    const timer = window.setTimeout(() => run(searchFiles(q, 20)), 350)
+    return () => {
+      alive = false
+      window.clearTimeout(timer)
+    }
+  }, [attachOpen, attachQuery])
   const turnIdRef = useRef(0)
   const abortRef = useRef<AbortController | null>(null)
   const listRef = useRef<HTMLDivElement | null>(null)
@@ -530,17 +554,15 @@ export default function AIEditChat({
       return
     }
     // 快捷指令自带处理模式：续写/润色→可修改（自动应用）；摘要/翻译→仅对话。
-    // forceChatOnly 宿主不支持改文档，一律仅对话。
-    const m: ChatMode = forceChatOnly || !quickCommand.editMode ? 'chat' : 'edit'
+    const m: ChatMode = !quickCommand.editMode ? 'chat' : 'edit'
     setMode(m)
     modeRef.current = m
     void send(quickCommand.instruction)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [quickCommand, open, aiOn])
 
-  /** 切换面板模式（可修改/仅对话；forceChatOnly 下不可切换）。 */
+  /** 切换面板模式（可修改/仅对话）。 */
   const changeMode = (m: ChatMode) => {
-    if (forceChatOnly) return
     setMode(m)
     modeRef.current = m
   }
@@ -558,7 +580,7 @@ export default function AIEditChat({
     const full = useSelection ? tgt.text : getAllTextRef.current()
     // 空上下文：文本编辑页维持原拦截；excalidraw/drawio/仅对话场景允许无
     // 上下文发送（空白画布从零生成、Office 无转换文本时直接提问）。
-    if (!full.trim() && applyKind === 'text' && !forceChatOnly) {
+    if (!full.trim() && applyKind === 'text') {
       setNotice(zh ? '文档内容为空，无法作为上下文发送' : 'Nothing to send: the document is empty')
       return
     }
@@ -602,14 +624,17 @@ export default function AIEditChat({
       : `${zh ? '指令' : 'Instruction'}：${text}`
     const userTurnId = ++turnIdRef.current
     const asstTurnId = ++turnIdRef.current
+    const sentFiles = attached.length > 0 ? [...attached] : undefined
     setInput('')
     setNotice('')
+    setAttached([])
     setTurns((prev) => [
       ...prev,
       {
         id: userTurnId,
         role: 'user',
         content: text,
+        files: sentFiles,
         note: full.trim()
           ? `${scopeLabel} · ${full.length} ${zh ? '字符' : 'chars'}${truncated ? (zh ? '（已截断）' : ' (truncated)') : ''}`
           : (zh ? '无文档上下文' : 'No document context'),
@@ -639,6 +664,8 @@ export default function AIEditChat({
           use_mcp: toggles.mcp ? true : undefined,
           // 我的文件（RAG 引用本人文档）：默认开（后端就绪前透传、忽略）。
           include_docs: toggles.docs ? true : undefined,
+          // 引用文件全文注入上下文（context.fileIds；aiChat 空数组不下发）。
+          fileIds: attached.length > 0 ? attached.map((f) => f.fileId) : undefined,
         },
         {
           onMeta: (meta) => {
@@ -827,9 +854,7 @@ export default function AIEditChat({
         : applyKind === 'richtext-patch'
           ? (zh ? '编辑指令自动定位并应用，可撤销' : 'Edit instructions auto-applied, revertible')
           : (zh ? '回复自动应用，可撤销' : 'Auto-apply, revertible'))
-    : (officeInsert
-      ? (zh ? '对话+插入：回复可一键插入文档' : 'Chat + insert: replies can be inserted into the document')
-      : (zh ? '纯输出，不改文档' : 'Output only'))
+    : (zh ? '纯输出，不改文档' : 'Output only')
   const modeTip = mode === 'edit'
     ? (applyKind === 'excalidraw-json'
       ? (zh
@@ -856,15 +881,7 @@ export default function AIEditChat({
       : applyKind === 'richtext-patch'
         ? (zh ? '描述要做的修改（AI 输出编辑指令并自动应用），Enter 发送' : 'Describe the change (AI emits edit instructions, auto-applied), Enter to send')
         : (zh ? '输入指令，Enter 发送（Shift+Enter 换行）' : 'Type an instruction, Enter to send (Shift+Enter for newline)')
-  const emptyHint = forceChatOnly
-    ? (officeInsert
-      ? (zh
-        ? '与 AI 对话讨论当前文档，回复可一键插入文档：点击回复下方的「应用到文档」，内容将经 DocFlow AI 插件插入编辑器光标处（有选区时替换选区）。文档文本经转换接口获取；暂不支持转换的格式将以无上下文对话。'
-        : 'Chat with the AI about the current document and insert replies with one click: press “Apply to document” under a reply to insert it at the editor caret via the DocFlow AI plugin (replaces the selection when there is one). Document text is fetched via conversion; unsupported formats chat without context.')
-      : (zh
-        ? '与 AI 对话讨论当前文档（仅对话，不改动文档）。文档文本经转换接口获取；暂不支持转换的格式将以无上下文对话。'
-        : 'Chat with the AI about the current document (chat only, never modified). Document text is fetched via conversion; unsupported formats chat without context.'))
-    : applyKind === 'excalidraw-json'
+  const emptyHint = applyKind === 'excalidraw-json'
       ? (zh
         ? '描述想要的图，例如「画一个用户注册流程图」「画一个三层架构图」。「可修改」模式下 AI 生成的 excalidraw 元素 JSON 会自动转换为白板原生元素插入画布（可撤销）。'
         : 'Describe a diagram, e.g. “draw a user sign-up flowchart”. In “Can edit” mode the generated excalidraw element JSON is converted into native whiteboard elements and inserted (revertible).')
@@ -905,34 +922,30 @@ export default function AIEditChat({
           />
         </span>
       </div>
-      {/* 模式：可修改（自动应用+版本保护，默认）/ 仅对话（纯输出）；
-          forceChatOnly（如 OnlyOffice 页）隐藏切换恒仅对话；
-          同排放联网/思考小开关（与全局助手共用 localStorage 与默认逻辑，
-          窄面板经 flex-wrap 换行不挤爆）。 */}
+      {/* 模式 + 上下文范围同行（v3.9：原两行合并省一行——可修改/仅对话 +
+          选区/全文同排；模型选择移入底部输入区工具栏，发送键最右）。 */}
       <div className="ai-edit-chat-mode">
-        {!forceChatOnly && (
+        <Segmented
+          size="small"
+          value={mode}
+          onChange={(v) => changeMode(v as ChatMode)}
+          options={[
+            { label: zh ? '可修改' : 'Can edit', value: 'edit' },
+            { label: zh ? '仅对话' : 'Chat only', value: 'chat' },
+          ]}
+        />
+        {(applyKind === 'text' || applyKind === 'richtext-patch') && (
           <Segmented
             size="small"
-            value={mode}
-            onChange={(v) => changeMode(v as ChatMode)}
+            value={scope}
+            onChange={(v) => setScope(v as ChatScope)}
             options={[
-              { label: zh ? '可修改' : 'Can edit', value: 'edit' },
-              { label: zh ? '仅对话' : 'Chat only', value: 'chat' },
+              { label: zh ? '选区' : 'Selection', value: 'selection', disabled: !hasSelection },
+              { label: zh ? '全文' : 'Whole doc', value: 'full' },
             ]}
           />
         )}
-        {models.length > 0 && (
-          <AIModelSelect
-            models={models}
-            modelKey={modelKey}
-            modelExplicit={modelExplicit}
-            onSelect={(v) => {
-              setModelKey(v)
-              setModelExplicit(true)
-            }}
-            zh={zh}
-          />
-        )}
+        <span className="muted ai-edit-chat-scope-hint">{scopeHint}</span>
         {/* v3.7：AIChatToggleBar 移到 chat-tools-bar（输入框内底部工具栏），
             不再在面板顶部平铺。 */}
         {/* 模式说明收起为悬浮图标（hover 显示完整说明），避免平铺文案占用输入区空间。 */}
@@ -946,23 +959,6 @@ export default function AIEditChat({
           </span>
         </Popover>
       </div>
-      {/* 上下文范围：选区（默认，无选区禁用）/ 全文；白板/drawio 无选区
-          概念（上下文恒为摘要/XML），仅展示提示不渲染切换；richtext-patch
-          沿用选区/全文切换（仅影响送入模型的上下文范围）。 */}
-      <div className="ai-edit-chat-scope">
-        {(applyKind === 'text' || applyKind === 'richtext-patch') && (
-          <Segmented
-            size="small"
-            value={scope}
-            onChange={(v) => setScope(v as ChatScope)}
-            options={[
-              { label: zh ? '选区' : 'Selection', value: 'selection', disabled: !hasSelection },
-              { label: zh ? '全文' : 'Whole doc', value: 'full' },
-            ]}
-          />
-        )}
-        <span className="muted ai-edit-chat-scope-hint">{scopeHint}</span>
-      </div>
       <div className="ai-edit-chat-thread" ref={listRef}>
         {turns.length === 0 && (
           <div className="ai-edit-chat-empty muted">{emptyHint}</div>
@@ -972,6 +968,16 @@ export default function AIEditChat({
             {turn.role === 'user' ? (
               <div className="ai-bubble ai-bubble-user">
                 {turn.content}
+                {turn.files && turn.files.length > 0 && (
+                  <span className="ai-turn-files">
+                    {turn.files.map((f) => (
+                      <span key={f.fileId} className="ai-turn-file-chip" title={f.fileName}>
+                        <Paperclip size={10} strokeWidth={2} aria-hidden="true" />
+                        <span>{f.fileName}</span>
+                      </span>
+                    ))}
+                  </span>
+                )}
                 {turn.note && <div className="ai-edit-chat-note">{turn.note}</div>}
               </div>
             ) : (
@@ -1001,7 +1007,10 @@ export default function AIEditChat({
                     )
                   ) : turn.streaming ? (
                     <span className="ai-thinking">{t(locale, 'aiAssistantGenerating')}</span>
-                  ) : null}
+                  ) : (
+                    // 兜底：流结束但无正文/错误/停止标记——可见提示而非空白。
+                    <span className="muted">{zh ? '（模型未返回内容）' : '(no content returned)'}</span>
+                  )}
                   {turn.streaming && turn.content && <span className="ai-caret" aria-hidden="true" />}
                   {turn.error && <div className="ai-error-msg">{turn.error}</div>}
                   {/* 外部工具调用（MCP）：Wrench 小标签逐条列出（顺序保留）。 */}
@@ -1012,24 +1021,6 @@ export default function AIEditChat({
                       <Button size="small" type="text" icon={<Copy size={13} strokeWidth={2} />} onClick={() => copy(turn.content)}>
                         {zh ? '复制' : 'Copy'}
                       </Button>
-                      {/* Office「应用到文档」：经宿主页 → DocFlow AI 插件把整条
-                          回复插入编辑器光标处（有选区替换选区）。插件未就绪时
-                          按钮置灰并提示先打开插件面板。 */}
-                      {officeInsert && (
-                        <Tooltip title={officeInsert.ready
-                          ? (zh ? '把本条回复经 DocFlow AI 插件插入文档光标处（有选区时替换选区）' : 'Insert this reply at the document caret via the DocFlow AI plugin (replaces the selection when there is one)')
-                          : (zh ? 'DocFlow AI 插件面板未打开：请先点击编辑器左侧工具栏的插件图标打开「DocFlow AI」' : 'The DocFlow AI plugin panel is not open: click the plugin icon on the editor left toolbar to open “DocFlow AI” first')}>
-                          <Button
-                            size="small"
-                            type="text"
-                            icon={<FileInput size={13} strokeWidth={2} />}
-                            disabled={!officeInsert.ready}
-                            onClick={() => officeInsert.onInsert(turn.content)}
-                          >
-                            {zh ? '应用到文档' : 'Apply to document'}
-                          </Button>
-                        </Tooltip>
-                      )}
                     </div>
                   )}
                   {/* 自动应用状态：进行中 / 修改点（可撤销）/ 已撤销 / 失败。 */}
@@ -1079,10 +1070,21 @@ export default function AIEditChat({
           </div>
         ))}
       </div>
-      {/* 输入区（v3.4：预设 chips 移除——纯填入提示词价值低；常用快捷指令
-          保留在头部「AI 对话」下拉）。 */}
+      {/* 输入区（v3.9：Cherry Studio 式统一框——引用 chips + 输入框 + 单行
+          工具栏（技能/引用文件/开关组 + 模型选择 + 发送键最右端）。 */}
       <div className="ai-edit-chat-composer">
         {notice && <div className="ai-edit-chat-notice error-text">{notice}</div>}
+        {attached.length > 0 && (
+          <div className="ai-attach-chips">
+            {attached.map((f) => (
+              <span key={f.fileId} className="ai-attach-chip">
+                <Paperclip size={10} strokeWidth={2} aria-hidden="true" />
+                <span className="ai-attach-chip-name" title={f.fileName}>{f.fileName}</span>
+                <button type="button" aria-label={zh ? '移除引用' : 'Remove reference'} onClick={() => toggleAttach({ id: f.fileId, name: f.fileName })}>×</button>
+              </span>
+            ))}
+          </div>
+        )}
         <div className="chat-input-box">
           <Input.TextArea
             ref={inputRef}
@@ -1099,23 +1101,65 @@ export default function AIEditChat({
             }}
           />
           <div className="chat-tools-bar">
-            <span className="ai-input-tools">
-              {/* 平台技能模板：{selection}=当前选区（无选区置空并提示）、
-                  {file}=当前文件名（面板打开时解析）。 */}
-              <AISkillButton
-                zh={zh}
-                onPick={(s) => {
-                  const tgt = getTargetRef.current()
-                  const selection = tgt.hasSelection ? tgt.text : ''
-                  if (!selection && s.prompt.includes('{selection}')) {
-                    void message.warning(zh ? '未选中内容，{selection} 已置空' : 'No selection; {selection} was left empty')
-                  }
-                  setInput(renderSkillPrompt(s.prompt, { selection, file: fileName }))
-                }}
-              />
-              <span className="ai-input-hint muted">{zh ? 'Enter 发送 · Shift + Enter 换行' : 'Enter to send · Shift+Enter for newline'}</span>
-            </span>
-            {/* v3.7：AIChatToggleBar 从面板顶部移到输入框底部工具栏。 */}
+            {/* 左：技能 + 引用文件 + 开关组（联网/思考/MCP/我的文件）。 */}
+            <AISkillButton
+              zh={zh}
+              onPick={(s) => {
+                const tgt = getTargetRef.current()
+                const selection = tgt.hasSelection ? tgt.text : ''
+                if (!selection && s.prompt.includes('{selection}')) {
+                  void message.warning(zh ? '未选中内容，{selection} 已置空' : 'No selection; {selection} was left empty')
+                }
+                setInput(renderSkillPrompt(s.prompt, { selection, file: fileName }))
+              }}
+            />
+            {/* 引用文件（v3.9）：其它文件全文注入上下文（context.fileIds）。 */}
+            <Popover
+              trigger="click"
+              placement="topLeft"
+              arrow={false}
+              open={attachOpen}
+              onOpenChange={(next) => {
+                setAttachOpen(next)
+                if (next) setAttachQuery('')
+              }}
+              content={
+                <div className="ai-attach-pop">
+                  <Input
+                    allowClear
+                    size="small"
+                    value={attachQuery}
+                    onChange={(e) => setAttachQuery(e.target.value)}
+                    placeholder={zh ? '搜索文件（留空 = 最近访问）' : 'Search files (empty = recent)'}
+                    prefix={<Paperclip size={12} strokeWidth={2} aria-hidden="true" />}
+                  />
+                  <div className="ai-attach-list">
+                    {attachLoading && <div className="ai-attach-state muted">{zh ? '加载中…' : 'Loading…'}</div>}
+                    {!attachLoading && attachItems.length === 0 && <div className="ai-attach-state muted">{zh ? '没有匹配的文件' : 'No matching files'}</div>}
+                    {attachItems.map((item) => {
+                      const selected = attached.some((f) => f.fileId === item.id)
+                      return (
+                        <button
+                          key={item.id}
+                          type="button"
+                          className={`ai-attach-item${selected ? ' selected' : ''}`}
+                          onClick={() => toggleAttach(item)}
+                        >
+                          <FileText size={13} strokeWidth={2} aria-hidden="true" />
+                          <span className="name" title={item.name}>{item.name}</span>
+                          <Check size={13} strokeWidth={2} aria-hidden="true" className="check" />
+                        </button>
+                      )
+                    })}
+                  </div>
+                  <div className="ai-attach-state muted">{zh ? '引用文件全文将随指令一并作为上下文发送' : 'Referenced files are sent as extra context'}</div>
+                </div>
+              }
+            >
+              <Button size="small" type="text" className="ai-attach-btn" aria-label={zh ? '引用文件' : 'Attach files'} title={zh ? '引用文件（其它文件全文作为附加上下文）' : 'Attach files (full text as extra context)'}>
+                <Paperclip size={14} strokeWidth={2} aria-hidden="true" />
+              </Button>
+            </Popover>
             <AIChatToggleBar
               zh={zh}
               web={toggles.web}
@@ -1130,31 +1174,32 @@ export default function AIEditChat({
               onMcp={toggles.setMcp}
               onDocs={toggles.setDocs}
             />
-            {busy ? (
-              <Button
-                className="ai-stop-btn"
-                shape="circle"
-                size="small"
-                aria-label={zh ? '停止生成' : 'Stop generating'}
-                title={zh ? '停止生成' : 'Stop generating'}
-                onClick={stop}
-              >
-                <Square size={10} fill="currentColor" strokeWidth={0} aria-hidden="true" />
-              </Button>
-            ) : (
-              <Button
-                className="ai-send-btn"
-                type="primary"
-                shape="circle"
-                size="small"
-                disabled={!input.trim()}
-                aria-label={t(locale, 'aiAssistantSend')}
-                title={t(locale, 'aiAssistantSend')}
-                onClick={() => void send(input)}
-              >
-                <Send size={13} strokeWidth={2} aria-hidden="true" />
-              </Button>
-            )}
+            {/* 右：模型选择 + 发送/停止（最右端，与 AI 助理/创作同款样式）。 */}
+            <div className="chat-tools-right">
+              {models.length > 0 && (
+                <AIModelSelect
+                  models={models}
+                  modelKey={modelKey}
+                  modelExplicit={modelExplicit}
+                  onSelect={(v) => {
+                    setModelKey(v)
+                    setModelExplicit(true)
+                  }}
+                  zh={zh}
+                />
+              )}
+            </div>
+            <span className="chat-send-btn-wrap">
+              {busy ? (
+                <button type="button" className="chat-stop-btn" aria-label={zh ? '停止生成' : 'Stop generating'} title={zh ? '停止生成' : 'Stop generating'} onClick={stop}>
+                  {CHAT_STOP_ICON}
+                </button>
+              ) : (
+                <button type="button" className="chat-send-btn" disabled={!input.trim()} aria-label={t(locale, 'aiAssistantSend')} title={t(locale, 'aiAssistantSend')} onClick={() => void send(input)}>
+                  {CHAT_SEND_ICON}
+                </button>
+              )}
+            </span>
           </div>
         </div>
       </div>

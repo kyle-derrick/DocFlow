@@ -1,31 +1,28 @@
 // 查看页悬浮 AI 助理（替换查看页原 AI 摘要按钮行）：
-// - 收起态：40px 悬浮球（Sparkles，主色）；pointer 事件手写拖动
+// - 收起态：56px 悬浮球（Sparkles，主色）；pointer 事件手写拖动
 //   （位移 >4px 判定为拖动，否则视为点击展开/收起），位置记忆 localStorage
-//   （docflow.viewer-ai.pos），始终约束在可用边界内（resize 重夹取）；
-// - 边缘吸附：拖动结束时距左/右边界 <24px 时吸附贴边——悬浮球收成半嵌
-//   边缘的圆点（一半露出边界外），点击弹出完整悬浮球/卡片（脱离吸附态）；
-// - 弹窗内挂载：组件渲染点（FileBrowser 查看弹窗标题行 headExtra）在
-//   .ant-modal-container 内时，可用边界自动切换为弹窗容器矩形（悬浮球/
-//   卡片始终在弹窗内，z-index 高于弹窗）；独立查看页（ViewerPage）无弹窗
-//   祖先 → 边界为视口；
-// - 展开态：360×520（按边界收缩）卡片 = 头部（标题 + 文件名 + 收起按钮 +
-//   拖动把手）+ Segmented「对话 | 摘要」+ 内容区：
-//   · 对话：精简版多轮对话（aiChat SSE 流式；模型选择器 = 默认模型 + 下拉，
-//     复用 AIAssistant 的 getAIModels/AI_MODEL_STORAGE_KEY），系统提示注入
-//     当前文件上下文（文件名 + 全文截 12000 字，fetchFileText 现取缓存），
-//     气泡经 AIMarkdown 渲染；文本类文件的 AI 回答提供消息级「保存为新版本」
-//     （回复中围栏代码块优先/整段兜底 → uploadFileVersion 覆盖当前 file_id，
-//     自动留版本链可在历史版本回退；成功经 onSaved 通知查看页重新拉取预览）；
-//     非文本类（pdf/office 等）禁用保存按钮 + Tooltip 说明；
-//   · 摘要：/ai/summarize 流式（同 AISummary 链路），markdown 展示 + 复制。
+//   （docflow.viewer-ai.pos）；默认 CSS right/bottom 贴窗口右下角（v3.8），
+//   双击重置回默认；
+// - 弹窗内挂载（FileBrowser 查看弹窗标题行）：默认锚点切到弹窗容器右下角；
+// - 展开态卡片（v3.9）：360×520 固有比例（按边界收缩），位置以球锚点经
+//   cardPosFor 翻转——空间足够向左上展开（默认右下角形态），不足时向右下
+//   展开，并夹取在可用边界（弹窗矩形/视口）内，绝不越界遮出边缘；
+//   卡片 = 头部（标题 + 文件名 + 收起）+ Segmented「对话 | 摘要」+ 内容区 +
+//   输入区（Cherry Studio 式单行工具栏：联网/思考/清空 + 模型选择 + 发送键
+//   最右端，与 AI 助理/AI 创作同款 chat-send-btn）：
+//   · 对话：aiChat SSE 流式（系统提示注入当前文件全文截 12000 字），文本类
+//     文件的 AI 回答提供消息级「保存为新版本」（围栏代码块优先 →
+//     uploadFileVersion 覆盖当前 file_id，自动留版本链）；
+//   · 摘要：/ai/summarize 流式，markdown 展示 + 复制。
 // - AI 未启用（useAIEnabled=false）不渲染。
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import { App as AntdApp, Button, Input, Popconfirm, Segmented, Select, Tooltip } from 'antd'
-import { Check, ChevronDown, Copy, Globe, Brain, RotateCcw, Save, Send, Sparkles, Square, Trash2 } from 'lucide-react'
+import { Check, ChevronDown, Copy, Globe, Brain, RotateCcw, Save, Sparkles, Trash2 } from 'lucide-react'
 import AIMarkdown from './AIMarkdown'
 import { AIModelOption, AI_MODEL_STORAGE_KEY, AI_THINK_STORAGE_KEY, AI_WEB_STORAGE_KEY, defaultAIModelKey, getAIModels, readAIFlag, writeAIFlag } from './AIAssistant'
 import { AIChatThinking, AIToolChain, applyToolResult, toolEntryFrom } from './aichat'
+import { CHAT_SEND_ICON, CHAT_STOP_ICON } from './aichat/icons'
 import type { AIToolCallEntry } from './aichat'
 import {
   AIMessage,
@@ -38,19 +35,43 @@ import {
 import { useAIEnabled } from '../aiFeature'
 import { t, useLocale } from '../i18n'
 
-/** 悬浮位置持久化 key（{x,y,snap}：x/y 为悬浮球/卡片左上角（视口坐标），
- *  snap = 吸附边（'left' | 'right' | null，半嵌圆点态）。 */
+/** 悬浮位置持久化 key（{x,y}：x/y 为悬浮球左上角（视口坐标））。 */
 const WIDGET_POS_KEY = 'docflow.viewer-ai.pos'
 /** 悬浮球尺寸 / 卡片尺寸（px）。 */
 const BALL_SIZE = 56
 const CARD_W = 360
 const CARD_H = 520
-/** 默认边距：球距视口右下角（px，CSS 中使用）。 */
-// const DEFAULT_MARGIN = 24
+/** 默认边距：球/卡片距边界（px）。 */
+const EDGE_MARGIN = 24
+/** 卡片与边界的最小安全间距（px）。 */
+const CARD_GAP = 8
 /** 拖动阈值：位移超过该值判定为拖动（否则视为点击）。 */
 const DRAG_THRESHOLD = 4
 /** 对话上下文注入的文件全文截断长度。 */
 const CONTEXT_TEXT_LIMIT = 12000
+
+/** 可用边界（视口坐标；弹窗内挂载时 = 弹窗容器矩形）。 */
+interface HostBounds { x: number; y: number; w: number; h: number }
+
+/** 计算展开卡片位置（翻转向）：以悬浮球右下角为锚，优先向左上展开（球在
+ * 右下角的默认形态）；左/上空间不足时向右下展开，最终夹取在边界内。
+ * 返回卡片定宽高（按边界收缩），保持 360×520 的固有比例。 */
+function cardPosFor(ballX: number, ballY: number, b: HostBounds): { left: number; top: number; width: number; height: number } {
+  const w = Math.min(CARD_W, b.w - CARD_GAP * 2)
+  const h = Math.min(CARD_H, b.h - CARD_GAP * 2)
+  const left = ballX + BALL_SIZE - w >= b.x + CARD_GAP
+    ? ballX + BALL_SIZE - w
+    : Math.min(ballX + BALL_SIZE + CARD_GAP, b.x + b.w - w - CARD_GAP)
+  const top = ballY + BALL_SIZE - h >= b.y + CARD_GAP
+    ? ballY + BALL_SIZE - h
+    : Math.min(ballY + BALL_SIZE + CARD_GAP, b.y + b.h - h - CARD_GAP)
+  return {
+    left: Math.min(Math.max(left, b.x + CARD_GAP), b.x + b.w - w - CARD_GAP),
+    top: Math.min(Math.max(top, b.y + CARD_GAP), b.y + b.h - h - CARD_GAP),
+    width: w,
+    height: h,
+  }
+}
 
 /** 悬浮位置：null = 默认（CSS right/bottom 贴角），否则为拖拽后的自定义
  *  视口坐标（left/top 定位）。双击清除回默认。 */
@@ -135,19 +156,69 @@ export default function ViewerAIWidget({
   const { message } = AntdApp.useApp()
   const textLike = isTextLike(fileName, '')
 
-  // ---- 悬浮球 / 卡片：位置与拖动（v3.8 重写）----
-  // 简化原则：默认用 CSS right/bottom 贴角（窗口 resize 自动适配，零 JS），
-  // 拖拽后才切 left/top 自定义定位；双击重置回默认。
+  // ---- 悬浮球 / 卡片：位置与拖动（v3.9）----
+  // 默认用 CSS right/bottom 贴角（窗口 resize 自动适配，零 JS）；弹窗内挂载
+  // 时改贴弹窗容器右下角（JS 定位）；拖拽后切 left/top 自定义；双击重置。
   const [open, setOpen] = useState(false)
   const [customPos, setCustomPos] = useState<CustomPos>(() => loadPos())
   const [dragging, setDragging] = useState(false)
   const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number; moved: boolean } | null>(null)
   const suppressClickRef = useRef(false)
+  // 当前渲染根元素（球或卡片），用于判定弹窗内挂载与解析边界。
+  const hostRef = useRef<HTMLElement | null>(null)
+  const [modalRect, setModalRect] = useState<{ left: number; top: number; width: number; height: number } | null>(null)
 
-  /** 球/卡片样式：null = 默认 CSS right/bottom；有值 = left/top 自定义。 */
-  const posStyle = customPos
-    ? { left: customPos.x, top: customPos.y, right: 'auto', bottom: 'auto' }
+  // 重测弹窗边界（无弹窗祖先 = null）：open 切换（根元素换位球⇄卡片）与
+  // 窗口 resize（弹窗重新居中）时调用；useLayoutEffect 保证首帧前完成，
+  // 弹窗内默认贴角不闪视口角。
+  const measureModal = () => {
+    const modal = hostRef.current?.closest('.ant-modal') as HTMLElement | null
+    if (modal) {
+      const r = modal.getBoundingClientRect()
+      setModalRect({ left: r.left, top: r.top, width: r.width, height: r.height })
+    } else {
+      setModalRect(null)
+    }
+  }
+  useLayoutEffect(measureModal, [open])
+
+  /** 卡片可用边界（弹窗内挂载 = 弹窗矩形；否则视口）。 */
+  const hostBounds: HostBounds = modalRect
+    ? { x: modalRect.left, y: modalRect.top, w: modalRect.width, h: modalRect.height }
+    : { x: 0, y: 0, w: typeof window === 'undefined' ? CARD_W : window.innerWidth, h: typeof window === 'undefined' ? CARD_H : window.innerHeight }
+  /** 边界右下角的默认球锚点（无自定义位置时的等效坐标）。 */
+  const defaultAnchor = {
+    x: hostBounds.x + hostBounds.w - EDGE_MARGIN - BALL_SIZE,
+    y: hostBounds.y + hostBounds.h - EDGE_MARGIN - BALL_SIZE,
+  }
+  /** 球的锚点坐标：拖拽自定义 > 弹窗内=弹窗右下角 > null（CSS 视口贴角）。 */
+  const ballAnchor: { x: number; y: number } | null = customPos
+    ?? (modalRect
+      ? { x: modalRect.left + modalRect.width - EDGE_MARGIN - BALL_SIZE, y: modalRect.top + modalRect.height - EDGE_MARGIN - BALL_SIZE }
+      : null)
+  /** 卡片翻转计算用的有效锚点（默认贴角也有等效坐标）。 */
+  const anchorResolved = ballAnchor ?? defaultAnchor
+
+  /** 球样式：null = 默认 CSS right/bottom；有值 = left/top 自定义。 */
+  const posStyle = ballAnchor
+    ? { left: ballAnchor.x, top: ballAnchor.y, right: 'auto', bottom: 'auto' }
     : {}
+
+  /** 卡片位置/尺寸：以球锚点翻转/夹取（定高 520 比例，按边界收缩不越界）。 */
+  const cardPos = cardPosFor(anchorResolved.x, anchorResolved.y, hostBounds)
+  // 窗口 resize 时重算边界（视口取值直接生效；弹窗内挂载时弹窗矩形随
+  // 居中变化，须重测 modalRect）。
+  const [resizeTick, setResizeTick] = useState(0)
+  useEffect(() => {
+    const onResize = () => {
+      measureModal()
+      setResizeTick((v) => v + 1)
+    }
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+  void resizeTick // 仅作 resize 重渲染触发器（读取一次避免未用告警）
 
   const startDrag = (e: ReactPointerEvent<HTMLElement>) => {
     if (e.button !== 0) return
@@ -156,13 +227,13 @@ export default function ViewerAIWidget({
     const el = e.target as HTMLElement
     if (el !== e.currentTarget && el.closest('button, a, input, .ant-segmented')) return
     e.preventDefault()
-    // 获取当前实际渲染位置（不论默认还是自定义，统一转 left/top 基准）。
-    const rect = e.currentTarget.getBoundingClientRect()
+    // 拖拽基准 = 球锚点（卡片头部拖拽同样移动球锚点，卡片随翻转逻辑跟随；
+    // 默认贴角无自定义坐标时取边界右下角等效锚点）。
     dragRef.current = {
       startX: e.clientX,
       startY: e.clientY,
-      origX: rect.left,
-      origY: rect.top,
+      origX: anchorResolved.x,
+      origY: anchorResolved.y,
       moved: false,
     }
     try { e.currentTarget.setPointerCapture(e.pointerId) } catch { /* ignore */ }
@@ -459,15 +530,15 @@ export default function ViewerAIWidget({
     )
   }
 
-  // 卡片尺寸（按当前边界收缩；弹窗内挂载时随弹窗大小）。
-  // 卡片尺寸由 CSS 控制（360×520 max，自适应 maxHeight）。
-
   return (
     <>
       {open ? (
         <div
+          ref={(el) => { hostRef.current = el }}
           className={`viewer-aiw-card${dragging ? ' dragging' : ''}`}
-          style={{ ...posStyle, width: CARD_W, maxHeight: CARD_H }}
+          /* v3.9：卡片恒定定宽高（360×520 固有比例，按边界收缩），位置经
+             cardPosFor 翻转/夹取——不再出现接近 1:1 的挤压形态或越界。 */
+          style={{ left: cardPos.left, top: cardPos.top, right: 'auto', bottom: 'auto', width: cardPos.width, height: cardPos.height }}
           role="dialog"
           aria-label={zh ? 'AI 助理' : 'AI assistant'}
         >
@@ -536,7 +607,10 @@ export default function ViewerAIWidget({
                         <span className="muted">{t(locale, 'aiAssistantGenerating')}</span>
                       ) : turn.stopped ? (
                         <span className="muted">{t(locale, 'aiAssistantStopped')}</span>
-                      ) : null}
+                      ) : (
+                        // 兜底：流结束但无正文/错误/停止标记——给出可见提示而非空白。
+                        <span className="muted">{zh ? '（模型未返回内容）' : '(no content returned)'}</span>
+                      )}
                       {turn.stopped && turn.content && <span className="ai-stopped-tag">{t(locale, 'aiAssistantStopped')}</span>}
                       {!turn.streaming && !turn.error && turn.content && (
                         <div className="viewer-aiw-msg-actions">
@@ -590,32 +664,22 @@ export default function ViewerAIWidget({
               </>
             )}
           </div>
-          {/* 底部：模型选择 + 清空（对话页签）/ 输入行。 */}
+          {/* 底部输入区（v3.9 Cherry Studio 式：输入框 + 单行工具栏，发送/
+              停止按钮在工具栏最右端=模型切换右侧，与 AI 助理/创作同款样式）。 */}
           {tab === 'chat' && (
             <div className="chat-input-box viewer-aiw-input">
-              <div className="viewer-aiw-input-row">
-                <Input.TextArea
-                  autoSize={{ minRows: 1, maxRows: 4 }}
-                  value={input}
-                  placeholder={t(locale, 'aiAssistantPlaceholder')}
-                  onChange={(e) => setInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-                      e.preventDefault()
-                      void send(input)
-                    }
-                  }}
-                />
-                {busy ? (
-                  <Button className="ai-stop-btn" shape="circle" size="small" aria-label={t(locale, 'aiAssistantStop')} title={t(locale, 'aiAssistantStop')} onClick={() => abortRef.current?.abort()}>
-                    <Square size={10} fill="currentColor" strokeWidth={0} aria-hidden="true" />
-                  </Button>
-                ) : (
-                  <Button className="ai-send-btn" type="primary" shape="circle" size="small" disabled={!input.trim()} aria-label={t(locale, 'aiAssistantSend')} title={t(locale, 'aiAssistantSend')} onClick={() => void send(input)}>
-                    <Send size={13} strokeWidth={2} aria-hidden="true" />
-                  </Button>
-                )}
-              </div>
+              <Input.TextArea
+                autoSize={{ minRows: 1, maxRows: 4 }}
+                value={input}
+                placeholder={t(locale, 'aiAssistantPlaceholder')}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                    e.preventDefault()
+                    void send(input)
+                  }
+                }}
+              />
               <div className="chat-tools-bar">
                 <Tooltip title={zh ? '联网搜索（回答附网络来源）' : 'Web search (with sources)'}>
                   <button type="button" className={`ai-tool-icon${web ? ' on' : ''}`} aria-pressed={web} aria-label={zh ? '联网搜索' : 'Web search'} onClick={() => { const v = !web; setWeb(v); writeAIFlag(AI_WEB_STORAGE_KEY, v) }}>
@@ -639,6 +703,17 @@ export default function ViewerAIWidget({
                       options={models.map((m) => ({ value: m.id, label: `${m.providerName || m.providerId} / ${m.model}` }))} />
                   )}
                 </div>
+                <span className="chat-send-btn-wrap">
+                  {busy ? (
+                    <button type="button" className="chat-stop-btn" aria-label={t(locale, 'aiAssistantStop')} title={t(locale, 'aiAssistantStop')} onClick={() => abortRef.current?.abort()}>
+                      {CHAT_STOP_ICON}
+                    </button>
+                  ) : (
+                    <button type="button" className="chat-send-btn" disabled={!input.trim()} aria-label={t(locale, 'aiAssistantSend')} title={t(locale, 'aiAssistantSend')} onClick={() => void send(input)}>
+                      {CHAT_SEND_ICON}
+                    </button>
+                  )}
+                </span>
               </div>
             </div>
           )}
@@ -647,6 +722,7 @@ export default function ViewerAIWidget({
       ) : (
         <button
           type="button"
+          ref={(el) => { hostRef.current = el }}
           className={`viewer-aiw-ball${dragging ? ' dragging' : ''}`}
           style={posStyle}
           onPointerDown={startDrag}

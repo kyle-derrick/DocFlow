@@ -3,12 +3,12 @@
 //   结构 = 顶部栏（左：当前会话标题，点击重命名；右：历史会话（Conversations）
 //   + 新建 + 图钉 + 关闭）+ 顶部工具栏（人设 Select + 智能|仅对话 Segmented +
 //   工作目录 + 记忆 / 清空 / 智能体任务（跳 /studio））+ 消息流（Bubble.List，
-//   用户右 / AI 左，含来源引用与工具调用展示）+ 底部 Sender（autoSize，发送
-//   按钮内嵌右下角 = Sender 自带；busy 自动变停止）+ Sender 上方一行图标式
+//   用户右 / AI 左，含来源引用与工具调用展示）+ 底部统一输入框（autoSize
+//   Sender；v3.9 内置发送按钮经 CSS 隐藏）+ 输入框下单行图标式
 //   开关 pill（模型选择 + 联网 / 文件RAG / 思考 / MCP / 文件工具 / 文件检索，
 //   开启态主色描边填充，DeepSeek 式）；引用文件 chips 与工具按钮在 Sender
 //   header 区；多轮对话 SSE 流式渲染（markdown + 打字机光标）；
-// - 「停止生成」：每轮流式请求挂 AbortController，busy 时 Sender 自带
+// - 「停止生成」：每轮流式请求挂 AbortController，busy 时工具栏最右端
 //   发送按钮变停止（onCancel），
 //   abort 后消息保留已生成内容并标记「已停止」（不视为错误，可继续输入）；
 //   会话不持久化（刷新即清空）；
@@ -83,6 +83,9 @@ import AIMarkdown from './AIMarkdown'
 import AIModelSelect from './AIModelSelect'
 import { useAIEnabled, useAIFeatures } from '../aiFeature'
 import { t, useLocale } from '../i18n'
+
+// v3.9：发送/停止按钮在 chat-tools-bar 最右端（共享 CHAT_SEND_ICON/
+// CHAT_STOP_ICON 同款样式）；Sender 内置按钮保留挂载、CSS 隐藏。
 
 /** 当前上下文文件（查看/编辑页打开 AI 时注入；快捷摘要目标）。 */
 interface AIContextFile {
@@ -681,9 +684,9 @@ export function AIChatToggleBar({
       {iconBtn(zh ? '联网搜索' : 'Web search', Globe, web, () => onWeb(!web), aiWebTooltip(zh))}
       {/* 我的文件（RAG 引用平台内本人文档）；仅 RAG 可用时显示（默认开）。 */}
       {iconBtn(zh ? '我的文件（RAG）' : 'My files (RAG)', FileSearch, docs, () => onDocs(!docs), aiDocsTooltip(zh), { hidden: !docsAvailable })}
-      {/* 思考：模型不支持推理时隐藏；未配置模型时禁用。 */}
+      {/* 思考：常显（v3.9——此前模型未勾选 reasoning 能力时整个按钮消失，
+          「创作/编辑页没有思考按钮」的主因）；不可用时禁用并 Tooltip 说明。 */}
       {iconBtn(zh ? '深度思考' : 'Deep thinking', Brain, think, () => onThink(!think), aiThinkTooltip(thinkBlocked, zh), {
-        hidden: thinkBlocked === 'unsupported',
         disabled: thinkBlocked !== null,
       })}
       {/* MCP 工具：仅平台存在启用中的 MCP 服务时显示（默认关）。 */}
@@ -704,6 +707,7 @@ export function AIChatToggleBar({
 // 网络来源归一化与渲染、工具调用链迁至 components/aichat（三处对话共用），
 // 保留原导出名以兼容 AIEditChat / StudioPage 等既有引用。
 import { AIChatThinking, AIMessageList, AIToolChain, AIWebSourcesView, applyToolResult, normalizeWebSources, toolEntryFrom } from './aichat'
+import { CHAT_SEND_ICON as SEND_ICON, CHAT_STOP_ICON as STOP_ICON } from './aichat/icons'
 import type { AIChatTurnData, AIToolCallEntry, AIAttachFile } from './aichat'
 import AIAttachTree from './aichat/AIAttachTree'
 import { useStickyScroll } from './aichat/useStickyScroll'
@@ -2355,6 +2359,10 @@ export default function AIAssistant() {
               onChange={setInput}
               placeholder={t(locale, 'aiAssistantPlaceholder')}
               autoSize={{ minRows: 1, maxRows: 6 }}
+              /* v3.9：内置发送按钮保留挂载（v2 的 submitDisabled 状态仅由其
+                 effect 驱动，卸载会废掉 Enter 提交）、经 CSS 隐藏；发送/停止
+                 统一在 chat-tools-bar 最右端（模型切换右侧）。loading 在
+                 busy 时接管 Enter（生成中不重复发送）。 */
               loading={busy}
               onSubmit={(message) => void send(message)}
               onCancel={() => abortRef.current?.abort()}
@@ -2379,17 +2387,15 @@ export default function AIAssistant() {
                 onClick={() => toggles.setDocs(!toggles.docs)}
               />
             )}
-            {/* 深度思考：当前模型不支持推理时隐藏，未配置模型时禁用。 */}
-            {toggles.thinkBlocked !== 'unsupported' && (
-              <AITogglePill
-                icon={<Brain size={14} strokeWidth={2} aria-hidden="true" />}
-                label={zh ? '思考' : 'Think'}
-                active={toggles.think}
-                disabled={toggles.thinkBlocked !== null}
-                title={aiThinkTooltip(toggles.thinkBlocked, zh)}
-                onClick={() => toggles.setThink(!toggles.think)}
-              />
-            )}
+            {/* 深度思考：常显（不可用时禁用并说明，不再整个隐藏）。 */}
+            <AITogglePill
+              icon={<Brain size={14} strokeWidth={2} aria-hidden="true" />}
+              label={zh ? '思考' : 'Think'}
+              active={toggles.think}
+              disabled={toggles.thinkBlocked !== null}
+              title={aiThinkTooltip(toggles.thinkBlocked, zh)}
+              onClick={() => toggles.setThink(!toggles.think)}
+            />
             {/* MCP 工具：仅平台存在启用中的 MCP 服务时显示。 */}
             {toggles.mcpAvailable && (
               <AITogglePill
@@ -2490,7 +2496,8 @@ export default function AIAssistant() {
             </Popover>
             {/* 平台技能模板。 */}
             <AISkillButton zh={zh} onPick={(s) => setInput(renderSkillPrompt(s.prompt))} />
-            {/* 右：模型选择（margin-left: auto 推到右端）。 */}
+            {/* 右：模型选择（margin-left: auto 推到右端）+ 发送/停止按钮
+                （最右端，与 AIChatComposer / 编辑页同款样式）。 */}
             <div className="chat-tools-right">
               {models.length > 0 && (
                 <AIModelSelect
@@ -2505,6 +2512,17 @@ export default function AIAssistant() {
                 />
               )}
             </div>
+            <span className="chat-send-btn-wrap">
+              {busy ? (
+                <button type="button" className="chat-stop-btn" aria-label={zh ? '停止生成' : 'Stop'} title={zh ? '停止生成' : 'Stop'} onClick={() => abortRef.current?.abort()}>
+                  {STOP_ICON}
+                </button>
+              ) : (
+                <button type="button" className="chat-send-btn" disabled={!input.trim()} aria-label={zh ? '发送' : 'Send'} title={zh ? '发送（Enter）' : 'Send (Enter)'} onClick={() => void send(input)}>
+                  {SEND_ICON}
+                </button>
+              )}
+            </span>
             </div>
           </div>
         </div>

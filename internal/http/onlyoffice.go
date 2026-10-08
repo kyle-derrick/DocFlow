@@ -80,6 +80,24 @@ func (h *Handler) registerOnlyOfficeRoutes(api *gin.RouterGroup, r *gin.Engine) 
 	group.GET("/download/:fileId", h.onlyofficeDownload)
 	group.GET("/download/:fileId/:filename", h.onlyofficeDownload)
 	group.POST("/callback", h.onlyofficeCallback)
+	// DocFlow AI 插件动态清单（编辑器 api.js 以普通 fetch 拉取，无 Bearer）。
+	group.GET("/ai-plugin/config.json", h.onlyofficeAIPluginManifest)
+}
+
+// onlyofficeAIPluginManifest GET /api/v1/onlyoffice/ai-plugin/config.json：
+// DocFlow AI 编辑器插件的动态清单（绝对 URL——静态 config.json 的相对
+// url 在部分 DS 版本下解析到反代 SPA 兜底，插件面板打开成「文件页」）。
+// 基址按请求 scheme+host 推导（显式 PUBLIC_BASE_URL 优先），内容与
+// frontend/public/oo-plugins/docflow-ai 静态页配套。
+func (h *Handler) onlyofficeAIPluginManifest(c *gin.Context) {
+	scheme, host := requestSchemeHost(c)
+	base := h.onlyoffice.BrowserBaseFor(scheme, host)
+	if base == "" {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "onlyoffice public base url is not configured"})
+		return
+	}
+	c.Header("Cache-Control", "no-cache")
+	c.JSON(http.StatusOK, h.onlyoffice.AIPluginManifest(base))
 }
 
 type onlyofficeSessionRequest struct {

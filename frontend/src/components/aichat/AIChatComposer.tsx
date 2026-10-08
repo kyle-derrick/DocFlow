@@ -6,6 +6,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ReactNode, Ref } from 'react'
 import { Sender } from '@ant-design/x'
+import { CHAT_SEND_ICON, CHAT_STOP_ICON } from './icons'
 import { FileText } from 'lucide-react'
 import { listFiles, searchFiles } from '../../api'
 
@@ -168,8 +169,11 @@ export default function AIChatComposer({
         }}
         placeholder={placeholder}
         autoSize={{ minRows: 1, maxRows: 6 }}
-        /* v3.7：loading 不传给 Sender（隐藏内置发送按钮——移到 chat-tools-bar
-            最右端与工具按钮同行，Cherry Studio 式）。 */
+        /* v3.9：内置发送按钮保留挂载、经 CSS 隐藏（.chat-input-box 规则同时
+            覆盖 v1/v2 类名）——不能用 suffix={false}：@ant-design/x v2 的
+            submitDisabled 状态仅由内置 SendButton 的 effect 驱动，卸载内置
+            按钮会导致 Enter 永远无法提交。发送/停止按钮只在 chat-tools-bar
+            最右端，Cherry Studio 式。 */
         disabled={disabled}
         onSubmit={() => submit()}
         onCancel={onCancel}
@@ -208,11 +212,11 @@ export default function AIChatComposer({
         <span className="chat-send-btn-wrap">
           {busy ? (
             <button type="button" className="chat-stop-btn" aria-label={zh ? '停止生成' : 'Stop'} title={zh ? '停止生成' : 'Stop'} onClick={onCancel}>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2" /></svg>
+              {CHAT_STOP_ICON}
             </button>
           ) : (
             <button type="button" className="chat-send-btn" disabled={!value.trim() || disabled} aria-label={zh ? '发送' : 'Send'} title={zh ? '发送（Enter）' : 'Send (Enter)'} onClick={submit}>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>
+              {CHAT_SEND_ICON}
             </button>
           )}
         </span>

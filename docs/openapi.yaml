@@ -6277,6 +6277,35 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
         '429': { $ref: '#/components/responses/RateLimited' }
 
+  /onlyoffice/ai-plugin/config.json:
+    get:
+      tags: [onlyoffice]
+      operationId: onlyofficeAIPluginManifest
+      summary: DocFlow AI 编辑器插件动态清单（无 Bearer）
+      description: >-
+        DocumentServer 编辑器 api.js 以普通 fetch 拉取的 DocFlow AI 插件
+        manifest（公开组，独立按 IP 轻限流，集成未启用时不注册=404）。
+        baseUrl 与 variations[].url/icons 均为按请求 scheme+host 推导的
+        绝对 URL（显式 PUBLIC_BASE_URL 优先）——静态 config.json 的相对
+        url 在部分 DocumentServer 版本下解析到反代 SPA 兜底，插件面板会
+        打开成站点「文件页」；动态绝对 URL 与部署形态无关。插件静态页由
+        前端产物 /oo-plugins/docflow-ai/index.html 提供（同站 cookie 调
+        /ai/chat，经 DS 插件桥读写文档）。
+      responses:
+        '200':
+          description: 插件 manifest（OnlyOffice config.json 结构，绝对 URL）
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '503':
+          description: 公开基址不可推导（PUBLIC_BASE_URL 未配置且请求 Host 缺失）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
   /files/from-template:
     post:
       tags: [Files]

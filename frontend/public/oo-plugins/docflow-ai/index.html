@@ -1,12 +1,23 @@
 <!doctype html>
+<!-- DocFlow AI OnlyOffice 插件面板（v3.9，Office 唯一 AI 入口）：
+     - 编辑器内侧栏完整对话：多轮历史 + SSE 流式（meta/thinking/delta/
+       done/error 与主应用同协议），推理思考折叠展示，停止生成（AbortController）；
+     - 文档上下文：面板就绪即经插件 API（callCommand + Api.GetDocument）
+       读全文（word 类，截 12000 字）注入 system；「引用全文」手动刷新、
+       「引用选中」仅带选区（cell/slide 无全文 API → 用选区引用）；
+     - 认证：与 DocFlow 同站（iframe 加载本域），refresh cookie 换一次性
+       access token；chat 401 时自动 refresh 重试一次；
+     - 文档操作（DS 插件桥）：引用选中（GetSelectedText）/ 插入到光标
+       （PasteHtml）/ 替换选中（InsertAndReplaceText）；
+     - 插件桥脚本：优先同源反代 /onlyoffice/sdkjs-plugins/v1/plugins.js
+       （离线部署可用），失败回退 onlyoffice.github.io CDN。 -->
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>DocFlow AI</title>
-<!-- OnlyOffice 插件桥（postMessage 协议；内网环境可把该文件自托管到
-     oo-plugins/v1/plugins.js 并改此地址）。 -->
-<script src="https://onlyoffice.github.io/sdkjs-plugins/v1/plugins.js"></script>
+<script src="/onlyoffice/sdkjs-plugins/v1/plugins.js"
+        onerror="var fb=document.createElement('script');fb.src='https://onlyoffice.github.io/sdkjs-plugins/v1/plugins.js';document.head.appendChild(fb);"></script>
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
@@ -16,22 +27,34 @@
   .m { max-width: 92%; padding: 8px 10px; border-radius: 10px; white-space: pre-wrap; word-break: break-word; }
   .m.u { align-self: flex-end; background: #4f7cff; color: #fff; border-bottom-right-radius: 3px; }
   .m.a { align-self: flex-start; background: rgba(127,127,127,.12); border-bottom-left-radius: 3px; }
-  .bar { display: flex; gap: 6px; padding: 8px; border-top: 1px solid rgba(127,127,127,.25); }
+  .think { align-self: flex-start; width: 100%; font-size: 12px; opacity: .8; }
+  .think summary { cursor: pointer; color: #8a8f98; user-select: none; }
+  .think .t { margin: 6px 0 0; padding: 6px 8px; border-left: 2px solid rgba(127,127,127,.4); white-space: pre-wrap; max-height: 160px; overflow-y: auto; }
+  .bar { display: flex; gap: 6px; padding: 8px; border-top: 1px solid rgba(127,127,127,.25); align-items: center; }
   textarea { flex: 1; resize: none; height: 44px; padding: 8px 10px; border: 1px solid rgba(127,127,127,.4); border-radius: 8px; font: inherit; background: inherit; color: inherit; }
   button { border: none; border-radius: 8px; padding: 8px 12px; font: inherit; cursor: pointer; background: #4f7cff; color: #fff; }
   button.sec { background: rgba(127,127,127,.15); color: inherit; }
+  button.tgl { background: rgba(127,127,127,.15); color: inherit; padding: 6px 10px; font-size: 12px; }
+  button.tgl.on { background: #4f7cff; color: #fff; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
   .hint { padding: 6px 10px; font-size: 11px; opacity: .65; }
 </style>
 </head>
 <body>
   <div id="log"></div>
-  <div class="hint" id="hint">Enter 发送 · Shift+Enter 换行</div>
+  <div class="bar" style="border-top: none; padding-bottom: 0;">
+    <button class="tgl" id="web" title="联网搜索：访问外部互联网获取最新信息并附来源">联网</button>
+    <button class="tgl on" id="think" title="深度思考：模型先推理再作答（须所选模型支持）">思考</button>
+    <span class="hint" id="hint" style="padding: 0;">Enter 发送 · Shift+Enter 换行</span>
+  </div>
   <div class="bar">
     <textarea id="q" placeholder="输入指令，例如：续写当前段落"></textarea>
     <button id="send">发送</button>
+    <button id="stop" style="display: none;">停止</button>
   </div>
   <div class="bar" style="border-top: none; padding-top: 0;">
     <button class="sec" id="useSel">引用选中</button>
+    <button class="sec" id="useAll">引用全文</button>
     <button class="sec" id="insert">插入到光标</button>
     <button class="sec" id="replace">替换选中</button>
   </div>
@@ -41,10 +64,22 @@
   var log = document.getElementById('log');
   var q = document.getElementById('q');
   var hint = document.getElementById('hint');
+  var sendBtn = document.getElementById('send');
+  var stopBtn = document.getElementById('stop');
+  var webBtn = document.getElementById('web');
+  var thinkBtn = document.getElementById('think');
   var lastReply = '';
   var selection = '';
+  // 文档全文上下文（callCommand 拉取，截 12000 字注入 system）。
+  var docText = '';
+  var CONTEXT_LIMIT = 12000;
+  // 多轮对话历史（跳过出错回合，保留最近 12 条）。
+  var history = [];
   var busy = false;
   var token = '';
+  var controller = null;
+  var webOn = false;
+  var thinkOn = true;
 
   function bubble(text, cls) {
     var d = document.createElement('div');
@@ -55,6 +90,36 @@
     return d;
   }
 
+  /** 思考折叠块（SSE thinking 增量追加；流式期间展开跟随）。 */
+  var thinkEl = null, thinkText = null;
+  function ensureThink() {
+    if (thinkEl) return thinkEl;
+    thinkEl = document.createElement('details');
+    thinkEl.className = 'think';
+    thinkEl.open = true;
+    var sum = document.createElement('summary');
+    sum.textContent = '思考中…';
+    var body = document.createElement('div');
+    body.className = 't';
+    thinkEl.appendChild(sum);
+    thinkEl.appendChild(body);
+    log.appendChild(thinkEl);
+    thinkText = body;
+    thinkEl._sum = sum;
+    log.scrollTop = log.scrollHeight;
+    return thinkEl;
+  }
+  function appendThink(chunk) {
+    ensureThink();
+    thinkText.textContent += chunk;
+    log.scrollTop = log.scrollHeight;
+  }
+  function settleThink(ms) {
+    if (!thinkEl) return;
+    thinkEl.open = false;
+    thinkEl._sum.textContent = '已深度思考' + (ms > 0 ? '（用时 ' + (ms / 1000).toFixed(1) + ' 秒）' : '');
+  }
+
   // ---- 认证：插件页与 DocFlow 同站（iframe 加载本域），用 refresh cookie
   //      换一次性 access token（与主应用 authFetch 同协议）。----
   function refresh() {
@@ -63,15 +128,22 @@
       .then(function (d) { token = d.access_token || ''; });
   }
 
-  // ---- /ai/chat SSE 流式（与主应用同事件协议：thinking/delta/tool_result/done）。----
-  function chat(prompt, onDelta) {
-    var body = JSON.stringify({ messages: [{ role: 'user', content: prompt }], stream: true });
+  // ---- /ai/chat SSE 流式（与主应用同事件协议：
+  //      meta/thinking/delta/done/error）。401 自动 refresh 重试一次。----
+  function chatOnce(messages, ev) {
+    var body = { messages: messages, stream: true };
+    if (webOn) body.web_search = true;
+    if (thinkOn) body.think = true;
     return fetch('/api/v1/ai/chat', {
       method: 'POST', credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
-      body: body,
+      body: JSON.stringify(body),
+      signal: controller.signal,
     }).then(function (res) {
-      if (!res.ok) return res.text().then(function (t) { throw new Error('HTTP ' + res.status + ' ' + t.slice(0, 120)); });
+      if (!res.ok) {
+        if (res.status === 401) throw { status: 401 };
+        return res.text().then(function (t) { throw new Error('HTTP ' + res.status + ' ' + t.slice(0, 120)); });
+      }
       var reader = res.body.getReader();
       var dec = new TextDecoder();
       var buf = '';
@@ -82,12 +154,18 @@
           var idx;
           while ((idx = buf.indexOf('\n\n')) >= 0) {
             var block = buf.slice(0, idx); buf = buf.slice(idx + 2);
-            var ev = '', data = '';
+            var name = '', data = '';
             block.split('\n').forEach(function (line) {
-              if (line.indexOf('event: ') === 0) ev = line.slice(7).trim();
+              if (line.indexOf('event: ') === 0) name = line.slice(7).trim();
               else if (line.indexOf('data: ') === 0) data = line.slice(6);
             });
-            if (ev === 'delta') { try { onDelta(JSON.parse(data).text || ''); } catch (e) {} }
+            if (!name) continue;
+            var payload = {};
+            try { payload = JSON.parse(data); } catch (e) { continue; }
+            if (name === 'delta') { var t = payload.text || ''; if (t) ev.onDelta(t); }
+            else if (name === 'thinking') { var th = payload.text || ''; if (th) ev.onThinking(th); }
+            else if (name === 'error') { throw new Error(payload.error || 'AI 请求失败'); }
+            else if (name === 'done') { ev.onDone(payload.usage || null); return; }
           }
           return pump();
         });
@@ -96,45 +174,130 @@
     });
   }
 
+  function chat(messages, ev) {
+    return chatOnce(messages, ev).catch(function (err) {
+      if (err && err.status === 401) {
+        return refresh().then(function () { return chatOnce(messages, ev); });
+      }
+      throw err;
+    });
+  }
+
   function send() {
     var text = q.value.trim();
     if (!text || busy) return;
     busy = true; q.value = '';
+    sendBtn.style.display = 'none';
+    stopBtn.style.display = '';
     bubble(text, 'u');
+    thinkEl = null; thinkText = null;
     var el = bubble('', 'a');
     var acc = '';
+    var thinkStart = 0;
     var prompt = text;
     if (selection) prompt = '选中文档内容如下：\n"""\n' + selection + '\n"""\n\n' + text;
-    chat(prompt, function (d) { acc += d; el.textContent = acc; log.scrollTop = log.scrollHeight; })
-      .catch(function (err) { el.textContent = (acc ? acc + '\n' : '') + '⚠ ' + err.message; })
-      .then(function () { lastReply = acc; busy = false; });
+    // 组装消息：system（全文上下文，有则注入）+ 最近历史 + 本轮。
+    var msgs = [];
+    if (docText) {
+      msgs.push({
+        role: 'system',
+        content: '用户正在 OnlyOffice 编辑器中编辑 DocFlow 文档。文档全文如下（超长已截断）：\n\n' + docText,
+      });
+    }
+    msgs = msgs.concat(history, [{ role: 'user', content: prompt }]);
+    controller = new AbortController();
+    var failed = false;
+    chat(msgs, {
+      onDelta: function (d) { acc += d; el.textContent = acc; log.scrollTop = log.scrollHeight; },
+      onThinking: function (th) {
+        if (!thinkStart) thinkStart = Date.now();
+        appendThink(th);
+      },
+      onDone: function () { settleThink(thinkStart ? Date.now() - thinkStart : 0); },
+    })
+      .catch(function (err) {
+        if (err && err.name === 'AbortError') {
+          el.textContent = (acc ? acc + '\n' : '') + '（已停止）';
+          settleThink(thinkStart ? Date.now() - thinkStart : 0);
+        } else {
+          failed = true;
+          // 401 重试仍失败（chatOnce 抛裸 {status:401}）：给出可读文案。
+          var msgText = err && err.status === 401
+            ? '登录态失效（请刷新文档页后重试）'
+            : (err && err.message ? err.message : String(err));
+          el.textContent = (acc ? acc + '\n' : '') + '⚠ ' + msgText;
+        }
+      })
+      .then(function () {
+        lastReply = acc;
+        // 多轮历史（仅完整成功的回合入史——失败回合不悬挂 user 轮）。
+        if (!failed) {
+          history.push({ role: 'user', content: prompt });
+          if (acc) history.push({ role: 'assistant', content: acc });
+          if (history.length > 12) history = history.slice(-12);
+        }
+        busy = false; controller = null; sendBtn.style.display = ''; stopBtn.style.display = 'none';
+      });
   }
-  document.getElementById('send').onclick = send;
+  sendBtn.onclick = send;
+  stopBtn.onclick = function () { if (controller) controller.abort(); };
+  webBtn.onclick = function () { webOn = !webOn; webBtn.className = 'tgl' + (webOn ? ' on' : ''); };
+  thinkBtn.onclick = function () { thinkOn = !thinkOn; thinkBtn.className = 'tgl' + (thinkOn ? ' on' : ''); };
   q.addEventListener('keydown', function (e) {
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
   });
 
-  // ---- OnlyOffice 文档操作（插件桥；401 时先 refresh 重试）。----
+  // ---- OnlyOffice 文档操作（插件桥）。----
   function withApi(fn) {
     if (!window.Asc || !window.Asc.plugin) { hint.textContent = '未检测到 OnlyOffice 插件环境'; return; }
     fn(window.Asc.plugin);
   }
   document.getElementById('useSel').onclick = function () {
+    withApi(function (api) { api.executeMethod('GetSelectedText'); });
+  };
+
+  /** 经插件 API 读文档全文（word 类元素逐段 GetText；cell/slide 无此 API，
+   *  失败静默=保持旧上下文）。截 CONTEXT_LIMIT 字注入 system。 */
+  function loadDocText(done) {
     withApi(function (api) {
-      api.executeMethod('GetSelectedText');
-      // 结果经 onMethodReturn 异步回传（见下方 init 注册）。
+      try {
+        api.callCommand(function () {
+          var oDocument = Api.GetDocument();
+          var parts = [];
+          var count = oDocument.GetElementsCount();
+          for (var i = 0; i < count; i++) {
+            var el = oDocument.GetElement(i);
+            try { parts.push(el.GetText()); } catch (e) { /* 跳过不可读元素 */ }
+          }
+          return parts.join('\n');
+        }, false, false, function (result) {
+          var text = typeof result === 'string' ? result : '';
+          docText = text.slice(0, CONTEXT_LIMIT);
+          if (done) done(!!docText);
+        });
+      } catch (e) {
+        if (done) done(false);
+      }
+    });
+  }
+  document.getElementById('useAll').onclick = function () {
+    hint.textContent = '正在读取文档全文…';
+    loadDocText(function (ok) {
+      hint.textContent = ok
+        ? ('已注入全文上下文（' + docText.length + ' 字）')
+        : '当前文档类型暂不支持全文读取（可用「引用选中」）';
     });
   };
-  function insertText(text, replaceAll) {
+  function insertText(text) {
     withApi(function (api) {
       // PasteHtml：在光标处插入 HTML（段落/换行按文档语义落位）。
       var html = String(text).split(/\n{2,}/).map(function (p) {
         return '<p>' + p.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/\n/g, '<br>') + '</p>';
       }).join('');
-      api.executeMethod('PasteHtml', [replaceAll ? { html: html } : html]);
+      api.executeMethod('PasteHtml', [html]);
     });
   }
-  document.getElementById('insert').onclick = function () { if (lastReply) insertText(lastReply, false); };
+  document.getElementById('insert').onclick = function () { if (lastReply) insertText(lastReply); };
   document.getElementById('replace').onclick = function () {
     if (!lastReply) return;
     withApi(function (api) {
@@ -143,10 +306,15 @@
   };
 
   // ---- 插件生命周期。----
-  if (window.Asc && window.Asc.plugin) {
+  var apiRegistered = false
+  function registerPluginApi() {
+    if (apiRegistered || !window.Asc || !window.Asc.plugin) return
+    apiRegistered = true
     window.Asc.plugin.init = function () {
-      hint.textContent = '就绪 · 生成后可插入/替换';
+      hint.textContent = '就绪 · 已注入文档上下文';
       void refresh().catch(function () { hint.textContent = '未登录 DocFlow（请先在 DocFlow 页面登录后刷新文档）'; });
+      // 自动读全文（word 类；失败静默——仍可「引用选中/全文」）。
+      loadDocText(function () {});
     };
     window.Asc.plugin.onMethodReturn = function (returnValue) {
       // GetSelectedText 的异步结果。
@@ -156,9 +324,26 @@
       }
     };
     window.Asc.plugin.button = function () { /* 关闭按钮（无按钮配置，占位） */ };
+  }
+  if (window.Asc && window.Asc.plugin) {
+    registerPluginApi()
   } else {
-    // 独立打开（调试）：仍可对话，文档按钮禁用。
-    hint.textContent = '独立调试模式（文档操作需在 OnlyOffice 编辑器内）';
+    // 桥脚本还在加载（同源 404 → CDN 异步回退）：轮询至多 10s，加载完成
+    // 即补注册（否则 CDN 回退路径永远拿不到 init/onMethodReturn——引用
+    // 选中/自动全文上下文静默失效）；超时则按独立调试模式降级。
+    var tries = 0
+    var poll = window.setInterval(function () {
+      tries++
+      if (window.Asc && window.Asc.plugin) {
+        window.clearInterval(poll)
+        registerPluginApi()
+        return
+      }
+      if (tries >= 20) {
+        window.clearInterval(poll)
+        hint.textContent = '独立调试模式（文档操作需在 OnlyOffice 编辑器内）'
+      }
+    }, 500)
     void refresh().catch(function () {});
   }
 })();

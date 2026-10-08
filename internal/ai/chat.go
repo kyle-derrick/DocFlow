@@ -57,6 +57,12 @@ const DefaultChatTimeout = 120 * time.Second
 // 上限）；anthropic 要求 max_tokens > budget_tokens，不满足时自动抬高。
 const AnthropicThinkBudgetTokens = 2048
 
+// ThinkMaxTokensFloor 推理思考开启时的 max_tokens 下限（budget + 2048）：
+// openai 兼容网关的 max_tokens 普遍同时计入 reasoning_content，全局默认
+// 2048 会被思考增量耗尽导致正文为空（前端表现为「已深度思考」后内容全
+// 空白）。Chat 入口统一抬高（anthropic 路径同思路，见 chatAnthropic）。
+const ThinkMaxTokensFloor = AnthropicThinkBudgetTokens + 2048
+
 // Message 为对话消息条目（role: system/user/assistant）。
 type Message struct {
 	Role    string `json:"role"`
@@ -372,6 +378,9 @@ func (s *Service) Chat(ctx context.Context, req ChatRequest, onDelta func(string
 	if maxTokens <= 0 {
 		maxTokens = cfg.MaxTokens
 	}
+	if req.Think && maxTokens < ThinkMaxTokensFloor {
+		maxTokens = ThinkMaxTokensFloor
+	}
 	// MCP 工具收集（use_mcp）+ 内置平台工具（use_files，HTTP 层注入）：
 	// 任一来源可用即进入工具循环（两类工具合并进 chatToolContext）；
 	// MCP 单服务失败跳过并 log，全部失败/零工具 → 仅剩内置工具或普通
@@ -578,6 +587,17 @@ func (s *Service) chatOpenAI(ctx context.Context, p settings.AIProvider, model s
 		res := ChatResult{Content: strings.TrimSpace(out.Choices[0].Message.Content)}
 		if out.Usage != nil {
 			res.PromptTokens, res.CompletionTokens = out.Usage.PromptTokens, out.Usage.CompletionTokens
+		}
+		// 空正文显式报错（不静默返回空内容——前端会渲染成内容全空白）。
+		if res.Content == "" {
+			return res, fmt.Errorf("%w: empty completion", ErrUpstreamChat)
+		}
+		// 非流式分支经 onDelta 补发整段文本：该分支也承载流式失败的一次性
+		// 回退（同 chatAnthropic），不补发则 SSE 客户端只收到流中断前的部分
+		// 增量甚至零增量，却得到 done 成功收尾——「内容空白/被静默截断」
+		// 的另一形态（工具循环路径的 emit(round.Content) 即此语义）。
+		if onDelta != nil {
+			onDelta(res.Content)
 		}
 		return res, nil
 	}
@@ -795,6 +815,12 @@ func (s *Service) chatAnthropic(ctx context.Context, p settings.AIProvider, mode
 		res := ChatResult{Content: strings.TrimSpace(b.String()), PromptTokens: out.Usage.InputTokens, CompletionTokens: out.Usage.OutputTokens}
 		if res.Content == "" {
 			return res, fmt.Errorf("%w: empty completion", ErrUpstreamChat)
+		}
+		// 非流式分支同样经 onDelta 补发整段文本（同 chatOpenAI：该分支承载
+		// 流式失败的一次性回退，不补发则 SSE 客户端只拿到部分增量甚至零
+		// 增量却得到 done 成功收尾）。
+		if onDelta != nil {
+			onDelta(res.Content)
 		}
 		return res, nil
 	}
@@ -1385,6 +1411,13 @@ func (s *Service) openAIToolRound(ctx context.Context, p settings.AIProvider, mo
 		if out.Usage != nil {
 			round.PromptTokens, round.CompletionTokens = out.Usage.PromptTokens, out.Usage.CompletionTokens
 		}
+		// 空正文且无工具调用：显式报错（与流式路径的 empty stream response
+		// 检查对齐；否则静默空 round 会让整次对话以 done+空内容收尾——
+		// 前端表现为「已深度思考」后内容全空白，推理模型耗尽 max_tokens
+		// 时的典型形态）。
+		if round.Content == "" && len(round.ToolCalls) == 0 {
+			return round, fmt.Errorf("%w: empty completion", ErrUpstreamChat)
+		}
 		emit(round.Content) // 非流式轮的整段文本同样经 emit 累计/流出
 		return round, nil
 	}
@@ -1536,6 +1569,11 @@ func (s *Service) chatAnthropicTools(ctx context.Context, p settings.AIProvider,
 		}
 		if len(toolBlocks) == 0 {
 			res.Content = strings.TrimSpace(content.String())
+			// 模型仅产出 thinking 块（budget_tokens 耗尽等）：显式报错而非
+			// 静默空正文收尾（前端会渲染成「已深度思考」后内容全空白）。
+			if res.Content == "" {
+				return res, fmt.Errorf("%w: model returned only thinking without content", ErrUpstreamChat)
+			}
 			return res, nil
 		}
 		if execs >= req.effectiveToolMaxRounds() {
