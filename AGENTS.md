@@ -57,6 +57,11 @@
 - 本项目运行于 Windows：脚本同时维护 `.sh` 与 `.ps1`，make 目标内部调用 ps1；终端命令默认 PowerShell
 - 提交信息风格参考 `git log`：中文，`<type>(<scope>): 描述`
 
+## AI agent 配置约定
+
+- agent 私有目录（`.opencode/`、`.trae/`、`.cursor/`、`opencode.json` 等）**不进 git**（已 gitignore）；跨 agent 通用技能放用户级 `~/.claude/skills/`，仓库内不放
+- 项目共享 MCP 服务定义在根目录 `.mcp.json`（Claude Code 项目级格式，Windows 下 `cmd /c npx` 包装）；新增 MCP server 改此文件而非各 agent 私有配置
+
 ## 文档
 
 - 架构 / 数据模型 / 设计取舍：`docs/architecture.md`

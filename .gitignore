@@ -17,6 +17,17 @@ frontend/blob-report/
 .idea/
 .vscode/
 
+# 各类 AI agent 的私有工作目录/配置（不进 git；跨 agent 复用的通用技能放
+# 用户级 ~/.claude/skills，MCP 服务定义放项目根 .mcp.json ——均为通用格式）
+.opencode/
+.trae/
+.cursor/
+.codex/
+.aider*
+.windsurf/
+opencode.json
+.playwright-mcp/
+
 # AI 辅助开发过程产物（设计稿等，不属于开源交付物）
 .design/
 
