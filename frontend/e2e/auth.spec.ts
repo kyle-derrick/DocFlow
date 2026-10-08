@@ -15,8 +15,9 @@ test.describe('认证', () => {
 
     await expect(page).toHaveURL(/\/$/)
     await expect(page.locator('.user-menu-trigger')).toBeVisible()
-    // v2.x 文件页无页首 heading（工具栏+表格布局），以文件表为落点断言。
-    await expect(page.locator('.file-table')).toBeVisible()
+    // 文件页主体就绪：文件表（有内容）或空态提示（全新库默认空间为空）
+    // 二选一——断言不得依赖库内既有数据（CI 每次全新库）。
+    await expect(page.locator('.file-table, .file-browser .empty')).toBeVisible()
   })
 
   test('错误密码提示 401 错误信息', async ({ page }) => {
@@ -44,8 +45,8 @@ test.describe('认证', () => {
     await page.reload()
     await expect(page).toHaveURL(/\/$/)
     await expect(page.locator('.user-menu-trigger')).toBeVisible()
-    // v2.x 文件页无页首 heading（工具栏+表格布局），以文件表为落点断言。
-    await expect(page.locator('.file-table')).toBeVisible()
+    // 同上：文件表或空态二选一（全新库默认空间为空）。
+    await expect(page.locator('.file-table, .file-browser .empty')).toBeVisible()
   })
 
   test('两个标签页并发恢复会话不会触发 refresh token 重放', async ({ page, context }) => {
