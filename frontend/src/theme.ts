@@ -2,7 +2,8 @@
 // - 偏好持久化在 localStorage（key: docflow.theme，JSON {accent, mode}）；
 // - 应用方式：document.documentElement 的 data-theme（accent）与
 //   data-mode（dark|light，system 模式按 prefers-color-scheme 实时解析）；
-// - 默认 indigo + dark，与既有视觉保持一致；非法存储值回退默认。
+// - 默认 indigo + light（v4.1：默认浅色，更符合办公文档场景的普遍预期；
+//   已存偏好不受影响），非法存储值回退默认。
 
 import { useEffect, useState } from 'react'
 
@@ -32,7 +33,7 @@ export interface ThemePreference {
   mode: ThemeMode
 }
 
-const DEFAULT_THEME: ThemePreference = { accent: 'indigo', mode: 'dark' }
+const DEFAULT_THEME: ThemePreference = { accent: 'indigo', mode: 'light' }
 
 const ACCENTS: ThemeAccent[] = ['indigo', 'violet', 'emerald', 'rose', 'amber']
 const MODES: ThemeMode[] = ['dark', 'light', 'system']

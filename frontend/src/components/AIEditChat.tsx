@@ -44,6 +44,17 @@ export interface AIEditTarget {
   hasSelection: boolean
 }
 
+/** 宿主注册的编辑工具（v5 内置 Agent 模式）：name/描述进 system，
+ * exec 在宿主编辑器上执行并返回结构化结果（ok=false 时错误回喂 AI）。 */
+export interface AIEditTool {
+  name: string
+  /** 工具说明（签名与语义，写入 system 提示）。 */
+  desc: string
+  /** 参数摘要展示（工具链 UI 的 label）。 */
+  label: (args: Record<string, unknown>) => string
+  exec: (args: Record<string, unknown>) => Promise<{ ok: boolean; data?: unknown; error?: string }>
+}
+
 /** 上下文（选区/全文）送入模型的最大长度（超限截取头部并在消息中注明）。 */
 const MAX_CONTEXT_CHARS = 6000
 
@@ -337,6 +348,7 @@ export default function AIEditChat({
   onQuickConsumed,
   applyKind = 'text',
   outputFormat = 'plaintext',
+  agentTools,
 }: {
   open: boolean
   onClose: () => void
@@ -366,6 +378,11 @@ export default function AIEditChat({
    * markdown=富文本宿主（.dfrt 编辑页）：system 指令要求输出 Markdown，
    * 宿主经 marked 转富文本 HTML 插入。仅 applyKind='text' 生效。 */
   outputFormat?: 'markdown' | 'plaintext'
+  /** 宿主注册的编辑工具集（v5 内置 Agent 模式）：提供时面板切换为
+   *  TOOL_CALL/FINAL 工具循环——AI 自主读文档/定位/编辑/验证（编辑范围
+   *  由 AI 判断），工具经 exec 在宿主编辑器上执行，过程以工具链 UI 展示。
+   *  未提供（富文本指令/白板/图表等既有直编通道）保持原单轮模式。 */
+  agentTools?: AIEditTool[]
 }) {
   const locale = useLocale()
   const zh = locale === 'zh-CN'
@@ -567,12 +584,173 @@ export default function AIEditChat({
     modeRef.current = m
   }
 
+  // ---- v5 内置 Agent 工具循环（agentTools 提供时启用） ----
+  // 协议与 Office 插件一致：AI 每轮输出单行 TOOL_CALL {...}（一次一个工具）
+  // 或 FINAL 总结；exec 后结果以 TOOL_RESULT 回喂继续，直至 FINAL/上限。
+  // 工具过程复用 turn.toolCalls（AIToolChain：running→success/error）。
+  const agentToolsRef = useRef(agentTools)
+  agentToolsRef.current = agentTools
+
+// 括号深度扫描提取 TOOL_CALL {...}（字符串感知：引号内的 {} 与转义不计
+// 深度，支持嵌套/跨行；从最后一个候选向前取首个可解析的——推理模型在
+// 工具行外漏思考散文、重复多行时的鲁棒解析，与 Office 插件同实现）。
+  function extractCallJson(t: string): { tool: string; args: Record<string, unknown> } | null {
+    let k = 0
+    const found: string[] = []
+    while (found.length < 8) {
+      const at = t.indexOf('TOOL_CALL', k)
+      if (at < 0) break
+      const brace = t.indexOf('{', at)
+      if (brace < 0) break
+      let depth = 0, inStr = false, escp = false, end = -1
+      for (let i2 = brace; i2 < t.length; i2++) {
+        const ch = t.charAt(i2)
+        if (escp) { escp = false; continue }
+        if (ch === '\\') { if (inStr) escp = true; continue }
+        if (ch === '"') { inStr = !inStr; continue }
+        if (inStr) continue
+        if (ch === '{') depth++
+        else if (ch === '}') { depth--; if (depth === 0) { end = i2; break } }
+      }
+      if (end < 0) break
+      found.push(t.slice(brace, end + 1))
+      k = end + 1
+    }
+    for (let j2 = found.length - 1; j2 >= 0; j2--) {
+      try {
+        const c = JSON.parse(found[j2]) as { tool: string; args?: Record<string, unknown> }
+        if (c && typeof c.tool === 'string') return { tool: c.tool, args: c.args ?? {} }
+      } catch { /* 候选不完整 → 跳过 */ }
+    }
+    return null
+  }
+  const parseAgentReply = (text: string): { type: 'final'; text: string } | { type: 'tool'; call: { tool: string; args: Record<string, unknown> } } => {
+    const t = text.trim()
+    if (t.startsWith('FINAL')) return { type: 'final', text: t.slice(5).trim() || t }
+    const call = extractCallJson(t)
+    if (call) return { type: 'tool', call }
+    return { type: 'final', text: t }
+  }
+
+  const patchLastTurn = (turnId: number, patch: (x: ChatTurn) => Partial<ChatTurn>) => {
+    setTurns((prev) => prev.map((x) => (x.id === turnId ? { ...x, ...patch(x) } : x)))
+  }
+
+  /** Agent 模式发送：工具循环 + FINAL；过程写入助手回合（toolCalls 链）。 */
+  const sendAgent = async (question: string) => {
+    const tools = agentToolsRef.current ?? []
+    const sys = [
+      `你是 DocFlow 内置文档编辑 Agent（宿主：${applyKind === 'text' ? '文本编辑器' : '编辑器'}）。通过调用工具直接操作当前文档，用户只描述意图。`,
+      '',
+      '可用工具（每次回复恰好一行 TOOL_CALL {...} 调用一个，或以 FINAL 开头给出最终答复）：',
+      ...tools.map((t) => `- ${t.name}：${t.desc}`),
+      '',
+      '输出格式（硬性要求）：每轮回复的完整内容必须恰好是一行 TOOL_CALL {...}（单个工具、合法 JSON、前后不得有任何解释/思考文字），或以 FINAL 开头的最终答复。同一轮绝不输出两个 TOOL_CALL。',
+      '工作方式：先读（read_document/read_selection/search_text）再改；局部修改用精确工具、不要整篇重写；一次一个工具，根据结果决定下一步；失败读错误换路径；完成后 FINAL + 简明中文总结（改了什么、在哪）。',
+      'TOOL_CALL 示例：TOOL_CALL {"tool":"replace_text","args":{"find":"旧文本","replace":"新文本"}}',
+    ].join(String.fromCharCode(10))
+    const userTurnId = ++turnIdRef.current
+    const asstTurnId = ++turnIdRef.current
+    const tgt = getTargetRef.current()
+    setInput('')
+    setNotice('')
+    setTurns((prev) => [
+      ...prev,
+      {
+        id: userTurnId, role: 'user', content: question,
+        note: tgt.hasSelection ? `选区 ${tgt.text.length} 字` : '全文上下文',
+      },
+      { id: asstTurnId, role: 'assistant', content: '', streaming: true },
+    ])
+    setBusy(true)
+    const controller = new AbortController()
+    abortRef.current = controller
+    const convo: AIMessage[] = [{ role: 'system', content: sys }, { role: 'user', content: question }]
+    const MAX_ROUNDS = 14
+    try {
+      let finalText = ''
+      for (let round = 1; round <= MAX_ROUNDS; round++) {
+        let acc = ''
+        await aiChat(
+          { messages: convo, think: toggles.think ? true : undefined, web_search: toggles.web ? true : undefined },
+          {
+            onDelta: (chunk) => {
+              acc += chunk
+              patchLastTurn(asstTurnId, () => ({ content: acc }))
+            },
+            onThinking: (th) => {
+              patchLastTurn(asstTurnId, (x) => ({
+                thinking: (x.thinking ?? '') + th,
+                thinkingStartedAt: x.thinkingStartedAt ?? Date.now(),
+              }))
+            },
+            onMeta: () => {},
+            onTool: () => {},
+            onToolResult: () => {},
+            onSources: () => {},
+          },
+          controller.signal,
+        )
+        const parsed = parseAgentReply(acc)
+        if (parsed.type === 'final') {
+          finalText = parsed.text
+          break
+        }
+        const tool = parsed.call.tool
+        const args = parsed.call.args
+        const def = tools.find((t) => t.name === tool)
+        // 工具链条目：running → 终态（exec 结果/错误）
+        const entryId = Date.now() + round
+        patchLastTurn(asstTurnId, (x) => ({
+          toolCalls: [...(x.toolCalls ?? []), { label: def ? def.label(args) : `${tool}`, server: 'docflow', tool, input: JSON.stringify(args).slice(0, 400), status: 'running' as const, _id: entryId }],
+        }))
+        let result: { ok: boolean; data?: unknown; error?: string }
+        if (!def) {
+          result = { ok: false, error: `未知工具 ${tool}（可用：${tools.map((t) => t.name).join(', ')}）` }
+        } else {
+          try {
+            result = await def.exec(args)
+          } catch (err) {
+            result = { ok: false, error: err instanceof Error ? err.message : String(err) }
+          }
+        }
+        patchLastTurn(asstTurnId, (x) => ({
+          toolCalls: (x.toolCalls ?? []).map((e) => (
+            (e as { _id?: number })._id === entryId
+              ? { ...e, status: result.ok ? ('success' as const) : ('error' as const), output: result.ok ? JSON.stringify(result.data ?? { ok: true }).slice(0, 400) : (result.error ?? '失败') }
+              : e
+          )),
+        }))
+        convo.push({ role: 'assistant', content: `TOOL_CALL ${JSON.stringify({ tool, args })}` })
+        convo.push({ role: 'user', content: `TOOL_RESULT ${JSON.stringify(result).slice(0, 3000)}` })
+      }
+      patchLastTurn(asstTurnId, (x) => ({
+        content: finalText || '（未产生最终答复）',
+        streaming: false,
+        thinkingMS: x.thinkingStartedAt ? Math.max(0, Date.now() - x.thinkingStartedAt) : undefined,
+        note: finalText ? undefined : '已达工具轮次上限，已执行操作保留',
+      }))
+    } catch (err) {
+      const aborted = err instanceof Error && err.name === 'AbortError'
+      patchLastTurn(asstTurnId, (x) => ({
+        streaming: false,
+        note: aborted ? '已停止（已执行操作保留）' : undefined,
+        error: aborted ? undefined : (err instanceof Error ? err.message : t(locale, 'aiAssistantErr')),
+        thinkingMS: x.thinkingStartedAt ? Math.max(0, Date.now() - x.thinkingStartedAt) : undefined,
+      }))
+    } finally {
+      abortRef.current = null
+      setBusy(false)
+    }
+  }
+
   /** 发送一轮：每轮独立构造 prompt（系统约束 + 最近 2 轮历史 + 指令与
    * 当前选区/全文上下文），SSE 流式渲染；停止/失败落在助手回合上。
    * 可修改模式下正常完成后自动应用（见 autoApply）；中止/失败不应用。 */
   const send = async (question: string) => {
     const text = question.trim()
     if (!text || busy) return
+    if (agentTools && agentTools.length > 0) { await sendAgent(text); return }
     // 以发送时刻的模式为准（流式期间切换不影响本轮）。
     const applyMode = modeRef.current
     const tgt = getTargetRef.current()

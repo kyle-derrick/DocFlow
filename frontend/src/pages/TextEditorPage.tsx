@@ -11,7 +11,7 @@ import MarkmapDiagram from '../components/MarkmapDiagram'
 import MermaidDiagram from '../components/MermaidDiagram'
 import type { AIEditTarget } from '../components/AIEditChat'
 import AIEditChat, { AIEditChatButton } from '../components/AIEditChat'
-import type { AIQuickCommand } from '../components/AIEditChat'
+import type { AIEditTool, AIQuickCommand } from '../components/AIEditChat'
 import { closeEditorWithFallback, safeReturnTo } from '../editorNavigation'
 import { MessageKey, t, useLocale } from '../i18n'
 import { useColorMode } from '../theme'
@@ -376,6 +376,97 @@ export default function TextEditorPage({
   }
 
   /** AIEditMenu 的选区读取：无选区（或读取失败）回退全文模式。 */
+  /** v5 内置 Agent 编辑工具集（文本/Markdown 编辑页）：AI 经工具循环自主
+   *  读文档/定位/编辑（read→search→replace/insert），编辑范围由 AI 判断。
+   *  写工具经 aiApply/setText 落到 Monaco（undo 栈完整、自动 dirty）。 */
+  const aiEditTools: AIEditTool[] = useMemo(() => ([
+    {
+      name: 'read_document',
+      desc: '{} → 读当前全文（带行号，最多前 800 行）。',
+      label: () => '读取全文',
+      exec: async () => {
+        const lines = text.split(String.fromCharCode(10))
+        const body = lines.slice(0, 800).map((ln, i) => `${i + 1}: ${ln}`).join(String.fromCharCode(10))
+        return { ok: true, data: { lines: lines.length, text: body.slice(0, 20000) } }
+      },
+    },
+    {
+      name: 'read_selection',
+      desc: '{} → 读当前选中文本（无选区返回空并注明）。',
+      label: () => '读取选区',
+      exec: async () => {
+        const sel = aiSelectionRef.current
+        const has = !!sel && sel.end > sel.start
+        return { ok: true, data: { hasSelection: has, text: has ? text.slice(sel!.start, sel!.end).slice(0, 8000) : '' } }
+      },
+    },
+    {
+      name: 'search_text',
+      desc: '{query} → 返回所有含 query 的行号与该行内容（定位修改点）。',
+      label: (a: Record<string, unknown>) => `搜索 ${String(a.query ?? '').slice(0, 20)}`,
+      exec: async (a: Record<string, unknown>) => {
+        const query = String(a.query ?? '')
+        if (!query) return { ok: false, error: 'query 必填' }
+        const lines = text.split(String.fromCharCode(10))
+        const hits: Array<{ line: number; text: string }> = []
+        for (let i = 0; i < lines.length && hits.length < 50; i++) {
+          if (lines[i].includes(query)) hits.push({ line: i + 1, text: lines[i].slice(0, 200) })
+        }
+        return { ok: true, data: { total: hits.length, hits } }
+      },
+    },
+    {
+      name: 'replace_text',
+      desc: '{find, replace, scope?:"first"|"all"} → 精确文本替换（find 必须与原文逐字一致；默认全部替换）。',
+      label: (a: Record<string, unknown>) => `替换 ${String(a.find ?? '').slice(0, 16)}→${String(a.replace ?? '').slice(0, 16)}`,
+      exec: async (a: Record<string, unknown>) => {
+        const find = String(a.find ?? '')
+        if (!find) return { ok: false, error: 'find 必填' }
+        const replace = String(a.replace ?? '')
+        const all = (a.scope ?? 'all') !== 'first'
+        if (!text.includes(find)) return { ok: false, error: `未找到：${find.slice(0, 60)}` }
+        let count = 0
+        const next = all
+          ? text.split(find).reduce((acc: string[], part, i) => {
+              if (i === 0) return [part]
+              count++
+              return [...acc, replace, part]
+            }, []).join('')
+          : text.replace(find, () => { count++; return replace })
+        setText(next)
+        markDirty()
+        return { ok: true, data: { replaced: count } }
+      },
+    },
+    {
+      name: 'insert_content',
+      desc: '{text, at?:"end"|"selection"} → 插入文本（at=selection 且有选区时替换选区，默认文末追加）。',
+      label: (a: Record<string, unknown>) => `插入@${String(a.at ?? 'end')}`,
+      exec: async (a: Record<string, unknown>) => {
+        const content = String(a.text ?? '')
+        if (!content) return { ok: false, error: 'text 必填' }
+        if (a.at === 'selection') {
+          const sel = aiSelectionRef.current
+          if (sel && sel.end > sel.start) { aiApply('replace', content); return { ok: true, data: { at: 'selection' } } }
+          aiApply('insert', content)
+          return { ok: true, data: { at: 'cursor' } }
+        }
+        aiAppendEnd(content)
+        return { ok: true, data: { at: 'end' } }
+      },
+    },
+    {
+      name: 'write_whole',
+      desc: '{text} → 整篇重写（仅当改动覆盖大半文档时使用）。',
+      label: () => '整篇重写',
+      exec: async (a: Record<string, unknown>) => {
+        setText(String(a.text ?? ''))
+        markDirty()
+        return { ok: true }
+      },
+    },
+  ]), [text])
+
   const aiGetTarget = (): AIEditTarget => {
     const sel = aiSelectionRef.current
     if (sel && sel.end > sel.start) {
@@ -637,6 +728,7 @@ export default function TextEditorPage({
           getAllText={() => text}
           onApply={aiApply}
           onAppend={aiAppendEnd}
+          agentTools={aiEditTools}
           fileId={fileId}
           ensureSaved={aiEnsureSaved}
           reload={aiReload}

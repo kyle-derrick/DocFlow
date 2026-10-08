@@ -1,19 +1,11 @@
 <!doctype html>
-<!-- DocFlow AI OnlyOffice 插件面板（v4.0——真集成：AI 直接编辑文档）：
-     - 双模式：「可修改」= AI 输出 docflow-edit 编辑指令（替换选区/光标插入/
-       文末追加/整篇重写/插入表格），插件经 OnlyOffice Api（callCommand）
-       直接在文档上执行——非手动贴文本；「仅对话」= 普通问答，回复可手动
-       「插入到光标/替换选中」。
-     - 轻量 Markdown 渲染（标题/加粗/行内代码/列表/表格），编辑指令与聊天气泡
-       共用同一解析器；编辑指令执行后显示「已应用 N 项操作」卡片（可展开原文）。
-     - 模型选择（GET /ai/models，chat 能力过滤；与主应用共用 localStorage
-       docflow.ai.model 偏好）；联网/思考开关；多轮历史；思考折叠；停止生成。
-     - 文档上下文：callCommand 读全文（word 类截 12000 字）注入 system；
-       「引用选中/引用全文」手动圈定范围。
-     - 认证：同站 cookie 换一次性 access token（POST 带 X-CSRF-Token，
-       与主应用 authFetch 同协议），401 自动重试一次。
-     - config.json 静态相对 URL（DS 按 config.json 所在目录拼接，绝对 URL 会
-       404）；不 autostart，从编辑器「插件」标签页展开。 -->
+<!-- DocFlow AI OnlyOffice 插件（v5.0——工具化 + 内置 Agent 自主调度）：
+     - 自主编辑模式：AI 经工具循环自主操作文档（read/search → 规划 → 编辑 →
+       验证 → 总结），工具集按编辑器类型（word/excel/ppt/pdf）动态注册，
+       编辑范围（插入/局部/全文）由 AI 自行判断，无需用户手动选按钮。
+     - 仅对话模式：问答，回复可手动插入/替换（兜底通道）。
+     - 详见 plugin.js 头注释。config.json 静态相对 URL（DS 按 config.json
+       所在目录拼接）；不 autostart。默认浅色（跟随 DS theme-type 参数）。 -->
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
@@ -23,63 +15,60 @@
         onerror="var fb=document.createElement('script');fb.src='https://onlyoffice.github.io/sdkjs-plugins/v1/plugins.js';document.head.appendChild(fb);"></script>
 <style>
   :root {
-    color-scheme: light dark;
-    --brand: #2f6fed; --brand-weak: rgba(47, 111, 237, .12);
-    --bg: #fff; --fg: #1d2433; --muted: #8a8f98; --line: rgba(127,127,127,.22);
-    --card: rgba(127,127,127,.08); --ok: #2f9e44; --bad: #e03131;
+    color-scheme: light;
+    --brand: #2f6fed; --brand-weak: rgba(47, 111, 237, .1);
+    --bg: #fff; --fg: #1d2433; --muted: #8a8f98; --line: rgba(16, 24, 40, .14);
+    --card: #f5f6f8; --ok: #237a35; --bad: #d5382e; --mono: ui-monospace, Consolas, monospace;
   }
-  @media (prefers-color-scheme: dark) {
-    :root { --bg: #161a22; --fg: #e6e8ee; --card: rgba(127,127,127,.14); }
+  html[data-theme-type="dark"] {
+    color-scheme: dark;
+    --bg: #161a22; --fg: #e6e8ee; --card: rgba(127,127,127,.14); --line: rgba(127,127,127,.24);
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
-  body {
-    margin: 0; font: 13px/1.6 system-ui, -apple-system, 'Segoe UI', sans-serif;
-    display: flex; flex-direction: column; background: var(--bg); color: var(--fg);
-  }
+  body { margin: 0; font: 13px/1.6 system-ui, -apple-system, 'Segoe UI', sans-serif; display: flex; flex-direction: column; background: var(--bg); color: var(--fg); }
   button { font: inherit; cursor: pointer; }
-  /* ---- 头部：标题 + 模式 + 模型 + 清空 ---- */
   header { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--line); flex-shrink: 0; }
   .logo { width: 20px; height: 20px; border-radius: 6px; background: var(--brand); color: #fff; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; flex-shrink: 0; }
-  header .title { font-weight: 600; font-size: 13px; }
+  header .title { font-weight: 600; }
   .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
   .seg button { border: none; background: transparent; color: var(--fg); padding: 4px 10px; font-size: 12px; }
   .seg button.on { background: var(--brand); color: #fff; }
-  .iconbtn { border: none; background: transparent; color: var(--muted); border-radius: 6px; padding: 4px 6px; font-size: 14px; line-height: 1; }
+  .iconbtn { border: none; background: transparent; color: var(--muted); border-radius: 6px; padding: 4px 6px; }
   .iconbtn:hover { color: var(--fg); background: var(--card); }
   .spacer { flex: 1; }
-  /* ---- 消息流 ---- */
   #log { flex: 1; min-height: 0; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
-  .m { max-width: 94%; padding: 8px 10px; border-radius: 10px; white-space: normal; word-break: break-word; }
+  .m { max-width: 94%; padding: 8px 10px; border-radius: 10px; word-break: break-word; }
   .m.u { align-self: flex-end; background: var(--brand); color: #fff; border-bottom-right-radius: 3px; white-space: pre-wrap; }
   .m.u .ref { display: block; margin-top: 4px; font-size: 11px; opacity: .8; }
   .m.a { align-self: flex-start; background: var(--card); border-bottom-left-radius: 3px; }
   .m.a.err { color: var(--bad); }
   .m.a h1, .m.a h2, .m.a h3 { margin: 6px 0 2px; font-size: 14px; }
-  .m.a code { font-family: ui-monospace, Consolas, monospace; background: rgba(127,127,127,.18); border-radius: 4px; padding: 0 4px; font-size: 12px; }
-  .m.a pre { background: rgba(127,127,127,.16); border-radius: 8px; padding: 8px; overflow-x: auto; }
+  .m.a code { font-family: var(--mono); background: rgba(127,127,127,.16); border-radius: 4px; padding: 0 4px; font-size: 12px; }
+  .m.a pre { background: rgba(127,127,127,.12); border-radius: 8px; padding: 8px; overflow-x: auto; }
   .m.a pre code { background: transparent; padding: 0; }
   .m.a ul { margin: 4px 0; padding-left: 18px; }
   .m.a table { border-collapse: collapse; margin: 6px 0; font-size: 12px; }
   .m.a th, .m.a td { border: 1px solid var(--line); padding: 3px 8px; }
-  .caret { display: inline-block; width: 7px; height: 14px; background: var(--brand); vertical-align: -2px; animation: blink 1s steps(2) infinite; }
+  .raw { align-self: stretch; font-family: var(--mono); font-size: 11px; color: var(--muted); white-space: pre-wrap; max-height: 120px; overflow-y: auto; }
+  .caret { display: inline-block; width: 7px; height: 13px; background: var(--brand); vertical-align: -2px; animation: blink 1s steps(2) infinite; }
   @keyframes blink { 50% { opacity: 0; } }
-  /* 思考折叠 */
   .think { align-self: stretch; font-size: 12px; color: var(--muted); }
   .think summary { cursor: pointer; user-select: none; }
   .think .t { margin: 6px 0 0; padding: 6px 8px; border-left: 2px solid var(--line); white-space: pre-wrap; max-height: 150px; overflow-y: auto; }
-  /* 编辑指令应用卡 */
-  .applied { align-self: stretch; border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; font-size: 12.5px; }
-  .applied .head { display: flex; align-items: center; gap: 6px; font-weight: 600; }
-  .applied.ok .head { color: var(--ok); }
-  .applied.bad .head { color: var(--bad); }
-  .applied ol { margin: 4px 0 0; padding-left: 18px; color: var(--fg); }
-  .applied ol li.fail { color: var(--bad); }
-  .applied details { margin-top: 6px; color: var(--muted); }
-  .applied pre { white-space: pre-wrap; max-height: 180px; overflow-y: auto; background: var(--card); border-radius: 8px; padding: 6px 8px; margin: 4px 0 0; font-size: 11.5px; }
-  /* ---- 工具行 + 输入 ---- */
-  .bar { display: flex; align-items: center; gap: 6px; padding: 6px 10px; flex-shrink: 0; }
-  .bar.tools { border-top: 1px solid var(--line); flex-wrap: wrap; row-gap: 4px; }
+  /* 工具调用过程卡（agent 调度链） */
+  .tcall { align-self: stretch; border: 1px solid var(--line); border-radius: 10px; padding: 6px 10px; font-size: 12px; display: flex; flex-direction: column; gap: 2px; }
+  .tcall .t-head { display: flex; align-items: center; gap: 6px; font-weight: 600; }
+  .tcall .t-args { font-family: var(--mono); font-size: 11px; color: var(--muted); white-space: pre-wrap; word-break: break-all; }
+  .tcall .t-res { font-size: 11.5px; color: var(--muted); max-height: 130px; overflow-y: auto; white-space: pre-wrap; }
+  .tcall.ok .t-head { color: var(--ok); }
+  .tcall.bad .t-head { color: var(--bad); }
+  .tcall .spin { width: 12px; height: 12px; border: 2px solid var(--line); border-top-color: var(--brand); border-radius: 50%; animation: spin .8s linear infinite; flex-shrink: 0; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .bar { display: flex; align-items: center; gap: 6px; padding: 6px 10px; flex-shrink: 0; flex-wrap: wrap; row-gap: 4px; }
+  .bar.tools { border-top: 1px solid var(--line); }
+  .bar.manual { padding-top: 0; }
+  .bar.manual.hidden { display: none; }
   .tgl { border: 1px solid var(--line); background: transparent; color: var(--fg); padding: 3px 10px; border-radius: 999px; font-size: 12px; }
   .tgl.on { background: var(--brand-weak); border-color: var(--brand); color: var(--brand); }
   select#model { border: 1px solid var(--line); background: var(--bg); color: var(--fg); border-radius: 8px; padding: 3px 6px; font-size: 12px; max-width: 150px; }
@@ -87,9 +76,9 @@
   .act:hover { border-color: var(--brand); color: var(--brand); }
   .bar.input { padding-top: 0; }
   .hint { padding: 2px 12px 6px; font-size: 11px; color: var(--muted); flex-shrink: 0; }
-  #q { flex: 1; resize: none; height: 52px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; font: inherit; background: var(--bg); color: var(--fg); }
+  #q { flex: 1; resize: none; height: 56px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; font: inherit; background: var(--bg); color: var(--fg); }
   #q:focus { outline: none; border-color: var(--brand); }
-  #send, #stop { border: none; border-radius: 10px; padding: 0 14px; height: 52px; background: var(--brand); color: #fff; }
+  #send, #stop { border: none; border-radius: 10px; padding: 0 14px; height: 56px; background: var(--brand); color: #fff; }
   #send:disabled { opacity: .4; cursor: not-allowed; }
   #stop { background: var(--bad); display: none; }
 </style>
@@ -99,7 +88,7 @@
     <span class="logo">AI</span>
     <span class="title">DocFlow AI</span>
     <div class="seg" id="mode">
-      <button data-v="edit" class="on" title="AI 输出编辑指令并直接在文档上执行">可修改</button>
+      <button data-v="edit" class="on" title="AI 经工具循环自主操作文档（读→改→验证→总结）">自主编辑</button>
       <button data-v="chat" title="仅问答，不改动文档（可手动插入回复）">仅对话</button>
     </div>
     <span class="spacer"></span>
@@ -113,620 +102,21 @@
     <button class="tgl on" id="think" title="深度思考（须所选模型支持推理）">思考</button>
     <select id="model" title="对话模型（与 DocFlow 主应用共用偏好）"><option value="">默认模型</option></select>
     <span class="spacer"></span>
-    <button class="act" id="useSel" title="把编辑器当前选中内容圈定为本次指令的作用范围">引用选中</button>
-    <button class="act" id="useAll" title="重新读取文档全文注入上下文">引用全文</button>
+    <button class="act" id="useSel" title="把当前选中内容作为本次指令的重点上下文（可选）">引用选中</button>
+    <button class="act" id="useAll" title="重新读取文档全文注入上下文">刷新全文</button>
   </div>
-  <div class="bar tools" style="border-top: none; padding-top: 0;">
-    <button class="act" id="insert" title="把最后一条回复插入光标处（仅对话模式的手动通道）">插入到光标</button>
-    <button class="act" id="replace" title="用最后一条回复替换当前选中（仅对话模式的手动通道）">替换选中</button>
+  <div class="bar manual" id="manualBar">
+    <button class="act" id="insert" title="把最后一条回复插入光标处（仅对话模式）">插入到光标</button>
+    <button class="act" id="replace" title="用最后一条回复替换当前选中（仅对话模式）">替换选中</button>
   </div>
 
   <div class="bar input">
-    <textarea id="q" placeholder="可修改模式：描述要做的修改（如「把第二段改得更简洁」「文末追加总结」「插入三列对比表格」）"></textarea>
+    <textarea id="q" placeholder="描述要做的修改，例如「把第二段改简洁并加粗关键词」「按 A 列汇总生成表格」「给全部一级标题统一配色」"></textarea>
     <button id="send">发送</button>
     <button id="stop">停止</button>
   </div>
   <div class="hint" id="hint">Enter 发送 · Shift+Enter 换行</div>
 
-<script>
-(function () {
-  'use strict';
-  var log = document.getElementById('log');
-  var q = document.getElementById('q');
-  var hintEl = document.getElementById('hint');
-  var sendBtn = document.getElementById('send');
-  var stopBtn = document.getElementById('stop');
-  var webBtn = document.getElementById('web');
-  var thinkBtn = document.getElementById('think');
-  var modelSel = document.getElementById('model');
-  var modeSeg = document.getElementById('mode');
-  var lastReply = '';           // 最后一条助手回复（仅对话手动插入用）
-  var selection = '';           // 「引用选中」圈定的选区文本
-  var docText = '';             // 文档全文上下文（callCommand 读取）
-  var history = [];             // 多轮历史（成功回合，最近 12 条）
-  var busy = false;
-  var token = '';
-  var controller = null;
-  var webOn = false;
-  var thinkOn = true;
-  var editMode = true;          // true=可修改（编辑指令），false=仅对话
-  var CONTEXT_LIMIT = 12000;
-  var FENCE_RE = /```docflow-edit\s*\n([\s\S]*?)```/;
-
-  // ================= 认证 =================
-  function csrfToken() {
-    var m = document.cookie.match(/(?:^|; )docflow_csrf=([^;]*)/);
-    return m ? decodeURIComponent(m[1]) : null;
-  }
-  function refresh() {
-    var headers = { 'Content-Type': 'application/json' };
-    var csrf = csrfToken();
-    if (csrf) headers['X-CSRF-Token'] = csrf;
-    return fetch('/api/v1/auth/refresh', { method: 'POST', credentials: 'same-origin', headers: headers })
-      .then(function (r) { if (!r.ok) throw { status: r.status }; return r.json(); })
-      .then(function (d) { token = d.access_token || ''; });
-  }
-
-  // ================= 模型列表 =================
-  function loadModels() {
-    return fetch('/api/v1/ai/models', { credentials: 'same-origin', headers: { Authorization: 'Bearer ' + token } })
-      .then(function (r) { if (!r.ok) throw new Error('models ' + r.status); return r.json(); })
-      .then(function (d) {
-        var raw = Array.isArray(d && d.models) ? d.models : [];
-        var items = [];
-        for (var i = 0; i < raw.length; i++) {
-          var m = raw[i] || {};
-          var caps = m.capabilities || {};
-          var kindIsChat = caps && typeof caps === 'object' ? caps.kind === 'chat' : true;
-          if (!kindIsChat) continue;
-          items.push({ id: (m.provider_id || m.providerId || '') + '/' + (m.id || m.model || ''), label: (m.provider_name || m.provider_id || '') + ' / ' + (m.id || m.model || ''), providerId: m.provider_id || m.providerId || '', modelId: m.id || m.model || '' });
-        }
-        return items;
-      })
-      .catch(function () { return []; });
-  }
-  function renderModels(items) {
-    var saved = '';
-    try { saved = window.localStorage.getItem('docflow.ai.model') || ''; } catch (e) {}
-    modelSel.innerHTML = '';
-    var opt = document.createElement('option');
-    opt.value = ''; opt.textContent = '默认模型';
-    modelSel.appendChild(opt);
-    for (var i = 0; i < items.length; i++) {
-      var o = document.createElement('option');
-      o.value = items[i].id; o.textContent = items[i].label;
-      if (saved && saved === items[i].id) o.selected = true;
-      modelSel.appendChild(o);
-    }
-    modelSel.onchange = function () {
-      try { window.localStorage.setItem('docflow.ai.model', modelSel.value); } catch (e) {}
-    };
-  }
-  function currentModel() {
-    var v = modelSel.value;
-    if (!v) return null;
-    var pid = v.slice(0, v.lastIndexOf('/'));
-    var mid = v.slice(v.lastIndexOf('/') + 1);
-    return { providerId: pid, modelId: mid };
-  }
-
-  // ================= 轻量 Markdown → HTML（聊天气泡渲染） =================
-  function esc(s) {
-    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  }
-  function inlineMd(s) {
-    return esc(s)
-      .replace(/`([^`]+)`/g, '<code>$1</code>')
-      .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
-      .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<i>$2</i>');
-  }
-  function mdToHtml(md) {
-    var lines = String(md).replace(/\r/g, '').split('\n');
-    var out = [], listOpen = false, codeOpen = false, codeBuf = [], tableBuf = [];
-    var flushList = function () { if (listOpen) { out.push('</ul>'); listOpen = false; } };
-    var flushTable = function () {
-      if (tableBuf.length === 0) return;
-      var rows = tableBuf.filter(function (r) { return !/^\|[\s:|-]+\|$/.test(r); });
-      if (rows.length) {
-        var html = ['<table>'];
-        for (var i = 0; i < rows.length; i++) {
-          var cells = rows[i].replace(/^\||\|$/g, '').split('|');
-          html.push('<tr>' + cells.map(function (c, j) { return (i === 0 ? '<th>' : '<td>') + inlineMd(c.trim()) + (i === 0 ? '</th>' : '</td>'); }).join('') + '</tr>');
-        }
-        html.push('</table>');
-        out.push(html.join(''));
-      }
-      tableBuf = [];
-    };
-    for (var i = 0; i < lines.length; i++) {
-      var line = lines[i];
-      if (/^```/.test(line)) {
-        if (codeOpen) { out.push('<pre><code>' + esc(codeBuf.join('\n')) + '</code></pre>'); codeBuf = []; codeOpen = false; }
-        else { flushList(); flushTable(); codeOpen = true; }
-        continue;
-      }
-      if (codeOpen) { codeBuf.push(line); continue; }
-      if (/^\|.*\|/.test(line)) { flushList(); tableBuf.push(line.trim()); continue; }
-      flushTable();
-      var h = /^(#{1,3})\s+(.*)$/.exec(line);
-      if (h) { flushList(); out.push('<h' + h[1].length + '>' + inlineMd(h[2]) + '</h' + h[1].length + '>'); continue; }
-      if (/^\s*[-*]\s+/.test(line)) {
-        if (!listOpen) { out.push('<ul>'); listOpen = true; }
-        out.push('<li>' + inlineMd(line.replace(/^\s*[-*]\s+/, '')) + '</li>');
-        continue;
-      }
-      flushList();
-      if (line.trim() === '') continue;
-      out.push('<p>' + inlineMd(line) + '</p>');
-    }
-    flushList(); flushTable();
-    if (codeOpen) out.push('<pre><code>' + esc(codeBuf.join('\n')) + '</code></pre>');
-    return out.join('');
-  }
-
-  // ================= 消息渲染 =================
-  function el(tag, cls, html) {
-    var d = document.createElement(tag);
-    if (cls) d.className = cls;
-    if (html !== undefined) d.innerHTML = html;
-    log.appendChild(d);
-    log.scrollTop = log.scrollHeight;
-    return d;
-  }
-  function userBubble(text, refNote) {
-    el('div', 'm u', esc(text) + (refNote ? '<span class="ref">📎 ' + esc(refNote) + '</span>' : ''));
-  }
-  function setHint(t) { hintEl.textContent = t; }
-
-  var thinkEl = null;
-  function ensureThink() {
-    if (thinkEl) return thinkEl;
-    thinkEl = el('details', 'think', '<summary>思考中…</summary>');
-    thinkEl.open = true;
-    var body = document.createElement('div');
-    body.className = 't';
-    thinkEl.appendChild(body);
-    thinkEl._body = body;
-    return thinkEl;
-  }
-  function appendThink(chunk) {
-    ensureThink();
-    thinkEl._body.textContent += chunk;
-    log.scrollTop = log.scrollHeight;
-  }
-  function settleThink(ms) {
-    if (!thinkEl) return;
-    thinkEl.open = false;
-    thinkEl.firstChild.textContent = '已深度思考' + (ms > 0 ? '（用时 ' + (ms / 1000).toFixed(1) + ' s）' : '');
-  }
-
-  // ================= OnlyOffice 桥 =================
-  function withApi(fn) {
-    if (!window.Asc || !window.Asc.plugin) { setHint('未检测到 OnlyOffice 插件环境'); return; }
-    fn(window.Asc.plugin);
-  }
-  /** 读文档全文（word 类元素逐段 GetText；失败回调 false）。 */
-  function loadDocText(done) {
-    withApi(function (api) {
-      try {
-        api.callCommand(function () {
-          var d = Api.GetDocument();
-          if (!d) return '';
-          var parts = [], n = d.GetElementsCount();
-          for (var i = 0; i < n; i++) {
-            var e = d.GetElement(i);
-            try { parts.push(e.GetText()); } catch (err) {}
-          }
-          return parts.join('\n');
-        }, false, false, function (result) {
-          var text = typeof result === 'string' ? result : '';
-          docText = text.slice(0, CONTEXT_LIMIT);
-          if (done) done(!!docText);
-        });
-      } catch (e) { if (done) done(false); }
-    });
-  }
-  function getSelection(cb) {
-    withApi(function (api) { api.executeMethod('GetSelectedText', null, function (r) { cb(r && typeof r === 'object' ? r.Text : r); }); });
-  }
-
-  // 编辑执行器函数体（字符串形态；经 new Function 注入 ops 数据后交
-  // callCommand——该 DS 版本不透传 callCommand 的 data 参数，须内联；
-  // 函数体内不得引用闭包变量，仅可用 data / Api。刻意零反斜杠写法
-  // （正则用 [ \t]、换行用 fromCharCode），避免多层转义损坏。
-  var NL = String.fromCharCode(10);
-  var EDIT_FN_SRC = [
-    'function mdRuns(par, text, mono) {',
-    '  var re = /(\\*\\*[^*]+\\*\\*|`[^`]+`)/g, last = 0, m;',
-    '  while ((m = re.exec(text)) !== null) {',
-    '    if (m.index > last) { var r0 = par.AddText(text.slice(last, m.index)); if (mono) r0.SetFontName("Courier New"); }',
-    '    var seg = m[0];',
-    '    if (seg.charAt(0) === "*") { var r1 = par.AddText(seg.slice(2, -2)); r1.SetBold(true); }',
-    '    else { var r2 = par.AddText(seg.slice(1, -1)); r2.SetFontName("Courier New"); }',
-    '    last = m.index + seg.length;',
-    '  }',
-    '  if (last < text.length) { var r3 = par.AddText(text.slice(last)); if (mono) r3.SetFontName("Courier New"); }',
-    '}',
-    'function mdPara(line) {',
-    '  var p = Api.CreateParagraph();',
-    '  var h = /^(#{1,3})[ \\t]+(.*)$/.exec(line);',
-    '  if (h) { var r = p.AddText(h[2]); r.SetBold(true); r.SetFontSize(h[1].length === 1 ? 18 : h[1].length === 2 ? 15 : 13.5); }',
-    '  else if (/^[ \\t]*[-*][ \\t]+/.test(line)) { p.AddText("• "); mdRuns(p, line.replace(/^[ \\t]*[-*][ \\t]+/, "")); }',
-    '  else { mdRuns(p, line); }',
-    '  return p;',
-    '}',
-    'function fillTable(tbl, rows) {',
-    '  for (var ri = 0; ri < rows.length; ri++) {',
-    '    for (var ci = 0; ci < rows[ri].length && ci < rows[0].length; ci++) {',
-    '      try {',
-    '        var cc = tbl.GetRow(ri).GetCell(ci).GetContent();',
-    '        var p = null;',
-    '        if (cc.GetElementsCount() > 0) { var e0 = cc.GetElement(0); if (e0 && typeof e0.AddText === "function") p = e0; }',
-    '        if (!p) { p = Api.CreateParagraph(); cc.Push(p); }',
-    '        mdRuns(p, String(rows[ri][ci]));',
-    '        if (ri === 0) { for (var rr = 0; rr < p.GetElementsCount(); rr++) { try { p.GetElement(rr).SetBold(true); } catch (e1) {} } }',
-    '      } catch (e) {}',
-    '    }',
-    '  }',
-    '}',
-    'function mdElements(md) {',
-    '  var out = [], lines = String(md).split(' + NL + '), inCode = false, codeBuf = [];',
-    '  for (var i = 0; i < lines.length; i++) {',
-    '    var line = lines[i];',
-    '    if (line.indexOf("```") === 0) {',
-    '      if (inCode) { out.push(mdPara(codeBuf.join(' + NL + '))); codeBuf = []; inCode = false; }',
-    '      else inCode = true;',
-    '      continue;',
-    '    }',
-    '    if (inCode) { codeBuf.push(line); continue; }',
-    '    if (line.trim() === "") continue;',
-    '    if (line.charAt(0) === "|") {',
-    '      var rows = [];',
-    '      while (i < lines.length && lines[i].charAt(0) === "|") {',
-    '        var t = lines[i].trim();',
-    '        if (!/^\\|[ \t:|-]+\\|$/.test(t)) rows.push(t.slice(1, -1).split("|"));',
-    '        i++;',
-    '      }',
-    '      i--;',
-    '      if (rows.length) { var tbl2 = Api.CreateTable(rows[0].length, rows.length); fillTable(tbl2, rows); out.push(tbl2); }',
-    '      continue;',
-    '    }',
-    '    out.push(mdPara(line));',
-    '  }',
-    '  if (inCode && codeBuf.length) out.push(mdPara(codeBuf.join(' + NL + ')));',
-    '  return out;',
-    '}',
-    'var doc = (typeof Api.GetDocument === "function") ? Api.GetDocument() : null;',
-    'var isCell = !doc && typeof Api.GetActiveSheet === "function";',
-    'var isSlide = !doc && !isCell && typeof Api.GetPresentation === "function";',
-    'if (!doc) return { editor: isCell ? "cell" : isSlide ? "slide" : "unknown", results: [] };',
-    'var results = [];',
-    'for (var k = 0; k < data.length; k++) {',
-    '  var op = data[k], ok = true, err = null;',
-    '  try {',
-    '    if (op.op === "insertTable" && op.rows && op.rows.length) {',
-    '      var tbl = Api.CreateTable(op.rows[0].length, op.rows.length);',
-    '      fillTable(tbl, op.rows);',
-    '      if (op.at === "end") doc.Push(tbl); else doc.InsertContent([tbl]);',
-    '    } else {',
-    '      var elems = mdElements(op.md || op.text || "");',
-    '      if (op.op === "replaceSelection") { doc.RemoveSelectedContent(); doc.InsertContent(elems); }',
-    '      else if (op.op === "insertAtCursor") { doc.InsertContent(elems); }',
-    '      else if (op.op === "append") { for (var a = 0; a < elems.length; a++) doc.Push(elems[a]); }',
-    '      else if (op.op === "replaceAll") { doc.RemoveAllElements(); for (var b = 0; b < elems.length; b++) doc.Push(elems[b]); }',
-    '      else { ok = false; err = "unknown op " + op.op; }',
-    '    }',
-    '  } catch (e) { ok = false; err = String(e && e.message || e); }',
-    '  results.push({ op: op.op, ok: ok, err: err });',
-    '}',
-    'return { editor: "word", results: results };'
-  ].join(NL);
-
-  /**
-   * 执行编辑指令数组（可修改模式）：ops JSON 内联进 EDIT_FN_SRC 生成函数
-   * 交 callCommand（该 DS 版本不透传 data 参数，实测；word 全支持，
-   * cell/slide 明确报不支持直接编辑）。每指令独立 try/catch 返回明细。
-   */
-  function applyEdits(ops) {
-    return new Promise(function (resolve) {
-      withApi(function (api) {
-        try {
-          var src = 'var data = ' + JSON.stringify(ops) + ';' + String.fromCharCode(10) + EDIT_FN_SRC;
-          var fn = new Function('return (function () {' + String.fromCharCode(10) + src + String.fromCharCode(10) + '})')();
-          api.callCommand(fn, false, false, function (result) {
-            resolve(result || { editor: 'unknown', results: [], err: 'callCommand 无返回' });
-          });
-        } catch (e) {
-          resolve({ editor: 'error', results: [], err: String(e) });
-        }
-      });
-    });
-  }
-
-  /** 仅对话模式：手动插入（word 用 PasteHtml 富文本；其余 PasteText）。 */
-  function insertReply(text, replaceSel) {
-    withApi(function (api) {
-      loadDocText(function () {});
-      var html = mdToHtml(text).replace(/<p>([\s\S]*?)<\/p>/g, '<p>$1</p>');
-      api.executeMethod('PasteHtml', [html]);
-      if (replaceSel) setHint('已插入（如需严格替换选区，请先选中再点「替换选中」）');
-    });
-  }
-  document.getElementById('insert').onclick = function () { if (lastReply) insertReply(lastReply, false); };
-  document.getElementById('replace').onclick = function () {
-    if (!lastReply) return;
-    getSelection(function (sel) {
-      if (!sel) { setHint('替换选中：请先在文档中选中内容'); return; }
-      insertReply(lastReply, true);
-    });
-  };
-
-  document.getElementById('useSel').onclick = function () {
-    getSelection(function (sel) {
-      selection = sel || '';
-      setHint(selection ? ('已引用选中（' + selection.length + ' 字），本次指令将针对该选区') : '选区为空（可在文档中选中后重试）');
-    });
-  };
-  document.getElementById('useAll').onclick = function () {
-    setHint('正在读取文档全文…');
-    loadDocText(function (ok) {
-      setHint(ok ? ('已注入全文上下文（' + docText.length + ' 字）') : '当前文档类型暂不支持全文读取');
-    });
-  };
-  document.getElementById('clear').onclick = function () {
-    history = []; selection = ''; lastReply = '';
-    log.innerHTML = '';
-    setHint('会话已清空');
-  };
-
-  // ================= 模式 / 开关 =================
-  modeSeg.addEventListener('click', function (e) {
-    var b = e.target.closest('button[data-v]');
-    if (!b) return;
-    editMode = b.dataset.v === 'edit';
-    var btns = modeSeg.querySelectorAll('button');
-    for (var i = 0; i < btns.length; i++) btns[i].classList.toggle('on', btns[i] === b);
-    q.placeholder = editMode
-      ? '可修改模式：描述要做的修改（如「把第二段改得更简洁」「文末追加总结」「插入三列对比表格」）'
-      : '仅对话模式：围绕当前文档提问，回复可用下方按钮手动插入';
-    setHint(editMode ? '可修改：AI 的编辑指令将直接在文档上执行（可撤销 Ctrl+Z）' : '仅对话：AI 不改动文档');
-  });
-  webBtn.onclick = function () { webOn = !webOn; webBtn.classList.toggle('on', webOn); };
-  thinkBtn.onclick = function () { thinkOn = !thinkOn; thinkBtn.classList.toggle('on', thinkOn); };
-
-  // ================= /ai/chat SSE =================
-  function chatOnce(messages, ev) {
-    var body = { messages: messages, stream: true };
-    if (webOn) body.web_search = true;
-    if (thinkOn) body.think = true;
-    var m = currentModel();
-    if (m && m.providerId) body.model = { providerId: m.providerId, modelId: m.modelId };
-    return fetch('/api/v1/ai/chat', {
-      method: 'POST', credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    }).then(function (res) {
-      if (!res.ok) {
-        if (res.status === 401) throw { status: 401 };
-        return res.text().then(function (t) { throw new Error('HTTP ' + res.status + ' ' + t.slice(0, 120)); });
-      }
-      var reader = res.body.getReader();
-      var dec = new TextDecoder();
-      var buf = '';
-      function pump() {
-        return reader.read().then(function (r) {
-          if (r.done) return;
-          buf += dec.decode(r.value, { stream: true });
-          var idx;
-          while ((idx = buf.indexOf('\n\n')) >= 0) {
-            var block = buf.slice(0, idx); buf = buf.slice(idx + 2);
-            var name = '', data = '';
-            block.split('\n').forEach(function (line) {
-              if (line.indexOf('event: ') === 0) name = line.slice(7).trim();
-              else if (line.indexOf('data: ') === 0) data = line.slice(6);
-            });
-            if (!name) continue;
-            var payload = {};
-            try { payload = JSON.parse(data); } catch (e) { continue; }
-            if (name === 'delta') { var t = payload.text || ''; if (t) ev.onDelta(t); }
-            else if (name === 'thinking') { var th = payload.text || ''; if (th) ev.onThinking(th); }
-            else if (name === 'error') { throw new Error(payload.error || 'AI 请求失败'); }
-            else if (name === 'done') { ev.onDone(payload.usage || null); return; }
-          }
-          return pump();
-        });
-      }
-      return pump();
-    });
-  }
-  function chat(messages, ev) {
-    return chatOnce(messages, ev).catch(function (err) {
-      if (err && err.status === 401) {
-        return refresh().then(function () { return chatOnce(messages, ev); });
-      }
-      throw err;
-    });
-  }
-
-  // ================= 系统提示 =================
-  var EDIT_PROTOCOL = [
-    '你是 OnlyOffice 文档编辑助手（DocFlow AI 内嵌面板，当前为「可修改」模式）。',
-    '用户会让你修改当前文档。你必须只输出一个 ```docflow-edit 围栏（以 ```docflow-edit 开头、``` 结尾），围栏内是 JSON 操作数组，围栏外不要任何文字。',
-    '可用操作（按数组顺序执行）：',
-    '{"op":"replaceSelection","md":"<替换当前选区的 Markdown>"} —— 用户已选中内容时使用（系统提示会注明本次是否引用了选区）',
-    '{"op":"insertAtCursor","md":"<插入到光标处的 Markdown>"}',
-    '{"op":"append","md":"<追加到文档末尾的 Markdown>"}',
-    '{"op":"replaceAll","md":"<整篇新文档 Markdown>"} —— 仅当改动覆盖大半文档时使用',
-    '{"op":"insertTable","rows":[["表头1","表头2"],["a","b"]],"at":"cursor|end"} —— 插入表格',
-    'md 支持轻量 Markdown：#/##/### 标题、**加粗**、`行内代码`、- 列表、|表格|、```代码块```。',
-    '规则：多个小修改优先多个精确操作而非整篇重写；用户要求「续写/追加」用 append；要求改写某段而未选中时，选 insertAtCursor 并在 md 中给出完整改写后内容，不要输出说明文字。'
-  ].join('\n');
-
-  var CHAT_PROTOCOL = '你是 OnlyOffice 文档编辑助手（DocFlow AI 内嵌面板，「仅对话」模式）。围绕当前文档回答用户问题，输出简洁的 Markdown；不改动文档，用户可手动插入你的回复。';
-
-  function buildMessages(prompt) {
-    var sys = editMode ? EDIT_PROTOCOL : CHAT_PROTOCOL;
-    var ctx = [];
-    if (docText) ctx.push('当前文档全文（可能截断）：\n' + docText);
-    if (selection) ctx.push('用户本次圈定的选区内容：\n' + selection);
-    if (ctx.length) sys += '\n\n【上下文】\n' + ctx.join('\n\n');
-    var msgs = [{ role: 'system', content: sys }];
-    if (selection) prompt = '【针对选区】' + prompt;
-    return msgs.concat(history, [{ role: 'user', content: prompt }]);
-  }
-
-  // ================= 编辑指令应用卡 =================
-  var OP_LABEL = { replaceSelection: '替换选区', insertAtCursor: '光标插入', append: '文末追加', replaceAll: '整篇重写', insertTable: '插入表格' };
-  function appliedCard(opsText, result) {
-    var fence = FENCE_RE.exec(opsText);
-    var rawJson = fence ? fence[1].trim() : '';
-    var card = document.createElement('div');
-    var itemsHtml = '';
-    var anyFail = false;
-    if (result && result.results) {
-      for (var i = 0; i < result.results.length; i++) {
-        var r = result.results[i];
-        if (!r.ok) anyFail = true;
-        itemsHtml += '<li class="' + (r.ok ? '' : 'fail') + '">' + esc(OP_LABEL[r.op] || r.op) + (r.ok ? '' : ' 失败：' + esc(r.err || '未知错误')) + '</li>';
-      }
-    }
-    var headTxt = result && result.editor !== 'word'
-      ? '⚠ 当前编辑器类型（' + esc(result.editor) + '）暂不支持直接编辑，仅 word 文档可自动应用'
-      : (anyFail ? '部分操作未成功' : '已应用到文档（' + (result && result.results ? result.results.length : 0) + ' 项操作，Ctrl+Z 可撤销）');
-    card.className = 'applied ' + (anyFail || (result && result.editor !== 'word') ? 'bad' : 'ok');
-    card.innerHTML = '<div class="head">' + headTxt + '</div>'
-      + (itemsHtml ? '<ol>' + itemsHtml + '</ol>' : '')
-      + '<details><summary>查看 AI 原始输出</summary><pre>' + esc(opsText) + '</pre></details>';
-    log.appendChild(card);
-    log.scrollTop = log.scrollHeight;
-  }
-
-  // ================= 发送 =================
-  function send() {
-    var text = q.value.trim();
-    if (!text || busy) return;
-    busy = true; q.value = '';
-    sendBtn.style.display = 'none'; stopBtn.style.display = '';
-    userBubble(text, selection ? ('选区 ' + selection.length + ' 字') : null);
-    thinkEl = null;
-    var acc = '';
-    var thinkStart = 0;
-    var failed = false;
-    var prompt = text;
-    var messages = buildMessages(prompt);
-    controller = new AbortController();
-    chat(messages, {
-      onDelta: function (d) {
-        acc += d;
-        if (!sendBubble) { sendBubble = el('div', 'm a'); sendBubble._caret = document.createElement('span'); sendBubble._caret.className = 'caret'; }
-        // 可修改模式流式期间先按原文显示（围栏指令执行后才替换为应用卡）
-        sendBubble.innerHTML = mdToHtml(acc);
-        sendBubble.appendChild(sendBubble._caret);
-        log.scrollTop = log.scrollHeight;
-      },
-      onThinking: function (th) {
-        if (!thinkStart) thinkStart = Date.now();
-        appendThink(th);
-      },
-      onDone: function () { settleThink(thinkStart ? Date.now() - thinkStart : 0); },
-    })
-      .then(function () {
-        // 完成后处理
-        if (sendBubble) { sendBubble.removeChild(sendBubble._caret); sendBubble = null; }
-        lastReply = acc;
-        if (editMode && FENCE_RE.test(acc)) {
-          var fence = FENCE_RE.exec(acc);
-          var ops = null;
-          try { ops = JSON.parse(fence[1].trim()); } catch (e) {}
-          if (!ops || !ops.length) {
-            el('div', 'm a err', '⚠ 编辑指令解析失败（AI 输出不是合法 JSON），已保留原文，可切换「仅对话」模式重试');
-            el('div', 'm a', mdToHtml(acc));
-          } else {
-            // 流式气泡换成简要文本，指令经 callCommand 执行
-            el('div', 'm a', '收到 ' + ops.length + ' 项编辑指令，正在执行…');
-            return applyEdits(ops).then(function (result) {
-              appliedCard(acc, result);
-              if (result && result.editor === 'word') {
-                // 操作成功后刷新全文上下文（后续轮次基于新内容）
-                loadDocText(function () {});
-              }
-            });
-          }
-        } else if (acc) {
-          el('div', 'm a', mdToHtml(acc));
-        } else {
-          el('div', 'm a', '（模型未返回内容）');
-        }
-      })
-      .catch(function (err) {
-        failed = true;
-        if (sendBubble) { sendBubble.removeChild(sendBubble._caret); sendBubble = null; }
-        if (err && err.name === 'AbortError') {
-          el('div', 'm a', (acc ? '<pre style="white-space:pre-wrap">' + esc(acc) + '</pre>' : '') + '（已停止）');
-          settleThink(thinkStart ? Date.now() - thinkStart : 0);
-        } else {
-          var msgText = err && err.status === 401 ? '登录态失效（请刷新文档页后重试）' : (err && err.message ? err.message : String(err));
-          el('div', 'm a err', esc(msgText));
-        }
-      })
-      .then(function () {
-        if (!failed && acc) {
-          history.push({ role: 'user', content: prompt });
-          history.push({ role: 'assistant', content: acc.length > 4000 ? acc.slice(0, 4000) : acc });
-          if (history.length > 12) history = history.slice(-12);
-        }
-        busy = false; controller = null;
-        sendBtn.style.display = ''; stopBtn.style.display = 'none';
-      });
-  }
-  var sendBubble = null;
-  sendBtn.onclick = send;
-  stopBtn.onclick = function () { if (controller) controller.abort(); };
-  q.addEventListener('keydown', function (e) {
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
-  });
-
-  // ================= 插件生命周期 =================
-  var apiRegistered = false;
-  function registerPluginApi() {
-    if (apiRegistered || !window.Asc || !window.Asc.plugin) return;
-    apiRegistered = true;
-    window.Asc.plugin.init = function () {
-      setHint('就绪 · 已注入文档上下文');
-      void refresh().then(function () {
-        return loadModels().then(renderModels);
-      }).catch(function () { setHint('未登录 DocFlow（请先在 DocFlow 页面登录后刷新文档）'); });
-      loadDocText(function () {});
-    };
-    window.Asc.plugin.onMethodReturn = function (returnValue) {
-      if (returnValue && typeof returnValue.Text === 'string') {
-        selection = returnValue.Text;
-        setHint(selection ? ('已引用选中（' + selection.length + ' 字）') : '选区为空');
-      }
-    };
-    window.Asc.plugin.button = function () {};
-  }
-  if (window.Asc && window.Asc.plugin) {
-    registerPluginApi();
-  } else {
-    var tries = 0;
-    var poll = window.setInterval(function () {
-      tries++;
-      if (window.Asc && window.Asc.plugin) {
-        window.clearInterval(poll);
-        registerPluginApi();
-        if (window.Asc.plugin.init) window.Asc.plugin.init();
-        return;
-      }
-      if (tries >= 20) {
-        window.clearInterval(poll);
-        setHint('独立调试模式（文档操作需在 OnlyOffice 编辑器内）');
-      }
-    }, 500);
-    void refresh().then(function () { return loadModels().then(renderModels); }).catch(function () {});
-  }
-})();
-</script>
+  <script src="plugin.js"></script>
 </body>
 </html>
