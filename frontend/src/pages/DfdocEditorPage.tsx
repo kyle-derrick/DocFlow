@@ -2,7 +2,7 @@
 // DocFlow 专属富文本格式，Tiptap JSON 存储（见 RichTextEditor）——编辑态
 // 加载 JSON 进 Tiptap，保存整篇回写新版本；查看态 readonly 渲染同一编辑器
 //（嵌入块内联渲染 drawio/白板/图片等）。by-path 路由经 prop 传入 file_id。
-import { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useRef, useState, useMemo } from 'react'
 import { App as AntdApp, Button } from 'antd'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { marked } from 'marked'
@@ -10,6 +10,7 @@ import { fetchFileText, getFileMeta, listDocumentComments, uploadFileVersion } f
 import type { DocumentComment } from '../api'
 import type { AIEditTarget } from '../components/AIEditChat'
 import AIEditChat, { AIEditChatButton } from '../components/AIEditChat'
+import type { AIEditTool } from '../components/AIEditChat'
 import type { AIQuickCommand } from '../components/AIEditChat'
 import { closeEditorWithFallback, safeReturnTo } from '../editorNavigation'
 import { MessageKey, t, useLocale } from '../i18n'
@@ -352,6 +353,94 @@ export default function DfdocEditorPage({
 
   /** 选区读取：Tiptap state.selection（空选区回退全文）；嵌入块/图片/文件
    * 卡片经 docToAIText 序列化为占位行带出（AI 可见 + 提示词约束保留）。 */
+  /** v5 内置 Agent 编辑工具集（富文本编辑页）：AI 经工具循环自主
+   *  读文档/定位/编辑。写操作复用 aiMarkdownToHTML + insertContentAt
+   *  （嵌入节点保留逻辑同既有 patch 执行器）。 */
+  const aiAgentTools: AIEditTool[] = useMemo(() => {
+    const docText = () => aiGetTarget().text
+    const replaceWhole = (next: string) => {
+      const ed = tiptapRef.current
+      if (!ed) return
+      // 文本级替换后整文重建：嵌入占位行原样保留（docToAIText 序列化含占位，
+      // next 若未破坏占位行即无损；aiMarkdownToHTML 不识别占位 → 交回占位还原）。
+      ed.chain().focus().insertContentAt({ from: 0, to: ed.state.doc.content.size }, aiMarkdownToHTML(next)).run()
+      setDirty(true)
+      dirtyRef.current = true
+    }
+    return [
+      {
+        name: 'read_document',
+        desc: '{} → 读当前文档全文（嵌入卡片序列化为占位行，须原样保留）。',
+        label: () => '读取全文',
+        exec: async () => ({ ok: true, data: { text: docText().slice(0, 20000) } }),
+      },
+      {
+        name: 'read_selection',
+        desc: '{} → 读当前选中文本（无选区返回空并注明）。',
+        label: () => '读取选区',
+        exec: async () => {
+          const t = aiGetTarget()
+          return { ok: true, data: { hasSelection: t.hasSelection, text: t.hasSelection ? t.text.slice(0, 8000) : '' } }
+        },
+      },
+      {
+        name: 'search_text',
+        desc: '{query} → 返回所有含 query 的文本片段（前后各 60 字上下文，最多 30 处）。',
+        label: (a: Record<string, unknown>) => `搜索 ${String(a.query ?? '').slice(0, 16)}`,
+        exec: async (a: Record<string, unknown>) => {
+          const query = String(a.query ?? '')
+          if (!query) return { ok: false, error: 'query 必填' }
+          const text = docText()
+          const hits: Array<{ ctx: string }> = []
+          let i = text.indexOf(query)
+          while (i >= 0 && hits.length < 30) {
+            hits.push({ ctx: text.slice(Math.max(0, i - 60), i + query.length + 60) })
+            i = text.indexOf(query, i + query.length)
+          }
+          return { ok: true, data: { total: hits.length, hits } }
+        },
+      },
+      {
+        name: 'replace_text',
+        desc: '{find, replace, scope?:"first"|"all"} → 精确文本替换（find 须与原文逐字一致；嵌入占位行不要动）。',
+        label: (a: Record<string, unknown>) => `替换 ${String(a.find ?? '').slice(0, 12)}→${String(a.replace ?? '').slice(0, 12)}`,
+        exec: async (a: Record<string, unknown>) => {
+          const find = String(a.find ?? '')
+          if (!find) return { ok: false, error: 'find 必填' }
+          const text = docText()
+          if (!text.includes(find)) return { ok: false, error: `未找到：${find.slice(0, 60)}` }
+          const rp = String(a.replace ?? '')
+          let count = 0
+          const next = (a.scope ?? 'all') !== 'first'
+            ? text.split(find).reduce<string[]>((acc, part, idx) => (idx === 0 ? [part] : (count++, [...acc, rp, part])), []).join('')
+            : text.replace(find, () => { count++; return rp })
+          replaceWhole(next)
+          return { ok: true, data: { replaced: count } }
+        },
+      },
+      {
+        name: 'insert_content',
+        desc: '{md, at?:"end"|"selection"} → 插入 Markdown 内容（at=selection 且有选区时替换选区，默认文末追加）。',
+        label: (a: Record<string, unknown>) => `插入@${String(a.at ?? 'end')}`,
+        exec: async (a: Record<string, unknown>) => {
+          const md = String(a.md ?? a.text ?? '')
+          if (!md) return { ok: false, error: 'md 必填' }
+          const ed = tiptapRef.current
+          if (!ed) return { ok: false, error: '编辑器未就绪' }
+          const { from, to } = ed.state.selection
+          if (a.at === 'selection' && to > from) {
+            ed.chain().focus().insertContentAt({ from, to }, aiMarkdownToHTML(md)).run()
+          } else {
+            ed.chain().focus().insertContentAt(ed.state.doc.content.size, aiMarkdownToHTML(md)).run()
+          }
+          setDirty(true)
+          dirtyRef.current = true
+          return { ok: true }
+        },
+      },
+    ]
+  }, [doc])
+
   const aiGetTarget = (): AIEditTarget => {
     const ed = tiptapRef.current
     if (!ed) return { text: '', hasSelection: false }
@@ -609,6 +698,7 @@ export default function DfdocEditorPage({
           quickCommand={aiQuick}
           onQuickConsumed={() => setAiQuick(null)}
           applyKind="richtext-patch"
+          agentTools={aiAgentTools}
         />
       </div>
     </main>
