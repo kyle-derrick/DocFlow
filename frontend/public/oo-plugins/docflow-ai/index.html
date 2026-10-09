@@ -1,25 +1,23 @@
 <!doctype html>
-<!-- DocFlow AI OnlyOffice 插件（v5.0——工具化 + 内置 Agent 自主调度）：
-     - 自主编辑模式：AI 经工具循环自主操作文档（read/search → 规划 → 编辑 →
-       验证 → 总结），工具集按编辑器类型（word/excel/ppt/pdf）动态注册，
-       编辑范围（插入/局部/全文）由 AI 自行判断，无需用户手动选按钮。
-     - 仅对话模式：问答，回复可手动插入/替换（兜底通道）。
-     - 详见 plugin.js 头注释。config.json 静态相对 URL（DS 按 config.json
-       所在目录拼接）；不 autostart。默认浅色（跟随 DS theme-type 参数）。 -->
+<!-- DocFlow AI OnlyOffice 插件（v6.0）：
+     - 编辑器类型从同源 localStorage docflow.ai.editor.kind 读取（宿主页
+       EditorPage 写入），彻底消除沙箱探测不可靠导致的 agent 失效。
+     - 发送/停止按钮与平台统一（28px 圆角方块，发送⇄停止切换）。
+     - 思考/工具/消息严格按时间顺序排列（无分区）。
+     - 详见 plugin.js。 -->
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>DocFlow AI</title>
-<script src="/onlyoffice/sdkjs-plugins/v1/plugins.js"
+<script src="/onlyoffice/sdkjs-plugins/v1/plugins.js?v=6"
         onerror="var fb=document.createElement('script');fb.src='https://onlyoffice.github.io/sdkjs-plugins/v1/plugins.js';document.head.appendChild(fb);"></script>
 <style>
   :root {
     color-scheme: light;
-    /* 与平台 --primary/--surface/--border 对齐（indigo 浅色） */
     --brand: #4f7cff; --brand-weak: rgba(79, 124, 255, .12); --brand-hover: #3d6ae8;
     --bg: #f7f8fa; --surface: #fff; --fg: #1f2430; --muted: #8a8f98; --line: rgba(16, 24, 40, .12);
-    --card: #f4f5f7; --ok: #237a35; --bad: #d5382e; --mono: ui-monospace, Consolas, monospace;
+    --card: #f4f5f7; --ok: #237a35; --bad: #d5382e;
   }
   html[data-theme-type="dark"] {
     color-scheme: dark;
@@ -30,59 +28,60 @@
   body { margin: 0; font: 13px/1.6 system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; display: flex; flex-direction: column; background: var(--surface); color: var(--fg); }
   button { font: inherit; cursor: pointer; }
   header { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--line); flex-shrink: 0; background: var(--card); }
-  .logo { width: 20px; height: 20px; border-radius: 6px; background: var(--brand); color: #fff; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; flex-shrink: 0; }
-  header .title { font-weight: 600; }
+  .logo { width: 20px; height: 20px; border-radius: 6px; background: var(--brand); color: #fff; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; }
+  header .title { font-weight: 600; font-size: 13px; }
   .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
-  .seg button { border: none; background: transparent; color: var(--fg); padding: 4px 10px; font-size: 12px; }
+  .seg button { border: none; background: transparent; color: var(--fg); padding: 3px 10px; font-size: 12px; }
   .seg button.on { background: var(--brand); color: #fff; }
   .iconbtn { border: none; background: transparent; color: var(--muted); border-radius: 6px; padding: 4px 6px; }
   .iconbtn:hover { color: var(--fg); background: var(--card); }
   .spacer { flex: 1; }
-  #log { flex: 1; min-height: 0; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+  /* 消息流（严格时间序：思考、工具卡、气泡同层级排列） */
+  #log { flex: 1; min-height: 0; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 6px; }
   .m { max-width: 94%; padding: 8px 10px; border-radius: 10px; word-break: break-word; }
   .m.u { align-self: flex-end; background: var(--brand); color: #fff; border-bottom-right-radius: 3px; white-space: pre-wrap; }
-  .m.u:hover { background: var(--brand-hover); }
-  .m.u .ref { display: block; margin-top: 4px; font-size: 11px; opacity: .8; }
   .m.a { align-self: flex-start; background: var(--card); border: 1px solid var(--line); border-bottom-left-radius: 3px; }
   .m.a.err { color: var(--bad); }
   .m.a h1, .m.a h2, .m.a h3 { margin: 6px 0 2px; font-size: 14px; }
-  .m.a code { font-family: var(--mono); background: rgba(127,127,127,.16); border-radius: 4px; padding: 0 4px; font-size: 12px; }
+  .m.a code { font-family: ui-monospace, Consolas, monospace; background: rgba(127,127,127,.16); border-radius: 4px; padding: 0 4px; font-size: 12px; }
   .m.a pre { background: rgba(127,127,127,.12); border-radius: 8px; padding: 8px; overflow-x: auto; }
-  .m.a pre code { background: transparent; padding: 0; }
   .m.a ul { margin: 4px 0; padding-left: 18px; }
   .m.a table { border-collapse: collapse; margin: 6px 0; font-size: 12px; }
   .m.a th, .m.a td { border: 1px solid var(--line); padding: 3px 8px; }
-  .raw { align-self: stretch; font-family: var(--mono); font-size: 11px; color: var(--muted); white-space: pre-wrap; max-height: 120px; overflow-y: auto; }
+  .raw { font-family: ui-monospace, Consolas, monospace; font-size: 11px; color: var(--muted); white-space: pre-wrap; max-height: 100px; overflow-y: auto; }
   .caret { display: inline-block; width: 7px; height: 13px; background: var(--brand); vertical-align: -2px; animation: blink 1s steps(2) infinite; }
   @keyframes blink { 50% { opacity: 0; } }
-  .think { align-self: stretch; font-size: 12px; color: var(--muted); }
+  .think { font-size: 12px; color: var(--muted); }
   .think summary { cursor: pointer; user-select: none; }
-  .think .t { margin: 6px 0 0; padding: 6px 8px; border-left: 2px solid var(--line); white-space: pre-wrap; max-height: 150px; overflow-y: auto; }
-  /* 工具调用过程卡（agent 调度链） */
-  .tcall { align-self: stretch; border: 1px solid var(--line); border-radius: 10px; padding: 6px 10px; font-size: 12px; display: flex; flex-direction: column; gap: 2px; }
+  .think .t { margin: 4px 0 0; padding: 4px 8px; border-left: 2px solid var(--line); white-space: pre-wrap; max-height: 120px; overflow-y: auto; }
+  /* 工具卡（与思考同级，时间序排列） */
+  .tcall { border: 1px solid var(--line); border-radius: 10px; padding: 5px 10px; font-size: 12px; }
   .tcall .t-head { display: flex; align-items: center; gap: 6px; font-weight: 600; }
-  .tcall .t-args { font-family: var(--mono); font-size: 11px; color: var(--muted); white-space: pre-wrap; word-break: break-all; }
-  .tcall .t-res { font-size: 11.5px; color: var(--muted); max-height: 130px; overflow-y: auto; white-space: pre-wrap; }
+  .tcall .t-args { font-family: ui-monospace, Consolas, monospace; font-size: 11px; color: var(--muted); white-space: pre-wrap; word-break: break-all; }
+  .tcall .t-res { font-size: 11.5px; color: var(--muted); max-height: 100px; overflow-y: auto; white-space: pre-wrap; }
   .tcall.ok .t-head { color: var(--ok); }
   .tcall.bad .t-head { color: var(--bad); }
-  .tcall .spin { width: 12px; height: 12px; border: 2px solid var(--line); border-top-color: var(--brand); border-radius: 50%; animation: spin .8s linear infinite; flex-shrink: 0; }
+  .tcall .spin { width: 11px; height: 11px; border: 2px solid var(--line); border-top-color: var(--brand); border-radius: 50%; animation: spin .8s linear infinite; flex-shrink: 0; }
   @keyframes spin { to { transform: rotate(360deg); } }
+  /* 工具栏 */
   .bar { display: flex; align-items: center; gap: 6px; padding: 6px 10px; flex-shrink: 0; flex-wrap: wrap; row-gap: 4px; }
   .bar.tools { border-top: 1px solid var(--line); }
-  .bar.manual { padding-top: 0; }
   .bar.manual.hidden { display: none; }
   .tgl { border: 1px solid var(--line); background: transparent; color: var(--fg); padding: 3px 10px; border-radius: 999px; font-size: 12px; }
   .tgl.on { background: var(--brand-weak); border-color: var(--brand); color: var(--brand); }
-  select#model { border: 1px solid var(--line); background: var(--surface); color: var(--fg); border-radius: 8px; padding: 3px 6px; font-size: 12px; max-width: 150px; }
+  select#model { border: 1px solid var(--line); background: var(--surface); color: var(--fg); border-radius: 8px; padding: 3px 6px; font-size: 12px; max-width: 140px; }
   .act { border: 1px solid var(--line); background: transparent; color: var(--fg); padding: 3px 10px; border-radius: 8px; font-size: 12px; }
-  .act:hover { border-color: var(--brand); color: var(--brand); }
   .bar.input { padding-top: 0; }
   .hint { padding: 2px 12px 6px; font-size: 11px; color: var(--muted); flex-shrink: 0; }
-  #q { flex: 1; resize: none; height: 56px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; font: inherit; background: var(--surface); color: var(--fg); }
-  #q:focus { outline: none; border-color: var(--brand); box-shadow: 0 0 0 2px var(--brand-weak); }
-  #send, #stop { border: none; border-radius: 10px; padding: 0 14px; height: 56px; background: var(--brand); color: #fff; }
-  #send:disabled { opacity: .4; cursor: not-allowed; }
+  #q { flex: 1; resize: none; height: 52px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; font: inherit; background: var(--surface); color: var(--fg); }
+  #q:focus { outline: none; border-color: var(--brand); }
+  /* 发送/停止（与平台 chat-send-btn 同款 28px 圆角方块） */
+  .send-grp { display: flex; flex-direction: column; gap: 4px; }
+  #send, #stop { border: none; border-radius: 6px; width: 52px; height: 52px; display: inline-flex; align-items: center; justify-content: center; background: var(--brand); color: #fff; padding: 0; }
+  #send:disabled { opacity: .35; cursor: not-allowed; }
+  #send svg, #stop svg { width: 16px; height: 16px; }
   #stop { background: var(--bad); display: none; }
+  #stop .sq { width: 14px; height: 14px; background: #fff; border-radius: 2px; }
 </style>
 </head>
 <body>
@@ -90,33 +89,29 @@
     <span class="logo">AI</span>
     <span class="title">DocFlow AI</span>
     <div class="seg" id="mode">
-      <button data-v="edit" class="on" title="AI 经工具循环自主操作文档（读→改→验证→总结）">自主编辑</button>
-      <button data-v="chat" title="仅问答，不改动文档（可手动插入回复）">仅对话</button>
+      <button data-v="edit" class="on" title="AI 经工具循环自主操作文档">自主编辑</button>
+      <button data-v="chat" title="仅问答，不改动文档">仅对话</button>
     </div>
     <span class="spacer"></span>
     <button class="iconbtn" id="clear" title="清空会话">🗑</button>
   </header>
-
   <div id="log"></div>
-
   <div class="bar tools">
-    <button class="tgl" id="web" title="联网搜索（附网络来源）">联网</button>
-    <button class="tgl on" id="think" title="深度思考（须所选模型支持推理）">思考</button>
-    <select id="model" title="对话模型（与 DocFlow 主应用共用偏好）"><option value="">默认模型</option></select>
+    <button class="tgl" id="web" title="联网搜索">联网</button>
+    <button class="tgl on" id="think" title="深度思考">思考</button>
+    <select id="model"><option value="">默认模型</option></select>
     <span class="spacer"></span>
   </div>
   <div class="bar manual hidden" id="manualBar">
-    <button class="act" id="insert" title="把最后一条回复插入光标处（仅对话模式）">插入到光标</button>
-    <button class="act" id="replace" title="用最后一条回复替换当前选中（仅对话模式）">替换选中</button>
+    <button class="act" id="insert">插入到光标</button>
+    <button class="act" id="replace">替换选中</button>
   </div>
-
   <div class="bar input">
-    <textarea id="q" placeholder="描述要做的修改，例如「把第二段改简洁并加粗关键词」「按 A 列汇总生成表格」「给全部一级标题统一配色」"></textarea>
-    <button id="send">发送</button>
-    <button id="stop">停止</button>
+    <textarea id="q" placeholder="描述要做的修改…"></textarea>
+    <button id="send" title="发送（Enter）" aria-label="发送"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg></button>
+    <button id="stop" title="停止" aria-label="停止"><span class="sq"></span></button>
   </div>
   <div class="hint" id="hint">Enter 发送 · Shift+Enter 换行</div>
-
-  <script src="plugin.js?v=54"></script>
+  <script src="plugin.js?v=6"></script>
 </body>
 </html>

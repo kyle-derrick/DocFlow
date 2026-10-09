@@ -203,6 +203,15 @@ export default function EditorPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
             : 'OnlyOffice DocsAPI is unavailable (script loaded but API missing)')
           return
         }
+        // 同源 localStorage 传编辑器类型给 DocFlow AI 插件（docx→word /
+        // xlsx→cell / pptx→slide）。该定制 DS 构建的沙箱初始化期只有
+        // 混淆内部方法，callCommand 探测不可靠——agent 误判 unknown 是
+        // Excel/Word 编辑失效的根因；从 fileType 硬判定彻底消除。
+        try {
+          const ft = String(((config as Record<string, unknown>).document as Record<string, unknown> | undefined)?.fileType ?? '')
+          const kind = /xl/i.test(ft) ? 'cell' : /pp/i.test(ft) ? 'slide' : 'pdf'
+          window.localStorage.setItem('docflow.ai.editor.kind', ft ? kind : 'pdf')
+        } catch { /* ignore */ }
         const editorConfig: OnlyOfficeEditorConfig = {
           ...config,
           width: '100%',

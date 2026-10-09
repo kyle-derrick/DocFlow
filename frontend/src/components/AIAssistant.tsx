@@ -1258,7 +1258,16 @@ export default function AIAssistant() {
     }
   }
   // 跟随态进入空间根时预热根目录 folderId 缓存。
+    // 打开/会话切换/消息清零时贴底（历史记录从最底下开始查看）。
   useEffect(() => {
+    const t = window.setTimeout(() => {
+      const el = document.querySelector('.aiax-bubbles-wrap')
+      if (el) el.scrollTop = el.scrollHeight
+    }, 100)
+    return () => window.clearTimeout(t)
+  }, [enabled])
+
+useEffect(() => {
     if (aiLoc && !aiLoc.folderId && aiLoc.spaceId) void resolveSpaceRootFolderId(aiLoc.spaceId)
   }, [aiLoc])
   // 工作目录（df_* 文件工具相对路径基准）：localStorage 记忆

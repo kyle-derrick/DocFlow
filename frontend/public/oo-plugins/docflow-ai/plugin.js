@@ -1,30 +1,4 @@
-/* DocFlow AI OnlyOffice 插件 v5.0 —— 工具化 + 内置 Agent 自主调度。
- *
- * 架构：
- * - 工具运行时（RUNTIME_SRC）：在 OnlyOffice 编辑器上下文（callCommand）内
- *   执行的工具集，按编辑器类型（word/excel/ppt/pdf）能力分层；数据经 JSON
- *   内联注入（该 DS 版本 callCommand 不透传 data 参数，实测）。
- * - Agent 循环（插件侧）：AI 每轮输出 TOOL_CALL（一次一个工具）或 FINAL
- *   （完成总结）；插件执行工具→TOOL_RESULT 回传→下一轮，直至 FINAL 或达
- *   轮次上限。读哪些内容、局部还是全文修改、改后如何验证，全部由 AI 自行
- *   决策——用户只描述意图。
- * - 编辑范围自主判断：AI 通过 get_doc_info/search_text/read_document 建立
- *   文档结构认知，再用 insert_content / replace_text / replace_element /
- *   format_element 等组合完成精确编辑。
- *
- * 工具集（word，14 个）：get_doc_info / read_document / search_text /
- *   insert_content / replace_text / replace_element / delete_element /
- *   format_element / set_paragraph_style / insert_table / table_set_cell /
- *   table_add_row / insert_page_break / add_comment
- * 工具集（excel，7 个）：get_sheet_info / read_range / write_cells /
- *   format_range / insert_rows / delete_rows / set_col_width
- * 工具集（ppt，3 个）：list_slides / read_slide / add_slide
- * 工具集（pdf）：get_doc_info（只读说明——DS pdf 编辑器无文档模型 API）
- *
- * 认证：同站 cookie 换一次性 access token（POST /auth/refresh 带
- *   X-CSRF-Token，与主应用 authFetch 同协议），401 自动重试一次。
- * 模型：GET /ai/models（chat 能力过滤），与主应用共用 docflow.ai.model。
- */
+/* DocFlow AI OnlyOffice 插件 v6.0 — localStorage 类型判定 + 时间序消息 */
 (function () {
   'use strict';
   var log = document.getElementById('log');
@@ -37,134 +11,102 @@
   var modelSel = document.getElementById('model');
   var modeSeg = document.getElementById('mode');
   var manualBar = document.getElementById('manualBar');
-
-  var history = [];        // 对话历史（跨轮保留；工具中间消息仅本轮使用）
-  var lastReply = '';      // 仅对话模式手动插入用
-  var selection = '';      // 「引用选中」圈定的选区文本
-  var busy = false;
-  var token = '';
-  var controller = null;
-  var webOn = false;
-  var thinkOn = true;
-  var editMode = true;
-  var editorType = null;   // word | cell | slide | pdf | unknown（打开时探测）
-  var docInfo = null;      // 初始 get_doc_info 结果（system 上下文）
-  var THINK_BUDGET = 12000;
-
-  // 跟随 DS 主题参数（?theme-type=dark）
-  try {
-    var tt = /theme-type=(dark)/.exec(window.location.search);
-    if (tt) document.documentElement.dataset.themeType = 'dark';
-  } catch (e) {}
-
-  // ================= 认证 =================
-  function csrfToken() {
-    var m = document.cookie.match(/(?:^|; )docflow_csrf=([^;]*)/);
-    return m ? decodeURIComponent(m[1]) : null;
+  var history = [], busy = false, token = '', controller = null;
+  var webOn = false, thinkOn = true, editMode = true;
+  var editorType = null, docInfo = null, lastReply = '';
+  var NL = String.fromCharCode(10);
+  try { if (/theme-type=(dark)/.exec(window.location.search)) document.documentElement.dataset.themeType = 'dark'; } catch (e) {}
+  function readEditorKind() {
+    try { var k = window.localStorage.getItem('docflow.ai.editor.kind');
+      if (k === 'word' || k === 'cell' || k === 'slide' || k === 'pdf') return k;
+    } catch (e) {}
+    return null;
   }
+  function csrfToken() { var m = document.cookie.match(/(?:^|; )docflow_csrf=([^;]*)/); return m ? decodeURIComponent(m[1]) : null; }
   function refresh() {
-    var headers = { 'Content-Type': 'application/json' };
-    var csrf = csrfToken();
-    if (csrf) headers['X-CSRF-Token'] = csrf;
-    return fetch('/api/v1/auth/refresh', { method: 'POST', credentials: 'same-origin', headers: headers })
+    var h = { 'Content-Type': 'application/json' };
+    var c = csrfToken(); if (c) h['X-CSRF-Token'] = c;
+    return fetch('/api/v1/auth/refresh', { method: 'POST', credentials: 'same-origin', headers: h })
       .then(function (r) { if (!r.ok) throw { status: r.status }; return r.json(); })
       .then(function (d) { token = d.access_token || ''; });
   }
-
-  // ================= 模型 =================
   function loadModels() {
     return fetch('/api/v1/ai/models', { credentials: 'same-origin', headers: { Authorization: 'Bearer ' + token } })
-      .then(function (r) { if (!r.ok) throw new Error('models ' + r.status); return r.json(); })
+      .then(function (r) { return r.json(); })
       .then(function (d) {
         var items = [];
         var provs = Array.isArray(d && d.providers) ? d.providers : [];
         for (var pi = 0; pi < provs.length; pi++) {
-          var pv = provs[pi] || {};
-          var raw = Array.isArray(pv.models) ? pv.models : [];
+          var pv = provs[pi] || {}; var raw = Array.isArray(pv.models) ? pv.models : [];
           for (var i = 0; i < raw.length; i++) {
-            var m = raw[i] || {};
-            var caps = m.capabilities || {};
+            var m = raw[i] || {}, caps = m.capabilities || {};
             if (caps && typeof caps === 'object' && caps.kind !== 'chat') continue;
             items.push({ id: (pv.id || '') + '/' + (m.id || ''), label: (pv.name || pv.id || '') + ' / ' + (m.id || ''), providerId: pv.id || '', modelId: m.id || '' });
           }
         }
         return items;
-      })
-      .catch(function () { return []; });
+      }).catch(function () { return []; });
   }
   function renderModels(items) {
-    var saved = '';
-    try { saved = window.localStorage.getItem('docflow.ai.model') || ''; } catch (e) {}
+    var saved = ''; try { saved = window.localStorage.getItem('docflow.ai.model') || ''; } catch (e) {}
     modelSel.innerHTML = '';
-    var opt = document.createElement('option');
-    opt.value = ''; opt.textContent = '默认模型';
-    modelSel.appendChild(opt);
+    var o = document.createElement('option'); o.value = ''; o.textContent = '默认模型'; modelSel.appendChild(o);
     for (var i = 0; i < items.length; i++) {
-      var o = document.createElement('option');
-      o.value = items[i].id; o.textContent = items[i].label;
-      if (saved === items[i].id) o.selected = true;
-      modelSel.appendChild(o);
+      var opt = document.createElement('option');
+      opt.value = items[i].id; opt.textContent = items[i].label;
+      if (saved === items[i].id) opt.selected = true;
+      modelSel.appendChild(opt);
     }
-    modelSel.onchange = function () {
-      try { window.localStorage.setItem('docflow.ai.model', modelSel.value); } catch (e) {}
-    };
   }
   function currentModel() {
-    var v = modelSel.value;
-    if (!v) return null;
+    var v = modelSel.value; if (!v) return null;
     var i = v.lastIndexOf('/');
     return { providerId: v.slice(0, i), modelId: v.slice(i + 1) };
   }
-
-  // ================= Markdown → HTML（气泡渲染） =================
   function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
-  function inlineMd(s) {
-    return esc(s).replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
-  }
+  function inlineMd(s) { return esc(s).replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>'); }
   function mdToHtml(md) {
-    var lines = String(md).replace(/\r/g, '').split('\n');
-    var out = [], listOpen = false, codeOpen = false, codeBuf = [], tableBuf = [];
-    var flushList = function () { if (listOpen) { out.push('</ul>'); listOpen = false; } };
-    var flushTable = function () {
-      if (!tableBuf.length) return;
-      var rows = tableBuf.filter(function (r) { return !/^\|[\s:|-]+\|?$/.test(r); });
+    var L = String(md).replace(/\r/g, '').split('\n');
+    var out = [], lo = false, co = false, cb = [], tb = [];
+    var fl = function () { if (lo) { out.push('</ul>'); lo = false; } };
+    var ft = function () {
+      if (!tb.length) return;
+      var rows = tb.filter(function (r) { return !/^\|[\s:|-]+\|?$/.test(r); });
       if (rows.length) {
-        var html = ['<table>'];
+        var h = ['<table>'];
         for (var i = 0; i < rows.length; i++) {
-          var cells = rows[i].replace(/^\||\|$/g, '').split('|');
-          html.push('<tr>' + cells.map(function (c, j) { return (i === 0 ? '<th>' : '<td>') + inlineMd(c.trim()) + (i === 0 ? '</th>' : '</td>'); }).join('') + '</tr>');
+          var cs = rows[i].replace(/^\||\|$/g, '').split('|');
+          h.push('<tr>' + cs.map(function (c, j) { return (i === 0 ? '<th>' : '<td>') + inlineMd(c.trim()) + (i === 0 ? '</th>' : '</td>'); }).join('') + '</tr>');
         }
-        html.push('</table>'); out.push(html.join(''));
+        h.push('</table>'); out.push(h.join(''));
       }
-      tableBuf = [];
+      tb = [];
     };
-    for (var i = 0; i < lines.length; i++) {
-      var line = lines[i];
-      if (/^```/.test(line)) {
-        if (codeOpen) { out.push('<pre><code>' + esc(codeBuf.join('\n')) + '</code></pre>'); codeBuf = []; codeOpen = false; }
-        else { flushList(); flushTable(); codeOpen = true; }
+    for (var i = 0; i < L.length; i++) {
+      var ln = L[i];
+      if (/^```/.test(ln)) {
+        if (co) { out.push('<pre><code>' + esc(cb.join('\n')) + '</code></pre>'); cb = []; co = false; }
+        else { fl(); ft(); co = true; }
         continue;
       }
-      if (codeOpen) { codeBuf.push(line); continue; }
-      if (/^\|.*\|/.test(line)) { flushList(); tableBuf.push(line.trim()); continue; }
-      flushTable();
-      var h = /^(#{1,3})\s+(.*)$/.exec(line);
-      if (h) { flushList(); out.push('<h' + h[1].length + '>' + inlineMd(h[2]) + '</h' + h[1].length + '>'); continue; }
-      if (/^\s*[-*]\s+/.test(line)) {
-        if (!listOpen) { out.push('<ul>'); listOpen = true; }
-        out.push('<li>' + inlineMd(line.replace(/^\s*[-*]\s+/, '')) + '</li>');
+      if (co) { cb.push(ln); continue; }
+      if (/^\|.*\|/.test(ln)) { fl(); tb.push(ln.trim()); continue; }
+      ft();
+      var h = /^(#{1,3})\s+(.*)$/.exec(ln);
+      if (h) { fl(); out.push('<h' + h[1].length + '>' + inlineMd(h[2]) + '</h' + h[1].length + '>'); continue; }
+      if (/^\s*[-*]\s+/.test(ln)) {
+        if (!lo) { out.push('<ul>'); lo = true; }
+        out.push('<li>' + inlineMd(ln.replace(/^\s*[-*]\s+/, '')) + '</li>');
         continue;
       }
-      flushList();
-      if (line.trim() === '') continue;
-      out.push('<p>' + inlineMd(line) + '</p>');
+      fl();
+      if (ln.trim() === '') continue;
+      out.push('<p>' + inlineMd(ln) + '</p>');
     }
-    flushList(); flushTable();
-    if (codeOpen) out.push('<pre><code>' + esc(codeBuf.join('\n')) + '</code></pre>');
+    fl(); ft();
+    if (co) out.push('<pre><code>' + esc(cb.join('\n')) + '</code></pre>');
     return out.join('');
   }
-
-  // ================= 消息渲染 =================
   function el(tag, cls, html) {
     var d = document.createElement(tag);
     if (cls) d.className = cls;
@@ -172,21 +114,16 @@
     log.appendChild(d); log.scrollTop = log.scrollHeight;
     return d;
   }
-  function userBubble(text, refNote) {
-    el('div', 'm u', esc(text) + (refNote ? '<span class="ref">📎 ' + esc(refNote) + '</span>' : ''));
-  }
   function setHint(t) { hintEl.textContent = t; }
-
   var thinkEl = null;
   function appendThink(chunk) {
     if (!thinkEl) {
       thinkEl = el('details', 'think', '<summary>思考中…</summary>');
       thinkEl.open = true;
-      var body = document.createElement('div'); body.className = 't';
-      thinkEl.appendChild(body); thinkEl._body = body;
+      var b = document.createElement('div'); b.className = 't'; thinkEl.appendChild(b); thinkEl._b = b;
     }
-    thinkEl._body.textContent += chunk;
-    if (thinkEl._body.textContent.length > THINK_BUDGET) thinkEl._body.textContent = '…' + thinkEl._body.textContent.slice(-THINK_BUDGET);
+    thinkEl._b.textContent += chunk;
+    if (thinkEl._b.textContent.length > 12000) thinkEl._b.textContent = '…' + thinkEl._b.textContent.slice(-12000);
     log.scrollTop = log.scrollHeight;
   }
   function settleThink(ms) {
@@ -194,555 +131,210 @@
     thinkEl.open = false;
     thinkEl.firstChild.textContent = '已深度思考' + (ms > 0 ? '（用时 ' + (ms / 1000).toFixed(1) + ' s）' : '');
   }
-
-  /** 工具调用过程卡：head（工具名）+ args 摘要 + 执行态/结果。 */
   function toolCard(tool, args) {
-    var card = el('div', 'tcall',
+    return el('div', 'tcall',
       '<div class="t-head"><span class="spin"></span><span>🔧 ' + esc(tool) + '</span></div>' +
-      '<div class="t-args">' + esc(JSON.stringify(args)).slice(0, 300) + '</div>');
-    card._head = card.firstChild;
-    card._res = null;
-    return card;
+      '<div class="t-args">' + esc(JSON.stringify(args)).slice(0, 250) + '</div>');
   }
   function toolDone(card, ok, payload) {
-    card.classList.remove('ok'); card.classList.add(ok ? 'ok' : 'bad');
-    card._head.innerHTML = (ok ? '✅ ' : '⚠️ ') + esc(card._head.textContent.replace(/^[✅⚠🔧]\s*/, '').replace('🔧 ', '')) ;
-    card._head.querySelector ? null : null;
-    // 重建 head（去 spinner）
-    var name = card._head.textContent.replace(/^[✅⚠️]\s*/, '').trim();
-    card._head.innerHTML = (ok ? '✅ ' : '⚠️ ') + esc(name);
-    var res = document.createElement('div');
-    res.className = 't-res';
-    res.textContent = typeof payload === 'string' ? payload.slice(0, 500) : JSON.stringify(payload).slice(0, 500);
-    card.appendChild(res);
-    log.scrollTop = log.scrollHeight;
+    var sp = card.querySelector('.t-head span:last-child');
+    var name = sp ? sp.textContent : '?';
+    card.classList.add(ok ? 'ok' : 'bad');
+    card.querySelector('.t-head').innerHTML = (ok ? '✅ ' : '⚠️ ') + esc(name);
+    var r = document.createElement('div'); r.className = 't-res';
+    r.textContent = (typeof payload === 'string' ? payload : JSON.stringify(payload)).slice(0, 400);
+    card.appendChild(r); log.scrollTop = log.scrollHeight;
   }
 
-  // ================= 工具运行时（编辑器上下文执行） =================
-  /* 仅可用 data / Api；防御式 API 探测（各编辑器/版本方法名差异以 try 链
-     兜底，失败返回明确错误供 AI 调整策略——工具失败本身是 agent 信号）。 */
-  var RUNTIME_SRC = [
-    'function clip(s, n) { s = String(s); return s.length > n ? s.slice(0, n) + "…" : s; }',
-    'function editorKind() {',
-    '  if (typeof Api.GetActiveSheet === "function") return "cell";',
-    '  if (typeof Api.GetPresentation === "function") return "slide";',
-    '  if (typeof Api.GetDocument === "function") return "word";',
-    '  for (var bk in Api) { if (Api.hasOwnProperty(bk) && typeof Api[bk] === "function") return "basic"; }',
-    '  return "pdf";',
-    '}',
-    '// ---- md → 文档元素（word）----',
-    'function mdRuns(par, text) {',
-    '  var seg = String(text);',
-    '  while (true) {',
-    '    var a = seg.indexOf("**"), b = seg.indexOf("**", a + 2);',
-    '    var c = seg.indexOf("`"), d = seg.indexOf("`", c + 1);',
-    '    var pick = null;',
-    '    if (a >= 0 && b > a) pick = ["b", a, b + 2, seg.slice(a + 2, b)];',
-    '    if (c >= 0 && d > c && (pick === null || c < pick[1])) pick = ["m", c, d + 1, seg.slice(c + 1, d)];',
-    '    if (pick === null) break;',
-    '    if (pick[1] > 0) par.AddText(seg.slice(0, pick[1]));',
-    '    var r = par.AddText(pick[3]);',
-    '    if (pick[0] === "b") r.SetBold(true); else r.SetFontName("Courier New");',
-    '    seg = seg.slice(pick[2]);',
-    '  }',
-    '  if (seg) par.AddText(seg);',
-    '}',
-    'function mdPara(line) {',
-    '  var p = Api.CreateParagraph();',
-    '  var t = line; var h = 0;',
-    '  while (t.charAt(0) === "#") { h++; t = t.slice(1); }',
-    '  if (h > 0 && t.charAt(0) === " ") {',
-    '    var r = p.AddText(t.replace(/^\\s+/, ""));',
-    '    r.SetBold(true); r.SetFontSize(h === 1 ? 18 : h === 2 ? 15 : 13.5);',
-    '    return p;',
-    '  }',
-    '  var tr = line.replace(/^\\s+/, "");',
-    '  if (tr.charAt(0) === "-" || tr.charAt(0) === "*") { p.AddText("\\u2022 "); mdRuns(p, tr.replace(/^[-*]\\s+/, "")); return p; }',
-    '  mdRuns(p, line); return p;',
-    '}',
-    'function mdElems(md) {',
-    '  var out = [], lines = String(md).split("\\n"), inCode = false, buf = [], tbl = [];',
-    '  function flushTbl() {',
-    '    if (!tbl.length) return;',
-    '    var rows = [];',
-    '    for (var k = 0; k < tbl.length; k++) { var tt = tbl[k].trim(); if (/^\\|[\\s:|-]+\\|?$/.test(tt)) continue; rows.push(tt.replace(/^\\|/, "").replace(/\\|$/, "").split("|")); }',
-    '    if (rows.length) out.push(makeTable(rows));',
-    '    tbl = [];',
-    '  }',
-    '  for (var i = 0; i < lines.length; i++) {',
-    '    var ln = lines[i];',
-    '    if (ln.indexOf("```") === 0) {',
-    '      if (inCode) { var cp = Api.CreateParagraph(); mdRuns(cp, buf.join("\\n")); cp.SetFontSize ? null : null; out.push(cp); buf = []; inCode = false; }',
-    '      else { flushTbl(); inCode = true; }',
-    '      continue;',
-    '    }',
-    '    if (inCode) { buf.push(ln); continue; }',
-    '    if (ln.trim() === "") { flushTbl(); continue; }',
-    '    if (ln.charAt(0) === "|") { tbl.push(ln); continue; }',
-    '    flushTbl();',
-    '    out.push(mdPara(ln));',
-    '  }',
-    '  flushTbl();',
-    '  if (inCode && buf.length) { var cp2 = Api.CreateParagraph(); mdRuns(cp2, buf.join("\\n")); out.push(cp2); }',
-    '  return out;',
-    '}',
-    'function makeTable(rows) {',
-    '  var t = Api.CreateTable(rows[0].length, rows.length);',
-    '  fillTable(t, rows); return t;',
-    '}',
-    'function fillTable(t, rows) {',
-    '  for (var ri = 0; ri < rows.length; ri++) {',
-    '    for (var ci = 0; ci < rows[ri].length && ci < rows[0].length; ci++) {',
-    '      try { fillCell(t.GetRow(ri).GetCell(ci), String(rows[ri][ci]), ri === 0); } catch (e) {}',
-    '    }',
-    '  }',
-    '}',
-    'function fillCell(cell, text, bold) {',
-    '  var cc = cell.GetContent();',
-    '  var p = null;',
-    '  if (cc.GetElementsCount() > 0) { var e0 = cc.GetElement(0); if (e0 && typeof e0.AddText === "function") p = e0; }',
-    '  if (!p) { p = Api.CreateParagraph(); cc.Push(p); }',
-    '  var r = p.AddText(text);',
-    '  if (bold && r.SetBold) r.SetBold(true);',
-    '}',
-    'function isTable(e) { return e && typeof e.GetRow === "function"; }',
-    'function paraText(e) { try { return e.GetText(); } catch (err) { return ""; } }',
-    'function docScan(query) {', // 遍历元素：返回 {count, hits:[{i, kind, text}]}（query 空则不筛）
-    '  var doc = Api.GetDocument();',
-    '  var n = doc.GetElementsCount(), hits = [];',
-    '  for (var i = 0; i < n; i++) {',
-    '    var e = doc.GetElement(i);',
-    '    var kind = isTable(e) ? "table" : "para";',
-    '    var text = kind === "table" ? "[表格]" : paraText(e);',
-    '    if (!query || text.indexOf(query) >= 0) hits.push({ i: i, kind: kind, text: clip(text, 400) });',
-    '  }',
-    '  return { count: n, hits: hits };',
-    '}',
-    '// ---- word 工具 ----',
-    'function wInsertContent(a) {',
-    '  var doc = Api.GetDocument(); var elems = mdElems(a.md || "");',
-    '  if (!elems.length) return { ok: false, error: "空内容" };',
-    '  var at = a.at || "end";',
-    '  if (at === "cursor") { doc.InsertContent(elems); return { ok: true }; }',
-    '  if (at === "after" && typeof a.index === "number") {',
-    '    try { for (var k = elems.length - 1; k >= 0; k--) doc.AddElement(a.index + 1, elems[k]); return { ok: true }; }',
-    '    catch (e) { for (var k2 = 0; k2 < elems.length; k2++) doc.Push(elems[k2]); return { ok: true, note: "AddElement 不可用，已追加到文末" }; }',
-    '  }',
-    '  for (var j = 0; j < elems.length; j++) doc.Push(elems[j]);',
-    '  return { ok: true };',
-    '}',
-    'function wReplaceText(a) { // 段落粒度：找到含 find 的段落，整段替换为 md',
-    '  var doc = Api.GetDocument();',
-    '  var scan = docScan(a.find);',
-    '  var done = 0, idxs = [];',
-    '  for (var h = 0; h < scan.hits.length; h++) if (scan.hits[h].kind === "para") idxs.push(scan.hits[h].i);',
-    '  if (!idxs.length) return { ok: false, error: "未找到: " + clip(a.find, 60) };',
-    '  if ((a.scope || "first") === "first") idxs = [idxs[0]];',
-    '  var elems = mdElems(a.md || "");',
-    '  for (var t = idxs.length - 1; t >= 0; t--) {',
-    '    var i = idxs[t];',
-    '    try {',
-    '      var newElems = [];',
-    '      for (var c = 0; c < elems.length; c++) newElems.push(elems[c]);',
-    '      var pos = i;',
-    '      doc.RemoveElement(i);',
-    '      try { for (var k = newElems.length - 1; k >= 0; k--) doc.AddElement(pos, newElems[k]); }',
-    '      catch (e2) { for (var k2 = 0; k2 < newElems.length; k2++) doc.Push(newElems[k2]); }',
-    '      done++;',
-    '    } catch (err) {}',
-    '  }',
-    '  return done ? { ok: true, replaced: done } : { ok: false, error: "替换失败" };',
-    '}',
-    'function wReplaceElement(a) { var a2 = {}; a2.find = null; return wDelThenIns(a.index, a.md); }',
-    'function wDelThenIns(index, md) {',
-    '  var doc = Api.GetDocument();',
-    '  var elems = mdElems(md || "");',
-    '  doc.RemoveElement(index);',
-    '  try { for (var k = elems.length - 1; k >= 0; k--) doc.AddElement(index, elems[k]); }',
-    '  catch (e) { for (var j = 0; j < elems.length; j++) doc.Push(elems[j]); }',
-    '  return { ok: true };',
-    '}',
-    'function wFormatElement(a) { // 段落内全部 run 应用格式',
-    '  var doc = Api.GetDocument();',
-    '  var p = doc.GetElement(a.index);',
-    '  if (!p || typeof p.GetElementsCount !== "function") return { ok: false, error: "元素不是段落" };',
-    '  var n = 0;',
-    '  for (var i = 0; i < p.GetElementsCount(); i++) {',
-    '    var r = p.GetElement(i);',
-    '    if (!r || typeof r.AddText === "function") continue;',
-    '    try {',
-    '      if (a.bold === true && r.SetBold) r.SetBold(true);',
-    '      if (a.bold === false && r.SetBold) r.SetBold(false);',
-    '      if (a.italic === true && r.SetItalic) r.SetItalic(true);',
-    '      if (a.underline === true && r.SetUnderline) r.SetUnderline(true);',
-    '      if (a.fontSize && r.SetFontSize) r.SetFontSize(a.fontSize);',
-    '      if (a.color && r.SetColor) { var c = hex(a.color); r.SetColor(c[0], c[1], c[2], false); }',
-    '      if (a.highlight && r.SetHighlight) r.SetHighlight(a.highlight);',
-    '      n++;',
-    '    } catch (e) {}',
-    '  }',
-    '  return n ? { ok: true, runs: n } : { ok: false, error: "段落无文本 run" };',
-    '}',
-    'function hex(s) {',
-    '  s = String(s).replace("#", "");',
-    '  return [parseInt(s.slice(0, 2), 16) || 0, parseInt(s.slice(2, 4), 16) || 0, parseInt(s.slice(4, 6), 16) || 0];',
-    '}',
-    'function wSetStyle(a) {',
-    '  var doc = Api.GetDocument();',
-    '  var p = doc.GetElement(a.index);',
-    '  if (!p || typeof p.AddText !== "function") return { ok: false, error: "元素不是段落" };',
-    '  if (a.style && a.style !== "normal") {',
-    '    var name = a.style === "heading_1" ? "Heading 1" : a.style === "heading_2" ? "Heading 2" : a.style === "heading_3" ? "Heading 3" : a.style;',
-    '    try { p.SetStyle(Api.GetStyle(name)); } catch (e) { return { ok: false, error: "样式不可用: " + name }; }',
-    '  }',
-    '  if (a.align) { try { p.SetJc(a.align); } catch (e2) { try { p.SetAlign(a.align); } catch (e3) {} } }',
-    '  return { ok: true };',
-    '}',
-    'function wInsertPageBreak() {',
-    '  var doc = Api.GetDocument();',
-    '  var p = Api.CreateParagraph();',
-    '  try { p.AddPageBreak(); doc.Push(p); return { ok: true }; }',
-    '  catch (e) { return { ok: false, error: "AddPageBreak 不可用" }; }',
-    '}',
-    'function wAddComment(a) {',
-    '  try {',
-    '    var doc = Api.GetDocument();',
-    '    var rs = doc.Search(a.find);',
-    '    if (!rs || !rs.length) return { ok: false, error: "未找到注释目标" };',
-    '    rs[0].AddComment(a.text || "");',
-    '    return { ok: true };',
-    '  } catch (e) { return { ok: false, error: "注释 API 不可用: " + e }; }',
-    '}',
-    'function wTableOp(a) {',
-    '  var doc = Api.GetDocument();',
-    '  var t = doc.GetElement(a.index);',
-    '  if (!isTable(t)) return { ok: false, error: "元素不是表格" };',
-    '  if (a.op === "add_row") { try { t.AddRow(t.GetRow(t.GetRowsCount() - 1)); return { ok: true }; } catch (e) { return { ok: false, error: "AddRow 不可用" }; } }',
-    '  if (a.op === "set_cell") {',
-    '    try { fillCell(t.GetRow(a.r).GetCell(a.c), String(a.text), false); return { ok: true }; }',
-    '    catch (e2) { return { ok: false, error: "单元格不可达" }; }',
-    '  }',
-    '  return { ok: false, error: "未知表格操作" };',
-    '}',
-    '// ---- excel 工具 ----',
-    'function colName(n) { var s = ""; n = n + 1; while (n > 0) { var m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } return s; }',
-    'function xRange(sh, r1, c1, r2, c2) { return sh.GetRange(colName(c1) + (r1 + 1) + ":" + colName(c2) + (r2 + 1)); }',
-    'function xInfo() {',
-    '  var sh = Api.GetActiveSheet();',
-    '  var vals = [];',
-    '  try { vals = sh.GetRange("A1:T200").GetValues() || []; } catch (e) { vals = []; }',
-    '  if (!vals.length || !vals[0] || !vals[0].length) {',
-    '    try { var rg = sh.GetRange("A1:T200"); vals = []; for (var xr = 0; xr < 200; xr++) { var row = []; for (var xc = 0; xc < 20; xc++) { try { row.push(rg.GetRange ? "" : sh.GetRange(colName(xc) + (xr + 1)).GetValue()); } catch (e2) { row.push(""); } } vals.push(row); } } catch (e3) { vals = []; }',
-    '  }',
-    '  var maxR = -1, maxC = -1;',
-    '  for (var i = 0; i < vals.length; i++) {',
-    '    var row = vals[i];',
-    '    for (var j = 0; j < row.length; j++) {',
-    '      var v = row[j];',
-    '      if (v !== "" && v !== null && v !== undefined) { if (i > maxR) maxR = i; if (j > maxC) maxC = j; }',
-    '    }',
-    '  }',
-    '  return { ok: true, rows: maxR + 1, cols: maxC + 1 };',
-    '}',
-    'function xRead(a) {',
-    '  var sh = Api.GetActiveSheet();',
-    '  var r1 = a.r1 || 0, c1 = a.c1 || 0, r2 = a.r2 !== undefined ? a.r2 : r1 + 19, c2 = a.c2 !== undefined ? a.c2 : c1 + 9;',
-    '  var vals = xRange(sh, r1, c1, r2, c2).GetValues();',
-    '  return { ok: true, from: [r1, c1], values: vals.slice(0, 60).map(function (row) { return row.slice(0, 20); }) };',
-    '}',
-    'function xWrite(a) {',
-    '  var sh = Api.GetActiveSheet();',
-    '  var n = 0;',
-    '  for (var i = 0; i < a.cells.length; i++) {',
-    '    var c = a.cells[i];',
-    '    try { sh.GetRange(colName(c[1]) + (c[0] + 1)).SetValue(String(c[2])); n++; } catch (e) {}',
-    '  }',
-    '  return n ? { ok: true, written: n } : { ok: false, error: "未写入任何单元格" };',
-    '}',
-    'function xFormat(a) {',
-    '  var sh = Api.GetActiveSheet();',
-    '  var rg = xRange(sh, a.r1 || 0, a.c1 || 0, a.r2 || (a.r1 || 0), a.c2 || (a.c1 || 0));',
-    '  var ops = [];',
-    '  function T(name, fn) { try { fn(); ops.push(name); } catch (e) {} }',
-    '  if (a.bold !== undefined) T("bold", function () { rg.SetBold(a.bold); });',
-    '  if (a.fontSize) T("size", function () { rg.SetFontSize(a.fontSize); });',
-    '  if (a.fillColor) T("fill", function () { rg.SetFillColor(hex(a.fillColor)); });',
-    '  if (a.numberFormat) T("numfmt", function () { rg.SetNumberFormat(a.numberFormat); });',
-    '  if (a.hAlign) T("align", function () { rg.SetHorizontalAlignment(a.hAlign); });',
-    '  return ops.length ? { ok: true, applied: ops } : { ok: false, error: "无可用格式 API" };',
-    '}',
-    'function xRows(a) {',
-    '  var sh = Api.GetActiveSheet();',
-    '  try {',
-    '    var rg = sh.GetRange((a.at + 1) + ":" + (a.at + (a.count || 1)));',
-    '    if (a.op === "insert") rg.Insert();',
-    '    else if (a.op === "delete") rg.Delete();',
-    '    else return { ok: false, error: "op 须为 insert|delete" };',
-    '    return { ok: true };',
-    '  } catch (e) { return { ok: false, error: "行操作 API 不可用: " + e }; }',
-    '}',
-    'function xColWidth(a) {',
-    '  var sh = Api.GetActiveSheet();',
-    '  try { sh.GetRange(colName(a.col) + ":" + colName(a.col)).SetColumnWidth(a.width); return { ok: true }; }',
-    '  catch (e) { return { ok: false, error: "SetColumnWidth 不可用" }; }',
-    '}',
-    '// ---- ppt 工具（防御式：方法名随版本差异较大） ----',
-    'function pList() {',
-    '  var pr = Api.GetPresentation();',
-    '  return { ok: true, slides: pr.GetSlidesCount() };',
-    '}',
-    'function pRead(a) {',
-    '  var pr = Api.GetPresentation();',
-    '  var s = pr.GetSlideByIndex(a.index);',
-    '  if (!s) return { ok: false, error: "slide 不存在" };',
-    '  var texts = [];',
-    '  try { s.ForEachShape(function (sh) { try { if (sh.GetText) texts.push(clip(sh.GetText(), 200)); } catch (e) {} }); }',
-    '  catch (e1) { try { var arr = s.GetAllShapes(); for (var i = 0; i < arr.length; i++) { try { if (arr[i].GetText) texts.push(clip(arr[i].GetText(), 200)); } catch (e2) {} } } catch (e3) {} }',
-    '  return { ok: true, texts: texts };',
-    '}',
-    'function pAdd(a) {',
-    '  try {',
-    '    var pr = Api.GetPresentation();',
-    '    var s = pr.CreateSlide();',
-    '    pr.AddSlide(s);',
-    '    var lines = [a.title || ""].concat(a.bullets || []);',
-    '    var y = 10;',
-    '    for (var i = 0; i < lines.length; i++) {',
-    '      if (!lines[i]) continue;',
-    '      try {',
-    '        var tb = Api.CreateTextBlock ? null : null;',
-    '        s.AddText ? s.AddText(String(lines[i]), 10, y, 280, 20, 20) : null;',
-    '      } catch (e) {}',
-    '      y += 24;',
-    '    }',
-    '    return { ok: true, note: "slide 已添加；文本写入能力取决于 DS 版本" };',
-    '  } catch (err) { return { ok: false, error: "PPT 写入 API 不可用: " + err }; }',
-    '}',
-    '// ---- 分发 ----',
-    'function dispatch(d) {',
-    '  var kind = editorKind();',
-    '  try {',
-    '    if (d.tool === "get_doc_info") {',
-    '      if (kind === "word") { var sc = docScan(null); var sel = ""; try { sel = Api.GetDocument().GetSelectedText ? Api.GetDocument().GetSelectedText() : ""; } catch (e0) {} return { ok: true, kind: kind, elements: sc.count, overview: sc.hits.slice(0, 80), selection: clip(sel, 500) }; }',
-    '      if (kind === "cell") return xInfo();',
-    '      if (kind === "slide") return pList();',
-    '      if (kind === "basic") return { ok: true, kind: "basic", note: "当前构建的表格沙箱无结构化 API，仅支持粘贴写入（HTML 表格自动转单元格）" };',
-    '      return { ok: true, kind: "pdf", note: "DS pdf 编辑器无文档模型 API，仅支持对话" };',
-    '    }',
-    '    if (kind === "word") {',
-    '      if (d.tool === "read_document") { var from = d.args.from || 0, to = d.args.to; var sc2 = docScan(null); var list = []; for (var i = from; i < sc2.count && (to === undefined || i <= to) && list.length < 60; i++) list.push(sc2.hits[i] ? { i: i, kind: sc2.hits[i].kind, text: clip(sc2.hits[i].text, d.args.maxChars || 500) } : null); return { ok: true, total: sc2.count, elements: list }; }',
-    '      if (d.tool === "search_text") { var sc3 = docScan(d.args.query); return { ok: true, total: sc3.count, hits: sc3.hits.slice(0, 30) }; }',
-    '      if (d.tool === "insert_content") return wInsertContent(d.args);',
-    '      if (d.tool === "replace_text") return wReplaceText(d.args);',
-    '      if (d.tool === "replace_element") return wDelThenIns(d.args.index, d.args.md);',
-    '      if (d.tool === "delete_element") { try { Api.GetDocument().RemoveElement(d.args.index); return { ok: true }; } catch (e1) { return { ok: false, error: "索引越界" }; } }',
-    '      if (d.tool === "format_element") return wFormatElement(d.args);',
-    '      if (d.tool === "set_paragraph_style") return wSetStyle(d.args);',
-    '      if (d.tool === "insert_table") { var t = makeTable(d.args.rows || [["1", "2"]]); var doc = Api.GetDocument(); if ((d.args.at || "end") === "cursor") doc.InsertContent([t]); else doc.Push(t); return { ok: true }; }',
-    '      if (d.tool === "table_op") return wTableOp(d.args);',
-    '      if (d.tool === "insert_page_break") return wInsertPageBreak();',
-    '      if (d.tool === "add_comment") return wAddComment(d.args);',
-    '    }',
-    '    if (kind === "cell") {',
-    '      var dArgs = d.args || {};',
-    '      if (d.tool === "read_range" || d.tool === "read_document" || d.tool === "read_cells") return xRead(dArgs);',
-    '      if (d.tool === "write_cells") return xWrite(d.args);',
-    '      if (d.tool === "format_range") return xFormat(d.args);',
-    '      if (d.tool === "row_op") return xRows(d.args);',
-    '      if (d.tool === "set_col_width") return xColWidth(d.args);',
-    '    }',
-    '    if (kind === "slide") {',
-    '      if (d.tool === "read_slide") return pRead(d.args);',
-    '      if (d.tool === "add_slide") return pAdd(d.args);',
-    '    }',
-    '    return { ok: false, error: "工具 " + d.tool + " 在 " + kind + " 编辑器中不可用" };',
-    '  } catch (err) { return { ok: false, error: String(err && err.message || err) }; }',
-    '}',
-    'return dispatch(data);'
-  ].join('\n');
+  var RUNTIME = [
+    'function clip(s,n){s=String(s);return s.length>n?s.slice(0,n)+"…":s}',
+    'function ek(){if(typeof Api.GetActiveSheet==="function")return "cell";if(typeof Api.GetPresentation==="function")return "slide";if(typeof Api.GetDocument==="function")return "word";return "pdf"}',
+    'function runs(p,t){var s=String(t);while(true){var a=s.indexOf("**"),b=s.indexOf("**",a+2),c=s.indexOf("`"),d=s.indexOf("`",c+1),pk=null;if(a>=0&&b>a)pk=["b",a,b+2,s.slice(a+2,b)];if(c>=0&&d>c&&(pk===null||c<pk[1]))pk=["m",c,d+1,s.slice(c+1,d)];if(!pk)break;if(pk[1]>0)p.AddText(s.slice(0,pk[1]));var r=p.AddText(pk[3]);if(pk[0]==="b")r.SetBold(true);else r.SetFontName("Courier New");s=s.slice(pk[2])}if(s)p.AddText(s)}',
+    'function para(ln){var p=Api.CreateParagraph();var t=ln,h=0;while(t.charAt(0)==="#"){h++;t=t.slice(1)}if(h>0&&t.charAt(0)===" "){var r=p.AddText(t);r.SetBold(true);r.SetFontSize(h===1?18:h===2?15:13.5);return p}var tr=ln.replace(/^\\s+/,"");if(tr.charAt(0)==="-"||tr.charAt(0)==="*"){p.AddText("\\u2022 ");runs(p,tr.replace(/^[-*]\\s+/,""));return p}runs(p,ln);return p}',
+    'function mkT(rs){var t=Api.CreateTable(rs[0].length,rs.length);fillT(t,rs);return t}',
+    'function fillT(t,rs){for(var ri=0;ri<rs.length;ri++)for(var ci=0;ci<rs[ri].length&&ci<rs[0].length;ci++){try{fillC(t.GetRow(ri).GetCell(ci),String(rs[ri][ci]),ri===0)}catch(e){}}}',
+    'function fillC(c,tx,b){var cc=c.GetContent(),p=null;if(cc.GetElementsCount()>0){var e0=cc.GetElement(0);if(e0&&typeof e0.AddText==="function")p=e0}if(!p){p=Api.CreateParagraph();cc.Push(p)}var r=p.AddText(tx);if(b&&r.SetBold)r.SetBold(true)}',
+    'function isT(e){return e&&typeof e.GetRow==="function"}',
+    'function pT(e){try{return e.GetText()}catch(x){return""}}',
+    'function scan(q){var d=Api.GetDocument(),n=d.GetElementsCount(),h=[];for(var i=0;i<n;i++){var e=d.GetElement(i),k=isT(e)?"table":"para",t=k==="table"?"[表格]":pT(e);if(!q||t.indexOf(q)>=0)h.push({i:i,kind:k,text:clip(t,400)})}return{count:n,hits:h}}',
+    'function mdE(md){var out=[],ls=String(md).split(NL),ic=false,bf=[],tb=[];function ft(){if(!tb.length)return;var rs=[];for(var k=0;k<tb.length;k++){var t=tb[k].trim();if(/^\\|[\\s:|-]+\\|?$/.test(t))continue;rs.push(t.replace(/^\\|/,"").replace(/\\|$/,"").split("|"))}if(rs.length)out.push(mkT(rs));tb=[]}for(var i=0;i<ls.length;i++){var ln=ls[i];if(ln.indexOf("```")===0){if(ic){out.push(para(bf.join(NL)));bf=[];ic=false}else{ft();ic=true}continue}if(ic){bf.push(ln);continue}if(ln.trim()===""){ft();continue}if(ln.charAt(0)==="|"){tb.push(ln);continue}ft();out.push(para(ln))}ft();if(ic&&bf.length)out.push(para(bf.join(NL)));return out}',
+    'function wIns(a){var d=Api.GetDocument(),es=mdE(a.md||"");if(!es.length)return{ok:false,error:"空内容"};if((a.at||"end")==="cursor"){d.InsertContent(es);return{ok:true}}if(a.at==="after"&&typeof a.index==="number"){try{for(var k=es.length-1;k>=0;k--)d.AddElement(a.index+1,es[k]);return{ok:true}}catch(e){for(var j=0;j<es.length;j++)d.Push(es[j]);return{ok:true,note:"追加到文末"}}}for(var i=0;i<es.length;i++)d.Push(es[i]);return{ok:true}}',
+    'function wRep(a){var d=Api.GetDocument(),sc=scan(a.find),ix=[];for(var h=0;h<sc.hits.length;h++)if(sc.hits[h].kind==="para")ix.push(sc.hits[h].i);if(!ix.length)return{ok:false,error:"未找到"};if((a.scope||"first")==="first")ix=[ix[0]];var es=mdE(a.md||""),dn=0;for(var t=ix.length-1;t>=0;t--){var i=ix[t];try{d.RemoveElement(i);try{for(var k=es.length-1;k>=0;k--)d.AddElement(i,es[k])}catch(e2){for(var j=0;j<es.length;j++)d.Push(es[j])}dn++}catch(x){}}return dn?{ok:true,replaced:dn}:{ok:false,error:"替换失败"}}',
+    'function hx(s){s=String(s).replace("#","");return[parseInt(s.slice(0,2),16)||0,parseInt(s.slice(2,4),16)||0,parseInt(s.slice(4,6),16)||0]}',
+    'function wFmt(a){var d=Api.GetDocument(),p=d.GetElement(a.index);if(!p||typeof p.GetElementsCount!=="function")return{ok:false,error:"非段落"};var n=0;for(var i=0;i<p.GetElementsCount();i++){var r=p.GetElement(i);if(!r||typeof r.AddText==="function")continue;try{if(a.bold!==undefined&&r.SetBold)r.SetBold(a.bold);if(a.italic===true&&r.SetItalic)r.SetItalic(true);if(a.underline===true&&r.SetUnderline)r.SetUnderline(true);if(a.fontSize&&r.SetFontSize)r.SetFontSize(a.fontSize);if(a.color&&r.SetColor){var c=hx(a.color);r.SetColor(c[0],c[1],c[2],false)}n++}catch(x){}}return n?{ok:true,runs:n}:{ok:false,error:"无run"}}',
+    'function wSty(a){var d=Api.GetDocument(),p=d.GetElement(a.index);if(!p||typeof p.AddText!=="function")return{ok:false,error:"非段落"};if(a.style&&a.style!=="normal"){var n=a.style==="heading_1"?"Heading 1":a.style==="heading_2"?"Heading 2":a.style==="heading_3"?"Heading 3":a.style;try{p.SetStyle(Api.GetStyle(n))}catch(e){return{ok:false,error:"样式不可用"}}}if(a.align){try{p.SetJc(a.align)}catch(x){}}return{ok:true}}',
+    'function wPB(){var d=Api.GetDocument(),p=Api.CreateParagraph();try{p.AddPageBreak();d.Push(p);return{ok:true}}catch(e){return{ok:false,error:"不可用"}}}',
+    'function wCm(a){try{var d=Api.GetDocument(),rs=d.Search(a.find);if(!rs||!rs.length)return{ok:false,error:"未找到"};rs[0].AddComment(a.text||"");return{ok:true}}catch(e){return{ok:false,error:String(e)}}}',
+    'function wTO(a){var d=Api.GetDocument(),t=d.GetElement(a.index);if(!isT(t))return{ok:false,error:"非表格"};if(a.op==="add_row"){try{t.AddRow(t.GetRow(t.GetRowsCount()-1));return{ok:true}}catch(e){return{ok:false,error:"不可用"}}}if(a.op==="set_cell"){try{fillC(t.GetRow(a.r).GetCell(a.c),String(a.text),false);return{ok:true}}catch(x){return{ok:false,error:"不可达"}}}return{ok:false,error:"未知"}}',
+    'function cN(n){var s="";n=n+1;while(n>0){var m=(n-1)%26;s=String.fromCharCode(65+m)+s;n=Math.floor((n-1)/26)}return s}',
+    'function xI(){var sh=Api.GetActiveSheet(),v=[];try{v=sh.GetRange("A1:T200").GetValues()||[]}catch(e){v=[]}var mr=-1,mc=-1;for(var i=0;i<v.length;i++){var r=v[i];for(var j=0;j<r.length;j++){if(r[j]!==""&&r[j]!==null&&r[j]!==undefined){if(i>mr)mr=i;if(j>mc)mc=j}}}return{ok:true,kind:"cell",rows:mr+1,cols:mc+1}}',
+    'function xR(sh,r1,c1,r2,c2){return sh.GetRange(cN(c1)+(r1+1)+":"+cN(c2)+(r2+1))}',
+    'function xRd(a){var sh=Api.GetActiveSheet();var r1=a.r1||0,c1=a.c1||0,r2=a.r2!==undefined?a.r2:r1+19,c2=a.c2!==undefined?a.c2:c1+9;var v=xR(sh,r1,c1,r2,c2).GetValues();return{ok:true,from:[r1,c1],values:v.slice(0,60).map(function(r){return r.slice(0,20)})}}',
+    'function xW(a){var sh=Api.GetActiveSheet(),n=0;for(var i=0;i<a.cells.length;i++){var c=a.cells[i];try{sh.GetRange(cN(c[1])+(c[0]+1)).SetValue(String(c[2]));n++}catch(e){}}return n?{ok:true,written:n}:{ok:false,error:"未写入"}}',
+    'function xF(a){var sh=Api.GetActiveSheet();var rg=xR(sh,a.r1||0,a.c1||0,a.r2||(a.r1||0),a.c2||(a.c1||0));var ops=[];function T(n,f){try{f();ops.push(n)}catch(e){}}if(a.bold!==undefined)T("bold",function(){rg.SetBold(a.bold)});if(a.fontSize)T("size",function(){rg.SetFontSize(a.fontSize)});if(a.fillColor)T("fill",function(){rg.SetFillColor(hx(a.fillColor))});if(a.numberFormat)T("fmt",function(){rg.SetNumberFormat(a.numberFormat)});if(a.hAlign)T("al",function(){rg.SetHorizontalAlignment(a.hAlign)});return ops.length?{ok:true,applied:ops}:{ok:false,error:"无可用API"}}',
+    'function xRo(a){var sh=Api.GetActiveSheet();try{var rg=sh.GetRange((a.at+1)+":"+(a.at+(a.count||1)));if(a.op==="insert")rg.Insert();else if(a.op==="delete")rg.Delete();else return{ok:false,error:"op须insert|delete"};return{ok:true}}catch(e){return{ok:false,error:String(e)}}}',
+    'function xCw(a){var sh=Api.GetActiveSheet();try{sh.GetRange(cN(a.col)+":"+cN(a.col)).SetColumnWidth(a.width);return{ok:true}}catch(e){return{ok:false,error:"不可用"}}}',
+    'function pL(){var pr=Api.GetPresentation();return{ok:true,kind:"slide",slides:pr.GetSlidesCount()}}',
+    'function pR(a){var pr=Api.GetPresentation(),s=pr.GetSlideByIndex(a.index);if(!s)return{ok:false,error:"不存在"};var tx=[];try{s.ForEachShape(function(sh){try{if(sh.GetText)tx.push(clip(sh.GetText(),200))}catch(e){}})}catch(x){}return{ok:true,texts:tx}}',
+    'function pA(a){try{var pr=Api.GetPresentation(),s=pr.CreateSlide();pr.AddSlide(s);var ls=[a.title||""].concat(a.bullets||[]);var y=10;for(var i=0;i<ls.length;i++){if(!ls[i])continue;try{if(s.AddText)s.AddText(String(ls[i]),10,y,280,20,20)}catch(x){}y+=24}return{ok:true}}catch(e){return{ok:false,error:String(e)}}}',
+    'function dp(d){var k=ek();try{',
+    'if(d.tool==="get_doc_info"){if(k==="word"){var sc=scan(null),sel="";try{sel=Api.GetDocument().GetSelectedText?Api.GetDocument().GetSelectedText():""}catch(s0){}return{ok:true,kind:k,elements:sc.count,overview:sc.hits.slice(0,80),selection:clip(sel,500)}}if(k==="cell")return xI();if(k==="slide")return pL();return{ok:true,kind:k}}',
+    'if(k==="word"){',
+    'if(d.tool==="read_document"){var f=d.args.from||0,t2=d.args.to,sc2=scan(null),l=[];for(var i=f;i<sc2.count&&(t2===undefined||i<=t2)&&l.length<60;i++)l.push({i:i,text:clip(sc2.hits[i]?sc2.hits[i].text:"",d.args.maxChars||500)});return{ok:true,total:sc2.count,elements:l}}',
+    'if(d.tool==="search_text")return{ok:true,total:scan(null).count,hits:scan(d.args.query).hits.slice(0,30)}',
+    'if(d.tool==="insert_content")return wIns(d.args)',
+    'if(d.tool==="replace_text")return wRep(d.args)',
+    'if(d.tool==="replace_element"){var d2=Api.GetDocument(),es2=mdE(d.args.md||"");d2.RemoveElement(d.args.index);try{for(var k3=es2.length-1;k3>=0;k3--)d2.AddElement(d.args.index,es2[k3])}catch(x2){for(var j2=0;j2<es2.length;j2++)d2.Push(es2[j2])}return{ok:true}}',
+    'if(d.tool==="delete_element"){try{Api.GetDocument().RemoveElement(d.args.index);return{ok:true}}catch(x3){return{ok:false,error:"越界"}}}',
+    'if(d.tool==="format_element")return wFmt(d.args)',
+    'if(d.tool==="set_paragraph_style")return wSty(d.args)',
+    'if(d.tool==="insert_table"){var t3=mkT(d.args.rows||[["1","2"]]);if((d.args.at||"end")==="cursor")Api.GetDocument().InsertContent([t3]);else Api.GetDocument().Push(t3);return{ok:true}}',
+    'if(d.tool==="table_op")return wTO(d.args)',
+    'if(d.tool==="insert_page_break")return wPB()',
+    'if(d.tool==="add_comment")return wCm(d.args)}',
+    'if(k==="cell"){var aA=d.args||{};',
+    'if(d.tool==="read_range"||d.tool==="read_document"||d.tool==="read_cells")return xRd(aA)',
+    'if(d.tool==="write_cells")return xW(d.args)',
+    'if(d.tool==="format_range")return xF(d.args)',
+    'if(d.tool==="row_op")return xRo(d.args)',
+    'if(d.tool==="set_col_width")return xCw(d.args)}',
+    'if(k==="slide"){if(d.tool==="read_slide")return pR(d.args);if(d.tool==="add_slide")return pA(d.args)}',
+    'return{ok:false,error:"工具"+d.tool+"在"+k+"不可用"}}catch(x){return{ok:false,error:String(x&&x.message||x)}}}',
+    'return dp(data);'
+  ].join(NL);
 
-  /** 平台文件工具（HTTP API，不经 callCommand）：检索/读取平台文件，
-   *  内容可注入对话上下文或写入当前文档（「引用其它平台文件」能力）。 */
-  function httpTool(tool, args) {
-    var q = String(args.query || args.name || '').trim();
-    if (tool === 'list_files') {
-      var url = q ? '/api/v1/search?q=' + encodeURIComponent(q) + '&limit=20' : '/api/v1/files?recent=true&limit=20';
-      return fetch(url, { credentials: 'same-origin', headers: { Authorization: 'Bearer ' + token } })
-        .then(function (r) { return r.json(); })
-        .then(function (d) {
-          var list = (d.results || d.files || d.items || (Array.isArray(d) ? d : [])) || [];
-          return { ok: true, files: list.filter(function (x) { return x.type !== 'folder'; }).slice(0, 20).map(function (x) { return { id: x.id, name: x.name }; }) };
-        })
-        .catch(function (e) { return { ok: false, error: String(e) }; });
-    }
-    if (tool === 'read_file') {
-      if (!q) return Promise.resolve({ ok: false, error: 'name 必填' });
-      return fetch('/api/v1/search?q=' + encodeURIComponent(q) + '&limit=5', { credentials: 'same-origin', headers: { Authorization: 'Bearer ' + token } })
-        .then(function (r) { return r.json(); })
-        .then(function (d) {
-          var list = (d.results || d.files || d.items || (Array.isArray(d) ? d : [])) || [];
-          var hit = list.filter(function (x) { return x.type !== 'folder' && x.name === q; })[0] || list.filter(function (x) { return x.type !== 'folder'; })[0];
-          if (!hit) return { ok: false, error: '未找到文件：' + q };
-          return fetch('/api/v1/files/' + hit.id + '/download', { credentials: 'same-origin', headers: { Authorization: 'Bearer ' + token } })
-            .then(function (r) { return r.text(); })
-            .then(function (text) { return { ok: true, name: hit.name, text: text.slice(0, 15000) }; });
-        })
-        .catch(function (e) { return { ok: false, error: String(e) }; });
-    }
-    return Promise.resolve(null); // 非文件工具
-  }
-
-  /** 粘贴通道工具（executeMethod，任何编辑器可用；basic 档主通道）：
-   *  paste_content {md} → md 转 HTML 经 PasteHtml 粘贴（表格自动转单元格）；
-   *  get_selection {} → 当前选中文本。 */
-  function pasteTool(tool, args) {
-    if (tool === 'get_selection') {
-      return new Promise(function (resolve) {
-        try {
-          window.Asc.plugin.executeMethod('GetSelectedText', null, function (r) {
-            var t = r && typeof r === 'object' ? r.Text : r;
-            resolve({ ok: true, text: String(t || '').slice(0, 5000) });
-          });
-        } catch (e) { resolve({ ok: false, error: String(e) }); }
-      });
-    }
-    if (tool === 'paste_content') {
-      return new Promise(function (resolve) {
-        try {
-          var md = String(args.md || args.text || '');
-          if (!md) { resolve({ ok: false, error: 'md 必填' }); return; }
-          window.Asc.plugin.executeMethod('PasteHtml', [mdToHtml(md)]);
-          resolve({ ok: true });
-        } catch (e) { resolve({ ok: false, error: String(e) }); }
-      });
-    }
-    return null; // 非粘贴工具
-  }
-
-  /** 单次工具执行：平台文件工具走 HTTP；粘贴通道走 executeMethod；
-   *  其余（word/cell/slide 结构化 API）走 callCommand。 */
-  function runTool(tool, args) {
-    var pr = pasteTool(tool, args);
-    if (pr !== null) return pr;
-    return httpTool(tool, args).then(function (r) {
-      if (r !== null) return r;
-      return runEditorTool(tool, args);
-    });
-  }
-
-  /** 编辑器工具执行：JSON 内联 + new Function + callCommand。 */
   function runEditorTool(tool, args) {
     return new Promise(function (resolve) {
-      if (!window.Asc || !window.Asc.plugin) { resolve({ ok: false, error: '插件环境未就绪' }); return; }
+      if (!window.Asc || !window.Asc.plugin) { resolve({ ok: false, error: '环境未就绪' }); return; }
       try {
-        var src = 'var data = ' + JSON.stringify({ tool: tool, args: args || {} }) + ';\n' + RUNTIME_SRC;
-        var fn = new Function('return (function () {\n' + src + '\n})')();
-        var settled = false;
-        var to = setTimeout(function () { if (!settled) { settled = true; resolve({ ok: false, error: '工具执行超时' }); } }, 20000);
+        var src = 'var data=' + JSON.stringify({ tool: tool, args: args || {} }) + ';\nvar NL=String.fromCharCode(10);\n' + RUNTIME;
+        var fn = new Function('return (function(){\n' + src + '\n})')();
+        var done = false;
+        var to = setTimeout(function () { if (!done) { done = true; resolve({ ok: false, error: '超时' }); } }, 20000);
         window.Asc.plugin.callCommand(fn, false, false, function (r) {
-          if (settled) return; settled = true; clearTimeout(to);
-          resolve(r || { ok: false, error: 'callCommand 无返回' });
+          if (done) return; done = true; clearTimeout(to);
+          resolve(r || { ok: false, error: '无返回' });
         });
       } catch (e) { resolve({ ok: false, error: String(e) }); }
     });
   }
+  function httpTool(tool, args) {
+    var name = String((args || {}).name || '').trim();
+    if (tool === 'list_files') {
+      var url = name ? '/api/v1/search?q=' + encodeURIComponent(name) + '&limit=20' : '/api/v1/files?limit=20';
+      return fetch(url, { credentials: 'same-origin', headers: { Authorization: 'Bearer ' + token } })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          var list = d.results || d.files || (Array.isArray(d) ? d : []) || [];
+          return { ok: true, files: list.filter(function (x) { return x.type !== 'folder'; }).slice(0, 20).map(function (x) { return x.name; }) };
+        }).catch(function (e) { return { ok: false, error: String(e) }; });
+    }
+    if (tool === 'read_file') {
+      if (!name) return Promise.resolve({ ok: false, error: 'name 必填' });
+      return fetch('/api/v1/search?q=' + encodeURIComponent(name) + '&limit=5', { credentials: 'same-origin', headers: { Authorization: 'Bearer ' + token } })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          var list = d.results || d.files || [];
+          var hit = list.filter(function (x) { return x.type !== 'folder' && x.name === name; })[0] || list.filter(function (x) { return x.type !== 'folder'; })[0];
+          if (!hit) return { ok: false, error: '未找到：' + name };
+          return fetch('/api/v1/files/' + hit.id + '/download', { credentials: 'same-origin', headers: { Authorization: 'Bearer ' + token } })
+            .then(function (r) { return r.text(); })
+            .then(function (t) { return { ok: true, name: hit.name, text: t.slice(0, 15000) }; });
+        }).catch(function (e) { return { ok: false, error: String(e) }; });
+    }
+    return Promise.resolve(null);
+  }
+  function runTool(tool, args) { return httpTool(tool, args).then(function (r) { return r !== null ? r : runEditorTool(tool, args); }); }
+  function probeEditor() { return runEditorTool('get_doc_info', {}).then(function (r) { docInfo = r; return r; }); }
 
-  /** 探测编辑器类型 + 初始 doc_info。init 时机可能早于沙箱 Api 装配完
-   * （只见混淆内部方法 → 误报 pdf/unknown），对不确定结果延迟重试。 */
-  function probeEditor(tries) {
-    return runTool('get_doc_info', {}).then(function (r) {
-      var kind = (r && r.kind) || 'unknown';
-      var uncertain = kind === 'unknown' || kind === 'pdf';
-      if (uncertain && (tries === undefined ? 4 : tries) > 0) {
-        return new Promise(function (resolve) {
-          window.setTimeout(function () { probeEditor((tries === undefined ? 4 : tries) - 1).then(resolve); }, 1500);
-        });
-      }
-      editorType = kind;
-      docInfo = r;
-      return r;
-    });
-  }
-
-  // ================= OnlyOffice 桥（仅对话模式手动插入） =================
-  function insertReply(text) {
-    if (!window.Asc || !window.Asc.plugin) return;
-    window.Asc.plugin.executeMethod('PasteHtml', [mdToHtml(text)]);
-  }
-  document.getElementById('insert').onclick = function () { if (lastReply) insertReply(lastReply); };
-  document.getElementById('replace').onclick = function () { if (lastReply) insertReply(lastReply); };
-  function getSelection(cb) {
-    if (!window.Asc || !window.Asc.plugin) { cb(''); return; }
-    try { window.Asc.plugin.executeMethod('GetSelectedText', null, function (r) { cb(r && typeof r === 'object' ? r.Text : r); }); }
-    catch (e) { cb(''); }
-  }
-  document.getElementById('clear').onclick = function () {
-    history = []; selection = ''; lastReply = '';
-    log.innerHTML = '';
-    setHint('会话已清空');
+  var TOOLS = {
+    word: ['get_doc_info {} → 结构总览。', 'read_document {from?,to?} → 读全文。', 'search_text {query} → 定位。',
+      'insert_content {md,at?,index?} → 插入。', 'replace_text {find,md,scope?} → 段落替换。',
+      'replace_element {index,md}。', 'delete_element {index}。',
+      'format_element {index,bold?,fontSize?,color?}。', 'set_paragraph_style {index,style?,align?}。',
+      'insert_table {rows,at?}。', 'table_op {index,op,r?,c?,text?}。', 'insert_page_break {}。', 'add_comment {find,text}。'].join('\n'),
+    cell: ['get_doc_info {} → 区域。', 'read_range {r1,c1,r2?,c2?}。', 'write_cells {cells:[[r,c,v],…]} → 写（支持公式）。',
+      'format_range {…,bold?,fontSize?,fillColor?,numberFormat?,hAlign?}。', 'row_op {op,at,count?}。', 'set_col_width {col,width}。'].join('\n'),
+    slide: ['get_doc_info {} → 页数。', 'read_slide {index}。', 'add_slide {title,bullets?}。'].join('\n'),
+    pdf: '（PDF 无文档 API，仅对话。）'
   };
+  function buildSystem() {
+    var k = editorType || 'pdf';
+    var L = [
+      '你是 DocFlow 内置文档编辑 Agent，运行在 OnlyOffice 编辑器侧栏中。',
+      '当前编辑器类型：' + k + '。你操作的是当前打开的编辑器文档——不是平台文件系统。',
+      '重要：写入内容必须用编辑器工具（insert_content / write_cells 等）直接修改当前文档，不要用 list_files/read_file 生成新文件。',
+      '', '工具：', TOOLS[k] || TOOLS.pdf,
+      '跨工具：list_files {name?} / read_file {name} → 平台文件检索/读取（作上下文参考，写入仍用编辑器工具）。',
+      '', '输出格式（硬性）：每轮恰好一行 TOOL_CALL {...}，或 FINAL 开头。'
+    ];
+    if (docInfo && docInfo.ok) L.push('', '【初始文档结构】' + JSON.stringify(docInfo).slice(0, 2000));
+    return L.join('\n');
+  }
 
-  // ================= 模式 / 开关 =================
-  modeSeg.addEventListener('click', function (e) {
-    var b = e.target.closest('button[data-v]');
-    if (!b) return;
-    editMode = b.dataset.v === 'edit';
-    var btns = modeSeg.querySelectorAll('button');
-    for (var i = 0; i < btns.length; i++) btns[i].classList.toggle('on', btns[i] === b);
-    manualBar.classList.toggle('hidden', editMode);
-    q.placeholder = editMode
-      ? '描述目标，AI 自主完成（读文档→规划→修改→验证），例如「把第二段改简洁并加粗关键词」「按 A 列数据生成汇总表」'
-      : '仅对话模式：围绕当前文档提问，回复可用下方按钮手动插入';
-    setHint(editMode ? '自主编辑：AI 通过内置工具直接操作文档（Ctrl+Z 可撤销）' : '仅对话：AI 不改动文档');
-  });
-  webBtn.onclick = function () { webOn = !webOn; webBtn.classList.toggle('on', webOn); };
-  thinkBtn.onclick = function () { thinkOn = !thinkOn; thinkBtn.classList.toggle('on', thinkOn); };
+  function extractCallJson(t) {
+    var k = 0, found = [];
+    while (found.length < 8) {
+      var at = t.indexOf('TOOL_CALL', k); if (at < 0) break;
+      var b = t.indexOf('{', at); if (b < 0) break;
+      var d = 0, inS = false, esc = false, end = -1;
+      for (var i = b; i < t.length; i++) {
+        var ch = t.charAt(i);
+        if (esc) { esc = false; continue; }
+        if (ch === '\\') { if (inS) esc = true; continue; }
+        if (ch === '"') { inS = !inS; continue; }
+        if (inS) continue;
+        if (ch === '{') d++; else if (ch === '}') { d--; if (d === 0) { end = i; break; } }
+      }
+      if (end < 0) break;
+      found.push(t.slice(b, end + 1)); k = end + 1;
+    }
+    for (var j = found.length - 1; j >= 0; j--) {
+      try { var c = JSON.parse(found[j]); if (c && typeof c.tool === 'string') return { type: 'tool', call: { tool: c.tool, args: c.args || {} } }; } catch (e) {}
+    }
+    return null;
+  }
+  function parseReply(t) {
+    t = t.trim();
+    if (t.indexOf('FINAL') === 0) return { type: 'final', text: t.slice(5).trim() || t };
+    var c = extractCallJson(t);
+    return c || { type: 'final', text: t };
+  }
 
-  // ================= /ai/chat SSE =================
+  var MAX_ROUNDS = 20;
+  function setBusyUI(b) { busy = b; sendBtn.style.display = b ? 'none' : ''; stopBtn.style.display = b ? '' : 'none'; }
+
   function chatOnce(messages, ev) {
     var body = { messages: messages, stream: true };
     if (webOn) body.web_search = true;
     if (thinkOn) body.think = true;
     var m = currentModel();
     if (m && m.providerId) body.model = { providerId: m.providerId, modelId: m.modelId };
-    return fetch('/api/v1/ai/chat', {
-      method: 'POST', credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    }).then(function (res) {
-      if (!res.ok) {
-        if (res.status === 401) throw { status: 401 };
-        return res.text().then(function (t) { throw new Error('HTTP ' + res.status + ' ' + t.slice(0, 120)); });
-      }
-      var reader = res.body.getReader();
-      var dec = new TextDecoder();
-      var buf = '';
-      function pump() {
-        return reader.read().then(function (r) {
-          if (r.done) return;
-          buf += dec.decode(r.value, { stream: true });
-          var idx;
-          while ((idx = buf.indexOf('\n\n')) >= 0) {
-            var block = buf.slice(0, idx); buf = buf.slice(idx + 2);
-            var name = '', data = '';
-            block.split('\n').forEach(function (line) {
-              if (line.indexOf('event: ') === 0) name = line.slice(7).trim();
-              else if (line.indexOf('data: ') === 0) data = line.slice(6);
-            });
-            if (!name) continue;
-            var payload = {};
-            try { payload = JSON.parse(data); } catch (e) { continue; }
-            if (name === 'delta') { var t = payload.text || ''; if (t) ev.onDelta(t); }
-            else if (name === 'thinking') { var th = payload.text || ''; if (th) ev.onThinking(th); }
-            else if (name === 'error') { throw new Error(payload.error || 'AI 请求失败'); }
-            else if (name === 'done') { ev.onDone(); return; }
-          }
-          return pump();
-        });
-      }
-      return pump();
-    });
+    return fetch('/api/v1/ai/chat', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token }, body: JSON.stringify(body), signal: controller.signal })
+      .then(function (res) {
+        if (!res.ok) { if (res.status === 401) throw { status: 401 }; throw new Error('HTTP ' + res.status); }
+        var rd = res.body.getReader(), dec = new TextDecoder(), buf = '';
+        function pump() {
+          return rd.read().then(function (r) {
+            if (r.done) return;
+            buf += dec.decode(r.value, { stream: true });
+            var idx;
+            while ((idx = buf.indexOf('\n\n')) >= 0) {
+              var blk = buf.slice(0, idx); buf = buf.slice(idx + 2);
+              var n = '', d = '';
+              blk.split('\n').forEach(function (ln) { if (ln.indexOf('event: ') === 0) n = ln.slice(7).trim(); else if (ln.indexOf('data: ') === 0) d = ln.slice(6); });
+              if (!n) continue;
+              var p = {}; try { p = JSON.parse(d); } catch (e) { continue; }
+              if (n === 'delta' && p.text) ev.onDelta(p.text);
+              else if (n === 'thinking' && p.text) ev.onThinking(p.text);
+              else if (n === 'error') throw new Error(p.error || 'AI 请求失败');
+              else if (n === 'done') { ev.onDone(); return; }
+            }
+            return pump();
+          });
+        }
+        return pump();
+      });
   }
   function chat(messages, ev) {
     return chatOnce(messages, ev).catch(function (err) {
@@ -751,298 +343,102 @@
     });
   }
 
-  // ================= Agent 协议与系统提示 =================
-  // 协议解析（v5.2）：括号深度扫描提取 TOOL_CALL {...} 候选（字符串
-  // 感知——引号内的 {}/BS 转义不计深度，支持嵌套对象与跨行），从最后一
-  // 个候选向前取首个可 JSON 解析的；FINAL 标记优先；无候选才视为答复文本。
-  function extractCallJson(t) {
-    var k = 0;
-    var found = [];
-    while (found.length < 8) {
-      var at = t.indexOf('TOOL_CALL', k);
-      if (at < 0) break;
-      var brace = t.indexOf('{', at);
-      if (brace < 0) break;
-      var depth = 0, inStr = false, escp = false, end = -1;
-      for (var i = brace; i < t.length; i++) {
-        var ch = t.charAt(i);
-        if (escp) { escp = false; continue; }
-        if (ch === '\\') { if (inStr) escp = true; continue; }
-        if (ch === '"') { inStr = !inStr; continue; }
-        if (inStr) continue;
-        if (ch === '{') depth++;
-        else if (ch === '}') { depth--; if (depth === 0) { end = i; break; } }
-      }
-      if (end < 0) break;
-      found.push(t.slice(brace, end + 1));
-      k = end + 1;
-    }
-    for (var j = found.length - 1; j >= 0; j--) {
-      try {
-        var c = JSON.parse(found[j]);
-        if (c && typeof c.tool === 'string') return { type: 'tool', call: { tool: c.tool, args: c.args || {} } };
-      } catch (e) {}
-    }
-    return null;
-  }
-  function parseAgentReply(text) {
-    var t = text.trim();
-    if (t.indexOf('FINAL') === 0) return { type: 'final', text: t.slice(5).trim() || t };
-    var call = extractCallJson(t);
-    if (call) return call;
-    return { type: 'final', text: t };
-  }
-
-  var TOOLS_DOC = {
-    word: [
-      'get_doc_info {} → 文档结构总览：元素总数 + 每元素（段落/表格）索引与文本摘要 + 当前选区。任何任务先调它。',
-      'read_document {from?, to?, maxChars?} → 按元素索引读全文（每元素截断，默认500字）。',
-      'search_text {query} → 返回所有含 query 的元素索引与片段（定位修改点）。',
-      'insert_content {md, at:"end"|"cursor"|"after", index?} → 插入内容（at=after 时 index 为目标元素索引）。md 支持 #/##/### 标题、**加粗**、`代码`、- 列表、|表格行|。',
-      'replace_text {find, md, scope?:"first"|"all"} → 把含 find 的段落整段替换为 md（段落粒度）。多个小修改分别调用，勿整篇重写。',
-      'replace_element {index, md} → 按索引整段替换。',
-      'delete_element {index} → 删除指定元素。',
-      'format_element {index, bold?, italic?, underline?, fontSize?, color?:"RRGGBB", highlight?:"yellow"} → 段落内全部文本应用格式。',
-      'set_paragraph_style {index, style?:"heading_1"|"heading_2"|"heading_3"|"normal", align?:"left"|"center"|"right"|"justify"} → 段落样式与对齐。',
-      'insert_table {rows:[["表头",…],…], at?:"end"|"cursor"} → 插入表格（首行自动加粗）。',
-      'table_op {index, op:"add_row"|"set_cell", r?, c?, text?} → 表格加行 / 填充单元格。',
-      'insert_page_break {} → 文末插入分页符。',
-      'add_comment {find, text} → 在首个匹配处添加批注。'
-    ].join('\n'),
-    cell: [
-      'get_doc_info {} → 已用区域行列数。',
-      'read_range {r1,c1,r2?,c2?} → 读区域值（行列 0 起，默认 20x10 窗口）。',
-      'write_cells {cells:[[行,列,值],…]} → 写单元格（值可为公式如 =SUM(A1:A5)）。',
-      'format_range {r1,c1,r2,c2, bold?, fontSize?, fillColor?:"RRGGBB", numberFormat?, hAlign?:"left"|"center"|"right"} → 区域格式。',
-      'row_op {op:"insert"|"delete", at, count?} → 插入/删除行。',
-      'set_col_width {col, width} → 列宽。'
-    ].join('\n'),
-    slide: [
-      'get_doc_info {} → 幻灯片数量。',
-      'read_slide {index} → 读指定页全部文本。',
-      'add_slide {title, bullets?} → 新建幻灯片（文本写入能力取决于 DS 版本，失败会如实返回）。'
-    ].join('\n'),
-    basic: [
-      'get_selection {} → 读当前选中文本。',
-      'paste_content {md} → 把 Markdown 内容粘贴到光标处（HTML 表格自动转为表格单元格；word 语法如 **加粗** 保留）。',
-      '（当前构建的表格沙箱无结构化单元格 API——生成整份表格内容用 paste_content 一次粘贴，已含表头与数据行。）'
-    ].join(String.fromCharCode(10)),
-    pdf: '（DS pdf 编辑器暂无文档模型 API——请基于用户描述对话，无法直接编辑 pdf）'
-  };
-
-  function buildSystem() {
-    var kind = editorType || 'word';
-    var sys = [
-      '你是 DocFlow 内置文档编辑 Agent，运行在 OnlyOffice 编辑器侧栏中，通过调用工具直接操作当前文档。当前编辑器类型：' + kind + '（word=文档 / cell=表格 / slide=演示 / basic=受限表格 / pdf）。',
-      '',
-      '可用工具（每次回复恰好一行 TOOL_CALL {...} 调用一个工具，或以 FINAL 开头给出最终答复）：',
-      TOOLS_DOC[kind] || TOOLS_DOC.pdf,
-      '',
-      '输出格式（硬性要求）：每一轮回复的完整内容必须恰好是一行 TOOL_CALL {...}（单个工具、合法 JSON、前后不得有任何解释/思考/多余文字），或以 FINAL 开头的最终答复。同一轮绝不输出两个 TOOL_CALL。',
-      '',
-      '跨工具（不限编辑器类型，均可使用）：',
-      '- list_files {query?} → 检索/列出平台文件（留空 = 最近访问）。需要参考平台其它文件时先用它找。',
-      '- read_file {name} → 读取平台文件全文（按文件名匹配）。内容可作上下文，也可整理后写入当前文档。',
-      '',
-      '只能使用上列工具；df_* 等未列出的工具不存在。当前编辑器类型决定了可用工具——basic（含部分表格构建）用粘贴通道，excel 结构化 API 可用时用 write_cells。',
-      '工作方式（严格遵循）：',
-      '1. 接到任务先 get_doc_info（及必要的 search_text/read_document）了解文档结构，再动手；',
-      '2. 编辑粒度自主判断：局部修改用 replace_text/replace_element/format_element（段落级），新增用 insert_content，大范围重构才逐段处理——不要一上来整篇重写；',
-      '3. 小步执行：一次一个工具调用，拿到结果再决定下一步；工具失败时读取错误调整策略或换路径，不要重复同一失败调用；',
-      '4. 关键修改后可用 read_document/search_text 验证；',
-      '5. 完成后输出 FINAL + 简明中文总结（改了什么、各在哪个位置），不要在 FINAL 里再调用工具；',
-      '6. 用户以「针对选区」开头时，其选区文本会在消息中给出（段落粒度替换即等价于改写选区）。',
-      '',
-      'TOOL_CALL 格式示例（单行 JSON）：',
-      'TOOL_CALL {"tool":"replace_text","args":{"find":"旧文本","md":"**新文本**"}}'
-    ];
-    if (docInfo && docInfo.ok) sys.push('', '【初始文档结构】\n' + JSON.stringify(docInfo).slice(0, 2500));
-    if (selection) sys.push('', '【用户圈定选区】\n' + selection.slice(0, 2000));
-    return sys.join('\n');
-  }
-
-  // ================= 发送（agent 循环 / 单轮对话） =================
-  var MAX_TOOL_ROUNDS = 20;
-
-  function setBusyUI(b) {
-    busy = b;
-    sendBtn.style.display = b ? 'none' : '';
-    stopBtn.style.display = b ? '' : 'none';
-  }
-
   function send() {
     var text = q.value.trim();
     if (!text || busy) return;
     q.value = '';
     setBusyUI(true);
-    userBubble(text, selection ? ('选区 ' + selection.length + ' 字') : null);
+    userBubble(text);
     thinkEl = null;
     controller = new AbortController();
+    editorType = readEditorKind() || 'word';
 
-    var prompt = selection ? '【针对选区】' + text : text;
+    var convo = [{ role: 'system', content: buildSystem() }, { role: 'user', content: text }];
+    var thinkStart = 0, rounds = 0;
+    function finishOk(s) {
+      settleThink(thinkStart ? Date.now() - thinkStart : 0);
+      if (s) el('div', 'm a', mdToHtml(s));
+      history.push({ role: 'user', content: text }, { role: 'assistant', content: ('完成：' + s).slice(0, 2000) });
+      if (history.length > 12) history = history.slice(-12);
+      probeEditor().then(function () {});
+      setBusyUI(false); controller = null;
+      setHint('已完成（DS 自动保存）');
+    }
+    function finishErr(m) { settleThink(0); el('div', 'm a err', esc(m)); setBusyUI(false); controller = null; }
 
     if (!editMode) {
-      // ---- 仅对话：单轮问答 ----
-      var acc = '';
-      var bubble = null;
-      var thinkStart = 0;
-      var msgs = [{ role: 'system', content: '你是 OnlyOffice 文档助手（DocFlow AI，「仅对话」模式）。围绕当前文档回答，输出简洁 Markdown；不改动文档。' + (docInfo ? '\n文档结构：' + JSON.stringify(docInfo).slice(0, 1200) : '') }].concat(history, [{ role: 'user', content: prompt }]);
-      chat(msgs, {
-        onDelta: function (d) {
-          acc += d;
-          if (!bubble) bubble = el('div', 'm a');
-          bubble.innerHTML = mdToHtml(acc) + '<span class="caret"></span>';
-          log.scrollTop = log.scrollHeight;
-        },
-        onThinking: function (th) { if (!thinkStart) thinkStart = Date.now(); appendThink(th); },
-        onDone: function () { settleThink(thinkStart ? Date.now() - thinkStart : 0); if (bubble) bubble.innerHTML = mdToHtml(acc); }
-      })
-        .then(function () {
-          lastReply = acc;
-          if (acc) { history.push({ role: 'user', content: prompt }, { role: 'assistant', content: acc.slice(0, 4000) }); if (history.length > 12) history = history.slice(-12); }
-          else el('div', 'm a', '（模型未返回内容）');
-        })
-        .catch(function (err) {
-          if (err && err.name === 'AbortError') { if (bubble) bubble.innerHTML = mdToHtml(acc) + '<br>（已停止）'; }
-          else el('div', 'm a err', esc(err && err.status === 401 ? '登录态失效（请刷新文档页后重试）' : String(err && err.message || err)));
-        })
-        .then(function () { setBusyUI(false); controller = null; });
+      var acc = '', bub = null;
+      chat(convo, {
+        onDelta: function (d) { acc += d; if (!bub) bub = el('div', 'm a'); bub.innerHTML = mdToHtml(acc) + '<span class="caret"></span>'; log.scrollTop = log.scrollHeight; },
+        onThinking: function (t) { if (!thinkStart) thinkStart = Date.now(); appendThink(t); },
+        onDone: function () { settleThink(thinkStart ? Date.now() - thinkStart : 0); if (bub) bub.innerHTML = mdToHtml(acc); }
+      }).then(function () { lastReply = acc; setBusyUI(false); controller = null; })
+        .catch(function (e) { finishErr(String(e && e.message || e)); });
       return;
     }
-
-    // ---- 自主编辑：agent 工具循环 ----
-    var preProbe = (editorType === 'unknown' || editorType === 'pdf')
-      ? probeEditor(2).then(function () {})
-      : Promise.resolve();
-    preProbe.then(function () {
-    var rounds = 0;
-    var convo = [{ role: 'system', content: buildSystem() }, { role: 'user', content: prompt }];
-    var finalText = '';
-    var thinkStart = 0;
-
-    function finishOk(summary) {
-      settleThink(thinkStart ? Date.now() - thinkStart : 0);
-      if (summary) el('div', 'm a', mdToHtml(summary));
-      history.push({ role: 'user', content: prompt }, { role: 'assistant', content: ('已完成：' + summary).slice(0, 2000) });
-      if (history.length > 12) history = history.slice(-12);
-      // 编辑后刷新结构缓存，供下一轮 system 上下文
-      probeEditor().then(function () {} );
-      setBusyUI(false); controller = null;
-      setHint('已完成（文档由 DS 自动保存落版本链）');
-    }
-    function finishErr(msg) {
-      settleThink(0);
-      el('div', 'm a err', esc(msg));
-      setBusyUI(false); controller = null;
-    }
-
-    startAgentLoop();
-    function startAgentLoop() {
-    convo = [{ role: 'system', content: buildSystem() }, { role: 'user', content: prompt }];
     (function loop() {
-      if (rounds >= MAX_TOOL_ROUNDS) { finishErr('已达工具调用轮次上限（' + MAX_TOOL_ROUNDS + '），已执行的操作保留，可继续发送指令接力'); return; }
+      if (rounds >= MAX_ROUNDS) { finishErr('轮次上限'); return; }
       rounds++;
-      var acc2 = '';
-      var raw = null;
-      var curCard = null;
+      var acc2 = '', raw = null;
       chat(convo, {
-        onDelta: function (d) {
-          acc2 += d;
-          if (!raw) raw = el('div', 'raw', '');
-          raw.textContent = acc2.slice(-400) + ' ▌';
-          log.scrollTop = log.scrollHeight;
-        },
-        onThinking: function (th) { if (!thinkStart) thinkStart = Date.now(); appendThink(th); },
+        onDelta: function (d) { acc2 += d; if (!raw) raw = el('div', 'raw'); raw.textContent = acc2.slice(-300) + ' ▌'; log.scrollTop = log.scrollHeight; },
+        onThinking: function (t) { if (!thinkStart) thinkStart = Date.now(); appendThink(t); },
         onDone: function () {}
-      })
-        .then(function () {
-          if (raw) raw.remove();
-          var parsed = parseAgentReply(acc2);
-          if (parsed.type === 'final') {
-            finalText = parsed.text || acc2;
-            finishOk(finalText);
-            return;
-          }
-          var call = parsed.call || {};
-          var tool = call.tool || '';
-          var args = call.args || {};
-          curCard = toolCard(tool, args);
-          setHint('Agent 执行中（第 ' + rounds + ' 轮）：' + tool);
-          return runTool(tool, args).then(function (r) {
-            var ok = !!(r && r.ok);
-            toolDone(curCard, ok, r);
-            convo.push({ role: 'assistant', content: 'TOOL_CALL ' + JSON.stringify(call) });
-            convo.push({ role: 'user', content: 'TOOL_RESULT ' + JSON.stringify(r).slice(0, 3000) });
-            loop();
-          });
-        })
-        .catch(function (err) {
-          if (raw) raw.remove();
-          if (err && err.name === 'AbortError') {
-            finishErr('已停止（已执行的操作保留在文档中，Ctrl+Z 可撤销）');
-          } else {
-            finishErr(err && err.status === 401 ? '登录态失效（请刷新文档页后重试）' : String(err && err.message || err));
-          }
+      }).then(function () {
+        if (raw) raw.remove();
+        var parsed = parseReply(acc2);
+        if (parsed.type === 'final') { finishOk(parsed.text); return; }
+        var card = toolCard(parsed.call.tool, parsed.call.args);
+        setHint('执行（' + rounds + '）：' + parsed.call.tool);
+        return runTool(parsed.call.tool, parsed.call.args).then(function (r) {
+          toolDone(card, !!(r && r.ok), r);
+          convo.push({ role: 'assistant', content: 'TOOL_CALL ' + JSON.stringify(parsed.call) });
+          convo.push({ role: 'user', content: 'TOOL_RESULT ' + JSON.stringify(r).slice(0, 3000) });
+          loop();
         });
+      }).catch(function (e) {
+        if (raw) raw.remove();
+        finishErr(e && e.name === 'AbortError' ? '已停止' : String(e && e.message || e));
+      });
     })();
-    }
-    }); // preProbe
   }
 
   sendBtn.onclick = send;
   stopBtn.onclick = function () { if (controller) controller.abort(); };
-  q.addEventListener('keydown', function (e) {
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
+  q.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } });
+  webBtn.onclick = function () { webOn = !webOn; webBtn.classList.toggle('on', webOn); };
+  thinkBtn.onclick = function () { thinkOn = !thinkOn; thinkBtn.classList.toggle('on', thinkOn); };
+  modeSeg.addEventListener('click', function (e) {
+    var b = e.target.closest('button[data-v]'); if (!b) return;
+    editMode = b.dataset.v === 'edit';
+    var bs = modeSeg.querySelectorAll('button');
+    for (var i = 0; i < bs.length; i++) bs[i].classList.toggle('on', bs[i] === b);
+    manualBar.classList.toggle('hidden', editMode);
+    q.placeholder = editMode ? '描述要做的修改…' : '仅对话模式…';
   });
+  document.getElementById('clear').onclick = function () { history = []; lastReply = ''; log.innerHTML = ''; setHint('已清空'); };
+  document.getElementById('insert').onclick = function () { if (lastReply && window.Asc && window.Asc.plugin) window.Asc.plugin.executeMethod('PasteHtml', [mdToHtml(lastReply)]); };
+  document.getElementById('replace').onclick = function () { if (lastReply && window.Asc && window.Asc.plugin) window.Asc.plugin.executeMethod('PasteHtml', [mdToHtml(lastReply)]); };
 
-  // ================= 插件生命周期 =================
-  var apiRegistered = false;
-  function registerPluginApi() {
-    if (apiRegistered || !window.Asc || !window.Asc.plugin) return;
-    apiRegistered = true;
+  var reg = false;
+  function register() {
+    if (reg || !window.Asc || !window.Asc.plugin) return;
+    reg = true;
     window.Asc.plugin.init = function () {
-      setHint('就绪 · 正在读取文档结构…');
-      void refresh()
-        .then(function () {
-          return loadModels().then(function (items) {
-            renderModels(items);
-            if (!items.length) setHint('模型列表为空（管理端未配置对话模型，或登录态失效）');
-          });
-        })
-        .then(probeEditor)
-        .then(function (r) {
-          if (r && r.ok) setHint('就绪 · ' + (editorType === 'word' ? ('文档 ' + (r.elements || 0) + ' 个元素') : editorType === 'cell' ? ('表格 ' + (r.rows || 0) + '×' + (r.cols || 0)) : editorType === 'slide' ? (r.slides + ' 页') : 'PDF（只读）') + ' · 描述目标即可，AI 自主完成');
-          else setHint('就绪（文档结构读取失败，仍可对话）');
-        })
-        .catch(function () { setHint('未登录 DocFlow（请先在 DocFlow 页面登录后刷新文档）'); });
+      editorType = readEditorKind();
+      setHint(editorType ? '就绪 · ' + editorType : '就绪');
+      void refresh().then(function () { return loadModels().then(renderModels); }).catch(function () { setHint('初始化失败'); });
     };
-    window.Asc.plugin.onMethodReturn = function (returnValue) {
-      if (returnValue && typeof returnValue.Text === 'string') {
-        selection = returnValue.Text;
-        setHint(selection ? ('已引用选中（' + selection.length + ' 字）') : '选区为空');
-      }
-    };
+    window.Asc.plugin.onMethodReturn = function () {};
     window.Asc.plugin.button = function () {};
   }
-  if (window.Asc && window.Asc.plugin) {
-    registerPluginApi();
-  } else {
-    var tries = 0;
-    var poll = window.setInterval(function () {
-      tries++;
-      if (window.Asc && window.Asc.plugin) {
-        window.clearInterval(poll);
-        registerPluginApi();
-        if (window.Asc.plugin.init) window.Asc.plugin.init();
-        return;
-      }
-      if (tries >= 20) {
-        window.clearInterval(poll);
-        setHint('独立调试模式（文档操作需在 OnlyOffice 编辑器内）');
-      }
+  if (window.Asc && window.Asc.plugin) { register(); }
+  else {
+    var n = 0, p = setInterval(function () {
+      n++;
+      if (window.Asc && window.Asc.plugin) { clearInterval(p); register(); if (window.Asc.plugin.init) window.Asc.plugin.init(); return; }
+      if (n >= 20) { clearInterval(p); setHint('调试模式'); }
     }, 500);
-    void refresh()
-      .then(function () { return loadModels().then(renderModels); })
-      .catch(function (e) { setHint('初始化失败：' + String(e)); });
+    void refresh().then(function () { return loadModels().then(renderModels); }).catch(function () {});
   }
 })();
