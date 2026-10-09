@@ -6962,7 +6962,11 @@ kbd {
    不再 autoScroll）。 */
 .aic-list-wrap { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
 .aic-list-wrap .ant-bubble-list { flex: 1; }
-.aic-list-wrap .ant-bubble-list-scroll-box { overflow: visible; }
+/* 关闭 Bubble.List 内部滚动（外层 aic-list-wrap 统一接管）；同时强制
+   column 正向布局——autoscroll 态的 column-reverse 会把内容向上溢出，
+   不计入祖先 scrollHeight（反向 flex 的 scrollHeight 怪癖），外层
+   overflow:auto 永远无内容可滚 → 历史记录无法滚动查看的根因。 */
+.aic-list-wrap .ant-bubble-list-scroll-box { overflow: visible; flex-direction: column; }
 .aic-send-tools { display: flex; align-items: center; gap: 8px; }
 /* ==================== AI 编辑对话：模式开关 + 自动应用/撤销（版本保护） ==================== */
 /* 面板头部下方的「可修改 / 仅对话 + 选区 / 全文」单行（v3.9 两行合并省一行），
