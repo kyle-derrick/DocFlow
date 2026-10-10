@@ -66,6 +66,17 @@ const APPLY_SUMMARY_CHARS = 60
 
 type ChatScope = 'selection' | 'full'
 
+/** Agent 模式 system 提示词的宿主名（按 applyKind）。 */
+function agentHostLabel(kind: AIApplyKind): string {
+  return kind === 'excalidraw-json'
+    ? 'Excalidraw 白板'
+    : kind === 'drawio-xml'
+      ? 'draw.io 图表'
+      : kind === 'richtext-patch'
+        ? '富文本文档'
+        : '文本编辑器'
+}
+
 /** 面板模式：edit=可修改（自动应用+版本保护）；chat=仅对话（纯输出）。 */
 type ChatMode = 'edit' | 'chat'
 
@@ -287,11 +298,12 @@ export function AIEditChatButton({
       'divider',
       { key: 'custom', label: t(locale, 'aiEditCustom'), focus: true },
     ],
-    // 富文本指令式编辑：快捷指令提示词显式引导走 docflow-edit 指令模式。
+    // 富文本编辑页（v7 Agent 工具循环）：快捷指令为自然语言意图，由 AI 经
+    // 工具自主执行（format_text/replace_text 等）；不再引导 docflow-edit 指令。
     'richtext-patch': [
-      { key: 'polish', label: t(locale, 'aiEditPolish'), instruction: zh ? '请润色当前文档：找出需要改写的句子，逐条输出 replace 编辑指令，保持原意；[DocFlow-…] 占位行为受保护的嵌入内容，必须原样保留' : 'Polish the document: emit one replace instruction per sentence that needs rewriting, keeping the meaning; [DocFlow-...] placeholder lines are protected embeds and must be kept verbatim', editMode: true },
-      { key: 'rewrite', label: zh ? '重构全文' : 'Rewrite all', instruction: zh ? '请重构全文结构与措辞：若改动覆盖大半文档，输出 replaceAll 整篇替换，否则分条 replace。文档中的 [DocFlow-Embed / DocFlow-Image / DocFlow-File] 占位行是嵌入的图表/图片/文件，必须逐字保留在输出中，不得删改' : 'Restructure the whole document: output a replaceAll operation if most of it changes, otherwise several replace operations. [DocFlow-Embed / DocFlow-Image / DocFlow-File] placeholder lines are embedded diagrams/images/files and must be kept verbatim in the output', editMode: true },
-      { key: 'fix', label: zh ? '修正错别字' : 'Fix typos', instruction: zh ? '请找出并修正文档中的错别字与标点错误，逐条输出 replace 编辑指令' : 'Find and fix typos and punctuation errors, one replace instruction each', editMode: true },
+      { key: 'polish', label: t(locale, 'aiEditPolish'), instruction: zh ? '请润色当前文档：逐句改写需要优化的表述，保持原意；嵌入的图表/图片/文件块保持不动' : 'Polish the document: rewrite sentences that need improvement while keeping the meaning; leave embedded diagrams/images/files untouched', editMode: true },
+      { key: 'rewrite', label: zh ? '重构全文' : 'Rewrite all', instruction: zh ? '请重构全文结构与措辞（改动覆盖大半时可整篇重写，但嵌入的图表/图片/文件块必须原样保留）' : 'Restructure the whole document (full rewrite allowed, but embedded diagrams/images/files must be preserved)', editMode: true },
+      { key: 'fix', label: zh ? '修正错别字' : 'Fix typos', instruction: zh ? '请找出并修正文档中的错别字与标点错误' : 'Find and fix typos and punctuation errors', editMode: true },
       { key: 'summary', label: t(locale, 'aiEditSummary'), instruction: zh ? '请总结当前文档' : 'Summarize the current document', editMode: false },
       'divider',
       { key: 'custom', label: t(locale, 'aiEditCustom'), focus: true },
@@ -644,16 +656,11 @@ export default function AIEditChat({
     setTurns((prev) => prev.map((x) => (x.id === turnId ? { ...x, ...patch(x) } : x)))
   }
 
-  /** Agent 模式发送：工具循环 + FINAL；过程写入助手回合（toolCalls 链）。 */
+  /** Agent 模式发送：工具循环 + FINAL；过程写入助手回合（toolCalls 链）。
+   *  仅「可修改」模式进入；「仅对话」走 sendAgentChat（无工具不改文档）。 */
   const sendAgent = async (question: string) => {
     const tools = agentToolsRef.current ?? []
-    const hostLabel = applyKind === 'excalidraw-json'
-      ? 'Excalidraw 白板'
-      : applyKind === 'drawio-xml'
-        ? 'draw.io 图表'
-        : applyKind === 'richtext-patch'
-          ? '富文本文档'
-          : '文本编辑器'
+    const hostLabel = agentHostLabel(applyKind)
     const extra = agentSystemExtraRef.current
     const sys = [
       `你是 DocFlow 内置文档编辑 Agent（宿主：${hostLabel}）。通过调用工具直接操作当前文档，用户只描述意图。`,
@@ -769,13 +776,101 @@ export default function AIEditChat({
     }
   }
 
+  /** Agent 页「仅对话」模式：纯问答（不带编辑工具、不自动应用），上下文为
+   *  当前文档全文/摘要（截 MAX_CONTEXT_CHARS）——与「可修改」的工具循环
+   *  严格区分，AI 无任何改文档能力。 */
+  const sendAgentChat = async (question: string) => {
+    const tgt = getTargetRef.current()
+    const full = tgt.text
+    const truncated = full.length > MAX_CONTEXT_CHARS
+    const userTurnId = ++turnIdRef.current
+    const asstTurnId = ++turnIdRef.current
+    setInput('')
+    setNotice('')
+    setTurns((prev) => [
+      ...prev,
+      {
+        id: userTurnId, role: 'user', content: question,
+        note: full.trim() ? `${zh ? '仅对话 · 全文上下文' : 'Chat-only · full context'}${truncated ? (zh ? `（截 ${MAX_CONTEXT_CHARS} 字）` : '') : ''}` : (zh ? '仅对话 · 无文档上下文' : 'Chat-only · no document context'),
+      },
+      { id: asstTurnId, role: 'assistant', content: '', streaming: true },
+    ])
+    setBusy(true)
+    const controller = new AbortController()
+    abortRef.current = controller
+    const history: AIMessage[] = turns
+      .filter((x) => !x.error && x.content)
+      .slice(-HISTORY_ROUNDS * 2)
+      .map((x) => ({ role: x.role, content: x.content }))
+    const system = (zh
+      ? `你是 DocFlow ${agentHostLabel(applyKind)}助手。当前为仅对话模式：回答用户关于当前文档/图表的问题，不要尝试修改文档。`
+      : `You are the DocFlow ${agentHostLabel(applyKind)} assistant in chat-only mode: answer questions about the current document; do not modify it.`)
+      + (full.trim() ? `\n\n${zh ? '当前内容' : 'Current content'}：\n<text>\n${truncated ? full.slice(0, MAX_CONTEXT_CHARS) : full}\n</text>` : '')
+    const selectedModel = modelKey ? models.find((m) => m.id === modelKey) ?? null : null
+    try {
+      let acc = ''
+      await aiChat(
+        {
+          messages: [{ role: 'system', content: system }, ...history, { role: 'user', content: question }],
+          providerId: selectedModel?.providerId || undefined,
+          model: selectedModel ? { providerId: selectedModel.providerId, modelId: selectedModel.model } : undefined,
+          web_search: toggles.web ? true : undefined,
+          think: toggles.think ? true : undefined,
+          use_mcp: toggles.mcp ? true : undefined,
+        },
+        {
+          onMeta: (meta) => {
+            const ws = normalizeWebSources((meta as { sources?: unknown }).sources)
+            if (ws.length > 0) {
+              setTurns((prev) => prev.map((x) => (x.id === asstTurnId ? { ...x, webSources: ws } : x)))
+            }
+          },
+          onDelta: (chunk) => {
+            acc += chunk
+            patchLastTurn(asstTurnId, () => ({ content: acc }))
+          },
+          onThinking: (th) => {
+            patchLastTurn(asstTurnId, (x) => ({
+              thinking: (x.thinking ?? '') + th,
+              thinkingStartedAt: x.thinkingStartedAt ?? Date.now(),
+            }))
+          },
+          onTool: () => {},
+          onToolResult: () => {},
+          onSources: () => {},
+        },
+        controller.signal,
+      )
+      patchLastTurn(asstTurnId, (x) => ({
+        streaming: false,
+        thinkingMS: x.thinkingStartedAt ? Math.max(0, Date.now() - x.thinkingStartedAt) : undefined,
+      }))
+    } catch (err) {
+      const aborted = err instanceof Error && err.name === 'AbortError'
+      patchLastTurn(asstTurnId, (x) => ({
+        streaming: false,
+        content: x.content || (aborted ? '（已停止）' : ''),
+        error: aborted ? undefined : (err instanceof Error ? err.message : t(locale, 'aiAssistantErr')),
+        thinkingMS: x.thinkingStartedAt ? Math.max(0, Date.now() - x.thinkingStartedAt) : undefined,
+      }))
+    } finally {
+      abortRef.current = null
+      setBusy(false)
+    }
+  }
+
   /** 发送一轮：每轮独立构造 prompt（系统约束 + 最近 2 轮历史 + 指令与
    * 当前选区/全文上下文），SSE 流式渲染；停止/失败落在助手回合上。
    * 可修改模式下正常完成后自动应用（见 autoApply）；中止/失败不应用。 */
   const send = async (question: string) => {
     const text = question.trim()
     if (!text || busy) return
-    if (agentTools && agentTools.length > 0) { await sendAgent(text); return }
+    if (agentTools && agentTools.length > 0) {
+      // Agent 页按面板模式分流：可修改=工具循环（AI 可改文档）；仅对话=纯
+      // 问答（无编辑工具，杜绝「仅对话却被工具改动文档」）。
+      if (modeRef.current === 'edit') { await sendAgent(text); return }
+      await sendAgentChat(text); return
+    }
     // 以发送时刻的模式为准（流式期间切换不影响本轮）。
     const applyMode = modeRef.current
     const tgt = getTargetRef.current()

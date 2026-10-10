@@ -116,7 +116,7 @@ var platformToolsAll = []PlatformTool{
 	},
 	{
 		Name:        PlatformToolWriteFile,
-		Description: "在平台空间创建文件或用新内容覆盖既有文本文件（覆盖自动保留历史版本，可在版本历史回滚）。path 为相对工作目录的目标路径（父目录须已存在，可用 df_mkdir 先建目录），content 为完整文件内容（UTF-8 文本）。限制：仅允许文本类扩展名（md/txt/代码/json/yaml/html/svg/drawio 等），内容 ≤2MB。返回创建的文件 ID 与是否为覆盖。",
+		Description: "在平台空间创建文件或用新内容覆盖既有文本文件（覆盖自动保留历史版本，可在版本历史回滚）。path 为相对工作目录的目标路径（父目录须已存在，可用 df_mkdir 先建目录），content 为完整文件内容（UTF-8 文本）。可用于创建 Markdown/代码/配置等文本文件，也可直接创建图表与白板源文件（.drawio 即 draw.io XML、.excalidraw 即白板元素 JSON、.mermaid、.svg、.plantuml——平台编辑器可直接打开继续编辑）。限制：仅允许文本类扩展名（md/txt/代码/json/yaml/html/svg/drawio/excalidraw/mermaid 等，office/图片等二进制不支持），内容 ≤2MB。返回创建的文件 ID 与是否为覆盖。",
 		Params: map[string]any{
 			"type":     "object",
 			"required": []string{"path", "content"},
