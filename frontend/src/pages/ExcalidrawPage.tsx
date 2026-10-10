@@ -11,7 +11,7 @@
 //   （先 window.close()，未关则按已校验 returnTo / 历史 / '/' 回退，见
 //   editorNavigation），失败留在页面显示错误；
 // - 初始挂载 onChange 以首个序列化 JSON 为基线，后续对比相同不置脏。
-import { Suspense, lazy, useEffect, useRef, useState } from 'react'
+import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react'
 import type { ComponentProps } from 'react'
 import { App as AntdApp, Button } from 'antd'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
@@ -20,7 +20,8 @@ import ExcalidrawViewer from '../components/ExcalidrawViewer'
 import { EditorLoadError, EditorLoadErrorBoundary } from '../components/EditorLoadError'
 import type { AIEditTarget } from '../components/AIEditChat'
 import AIEditChat, { AIEditChatButton } from '../components/AIEditChat'
-import type { AIQuickCommand } from '../components/AIEditChat'
+import type { AIEditTool, AIQuickCommand } from '../components/AIEditChat'
+import { EXCALIDRAW_JSON_GUIDE } from '../components/AIEditChat'
 import { closeEditorWithFallback, safeReturnTo } from '../editorNavigation'
 import { MessageKey, formatMessage, t, useLocale } from '../i18n'
 import { useColorMode } from '../theme'
@@ -437,27 +438,16 @@ export default function ExcalidrawPage({
   /** AI 上下文目标：白板无选区概念，恒全文（=摘要）。 */
   const aiGetTarget = (): AIEditTarget => ({ hasSelection: false, text: sceneSummary() })
 
-  /** AI excalidraw JSON 自动应用（AIEditChat 已提取 ```excalidraw-json 围栏
-   * 内的 JSON 数组文本）：JSON.parse 校验 → 过滤非法元素（缺 type/数值 x/y、
-   * text 缺 text、连线缺绑定与 points 均剔除）→ id 缺失/与画布冲突自动补
-   * 随机（start/end 引用同步改写，悬空引用的连线剔除）→ 官方
-   * convertToExcalidrawElements 把骨架补全为正式元素（seed/versionNonce/
-   * 文本量宽/绑定端点等派生字段全部自动生成）→ 平移到现有内容下方 →
-   * updateScene 追加插入（不覆盖现有内容）→ scrollToContent 对焦 →
-   * onChange 链路自动置脏并走 8s 静置自动保存。
-   * 返回 string=失败原因（AIEditChat 显示 applyError，画布未被修改）。 */
-  const aiApply = async (_mode: 'insert' | 'replace', json: string): Promise<string | void> => {
+  /** 骨架 JSON → 校验 → 官方转换 → 平移至现有内容下方追加插入（insert_elements
+   * 工具与单轮 aiApply 共用管线）。返回插入的正式元素（含最终 id）。 */
+  const insertSkeletons = async (json: string): Promise<{ ok: true; elements: SceneElements } | { ok: false; error: string }> => {
     const api = excalidrawAPIRef.current
-    if (!api) return locale === 'zh-CN' ? '白板编辑器未就绪，未应用' : 'Whiteboard editor not ready; not applied'
+    if (!api) return { ok: false, error: '白板编辑器未就绪' }
     let skeletons: Array<Record<string, unknown>>
     try {
       skeletons = parseExcalidrawSkeletons(json, new Set(api.getSceneElements().map((el) => el.id)))
     } catch (err) {
-      const why = err instanceof Error ? err.message : String(err)
-      const head = json.replace(/\s+/g, ' ').slice(0, 100)
-      return (locale === 'zh-CN'
-        ? `excalidraw JSON 校验失败（${why}），画布未被修改；原文已保留在上面对话中（开头：${head}…）`
-        : `Failed to validate the excalidraw JSON (${why}); the canvas was left unchanged. The original reply is kept above (starts with: ${head}…)`)
+      return { ok: false, error: `excalidraw JSON 校验失败：${err instanceof Error ? err.message : String(err)}` }
     }
     try {
       // 官方转换器（与编辑器同一懒加载 chunk）：骨架 → 正式元素。
@@ -466,22 +456,206 @@ export default function ExcalidrawPage({
         skeletons as unknown as Parameters<typeof convertToExcalidrawElements>[0],
         { regenerateIds: false },
       )
-      if (!converted.length) {
-        return locale === 'zh-CN' ? '未产生可插入的白板元素，画布未被修改' : 'No insertable whiteboard elements were produced; the canvas was left unchanged'
-      }
+      if (!converted.length) return { ok: false, error: '未产生可插入的白板元素' }
       const current = api.getSceneElements()
       // 追加插入：平移到现有内容正下方（留 60px 间距）避免重叠。
       const bottom = current.reduce((max, el) => Math.max(max, el.y + (el.height ?? 0)), 0)
       const offset = current.length ? bottom + 60 : 0
-      const placed = offset ? converted.map((el) => ({ ...el, y: el.y + offset })) : converted
+      const placed = (offset ? converted.map((el) => ({ ...el, y: el.y + offset })) : converted) as SceneElements
       api.updateScene({ elements: [...current, ...placed] })
       api.scrollToContent(placed)
+      return { ok: true, elements: placed }
     } catch (err) {
-      // 骨架字段类型错误等：不写画布，错误文案回 AIEditChat 显示。
-      const why = err instanceof Error ? err.message : String(err)
-      return (locale === 'zh-CN' ? 'excalidraw 元素转换失败：' : 'Excalidraw element conversion failed: ') + why
+      return { ok: false, error: `excalidraw 元素转换失败：${err instanceof Error ? err.message : String(err)}` }
     }
   }
+
+  /** AI excalidraw JSON 自动应用（单轮生成通道，AIEditChat 提取围栏 JSON）：
+   * 复用 insertSkeletons 管线；返回 string=失败原因（applyError，画布不动）。 */
+  const aiApply = async (_mode: 'insert' | 'replace', json: string): Promise<string | void> => {
+    const r = await insertSkeletons(json)
+    if (!r.ok) {
+      const head = json.replace(/\s+/g, ' ').slice(0, 100)
+      return (locale === 'zh-CN'
+        ? `${r.error}，画布未被修改；原文已保留在上面对话中（开头：${head}…）`
+        : `${r.error}; the canvas was left unchanged. The original reply is kept above (starts with: ${head}…)`)
+    }
+  }
+
+  /** v7 白板 Agent 工具集：元素级读/增/改/移/删——修改既有内容不再需要
+   *  整图重画（id 定位、白名单属性更新；连线绑定与标签联动清理）。 */
+  const aiAgentTools: AIEditTool[] = useMemo(() => {
+    const sceneEls = (): SceneElements => {
+      const api = excalidrawAPIRef.current
+      return api ? api.getSceneElements() : (sceneRef.current?.elements ?? ([] as unknown as SceneElements))
+    }
+    const apiOr = () => excalidrawAPIRef.current
+    return [
+      {
+        name: 'read_scene',
+        desc: '{} → 读画布元素清单（id/type/坐标/尺寸/文字/描边色/填充色/容器绑定，最多 300 个）——修改前先读，拿元素 id。',
+        label: () => '读取画布',
+        exec: async () => {
+          const els = sceneEls()
+          const items = els.slice(0, 300).map((el) => {
+            const e = el as unknown as Record<string, unknown>
+            const label = e.label && typeof (e.label as { text?: unknown }).text === 'string'
+              ? (e.label as { text: string }).text
+              : ''
+            return {
+              id: el.id,
+              type: el.type,
+              x: Math.round(el.x),
+              y: Math.round(el.y),
+              w: Math.round(el.width ?? 0),
+              h: Math.round(el.height ?? 0),
+              text: (el.type === 'text' ? String(e.text ?? '') : label) || undefined,
+              stroke: el.strokeColor,
+              fill: el.backgroundColor === 'transparent' ? undefined : el.backgroundColor,
+              containerId: typeof e.containerId === 'string' ? e.containerId : undefined,
+            }
+          })
+          return { ok: true, count: els.length, elements: items }
+        },
+      },
+      {
+        name: 'insert_elements',
+        desc: '{elements:[骨架对象数组]} → 插入新元素（一次可传整图全部元素；rectangle/ellipse/diamond/text/arrow/line，含 id 供连线引用）——生成新图形/整图用本工具。',
+        label: (a: Record<string, unknown>) => `插入 ${Array.isArray(a.elements) ? a.elements.length : '?'} 元素`,
+        exec: async (a: Record<string, unknown>) => {
+          const els = a.elements
+          if (!Array.isArray(els) || !els.length) return { ok: false, error: 'elements 必填：骨架对象数组（type/x/y 等，见格式规范）' }
+          const r = await insertSkeletons(JSON.stringify(els))
+          if (!r.ok) return r
+          return { ok: true, inserted: r.elements.length, ids: r.elements.map((el) => el.id) }
+        },
+      },
+      {
+        name: 'update_elements',
+        desc: '{updates:[{id, x?, y?, width?, height?, angle?, text?, fontSize?, strokeColor?, backgroundColor?, strokeWidth?, opacity?}]} → 按 id 修改既有元素（改颜色/文字/位置/尺寸；id 来自 read_scene）——局部修改用本工具，不要重画整图。',
+        label: (a: Record<string, unknown>) => `更新 ${Array.isArray(a.updates) ? a.updates.length : '?'} 元素`,
+        exec: async (a: Record<string, unknown>) => {
+          const api = apiOr()
+          if (!api) return { ok: false, error: '编辑器未就绪' }
+          const updates = Array.isArray(a.updates) ? a.updates : []
+          if (!updates.length) return { ok: false, error: 'updates 必填：[{id, …属性}]' }
+          const byId = new Map<string, Record<string, unknown>>()
+          for (const u of updates) {
+            if (u && typeof (u as { id?: unknown }).id === 'string') byId.set((u as { id: string }).id, u as Record<string, unknown>)
+          }
+          if (!byId.size) return { ok: false, error: 'updates 缺少有效 id' }
+          const NUMERIC = ['x', 'y', 'width', 'height', 'angle', 'fontSize', 'strokeWidth', 'opacity'] as const
+          const COLOR = ['strokeColor', 'backgroundColor'] as const
+          const current = api.getSceneElements()
+          const found = new Set<string>()
+          const next = current.map((el) => {
+            const u = byId.get(el.id)
+            if (!u) return el
+            found.add(el.id)
+            const e = { ...el } as unknown as Record<string, unknown>
+            for (const k of NUMERIC) {
+              const v = u[k]
+              if (typeof v === 'number' && Number.isFinite(v)) e[k] = v
+            }
+            for (const k of COLOR) {
+              const v = u[k]
+              if (typeof v === 'string' && v) e[k] = k === 'backgroundColor' && v === 'none' ? 'transparent' : v
+            }
+            const text = u.text
+            if (typeof text === 'string') {
+              if (e.type === 'text' || typeof e.containerId === 'string') {
+                e.text = text
+                // 文本量宽粗估（编辑器渲染时再精调）：行宽 ≈ 字数×字号×0.6。
+                const fs = typeof e.fontSize === 'number' ? e.fontSize : 20
+                const lines = text.split('\n')
+                e.width = Math.max(20, Math.max(...lines.map((s) => s.length)) * fs * 0.6)
+                e.height = Math.max(20, lines.length * fs * 1.25)
+                e.originalText = text
+              }
+            }
+            return e as typeof el
+          })
+          if (!found.size) {
+            return { ok: false, error: `未命中任何元素 id（可用 id 见 read_scene；收到 ${[...byId.keys()].slice(0, 5).join(', ')}…）` }
+          }
+          api.updateScene({ elements: next })
+          const missing = [...byId.keys()].filter((id) => !found.has(id))
+          return { ok: true, updated: found.size, missing: missing.length ? missing : undefined }
+        },
+      },
+      {
+        name: 'move_elements',
+        desc: '{ids:[…], dx, dy} → 平移一组元素（像素；dx/dy 正值向右下）。',
+        label: (a: Record<string, unknown>) => `平移 ${Array.isArray(a.ids) ? a.ids.length : '?'} 元素`,
+        exec: async (a: Record<string, unknown>) => {
+          const api = apiOr()
+          if (!api) return { ok: false, error: '编辑器未就绪' }
+          const ids = new Set(Array.isArray(a.ids) ? a.ids.filter((x): x is string => typeof x === 'string') : [])
+          const dx = Number(a.dx), dy = Number(a.dy)
+          if (!ids.size || !Number.isFinite(dx) || !Number.isFinite(dy)) return { ok: false, error: 'ids/dx/dy 必填' }
+          const current = api.getSceneElements()
+          let moved = 0
+          const next = current.map((el) => {
+            if (!ids.has(el.id)) return el
+            moved++
+            return { ...el, x: el.x + dx, y: el.y + dy }
+          })
+          if (!moved) return { ok: false, error: '未命中任何元素 id' }
+          api.updateScene({ elements: next })
+          return { ok: true, moved }
+        },
+      },
+      {
+        name: 'delete_elements',
+        desc: '{ids:[…]} → 删除元素（连带其标签与绑定连线一并清理，避免悬空引用）。',
+        label: (a: Record<string, unknown>) => `删除 ${Array.isArray(a.ids) ? a.ids.length : '?'} 元素`,
+        exec: async (a: Record<string, unknown>) => {
+          const api = apiOr()
+          if (!api) return { ok: false, error: '编辑器未就绪' }
+          const ids = new Set(Array.isArray(a.ids) ? a.ids.filter((x): x is string => typeof x === 'string') : [])
+          if (!ids.size) return { ok: false, error: 'ids 必填' }
+          const current = api.getSceneElements()
+          // 扩张删除集：被删形状的标签（containerId 指向它）与绑定箭头一并删。
+          const kill = new Set(ids)
+          for (const el of current) {
+            const e = el as unknown as Record<string, unknown>
+            if (typeof e.containerId === 'string' && kill.has(e.containerId)) kill.add(el.id)
+            const bound = e.boundElements
+            if (Array.isArray(bound) && kill.has(el.id)) {
+              for (const b of bound as Array<{ id?: unknown; type?: unknown }>) {
+                if (typeof b.id === 'string' && b.type === 'arrow') kill.add(b.id)
+              }
+            }
+          }
+          let removed = 0
+          const next = current
+            .filter((el) => {
+              if (kill.has(el.id)) { removed++; return false }
+              return true
+            })
+            .map((el) => {
+              const e = el as unknown as Record<string, unknown>
+              const patch: Record<string, unknown> = {}
+              // 清理幸存元素的悬空引用：boundElements / startBinding / endBinding。
+              if (Array.isArray(e.boundElements)) {
+                const keep = (e.boundElements as Array<{ id?: unknown }>).filter((b) => !kill.has(String(b.id ?? '')))
+                if (keep.length !== (e.boundElements as unknown[]).length) patch.boundElements = keep.length ? keep : undefined
+              }
+              for (const key of ['startBinding', 'endBinding'] as const) {
+                const b = e[key] as { elementId?: unknown } | undefined
+                if (b && typeof b.elementId === 'string' && kill.has(b.elementId)) patch[key] = null
+              }
+              return Object.keys(patch).length ? ({ ...el, ...patch } as typeof el) : el
+            })
+          if (!removed) return { ok: false, error: '未命中任何元素 id' }
+          api.updateScene({ elements: next })
+          return { ok: true, deleted: removed }
+        },
+      },
+    ]
+    // insertSkeletons 为组件内闭包（ref 访问无状态依赖），工具仅经 ref 操作。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   /** 版本保护前置：应用前先保存当前场景为基线版本（照文本编辑页模式）。 */
   const aiEnsureSaved = async (): Promise<{ versionId: string; version: number } | null> => {
@@ -610,8 +784,9 @@ export default function ExcalidrawPage({
             </Suspense>
           </EditorLoadErrorBoundary>
           </div>
-          {/* AI 对话式创作面板（excalidraw 元素 JSON → 白板原生元素；应用前
-              aiEnsureSaved 保存基线版本，撤销回退后 aiReload 重载画布）。 */}
+          {/* AI 对话式创作面板（v7：agentTools 元素级工具循环——read_scene /
+              insert_elements / update_elements / move_elements /
+              delete_elements；单轮生成通道保留为回退）。 */}
           <AIEditChat
             open={aiChatOpen}
             onClose={() => setAiChatOpen(false)}
@@ -624,6 +799,15 @@ export default function ExcalidrawPage({
             quickCommand={aiQuick}
             onQuickConsumed={() => setAiQuick(null)}
             applyKind="excalidraw-json"
+            agentTools={aiAgentTools}
+            agentSystemExtra={[
+              '白板宿主约束：',
+              '- 画新图形/整图：一次 insert_elements 传入全部元素（含标题 text 与连线 arrow）。',
+              '- 改既有内容（颜色/文字/位置/尺寸）：先 read_scene 拿 id，再 update_elements 局部更新——不要重画整图。',
+              '- 删除元素连带其标签与绑定箭头自动清理（delete_elements）。',
+              '- insert_elements 的元素骨架字段规范（忽略其中关于围栏输出/整体布局区间的表述，坐标系以画布现状为准）：',
+              EXCALIDRAW_JSON_GUIDE,
+            ].join('\n')}
           />
         </div>
       ))}
