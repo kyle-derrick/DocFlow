@@ -115,6 +115,7 @@
     return d;
   }
   function setHint(t) { hintEl.textContent = t; }
+  function userBubble(text) { el('div', 'm u', esc(text)); }
   var thinkEl = null;
   function appendThink(chunk) {
     if (!thinkEl) {
@@ -290,7 +291,11 @@
       found.push(t.slice(b, end + 1)); k = end + 1;
     }
     for (var j = found.length - 1; j >= 0; j--) {
-      try { var c = JSON.parse(found[j]); if (c && typeof c.tool === 'string') return { type: 'tool', call: { tool: c.tool, args: c.args || {} } }; } catch (e) {}
+      try { var c = JSON.parse(found[j]);
+        var tn = c.tool || c.name;
+        var ta = c.args || c.arguments || {};
+        if (tn && typeof tn === 'string') return { type: 'tool', call: { tool: tn, args: ta } };
+      } catch (e) {}
     }
     return null;
   }
@@ -306,6 +311,7 @@
 
   function chatOnce(messages, ev) {
     var body = { messages: messages, stream: true };
+    body.use_files = false; // 关键：关闭后端 df_* 平台文件工具注入（后端默认 true），插件自身经 TOOL_CALL 协议调度编辑器工具
     if (webOn) body.web_search = true;
     if (thinkOn) body.think = true;
     var m = currentModel();

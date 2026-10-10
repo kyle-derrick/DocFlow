@@ -209,7 +209,7 @@ export default function EditorPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
         // Excel/Word 编辑失效的根因；从 fileType 硬判定彻底消除。
         try {
           const ft = String(((config as Record<string, unknown>).document as Record<string, unknown> | undefined)?.fileType ?? '')
-          const kind = /xl/i.test(ft) ? 'cell' : /pp/i.test(ft) ? 'slide' : 'pdf'
+          const kind = /xl/i.test(ft) ? 'cell' : /pp/i.test(ft) ? 'slide' : ft ? 'word' : 'pdf'
           window.localStorage.setItem('docflow.ai.editor.kind', ft ? kind : 'pdf')
         } catch { /* ignore */ }
         const editorConfig: OnlyOfficeEditorConfig = {
