@@ -879,6 +879,7 @@ function AIWorkDirButton({ value, follow, onFollow, onChange, zh }: { value: AIW
         setOpen(next)
         if (!next) setErr('')
       }}
+      getPopupContainer={() => document.querySelector('.aiax-toolbar') ?? document.body}
       content={
         <div className="ai-workdir-pop">
           <label className="ai-workdir-row">

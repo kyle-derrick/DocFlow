@@ -490,10 +490,39 @@ export default function ViewerAIWidget({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [aiOn, open])
 
-  // 文件切换（同页复用组件时）：清空会话/摘要/上下文缓存。
+  // 文件切换（同页复用组件时）：按 fileId 存取会话（跨打开持久化）。
+  const convKey = fileId ? `docflow.ai.view.conv.${fileId}` : ''
   useEffect(() => {
+    if (!convKey) return
+    try {
+      const raw = window.localStorage.getItem(convKey)
+      if (raw) {
+        const saved = JSON.parse(raw) as WidgetTurn[]
+        if (Array.isArray(saved) && saved.length > 0) {
+          turnsRef.current = saved
+          setTurns(saved)
+          return
+        }
+      }
+    } catch { /* 损坏忽略 */ }
     turnsRef.current = []
     setTurns([])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [convKey])
+
+  // 会话变更时持久化（流式/进行中回合不落盘）。
+  useEffect(() => {
+    if (!convKey) return
+    const busyTurn = turns.some((x) => x.streaming)
+    if (busyTurn) return
+    try {
+      const persist = turns.slice(-40).map((x) => ({ ...x, streaming: undefined }))
+      window.localStorage.setItem(convKey, JSON.stringify(persist))
+    } catch { /* 配额失败忽略 */ }
+  }, [convKey, turns])
+
+  // 摘要/上下文缓存重置（文件切换时）。
+  useEffect(() => {
     setSummary({ loading: false, text: '', error: '' })
     fileTextRef.current = null
     setSavedIds(new Set())
