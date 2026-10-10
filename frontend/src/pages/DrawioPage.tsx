@@ -11,7 +11,7 @@
 //   兜底，常规未保存保护依赖 drawio 的「保存并退出」按钮——协议本身不
 //   通知父页脏态，autosave:0 亦不产生自动保存事件）。
 // - 集成禁用或探测失败显示「图表服务不可用」。
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { App as AntdApp, Button } from 'antd'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import {
@@ -26,7 +26,8 @@ import DrawioViewer from '../components/DrawioViewer'
 import { EditorLoadError } from '../components/EditorLoadError'
 import type { AIEditTarget } from '../components/AIEditChat'
 import AIEditChat, { AIEditChatButton } from '../components/AIEditChat'
-import type { AIQuickCommand } from '../components/AIEditChat'
+import type { AIEditTool, AIQuickCommand } from '../components/AIEditChat'
+import { DRAWIO_XML_GUIDE } from '../components/AIEditChat'
 import { useAIEnabled } from '../aiFeature'
 import { useLocale } from '../i18n'
 import { useColorMode } from '../theme'
@@ -171,6 +172,74 @@ function fixDrawioXML(xml: string): string {
     }
   }
   return new XMLSerializer().serializeToString(doc)
+}
+
+// ---- v7 Agent 工具的 XML DOM 操作（元素级读/增/改/删，均作用于当前
+//      mxGraphModel；改完统一走 fixDrawioXML 守门 + load/export 应用链路）----
+
+/** 解析 XML 文本 → {doc, root}；非法或无 root 抛错。 */
+function parseDrawioDoc(xml: string): { doc: Document; root: Element } {
+  const doc = new DOMParser().parseFromString(xml, 'application/xml')
+  if (doc.querySelector('parsererror')) throw new Error('invalid XML')
+  const root = doc.getElementsByTagName('mxGraphModel')[0]?.getElementsByTagName('root')[0]
+    ?? doc.getElementsByTagName('root')[0]
+  if (!root) throw new Error('missing mxGraphModel/root')
+  return { doc, root }
+}
+
+/** root 下业务单元格（跳过基础单元格 0/1）。 */
+function drawioCells(root: Element): Element[] {
+  return Array.from(root.getElementsByTagName('mxCell')).filter((c) => {
+    const id = c.getAttribute('id') ?? ''
+    return !!id && id !== '0' && id !== '1'
+  })
+}
+
+/** mxCell 概要（list_cells 返回 / AI 定位用）。 */
+function drawioCellInfo(c: Element): Record<string, unknown> {
+  const g = Array.from(c.children).find((ch) => ch.tagName === 'mxGeometry')
+  const num = (n: string): number | undefined => {
+    const v = Number(g?.getAttribute(n))
+    return Number.isFinite(v) ? v : undefined
+  }
+  const kind = c.getAttribute('vertex') === '1' ? 'vertex' : c.getAttribute('edge') === '1' ? 'edge' : 'cell'
+  return {
+    id: c.getAttribute('id') ?? '',
+    kind,
+    value: (c.getAttribute('value') ?? '').slice(0, 40) || undefined,
+    x: num('x'), y: num('y'), w: num('width'), h: num('height'),
+    source: c.getAttribute('source') ?? undefined,
+    target: c.getAttribute('target') ?? undefined,
+    style: (c.getAttribute('style') ?? '').slice(0, 80) || undefined,
+  }
+}
+
+/** 生成不与现有冲突的新 id（ai-N 递增，前缀标明 AI 来源）。 */
+function freshDrawioIds(root: Element, count: number): string[] {
+  const used = new Set(drawioCells(root).map((c) => c.getAttribute('id') ?? ''))
+  const out: string[] = []
+  let n = 1
+  while (out.length < count) {
+    const id = `ai-${n++}`
+    if (!used.has(id)) { used.add(id); out.push(id) }
+  }
+  return out
+}
+
+/** style 串 ↔ 键值映射（update_cells 的 styleSet 合并用；保留末尾分号风格）。 */
+function drawioStyleMap(style: string): Map<string, string> {
+  const m = new Map<string, string>()
+  for (const part of style.split(';')) {
+    const seg = part.trim()
+    if (!seg) continue
+    const eq = seg.indexOf('=')
+    if (eq > 0) m.set(seg.slice(0, eq), seg.slice(eq + 1))
+    else if (!m.has(seg)) m.set(seg, '')
+  }
+  return m
+}
+function drawioStyleString(m: Map<string, string>): string {
+  return [...m.entries()].map(([k, v]) => (v === '' ? k : `${k}=${v}`)).join(';') + ';'
 }
 
 export default function DrawioPage({ mode, fileId: fileIdProp }: { mode?: 'edit' | 'view'; fileId?: string } = {}) {
@@ -381,15 +450,12 @@ export default function DrawioPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
   /** AI 上下文目标：图表无选区概念，恒全文（=当前最新已知 XML）。 */
   const aiGetTarget = (): AIEditTarget => ({ hasSelection: false, text: xmlRef.current })
 
-  /** AI XML 自动应用（AIEditChat 已提取完整 drawio XML）：向 iframe 发
-   * load 动作整体替换画布内容（与初始化装载同款消息）；load 本身不一定
-   * 触发 autosave 事件，故随后主动发 export 请求——drawio 回 export 事件
-   * 带最新 XML，走既有 saveDiagram 通道落新版本（导出→上传→版本号刷新）。
-   * 返回 string=失败原因（AIEditChat 显示 applyError，画布未被修改）。 */
-  const aiApply = (_mode: 'insert' | 'replace', xml: string): string | void => {
+  /** 应用 XML 到画布（Agent 工具与单轮 aiApply 共用）：fixDrawioXML 守门
+   * （悬空引用/缺几何/坐标漂移/重叠）→ iframe load 整体替换 → 主动 export
+   * 走既有 saveDiagram 链路落版本。返回 string=失败原因。 */
+  const applyDiagramXML = (xml: string): string | void => {
     const frame = frameRef.current?.contentWindow
     if (!frame) return '图表编辑器未就绪，未应用'
-    // 应用前自动校正（悬空引用/缺几何/坐标漂移/重叠），失败回落原文不应用。
     let fixed = xml
     try {
       fixed = fixDrawioXML(xml)
@@ -400,6 +466,193 @@ export default function DrawioPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
     dirtyRef.current = true
     frame.postMessage(JSON.stringify({ action: 'export', format: 'xml' }), '*')
   }
+
+  /** AI XML 自动应用（AIEditChat 已提取完整 drawio XML；单轮生成通道）。 */
+  const aiApply = (_mode: 'insert' | 'replace', xml: string): string | void => applyDiagramXML(xml)
+
+  /** v7 drawio Agent 工具集：单元格级读/列/增/改/删 + 整图替换——局部修改
+   *  不再需要输出整份 XML（id 定位、样式键值合并、悬空边清理）。 */
+  const aiAgentTools: AIEditTool[] = useMemo(() => {
+    const currentXML = () => (xmlRef.current.trim() ? xmlRef.current : EMPTY_DRAWIO_XML)
+    /** 改动应用：返回 string=失败原因，void=成功（已 load+export 落版本）。 */
+    const apply = (doc: Document): string | void => applyDiagramXML(new XMLSerializer().serializeToString(doc))
+    return [
+      {
+        name: 'read_diagram',
+        desc: '{} → 读当前图表完整 XML（超 12000 字截断；小图优先用本工具掌握全貌）。',
+        label: () => '读取图表 XML',
+        exec: async () => {
+          const xml = currentXML()
+          return { ok: true, cells: drawioCells(parseDrawioDoc(xml).root).length, xml: xml.slice(0, 12000), truncated: xml.length > 12000 }
+        },
+      },
+      {
+        name: 'list_cells',
+        desc: '{} → 单元格清单（id/类型/文本/坐标尺寸/连线端点/样式摘要，最多 150 个）——修改前先读，拿单元格 id。',
+        label: () => '列出单元格',
+        exec: async () => {
+          const { root } = parseDrawioDoc(currentXML())
+          return { ok: true, cells: drawioCells(root).slice(0, 150).map(drawioCellInfo) }
+        },
+      },
+      {
+        name: 'insert_cells',
+        desc: '{xml} → 插入单元格片段（<mxCell …/> 列表或含 <mxGraphModel> 的整段；顶点须带 <mxGeometry x/y/width/height>，边 source/target 引用本批次或既有 id）——新增图形/局部补图用本工具。',
+        label: () => '插入单元格',
+        exec: async (a: Record<string, unknown>) => {
+          const xml = String(a.xml ?? '')
+          if (!xml.includes('mxCell')) return { ok: false, error: 'xml 必填：mxCell 片段（顶点先于引用它的边）' }
+          let fragRoot: Element
+          try {
+            const wrapped = /<mxGraphModel[\s>]/.test(xml) ? xml : `<mxGraphModel><root>${xml}</root></mxGraphModel>`
+            fragRoot = parseDrawioDoc(wrapped).root
+          } catch (e) {
+            return { ok: false, error: `片段解析失败：${e instanceof Error ? e.message : String(e)}` }
+          }
+          let doc: Document, root: Element
+          try {
+            ({ doc, root } = parseDrawioDoc(currentXML()))
+          } catch (e) {
+            return { ok: false, error: `当前图表解析失败：${e instanceof Error ? e.message : String(e)}` }
+          }
+          const incoming = drawioCells(fragRoot)
+          if (!incoming.length) return { ok: false, error: '片段中没有 mxCell' }
+          // id 缺失/与既有冲突 → 补新 id；批内引用同步改写。
+          const existing = new Set(drawioCells(root).map((c) => c.getAttribute('id') ?? ''))
+          const rename = new Map<string, string>()
+          const fresh = freshDrawioIds(root, incoming.length * 2)
+          let fi = 0
+          const adopted = doc.importNode(fragRoot, false)
+          for (const cell of incoming) {
+            const id = cell.getAttribute('id') ?? ''
+            let finalId = id
+            if (!id || existing.has(id) || rename.has(id)) {
+              finalId = fresh[fi++] ?? `ai-x${Date.now()}${fi}`
+              rename.set(id || finalId, finalId)
+            }
+            existing.add(finalId)
+            cell.setAttribute('id', finalId)
+            if (!cell.getAttribute('parent')) cell.setAttribute('parent', '1')
+            adopted.appendChild(doc.importNode(cell, true))
+          }
+          for (const cell of Array.from(adopted.children)) {
+            const c = cell as Element
+            if (c.tagName !== 'mxCell' || c.getAttribute('edge') !== '1') continue
+            for (const key of ['source', 'target'] as const) {
+              const ref = c.getAttribute(key)
+              if (ref && rename.has(ref)) c.setAttribute(key, rename.get(ref) as string)
+            }
+          }
+          root.appendChild(adopted)
+          const err = apply(doc)
+          if (err) return { ok: false, error: err }
+          return { ok: true, inserted: incoming.length, ids: incoming.map((c) => c.getAttribute('id') ?? '') }
+        },
+      },
+      {
+        name: 'update_cells',
+        desc: '{updates:[{id, value?, style?, styleSet?, x?, y?, w?, h?}]} → 按 id 修改单元格：value 改文本；style 整串替换或 styleSet 键值合并（如 {"fillColor":"#dae8fc","fontStyle":"1"}，null 删键）；x/y/w/h 改几何——局部修改用本工具，不要重画整图。',
+        label: (a: Record<string, unknown>) => `更新 ${Array.isArray(a.updates) ? a.updates.length : '?'} 单元格`,
+        exec: async (a: Record<string, unknown>) => {
+          const updates = Array.isArray(a.updates) ? (a.updates as Array<Record<string, unknown>>) : []
+          if (!updates.length) return { ok: false, error: 'updates 必填：[{id, …}]' }
+          let doc: Document, root: Element
+          try {
+            ({ doc, root } = parseDrawioDoc(currentXML()))
+          } catch (e) {
+            return { ok: false, error: `当前图表解析失败：${e instanceof Error ? e.message : String(e)}` }
+          }
+          const byId = new Map<string, Element>()
+          for (const c of drawioCells(root)) byId.set(c.getAttribute('id') ?? '', c)
+          const missing: string[] = []
+          let updated = 0
+          for (const u of updates) {
+            const id = String((u as { id?: unknown }).id ?? '')
+            const cell = byId.get(id)
+            if (!cell) { missing.push(id); continue }
+            if ((u as { value?: unknown }).value !== undefined) {
+              cell.setAttribute('value', String((u as { value?: unknown }).value))
+            }
+            const style = (u as { style?: unknown }).style
+            if (typeof style === 'string' && style) cell.setAttribute('style', style)
+            const styleSet = (u as { styleSet?: unknown }).styleSet
+            if (styleSet && typeof styleSet === 'object' && !Array.isArray(styleSet)) {
+              const m = drawioStyleMap(cell.getAttribute('style') ?? '')
+              for (const [k, v] of Object.entries(styleSet as Record<string, unknown>)) {
+                if (v === null) m.delete(k)
+                else m.set(k, String(v))
+              }
+              cell.setAttribute('style', drawioStyleString(m))
+            }
+            const geo = { x: 'x', y: 'y', w: 'width', h: 'height' } as const
+            let g = Array.from(cell.children).find((ch) => ch.tagName === 'mxGeometry')
+            const needsGeo = (Object.keys(geo) as Array<keyof typeof geo>).some((k) => typeof (u as Record<string, unknown>)[k] === 'number')
+            if (needsGeo && !g) {
+              g = doc.createElement('mxGeometry')
+              g.setAttribute('as', 'geometry')
+              cell.appendChild(g)
+            }
+            if (g) {
+              for (const [k, attr] of Object.entries(geo) as Array<[keyof typeof geo, string]>) {
+                const v = (u as Record<string, unknown>)[k]
+                if (typeof v === 'number' && Number.isFinite(v)) g.setAttribute(attr, String(v))
+              }
+            }
+            updated++
+          }
+          if (!updated) return { ok: false, error: `未命中任何单元格 id（可用 id 见 list_cells；收到 ${missing.slice(0, 5).join(', ')}…）` }
+          const err = apply(doc)
+          if (err) return { ok: false, error: err }
+          return { ok: true, updated, missing: missing.length ? missing : undefined }
+        },
+      },
+      {
+        name: 'delete_cells',
+        desc: '{ids:[…]} → 删除单元格（引用它们的连线一并删除，避免悬空）。',
+        label: (a: Record<string, unknown>) => `删除 ${Array.isArray(a.ids) ? a.ids.length : '?'} 单元格`,
+        exec: async (a: Record<string, unknown>) => {
+          const ids = new Set(Array.isArray(a.ids) ? a.ids.filter((x): x is string => typeof x === 'string') : [])
+          if (!ids.size) return { ok: false, error: 'ids 必填' }
+          let doc: Document, root: Element
+          try {
+            ({ doc, root } = parseDrawioDoc(currentXML()))
+          } catch (e) {
+            return { ok: false, error: `当前图表解析失败：${e instanceof Error ? e.message : String(e)}` }
+          }
+          const cells = drawioCells(root)
+          // 扩张删除集：source/target 指向被删单元格的边一并删。
+          const kill = new Set(ids)
+          for (const c of cells) {
+            if (c.getAttribute('edge') === '1') {
+              const s = c.getAttribute('source'), t = c.getAttribute('target')
+              if ((s && kill.has(s)) || (t && kill.has(t))) kill.add(c.getAttribute('id') ?? '')
+            }
+          }
+          let removed = 0
+          for (const c of cells) {
+            if (kill.has(c.getAttribute('id') ?? '')) { c.parentNode?.removeChild(c); removed++ }
+          }
+          if (!removed) return { ok: false, error: '未命中任何单元格 id' }
+          const err = apply(doc)
+          if (err) return { ok: false, error: err }
+          return { ok: true, deleted: removed }
+        },
+      },
+      {
+        name: 'replace_diagram',
+        desc: '{xml} → 整图替换（仅当重排全图/从零新建时使用；改动少数元素优先 insert_cells/update_cells）。',
+        label: () => '整图替换',
+        exec: async (a: Record<string, unknown>) => {
+          const xml = String(a.xml ?? '')
+          if (!/<(mxGraphModel|mxfile)[\s>]/.test(xml)) return { ok: false, error: 'xml 必填：完整 drawio XML' }
+          const err = applyDiagramXML(xml)
+          return err ? { ok: false, error: err } : { ok: true }
+        },
+      },
+    ]
+    // applyDiagramXML 为组件内闭包（ref 访问无状态依赖），工具仅经 ref 操作。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   /** 版本保护前置：应用前先把当前图表（最新已知 XML）保存为基线版本。 */
   const aiEnsureSaved = async (): Promise<{ versionId: string; version: number } | null> => {
@@ -536,6 +789,9 @@ export default function DrawioPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
           </div>
           {/* AI 对话式创作面板（drawio XML 整体替换；应用前 aiEnsureSaved 保存
               基线版本，撤销回退后 aiReload 重载画布）。 */}
+          {/* v7：agentTools 单元格级工具循环——read_diagram/list_cells/
+              insert_cells/update_cells/delete_cells/replace_diagram；单轮
+              整图 XML 通道保留为回退（agentTools 生效时由 AI 自主选择）。 */}
           <AIEditChat
             open={aiChatOpen}
             onClose={() => setAiChatOpen(false)}
@@ -548,6 +804,15 @@ export default function DrawioPage({ mode, fileId: fileIdProp }: { mode?: 'edit'
             quickCommand={aiQuick}
             onQuickConsumed={() => setAiQuick(null)}
             applyKind="drawio-xml"
+            agentTools={aiAgentTools}
+            agentSystemExtra={[
+              'drawio 宿主约束：',
+              '- 画新图/补元素：insert_cells {xml}（mxCell 片段，顶点先于引用它的边，顶点须带 mxGeometry）；一次可传整图。',
+              '- 改既有元素（文本/颜色/位置/尺寸）：先 list_cells 或 read_diagram 拿 id，再 update_cells 局部更新（styleSet 键值合并改样式）——不要重画整图。',
+              '- 删除元素连带引用它的边自动清理（delete_cells）；整图重排才用 replace_diagram。',
+              '- insert_cells/replace_diagram 的 XML 规范（忽略其中「输出单个代码块」的表述）：',
+              DRAWIO_XML_GUIDE,
+            ].join('\n')}
           />
         </div>
       ))}
