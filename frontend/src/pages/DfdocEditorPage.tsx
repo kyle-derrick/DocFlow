@@ -6,7 +6,7 @@ import { Suspense, lazy, useCallback, useEffect, useRef, useState, useMemo } fro
 import { App as AntdApp, Button } from 'antd'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { marked } from 'marked'
-import { fetchFileText, getFileMeta, listDocumentComments, uploadFileVersion } from '../api'
+import { fetchFileText, getFileMeta, listDocumentComments, searchFiles, uploadFileVersion } from '../api'
 import type { DocumentComment } from '../api'
 import type { AIEditTarget } from '../components/AIEditChat'
 import AIEditChat, { AIEditChatButton } from '../components/AIEditChat'
@@ -353,24 +353,52 @@ export default function DfdocEditorPage({
 
   /** 选区读取：Tiptap state.selection（空选区回退全文）；嵌入块/图片/文件
    * 卡片经 docToAIText 序列化为占位行带出（AI 可见 + 提示词约束保留）。 */
-  /** v5 内置 Agent 编辑工具集（富文本编辑页）：AI 经工具循环自主
+  /** v7 内置 Agent 编辑工具集（富文本编辑页）：AI 经工具循环自主
    *  读文档/定位/编辑。写操作复用 aiMarkdownToHTML + insertContentAt
-   *  （嵌入节点保留逻辑同既有 patch 执行器）。 */
+   *  （嵌入节点保留逻辑同既有 patch 执行器）；行内格式/块类型工具直接走
+   *  Tiptap marks/节点命令；insert_image/insert_embed 检索平台文件插入
+   *  图片块与内嵌块（跨文档组合：drawio/白板/Office/文件卡片）。 */
   const aiAgentTools: AIEditTool[] = useMemo(() => {
     const docText = () => aiGetTarget().text
+    const markDirty = () => {
+      setDirty(true)
+      dirtyRef.current = true
+    }
     const replaceWhole = (next: string) => {
       const ed = tiptapRef.current
       if (!ed) return
       // 文本级替换后整文重建：嵌入占位行原样保留（docToAIText 序列化含占位，
       // next 若未破坏占位行即无损；aiMarkdownToHTML 不识别占位 → 交回占位还原）。
       ed.chain().focus().insertContentAt({ from: 0, to: ed.state.doc.content.size }, aiMarkdownToHTML(next)).run()
-      setDirty(true)
-      dirtyRef.current = true
+      markDirty()
+    }
+    /** 文档位置 → 顶层块范围（set_block_type/delete_block 的块定位）。 */
+    const blockRangeOf = (pos: number): { from: number; to: number; node: ProseMirrorNode } | null => {
+      const ed = tiptapRef.current
+      if (!ed) return null
+      const $pos = ed.state.doc.resolve(pos)
+      if ($pos.depth === 0) return null
+      const from = $pos.before(1)
+      const node = ed.state.doc.nodeAt(from)
+      if (!node) return null
+      return { from, to: from + node.nodeSize, node }
+    }
+    /** 按名称检索平台文件（精确名优先，过滤目录）。 */
+    const findFile = async (name: string): Promise<{ id: string; name: string } | null> => {
+      const q = name.trim()
+      if (!q) return null
+      try {
+        const res = await searchFiles(q, 20)
+        const files = res.filter((x) => x.type !== 'folder')
+        return files.find((x) => x.name === q) ?? files[0] ?? null
+      } catch {
+        return null
+      }
     }
     return [
       {
         name: 'read_document',
-        desc: '{} → 读当前文档全文（嵌入卡片序列化为占位行，须原样保留）。',
+        desc: '{} → 读当前文档全文（嵌入卡片序列化为 [DocFlow-Embed/Image/File] 占位行——受保护内容，改写时必须原样保留）。',
         label: () => '读取全文',
         exec: async () => ({ ok: true, data: { text: docText().slice(0, 20000) } }),
       },
@@ -420,7 +448,7 @@ export default function DfdocEditorPage({
       },
       {
         name: 'insert_content',
-        desc: '{md, at?:"end"|"selection"} → 插入 Markdown 内容（at=selection 且有选区时替换选区，默认文末追加）。',
+        desc: '{md, at?:"end"|"cursor"|"selection"} → 插入 Markdown 内容（at=cursor 光标处；selection 有选区时替换选区；默认文末追加）。',
         label: (a: Record<string, unknown>) => `插入@${String(a.at ?? 'end')}`,
         exec: async (a: Record<string, unknown>) => {
           const md = String(a.md ?? a.text ?? '')
@@ -430,11 +458,186 @@ export default function DfdocEditorPage({
           const { from, to } = ed.state.selection
           if (a.at === 'selection' && to > from) {
             ed.chain().focus().insertContentAt({ from, to }, aiMarkdownToHTML(md)).run()
+          } else if (a.at === 'cursor') {
+            ed.chain().focus().insertContentAt(from, aiMarkdownToHTML(md)).run()
           } else {
             ed.chain().focus().insertContentAt(ed.state.doc.content.size, aiMarkdownToHTML(md)).run()
           }
-          setDirty(true)
-          dirtyRef.current = true
+          markDirty()
+          return { ok: true }
+        },
+      },
+      {
+        name: 'format_text',
+        desc: '{find, bold?, italic?, underline?, strike?, code?, highlight?} → 对 find 定位的原文片段应用行内格式（传 false 清除该格式；find 取 10-80 字唯一原文片段）。',
+        label: (a: Record<string, unknown>) => `格式化 ${String(a.find ?? '').slice(0, 12)}`,
+        exec: async (a: Record<string, unknown>) => {
+          const ed = tiptapRef.current
+          const find = String(a.find ?? '')
+          if (!ed || !find) return { ok: false, error: 'find 必填' }
+          const range = docFindText(ed.state.doc, find)
+          if (!range) return { ok: false, error: `未找到：${find.slice(0, 60)}` }
+          const marks: Array<[string, unknown]> = [
+            ['bold', a.bold], ['italic', a.italic], ['underline', a.underline],
+            ['strike', a.strike], ['code', a.code], ['highlight', a.highlight],
+          ]
+          const wanted = marks.filter(([, v]) => v !== undefined)
+          if (!wanted.length) return { ok: false, error: '至少指定一个格式参数（bold/italic/underline/strike/code/highlight）' }
+          let ch = ed.chain().focus().setTextSelection(range)
+          for (const [name, v] of wanted) ch = v === false ? ch.unsetMark(name) : ch.setMark(name)
+          if (!ch.run()) return { ok: false, error: '格式化失败（选区可能跨块）' }
+          markDirty()
+          return { ok: true, applied: wanted.length }
+        },
+      },
+      {
+        name: 'set_block_type',
+        desc: '{find, type} → 把 find 所在块设为目标类型：paragraph|heading1|heading2|heading3|bullet|ordered|task|code|quote（段落/标题/无序·有序·任务列表/代码块/引用）。',
+        label: (a: Record<string, unknown>) => `块类型→${String(a.type ?? '')}`,
+        exec: async (a: Record<string, unknown>) => {
+          const ed = tiptapRef.current
+          const find = String(a.find ?? '')
+          const type = String(a.type ?? '').toLowerCase().replace(/^h(\d)$/, 'heading$1')
+          if (!ed || !find) return { ok: false, error: 'find 必填' }
+          const range = docFindText(ed.state.doc, find)
+          if (!range) return { ok: false, error: `未找到：${find.slice(0, 60)}` }
+          const block = blockRangeOf(range.from)
+          if (!block) return { ok: false, error: '无法定位所在块' }
+          const cur = block.node.type.name
+          const attrs = block.node.attrs as { level?: number }
+          // 已是目标类型 → 幂等成功（toggle* 类命令避免反复翻转）。
+          const already =
+            (type === 'paragraph' && cur === 'paragraph') ||
+            (/^heading[1-3]$/.test(type) && cur === 'heading' && attrs.level === Number(type.slice(-1))) ||
+            (type === 'bullet' && cur === 'bulletList') ||
+            (type === 'ordered' && cur === 'orderedList') ||
+            (type === 'task' && cur === 'taskList') ||
+            (type === 'code' && cur === 'codeBlock') ||
+            (type === 'quote' && cur === 'blockquote')
+          if (already) return { ok: true, note: '已是目标类型' }
+          const sel = { from: block.from, to: block.to }
+          let ch = ed.chain().focus().setTextSelection(sel)
+          if (type === 'paragraph') ch = ch.setParagraph()
+          else if (/^heading[1-3]$/.test(type)) ch = ch.setHeading({ level: Number(type.slice(-1)) as 1 | 2 | 3 })
+          else if (type === 'code') ch = ch.setCodeBlock()
+          else if (type === 'bullet') ch = ch.toggleBulletList()
+          else if (type === 'ordered') ch = ch.toggleOrderedList()
+          else if (type === 'task') ch = ch.toggleTaskList()
+          else if (type === 'quote') ch = ch.toggleBlockquote()
+          else return { ok: false, error: `type 须为 paragraph|heading1-3|bullet|ordered|task|code|quote（收到 ${type}）` }
+          if (!ch.run()) return { ok: false, error: '块类型转换失败' }
+          markDirty()
+          return { ok: true }
+        },
+      },
+      {
+        name: 'insert_table',
+        desc: '{md, at?} → 插入表格：md 为 Markdown 表格文本（| 分隔、首行为表头，如 | 列A | 列B |\\n|---|---|\\n| 1 | 2 |）；at=cursor|end。',
+        label: () => '插入表格',
+        exec: async (a: Record<string, unknown>) => {
+          const md = String(a.md ?? '')
+          if (!md.includes('|')) return { ok: false, error: 'md 须为 | 分隔的 Markdown 表格文本' }
+          const html = aiMarkdownToHTML(md)
+          if (!html.includes('<table')) return { ok: false, error: '未解析出表格（检查 | 分隔与表头分隔行）' }
+          const ed = tiptapRef.current
+          if (!ed) return { ok: false, error: '编辑器未就绪' }
+          const pos = a.at === 'cursor' ? ed.state.selection.from : ed.state.doc.content.size
+          ed.chain().focus().insertContentAt(pos, html).run()
+          markDirty()
+          return { ok: true }
+        },
+      },
+      {
+        name: 'insert_image',
+        desc: '{url? 或 name?, at?} → 插入图片：name 检索平台图片文件插入图片块（推荐，可长期访问）；url 插入外链图片（可能失效）。',
+        label: (a: Record<string, unknown>) => `图片 ${String(a.name ?? a.url ?? '').slice(0, 16)}`,
+        exec: async (a: Record<string, unknown>) => {
+          const ed = tiptapRef.current
+          if (!ed) return { ok: false, error: '编辑器未就绪' }
+          const at = a.at === 'cursor' ? ed.state.selection.from : ed.state.doc.content.size
+          const url = String(a.url ?? '')
+          if (url) {
+            ed.chain().focus().insertContentAt(at, { type: 'image', attrs: { src: url } }).run()
+            markDirty()
+            return { ok: true }
+          }
+          const name = String(a.name ?? '')
+          if (!name) return { ok: false, error: 'name 或 url 必填其一' }
+          const hit = await findFile(name)
+          if (!hit) return { ok: false, error: `未找到文件：${name}` }
+          if (!/\.(png|jpe?g|gif|webp|svg|bmp|avif)$/i.test(hit.name)) {
+            return { ok: false, error: `${hit.name} 不是图片文件（可用 insert_embed 嵌入其它类型）` }
+          }
+          ed.chain().focus().insertContentAt(at, { type: 'docflowImage', attrs: { fileId: hit.id, title: hit.name, width: 100 } }).run()
+          markDirty()
+          return { ok: true, inserted: hit.name }
+        },
+      },
+      {
+        name: 'insert_embed',
+        desc: '{name, at?} → 插入平台文件内嵌块（.drawio→图表、.excalidraw→白板、Office→文档卡片、其余→文件卡片）——在文档中组合其它类型内容的核心工具。',
+        label: (a: Record<string, unknown>) => `内嵌 ${String(a.name ?? '').slice(0, 16)}`,
+        exec: async (a: Record<string, unknown>) => {
+          const ed = tiptapRef.current
+          if (!ed) return { ok: false, error: '编辑器未就绪' }
+          const name = String(a.name ?? '')
+          if (!name) return { ok: false, error: 'name 必填（平台内文件名，可先 list 不到时换关键词）' }
+          const hit = await findFile(name)
+          if (!hit) return { ok: false, error: `未找到文件：${name}` }
+          const kind = /\.drawio$/i.test(hit.name)
+            ? 'drawio'
+            : /\.excalidraw$/i.test(hit.name)
+              ? 'excalidraw'
+              : /\.(docx?|xlsx?|pptx?|pdf)$/i.test(hit.name)
+                ? 'office'
+                : 'file'
+          const at = a.at === 'cursor' ? ed.state.selection.from : ed.state.doc.content.size
+          ed.chain().focus().insertContentAt(at, { type: 'docflowEmbed', attrs: { kind, fileId: hit.id, title: hit.name } }).run()
+          markDirty()
+          return { ok: true, kind, inserted: hit.name }
+        },
+      },
+      {
+        name: 'insert_link',
+        desc: '{text, url, at?} → 插入超链接文本。',
+        label: (a: Record<string, unknown>) => `链接 ${String(a.url ?? '').slice(0, 16)}`,
+        exec: async (a: Record<string, unknown>) => {
+          const ed = tiptapRef.current
+          const text = String(a.text ?? '')
+          const url = String(a.url ?? '')
+          if (!ed || !text || !url) return { ok: false, error: 'text/url 必填' }
+          const at = a.at === 'cursor' ? ed.state.selection.from : ed.state.doc.content.size
+          const safe = url.replace(/"/g, '%22')
+          ed.chain().focus().insertContentAt(at, `<a href="${safe}">${text.replace(/</g, '&lt;')}</a>`).run()
+          markDirty()
+          return { ok: true }
+        },
+      },
+      {
+        name: 'delete_block',
+        desc: '{find} → 删除 find 所在的整个块（段落/标题/列表项/表格行所在块等）。',
+        label: (a: Record<string, unknown>) => `删块 ${String(a.find ?? '').slice(0, 12)}`,
+        exec: async (a: Record<string, unknown>) => {
+          const ed = tiptapRef.current
+          const find = String(a.find ?? '')
+          if (!ed || !find) return { ok: false, error: 'find 必填' }
+          const range = docFindText(ed.state.doc, find)
+          if (!range) return { ok: false, error: `未找到：${find.slice(0, 60)}` }
+          const block = blockRangeOf(range.from)
+          if (!block) return { ok: false, error: '无法定位所在块' }
+          ed.chain().focus().deleteRange({ from: block.from, to: block.to }).run()
+          markDirty()
+          return { ok: true }
+        },
+      },
+      {
+        name: 'write_document',
+        desc: '{md} → 整篇重写（仅当改动覆盖大半文档时使用；md 中的 [DocFlow-Embed/Image/File] 占位行必须逐字保留）。',
+        label: () => '整篇重写',
+        exec: async (a: Record<string, unknown>) => {
+          const md = String(a.md ?? '')
+          if (!md.trim()) return { ok: false, error: 'md 必填' }
+          replaceWhole(md)
           return { ok: true }
         },
       },
@@ -681,11 +884,10 @@ export default function DfdocEditorPage({
             />
           </Suspense>
         </div>
-        {/* AI 对话式创作/编辑侧栏面板（applyKind=richtext-patch 指令式编辑）：
-            AI 回复 ```docflow-edit 围栏内的 JSON 编辑指令数组，经
-            applyRichTextPatch 在文档中按定位原文精确执行增删改插（可撤销）；
-            围栏缺失时执行器回落选区替换/文末追加。可修改模式自动应用前经
-            aiEnsureSaved 保存基线版本，撤销回退后 reload。 */}
+        {/* AI 对话式创作/编辑侧栏面板（v7：agentTools 工具循环为主通道——
+            AI 经 read/search/format/set_block_type/insert_* 工具自主编辑；
+            agentSystemExtra 注入富文本宿主约束；applyKind=richtext-patch 仅
+            保留为面板文案形态（agent 模式下不走单轮指令通道）。 */}
         <AIEditChat
           open={aiChatOpen}
           onClose={() => setAiChatOpen(false)}
@@ -699,6 +901,13 @@ export default function DfdocEditorPage({
           onQuickConsumed={() => setAiQuick(null)}
           applyKind="richtext-patch"
           agentTools={aiAgentTools}
+          agentSystemExtra={[
+            '富文本宿主约束：',
+            '- 定位统一用 find（10-80 字、取自单一段落内的唯一原文片段，逐字复制）。',
+            '- [DocFlow-Embed kind="…" fileId="…" title="…"] / [DocFlow-Image …] / [DocFlow-File …] 占位行是嵌入的图表/白板/图片/文件块，受保护：不得作为 find、不得改写其文本；整篇重写（write_document）时必须逐字保留。',
+            '- 行内样式用 format_text，段落级样式（标题/列表/代码块/引用）用 set_block_type——不要用整段替换实现格式调整。',
+            '- 插入图片优先 insert_image {name}（平台文件）；组合其它文档用 insert_embed {name}（drawio/白板/Office/文件卡片）。',
+          ].join('\n')}
         />
       </div>
     </main>

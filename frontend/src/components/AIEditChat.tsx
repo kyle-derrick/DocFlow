@@ -120,8 +120,9 @@ function extractDrawioXML(reply: string): string {
 /** drawio-xml 通道 system 指令附加的 XML 生成参考（吸收 jgraph/drawio-mcp
  * 官方指南精编，≤45 行）。技术规范统一英文——模型对英文 XML 约定遵循更稳，
  * 双语 intro 仍按现有 locale 机制（见 send()）。仅增强提示词，不影响
- * extractDrawioXML/应用逻辑。 */
-const DRAWIO_XML_GUIDE = `drawio XML quick reference:
+ * extractDrawioXML/应用逻辑。导出供宿主页（DrawioPage Agent 工具循环）
+ * 复用作 insert_cells/replace_diagram 载荷格式规范。 */
+export const DRAWIO_XML_GUIDE = `drawio XML quick reference:
 - Structure: prefer the simplified form <mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/>...cells...</root></mxGraphModel> (drawio auto-wraps mxfile/diagram; a full <mxfile>...</mxfile> is also accepted).
 - Node (shape): <mxCell id="2" value="Label" style="..." vertex="1" parent="1"><mxGeometry x="40" y="40" width="160" height="60" as="geometry"/></mxCell>.
 - Edge (connector): <mxCell id="5" value="Yes" style="..." edge="1" parent="1" source="2" target="3"><mxGeometry relative="1" as="geometry"/></mxCell>; define endpoint nodes first, then reference their ids via source/target.
@@ -155,8 +156,9 @@ const RICHTEXT_PATCH_GUIDE = `Rich text edit instruction protocol (mandatory out
  * types/data/transform.d.ts 的骨架（ExcalidrawElementSkeleton）契约为准
  * 精编：AI 只需输出骨架字段，前端经官方 convertToExcalidrawElements
  * 自动补全 seed/versionNonce/文本量宽/绑定端点等派生字段）。技术规范
- * 统一英文（同 DRAWIO_XML_GUIDE 约定）。 */
-const EXCALIDRAW_JSON_GUIDE = `Excalidraw elements JSON quick reference (element skeletons):
+ * 统一英文（同 DRAWIO_XML_GUIDE 约定）。导出供宿主页（ExcalidrawPage
+ * Agent 工具循环）复用作 insert_elements 载荷格式规范。 */
+export const EXCALIDRAW_JSON_GUIDE = `Excalidraw elements JSON quick reference (element skeletons):
 - Output ONE \`\`\`excalidraw-json fenced block containing a JSON ARRAY of element objects; no text outside the fence.
 - Every element object MUST have "type" and numeric "x"/"y". Give each element a short unique string "id" (e.g. "n1","n2") so arrows can reference nodes; other elements may reference an id via start/end.
 - Shape types (all accept optional strokeColor/backgroundColor/fillStyle/roughness/strokeWidth/strokeStyle/opacity/roundness):
@@ -349,6 +351,7 @@ export default function AIEditChat({
   applyKind = 'text',
   outputFormat = 'plaintext',
   agentTools,
+  agentSystemExtra,
 }: {
   open: boolean
   onClose: () => void
@@ -383,6 +386,9 @@ export default function AIEditChat({
    *  由 AI 判断），工具经 exec 在宿主编辑器上执行，过程以工具链 UI 展示。
    *  未提供（富文本指令/白板/图表等既有直编通道）保持原单轮模式。 */
   agentTools?: AIEditTool[]
+  /** Agent 模式 system 提示词的宿主附加段（白板/图表等工具载荷格式规范、
+   *  宿主特定约束），拼在工具清单与输出格式约定之间。 */
+  agentSystemExtra?: string
 }) {
   const locale = useLocale()
   const zh = locale === 'zh-CN'
@@ -590,6 +596,8 @@ export default function AIEditChat({
   // 工具过程复用 turn.toolCalls（AIToolChain：running→success/error）。
   const agentToolsRef = useRef(agentTools)
   agentToolsRef.current = agentTools
+  const agentSystemExtraRef = useRef(agentSystemExtra)
+  agentSystemExtraRef.current = agentSystemExtra
 
 // 括号深度扫描提取 TOOL_CALL {...}（字符串感知：引号内的 {} 与转义不计
 // 深度，支持嵌套/跨行；从最后一个候选向前取首个可解析的——推理模型在
@@ -639,16 +647,25 @@ export default function AIEditChat({
   /** Agent 模式发送：工具循环 + FINAL；过程写入助手回合（toolCalls 链）。 */
   const sendAgent = async (question: string) => {
     const tools = agentToolsRef.current ?? []
+    const hostLabel = applyKind === 'excalidraw-json'
+      ? 'Excalidraw 白板'
+      : applyKind === 'drawio-xml'
+        ? 'draw.io 图表'
+        : applyKind === 'richtext-patch'
+          ? '富文本文档'
+          : '文本编辑器'
+    const extra = agentSystemExtraRef.current
     const sys = [
-      `你是 DocFlow 内置文档编辑 Agent（宿主：${applyKind === 'text' ? '文本编辑器' : '编辑器'}）。通过调用工具直接操作当前文档，用户只描述意图。`,
+      `你是 DocFlow 内置文档编辑 Agent（宿主：${hostLabel}）。通过调用工具直接操作当前文档，用户只描述意图。`,
       '',
       '可用工具（每次回复恰好一行 TOOL_CALL {...} 调用一个，或以 FINAL 开头给出最终答复）：',
       ...tools.map((t) => `- ${t.name}：${t.desc}`),
+      ...(extra ? ['', extra] : []),
       '',
       '输出格式（硬性要求——违反则本轮无效）：每轮回复的完整内容必须恰好是一行 TOOL_CALL {...}（单个工具、合法 JSON、前后不得有任何解释/思考/推理文字），或以 FINAL 开头的最终答复。',
       '禁止输出 "I\'ll"、"Let me"、"首先"等散文开头。不要解释你要做什么——直接输出 TOOL_CALL 或 FINAL。',
-      '工作方式：先读（read_document/read_selection/search_text）再改；局部修改用精确工具、不要整篇重写；一次一个工具，根据结果决定下一步；失败读错误换路径；完成后 FINAL + 简明中文总结（改了什么、在哪）。',
-      'TOOL_CALL 示例：TOOL_CALL {"tool":"replace_text","args":{"find":"旧文本","replace":"新文本"}}',
+      '工作方式：先读（read_*/search_*）再改；局部修改用精确工具、不要整篇重写；一次一个工具，根据结果决定下一步；失败读错误换路径；关键修改后可用读工具校验；完成后 FINAL + 简明中文总结（改了什么、在哪）。',
+      'TOOL_CALL 示例：TOOL_CALL {"tool":"read_document","args":{}}',
     ].join(String.fromCharCode(10))
     const userTurnId = ++turnIdRef.current
     const asstTurnId = ++turnIdRef.current
@@ -667,7 +684,8 @@ export default function AIEditChat({
     const controller = new AbortController()
     abortRef.current = controller
     const convo: AIMessage[] = [{ role: 'system', content: sys }, { role: 'user', content: question }]
-    const MAX_ROUNDS = 14
+    // 白板/图表多元素插入 + 读校验轮次较多（Office 插件侧为 50）
+    const MAX_ROUNDS = 24
     try {
       let finalText = ''
       for (let round = 1; round <= MAX_ROUNDS; round++) {
