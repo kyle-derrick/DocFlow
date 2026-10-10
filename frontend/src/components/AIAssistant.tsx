@@ -1261,16 +1261,21 @@ export default function AIAssistant() {
     }
   }
   // 跟随态进入空间根时预热根目录 folderId 缓存。
-    // 打开抽屉时贴底（历史记录从最底下开始查看）。Drawer 有展开动画（~300ms），
-  // 等 DOM 渲染完再滚。挂在 open 上（convoId 在下方声明，用 ref 延迟引用）。
+    // 打开抽屉时贴底（历史记录从最底下开始查看）。使用 sticky.wrapRef（直接
+  // 引用滚动容器，比 querySelector 可靠）+ 350ms 延迟等 Drawer 动画。
   useEffect(() => {
     if (!open) return
-    const t = window.setTimeout(() => {
-      const el = document.querySelector('.aiax-bubbles-wrap')
+    const t1 = window.setTimeout(() => {
+      const el = sticky.wrapRef.current
       if (el) el.scrollTop = el.scrollHeight
     }, 350)
-    return () => window.clearTimeout(t)
-  }, [open])
+    // 再延迟一次（Bubble.List 渲染可能更慢）
+    const t2 = window.setTimeout(() => {
+      const el = sticky.wrapRef.current
+      if (el) el.scrollTop = el.scrollHeight
+    }, 800)
+    return () => { window.clearTimeout(t1); window.clearTimeout(t2) }
+  }, [open, sticky.wrapRef])
 
 useEffect(() => {
     if (aiLoc && !aiLoc.folderId && aiLoc.spaceId) void resolveSpaceRootFolderId(aiLoc.spaceId)

@@ -167,13 +167,13 @@
     'function wPB(){var d=Api.GetDocument(),p=Api.CreateParagraph();try{p.AddPageBreak();d.Push(p);return{ok:true}}catch(e){return{ok:false,error:"不可用"}}}',
     'function wCm(a){try{var d=Api.GetDocument(),rs=d.Search(a.find);if(!rs||!rs.length)return{ok:false,error:"未找到"};rs[0].AddComment(a.text||"");return{ok:true}}catch(e){return{ok:false,error:String(e)}}}',
     'function wTO(a){var d=Api.GetDocument(),t=d.GetElement(a.index);if(!isT(t))return{ok:false,error:"非表格"};if(a.op==="add_row"){try{t.AddRow(t.GetRow(t.GetRowsCount()-1));return{ok:true}}catch(e){return{ok:false,error:"不可用"}}}if(a.op==="set_cell"){try{fillC(t.GetRow(a.r).GetCell(a.c),String(a.text),false);return{ok:true}}catch(x){return{ok:false,error:"不可达"}}}return{ok:false,error:"未知"}}',
-    'function cN(n){var s="";n=n+1;while(n>0){var m=(n-1)%26;s=String.fromCharCode(65+m)+s;n=Math.floor((n-1)/26)}return s}',
+    'function cN(n){var s="";while(n>0){var m=(n-1)%26;s=String.fromCharCode(65+m)+s;n=Math.floor((n-1)/26)}return s}',
     'function xI(){var sh=Api.GetActiveSheet(),v=[];try{v=sh.GetRange("A1:T200").GetValues()||[]}catch(e){v=[]}var mr=-1,mc=-1;for(var i=0;i<v.length;i++){var r=v[i];for(var j=0;j<r.length;j++){if(r[j]!==""&&r[j]!==null&&r[j]!==undefined){if(i>mr)mr=i;if(j>mc)mc=j}}}return{ok:true,kind:"cell",rows:mr+1,cols:mc+1}}',
-    'function xR(sh,r1,c1,r2,c2){return sh.GetRange(cN(c1)+(r1+1)+":"+cN(c2)+(r2+1))}',
-    'function xRd(a){var sh=Api.GetActiveSheet();var r1=a.r1||0,c1=a.c1||0,r2=a.r2!==undefined?a.r2:r1+19,c2=a.c2!==undefined?a.c2:c1+9;var v=xR(sh,r1,c1,r2,c2).GetValues();return{ok:true,from:[r1,c1],values:v.slice(0,60).map(function(r){return r.slice(0,20)})}}',
-    'function xW(a){var sh=Api.GetActiveSheet(),n=0;for(var i=0;i<a.cells.length;i++){var c=a.cells[i];try{sh.GetRange(cN(c[1])+(c[0]+1)).SetValue(String(c[2]));n++}catch(e){}}return n?{ok:true,written:n}:{ok:false,error:"未写入"}}',
-    'function xF(a){var sh=Api.GetActiveSheet();var rg=xR(sh,a.r1||0,a.c1||0,a.r2||(a.r1||0),a.c2||(a.c1||0));var ops=[];function T(n,f){try{f();ops.push(n)}catch(e){}}if(a.bold!==undefined)T("bold",function(){rg.SetBold(a.bold)});if(a.fontSize)T("size",function(){rg.SetFontSize(a.fontSize)});if(a.fillColor)T("fill",function(){rg.SetFillColor(hx(a.fillColor))});if(a.numberFormat)T("fmt",function(){rg.SetNumberFormat(a.numberFormat)});if(a.hAlign)T("al",function(){rg.SetHorizontalAlignment(a.hAlign)});return ops.length?{ok:true,applied:ops}:{ok:false,error:"无可用API"}}',
-    'function xRo(a){var sh=Api.GetActiveSheet();try{var rg=sh.GetRange((a.at+1)+":"+(a.at+(a.count||1)));if(a.op==="insert")rg.Insert();else if(a.op==="delete")rg.Delete();else return{ok:false,error:"op须insert|delete"};return{ok:true}}catch(e){return{ok:false,error:String(e)}}}',
+    'function xR(sh,r1,c1,r2,c2){return sh.GetRange(cN(c1)+r1+":"+cN(c2)+r2)}',
+    'function xRd(a){var sh=Api.GetActiveSheet();var r1=a.r1||1,c1=a.c1||1,r2=a.r2!==undefined?a.r2:r1+19,c2=a.c2!==undefined?a.c2:c1+9;var v=xR(sh,r1,c1,r2,c2).GetValues();return{ok:true,from:[r1,c1],values:v.slice(0,60).map(function(r){return r.slice(0,20)})}}',
+    'function xW(a){var sh=Api.GetActiveSheet(),n=0;for(var i=0;i<a.cells.length;i++){var c=a.cells[i];try{sh.GetRange(cN(c[1])+c[0]).SetValue(String(c[2]));n++}catch(e){}}return n?{ok:true,written:n}:{ok:false,error:"未写入"}}',
+    'function xF(a){var sh=Api.GetActiveSheet();var rg=xR(sh,a.r1||1,a.c1||1,a.r2||a.r1||1,a.c2||a.c1||1);var ops=[];function T(n,f){try{f();ops.push(n)}catch(e){}}if(a.bold!==undefined)T("bold",function(){rg.SetBold(a.bold)});if(a.fontSize)T("size",function(){rg.SetFontSize(a.fontSize)});if(a.fillColor)T("fill",function(){rg.SetFillColor(hx(a.fillColor))});if(a.numberFormat)T("fmt",function(){rg.SetNumberFormat(a.numberFormat)});if(a.hAlign)T("al",function(){rg.SetHorizontalAlignment(a.hAlign)});return ops.length?{ok:true,applied:ops}:{ok:false,error:"无可用API"}}',
+    'function xRo(a){var sh=Api.GetActiveSheet();try{var rg=sh.GetRange(a.at+":"+(a.at+(a.count||1)-1));if(a.op==="insert")rg.Insert();else if(a.op==="delete")rg.Delete();else return{ok:false,error:"op须insert|delete"};return{ok:true}}catch(e){return{ok:false,error:String(e)}}}',
     'function xCw(a){var sh=Api.GetActiveSheet();try{sh.GetRange(cN(a.col)+":"+cN(a.col)).SetColumnWidth(a.width);return{ok:true}}catch(e){return{ok:false,error:"不可用"}}}',
     'function pL(){var pr=Api.GetPresentation();return{ok:true,kind:"slide",slides:pr.GetSlidesCount()}}',
     'function pR(a){var pr=Api.GetPresentation(),s=pr.GetSlideByIndex(a.index);if(!s)return{ok:false,error:"不存在"};var tx=[];try{s.ForEachShape(function(sh){try{if(sh.GetText)tx.push(clip(sh.GetText(),200))}catch(e){}})}catch(x){}return{ok:true,texts:tx}}',
@@ -189,9 +189,9 @@
     'function wHF(a){try{var sec=Api.GetDocument().GetSection(0);if(!sec)return{ok:false,error:"no sec"};var hf=a.position==="header"?sec.GetHeader():sec.GetFooter();if(!hf)return{ok:false,error:"no hf"};var p=hf.GetElement(0);if(!p){p=Api.CreateParagraph();hf.Push(p)}if(a.text!==undefined){p.AddText(a.text)}return{ok:true}}catch(e){return{ok:false,error:String(e)}}}',
     'function wRA(a){var d=Api.GetDocument(),sc=scan(a.find),ix=[];for(var h=0;h<sc.hits.length;h++)if(sc.hits[h].kind==="para")ix.push(sc.hits[h].i);if(!ix.length)return{ok:false,error:"not found"};var es=mdE(a.replace||""),dn=0;for(var t=ix.length-1;t>=0;t--){var i=ix[t];try{d.RemoveElement(i);try{for(var k=es.length-1;k>=0;k--)d.AddElement(i,es[k])}catch(x){for(var j=0;j<es.length;j++)d.Push(es[j])}dn++}catch(y){}}return dn?{ok:true,replaced:dn}:{ok:false,error:"fail"}}',
     'function xM(a){try{var sh=Api.GetActiveSheet();var rg=xR(sh,a.r1,a.c1,a.r2,a.c2);if(a.merge===false)rg.UnMerge();else rg.Merge();return{ok:true}}catch(e){return{ok:false,error:String(e)}}}',
-    'function xFz(a){try{var sh=Api.GetActiveSheet();sh.GetRange(cN(a.c||0)+(a.r||0)).SetFrozen(true);return{ok:true}}catch(e){return{ok:false,error:"n/a"}}}',
+    'function xFz(a){try{var sh=Api.GetActiveSheet();sh.GetRange(cN(a.c||1)+(a.r||1)).SetFrozen(true);return{ok:true}}catch(e){return{ok:false,error:"n/a"}}}',
     'function xS(a){try{var wb=Api.GetWorkbook?Api.GetWorkbook():null;if(!wb)return{ok:false,error:"no wb"};if(a.op==="list"){return{ok:true,count:wb.GetSheetsCount?wb.GetSheetsCount():0}}if(a.op==="add"&&wb.AddSheet){wb.AddSheet(a.name||"");return{ok:true}}return{ok:false,error:"n/a"}}catch(e){return{ok:false,error:String(e)}}}',
-    'function xAf(a){try{var sh=Api.GetActiveSheet();for(var j=0;j<20;j++){sh.GetRange(cN(j)+":"+cN(j)).SetColumnWidth("auto")}return{ok:true}}catch(e){return{ok:false,error:"n/a"}}}',
+    'function xAf(a){try{var sh=Api.GetActiveSheet();for(var j=1;j<=20;j++){sh.GetRange(cN(j)+":"+cN(j)).SetColumnWidth("auto")}return{ok:true}}catch(e){return{ok:false,error:"n/a"}}}',
     'function xSort(a){try{var sh=Api.GetActiveSheet();var rg=xR(sh,a.r1,a.c1,a.r2,a.c2);if(rg.Sort)rg.Sort(a.by||0,a.order==="desc");return{ok:true}}catch(e){return{ok:false,error:"n/a"}}}',
     'function xFl(a){try{var sh=Api.GetActiveSheet();var rg=xR(sh,a.r1,a.c1,a.r2,a.c2);if(rg.SetFilter)rg.SetFilter(true);return{ok:true}}catch(e){return{ok:false,error:"n/a"}}}',
     'function xFm(a){return xW({cells:[[a.r,a.c,a.formula]]})}',
@@ -312,7 +312,7 @@
       'set_page_orientation {orientation} → portrait/landscape。', 'insert_horizontal_rule {} → 分隔线。',
       'insert_hyperlink {text,url}。', 'set_page_margins {top,right,bottom,left} → pt。', 'insert_toc {} → 目录大纲。',
       'set_header_footer {position:"header"|"footer",text} → 页眉/页脚。'].join('\n'),
-    cell: ['get_doc_info {} → 区域。', 'read_range {r1,c1,r2?,c2?}。', 'write_cells {cells:[[r,c,v],…]} → 写（支持公式）。',
+    cell: ['get_doc_info {} → 区域。', 'read_range {r1,c1,r2?,c2?}（1 基：r1=1,c1=1 即 A1）。', 'write_cells {cells:[[r,c,v],…]} → 写（1 基坐标：[1,1]=A1，支持=SUM()公式）。',
       'format_range {…,bold?,fontSize?,fillColor?,numberFormat?,hAlign?}。', 'row_op {op,at,count?}。', 'set_col_width {col,width}。',
       'merge_cells {r1,c1,r2,c2,merge?} → 合并/取消。', 'freeze_panes {r,c}。', 'sheet_op {op:"list"|"add",name?}。',
       'autofit {} → 自动列宽。', 'sort_range {r1,c1,r2,c2,by?,order?}。', 'apply_filter {r1,c1,r2,c2}。',
@@ -370,8 +370,8 @@
     return c || { type: 'final', text: t };
   }
 
-  var MAX_ROUNDS = 20;
-  function setBusyUI(b) { busy = b; sendBtn.style.display = b ? 'none' : ''; stopBtn.style.display = b ? '' : 'none'; }
+  var MAX_ROUNDS = 50;
+  function setBusyUI(b) { busy = b; sendBtn.style.display = b ? 'none' : 'inline-flex'; stopBtn.style.display = b ? 'inline-flex' : 'none'; }
 
   function chatOnce(messages, ev) {
     var body = { messages: messages, stream: true };
