@@ -5,12 +5,19 @@
 ## [Unreleased]
 
 ### 变更
+- **AI 编辑工具套装体系（v7）**：所有文档类型升级为工具循环 Agent（TOOL_CALL/FINAL 协议），坐标/序号全编辑器统一 1 基；各类型套装见 [docs/ai-editing.md](docs/ai-editing.md)
+  - OnlyOffice 插件 v7 重写：运行时从字符串数组改为真实函数 + toString 序列化（可语法校验）；word 26 / excel 19 / ppt 13 个工具（excel 新增 write_table 整表组合工具——二维数组一次写入 + 表头自动样式，根除逐格坐标错位；word 新增 read_table/get_selection/insert_code_block；ppt 新增 set_text/add_table/insert_image）；提示词按编辑器类型分节；插件缓存版本号机制（plugin.js 改动须递增 ?v=）
+  - 白板（Excalidraw）从单轮整体生成升级为元素级工具循环：read_scene / insert_elements / update_elements / move_elements / delete_elements（id 定位局部改色改字，不再整图重画；删除连带标签与绑定箭头清理）
+  - drawIO 从单轮整图替换升级为单元格级工具循环：read_diagram / list_cells / insert_cells / update_cells / delete_cells / replace_diagram（styleSet 键值合并改样式；悬空边自动清理）
+  - 富文本 Agent 工具 5→12 个：format_text（行内格式）/ set_block_type（标题·列表·代码块·引用）/ insert_table / insert_image / insert_link / **insert_embed（内嵌平台 drawio/白板/Office/文件卡片——跨类型组合）** / delete_block / write_document
+  - AIEditChat agent 页「仅对话」模式改为纯问答（无编辑工具）；agentSystemExtra 宿主规范注入机制；Agent 轮次上限 14→24；df_write_file 工具描述显式说明可创建图表/白板源文件（助手跨类型创作）
 - **移除 AI 创作空间（/studio）与 Agent 创作舱**：批量/多步文件创作改由外部 agent（Claude Code、Codex 等）经平台 MCP（docs/mcp.md）对接实现；平台 MCP 服务端、df_* 文档工具、AI 助手与编辑页对话完整保留。迁移 052 幂等 DROP agent_tasks / agent_task_logs / studio_projects；compose 移除 docker.sock 挂载与 IPC 卷，Dockerfile.agent / agent-runner 删除
 - Office 编辑页 AI 收敛为编辑器内「DocFlow AI」插件面板（不 autostart，从插件图标展开）；插件清单为静态相对 URL（DS 对 variations[].url 按 config.json 所在目录拼接，绝对 URL 会 404——实测结论），页内外部 AI 面板移除
 - **插件 v4.0 真集成**：「可修改」模式 = AI 输出 docflow-edit 编辑指令（replaceAll/append/insertAtCursor/replaceSelection/insertTable），插件经 OnlyOffice Api 直接在文档上执行，轻量 Markdown（标题/加粗/行内代码/列表/表格行/代码块）转原生文档元素，每项操作成败明细 + 可展开原始输出；「仅对话」= 问答 + 手动插入。补齐模型选择（/ai/models，与主应用共用偏好）、联网/思考、多轮历史、思考折叠、停止、清空、引用选中/全文；直接编辑支持 word（cell/slide 明确提示暂不支持）
 - AI agent 私有目录（.opencode/.trae/opencode.json 等）出库；通用技能迁用户级 ~/.claude/skills，MCP 客户端定义集中项目根 .mcp.json
 
 ### 修复
+- Excel AI 编辑整表错位（A 列空/行标题落 B 列/首行空）与样式缺失：v6 插件把模型 1 基坐标当 0 基再 +1（04911be 已改 1 基但 `plugin.js?v=6` 版本号未递增致旧缓存仍在跑，v7 破缓存根治）；format_range `SetFillColor` 把 RGB 数组当单参传入必然抛错被吞——底纹从未生效，v7 改 `(r,g,b)` 分参
 - AI 对话「已深度思考后内容全空白」根因：openai 兼容网关 max_tokens 同时计入 reasoning_content（默认 2048 被思考耗尽致正文空），think 时抬高至 4096；三条静默空正文路径（openai 非流式/工具循环回退、anthropic thinking-only 轮）改为显式报错；流式失败回退非流式经 onDelta 补发全文
 - 输入框内出现两个发送键：@ant-design/x v2 内置按钮类名变更（ant-sender-actions-list-presets）致旧 CSS 隐藏规则失效；改为 CSS 隐藏（suffix={false} 会冻结 submitDisabled 废掉 Enter 提交，不可用），发送/停止统一 28×28 与工具开关同尺寸、固定于工具栏最右端（模型选择右侧）
 - 思考按钮常显：模型未勾选 reasoning 能力时此前整个按钮消失（创作/编辑页"没有思考按钮"的根因），现改为禁用并说明
@@ -19,6 +26,7 @@
 - Empty-completion 兜底：流结束但无正文/错误/停止标记时显示「（模型未返回内容）」而非空白
 
 ### 文档
+- 新增 [docs/ai-editing.md](docs/ai-editing.md) AI 编辑工具套装总览：各类型工具清单（读/改/插/样式）、入口与实现位置、跨类型组合（富文本内嵌图表白板、助手创建源文件）、提示词分布
 - 新增 [docs/architecture.md](docs/architecture.md) 架构总览：总体形态、系统架构与部署拓扑、后端 35 个模块划分、数据模型（内容寻址/空间权限/演进史）、关键链路、前端架构、配置两级模型、设计取舍与已知局限
 - 新增 [deploy/env/](deploy/env/) 四套场景化 `.env` 模板（本地开发 / 单机验证 / 单机生产 / 多实例集群），并修正 README 中过时描述（draw.io 已无独立服务、自定义角色已移除、镜像清单与推送示例）
 

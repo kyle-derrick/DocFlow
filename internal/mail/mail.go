@@ -15,6 +15,7 @@ import (
 	"mime"
 	"net"
 	"net/smtp"
+	"strconv"
 	"time"
 )
 
@@ -120,7 +121,7 @@ func (s *SMTPMailer) send(to, subject, body string) error {
 		"Content-Type: text/plain; charset=UTF-8\r\n" +
 		"\r\n" +
 		body + "\r\n")
-	addr := fmt.Sprintf("%s:%d", s.host, s.port)
+	addr := net.JoinHostPort(s.host, strconv.Itoa(s.port))
 	// 拨号带 30s 超时：SMTP 服务器不可达时快速失败（管理页「发送测试邮件」
 	// 等同步请求不得无限挂起），超时错误原样回传给调用方。
 	dialer := &net.Dialer{Timeout: 30 * time.Second}
