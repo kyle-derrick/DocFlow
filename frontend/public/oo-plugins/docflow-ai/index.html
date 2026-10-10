@@ -1,10 +1,12 @@
 <!doctype html>
-<!-- DocFlow AI OnlyOffice 插件（v6.0）：
+<!-- DocFlow AI OnlyOffice 插件（v7.0）：
+     - 工具套装：word 26 / excel 19 / ppt 13 个编辑器工具，全 1 基索引；
+       excel 新增 write_table 组合工具（整表写入+表头样式）。
      - 编辑器类型从同源 localStorage docflow.ai.editor.kind 读取（宿主页
        EditorPage 写入），彻底消除沙箱探测不可靠导致的 agent 失效。
      - 发送/停止按钮与平台统一（28px 圆角方块，发送⇄停止切换）。
      - 思考/工具/消息严格按时间顺序排列（无分区）。
-     - 详见 plugin.js。 -->
+     - 详见 plugin.js。插件改动时必须递增下方 plugin.js?v= 破缓存。 -->
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
@@ -112,6 +114,6 @@
     <button id="stop" title="停止" aria-label="停止"><span class="sq"></span></button>
   </div>
   <div class="hint" id="hint">Enter 发送 · Shift+Enter 换行</div>
-  <script src="plugin.js?v=6"></script>
+  <script src="plugin.js?v=7"></script>
 </body>
 </html>
