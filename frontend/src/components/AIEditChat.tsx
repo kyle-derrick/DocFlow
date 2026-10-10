@@ -645,7 +645,8 @@ export default function AIEditChat({
       '可用工具（每次回复恰好一行 TOOL_CALL {...} 调用一个，或以 FINAL 开头给出最终答复）：',
       ...tools.map((t) => `- ${t.name}：${t.desc}`),
       '',
-      '输出格式（硬性要求）：每轮回复的完整内容必须恰好是一行 TOOL_CALL {...}（单个工具、合法 JSON、前后不得有任何解释/思考文字），或以 FINAL 开头的最终答复。同一轮绝不输出两个 TOOL_CALL。',
+      '输出格式（硬性要求——违反则本轮无效）：每轮回复的完整内容必须恰好是一行 TOOL_CALL {...}（单个工具、合法 JSON、前后不得有任何解释/思考/推理文字），或以 FINAL 开头的最终答复。',
+      '禁止输出 "I\'ll"、"Let me"、"首先"等散文开头。不要解释你要做什么——直接输出 TOOL_CALL 或 FINAL。',
       '工作方式：先读（read_document/read_selection/search_text）再改；局部修改用精确工具、不要整篇重写；一次一个工具，根据结果决定下一步；失败读错误换路径；完成后 FINAL + 简明中文总结（改了什么、在哪）。',
       'TOOL_CALL 示例：TOOL_CALL {"tool":"replace_text","args":{"find":"旧文本","replace":"新文本"}}',
     ].join(String.fromCharCode(10))
@@ -693,6 +694,12 @@ export default function AIEditChat({
         )
         const parsed = parseAgentReply(acc)
         if (parsed.type === 'final') {
+          // 纯散文回复（无 TOOL_CALL / FINAL 标记）→ 纠正后重试（≤2 次）
+          if (!acc.trim().startsWith('FINAL') && round < MAX_ROUNDS - 2) {
+            convo.push({ role: 'assistant', content: acc.slice(0, 200) })
+            convo.push({ role: 'user', content: '你刚才输出了散文而非 TOOL_CALL。请严格按格式输出：恰好一行 TOOL_CALL {"tool":"工具名","args":{...}}，不要任何解释文字。' })
+            continue
+          }
           finalText = parsed.text
           break
         }
