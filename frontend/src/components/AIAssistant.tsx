@@ -787,7 +787,7 @@ function findTreeTitlePath(nodes: DataNode[], key: Key): string[] | null {
  */
 function AIWorkDirButton({ value, follow, onFollow, onChange, zh }: { value: AIWorkDir | null; follow: { path: string } | null; onFollow: () => void; onChange: (v: AIWorkDir | null) => void; zh: boolean }) {
   const [open, setOpen] = useState(false)
-  const [spacesLoaded, setSpacesLoaded] = useState(false)
+  const [, setSpacesLoaded] = useState(false)
   const [spaces, setSpaces] = useState<Space[]>([])
   const [spaceId, setSpaceId] = useState('')
   const [treeData, setTreeData] = useState<DataNode[]>([])
@@ -795,29 +795,30 @@ function AIWorkDirButton({ value, follow, onFollow, onChange, zh }: { value: AIW
   // 各空间根目录 folderId（listSpaceFiles(spaceId, null) 的 parent_id）。
   const rootIdsRef = useRef<Record<string, string>>({})
 
-  // 首次打开拉空间列表：默认选中记忆的工作目录空间，否则默认空间/第一个。
+  // 首次打开拉空间列表。只依赖 open（value/spaceId/spacesLoaded 不进依赖
+  // ——任何依赖变化都触发 cleanup→alive=false→setSpaces 被跳过，这是
+  // Select 永远"暂无数据"的根因）。已加载标记用 ref 而非 state。
+  const valueRef = useRef(value)
+  valueRef.current = value
+  const spacesLoadedRef = useRef(false)
   useEffect(() => {
-    if (!open || spacesLoaded) return
-    let alive = true
+    if (!open || spacesLoadedRef.current) return
+    spacesLoadedRef.current = true
     setSpacesLoaded(true)
     listSpaces()
       .then((list) => {
-        if (!alive) return
         setSpaces(list)
-        setSpaceId((cur) => {
-          if (cur && list.some((s) => s.id === cur)) return cur
-          const remembered = value ? list.find((s) => s.id === value.spaceId) : null
-          const def = remembered ?? list.find((s) => s.is_default) ?? list[0]
-          return def?.id ?? ''
-        })
+        const cur = spaceId
+        if (cur && list.some((s) => s.id === cur)) return
+        const v = valueRef.current
+        const remembered = v ? list.find((s) => s.id === v.spaceId) : null
+        const def = remembered ?? list.find((s) => s.is_default) ?? list[0]
+        setSpaceId(def?.id ?? '')
       })
       .catch((e) => {
-        if (alive) setErr(e instanceof Error ? e.message : (zh ? '空间列表加载失败' : 'Failed to load spaces'))
+        setErr(e instanceof Error ? e.message : (zh ? '空间列表加载失败' : 'Failed to load spaces'))
       })
-    return () => {
-      alive = false
-    }
-  }, [open, spacesLoaded, value, zh])
+  }, [open, zh])
 
   // 空间就绪/切换：重置树（仅合成根节点，展开时懒加载一级目录）。
   useEffect(() => {
@@ -879,7 +880,7 @@ function AIWorkDirButton({ value, follow, onFollow, onChange, zh }: { value: AIW
         setOpen(next)
         if (!next) setErr('')
       }}
-      getPopupContainer={() => document.querySelector('.aiax-toolbar') ?? document.body}
+      overlayStyle={{ zIndex: 1100 }}
       content={
         <div className="ai-workdir-pop">
           <label className="ai-workdir-row">
@@ -887,6 +888,7 @@ function AIWorkDirButton({ value, follow, onFollow, onChange, zh }: { value: AIW
             <Select
               size="small"
               value={spaceId || undefined}
+              getPopupContainer={(trigger) => trigger.parentElement ?? document.body}
               placeholder={zh ? '选择空间' : 'Select a space'}
               onChange={setSpaceId}
               options={spaces.map((s) => ({ value: s.id, label: s.name }))}
@@ -1259,14 +1261,16 @@ export default function AIAssistant() {
     }
   }
   // 跟随态进入空间根时预热根目录 folderId 缓存。
-    // 打开/会话切换/消息清零时贴底（历史记录从最底下开始查看）。
+    // 打开抽屉时贴底（历史记录从最底下开始查看）。Drawer 有展开动画（~300ms），
+  // 等 DOM 渲染完再滚。挂在 open 上（convoId 在下方声明，用 ref 延迟引用）。
   useEffect(() => {
+    if (!open) return
     const t = window.setTimeout(() => {
       const el = document.querySelector('.aiax-bubbles-wrap')
       if (el) el.scrollTop = el.scrollHeight
-    }, 100)
+    }, 350)
     return () => window.clearTimeout(t)
-  }, [enabled])
+  }, [open])
 
 useEffect(() => {
     if (aiLoc && !aiLoc.folderId && aiLoc.spaceId) void resolveSpaceRootFolderId(aiLoc.spaceId)
